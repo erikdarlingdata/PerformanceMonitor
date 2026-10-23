@@ -866,8 +866,23 @@
                                             Click="AutoPortButton_Click"/>
                                 </WrapPanel>
                                 <TextBlock x:Name="McpStatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,6,0,0"/>
+                                <WrapPanel x:Name="McpTokenPanel" Orientation="Horizontal" Margin="0,6,0,0">
+                                    <TextBlock Text="Token:" VerticalAlignment="Center" Margin="0,0,6,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.Name="MCP token" x:Name="McpTokenTextBox" Width="320" IsReadOnly="True"
+                                             VerticalAlignment="Center">
+                                        <TextBox.CommandBindings>
+                                            <CommandBinding Command="ApplicationCommands.Copy" Executed="McpTokenTextBox_Copy"/>
+                                        </TextBox.CommandBindings>
+                                    </TextBox>
+                                    <Button x:Name="CopyMcpTokenButton" Content="Copy _Token" Margin="6,0,0,0" Padding="8,2"
+                                            VerticalAlignment="Center" Click="CopyMcpTokenButton_Click"/>
+                                    <Button x:Name="NewMcpTokenButton" Content="New token" Margin="6,0,0,0" Padding="8,2"
+                                            VerticalAlignment="Center" Click="NewMcpTokenButton_Click"
+                                            ToolTip="Make a new token. The old one stops working at once, and your MCP client needs the new config."/>
+                                </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="0,6,0,0">
-                                    <Button x:Name="CopyMcpCommandButton" Content="Cop_y Setup Command" Click="CopyMcpCommandButton_Click"/>
+                                    <Button x:Name="CopyMcpCommandButton" Content="Cop_y MCP config" Click="CopyMcpCommandButton_Click"/>
                                     <TextBlock TextWrapping="Wrap" Text="Works with Claude Code. Other LLMs may apply, but why would you?"
                                                FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                VerticalAlignment="Center" Margin="8,0,0,0"/>

@@ -109,6 +109,7 @@ public sealed class DarlingMcpObjectStatsTools
                 return McpHelpers.WithDatabase(
                            await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "index_object_stats", cancellationToken),
                            databases.Describe())
+                    ?? await HealthyEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, "table size rows", databases.Describe(), cancellationToken)
                     ?? McpHelpers.StatusForDatabase("unavailable", "No object size data available. Index/object stats are collected daily.", databases.Describe());
             }
 
@@ -260,6 +261,7 @@ public sealed class DarlingMcpObjectStatsTools
                 }
 
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "index_object_stats", cancellationToken)
+                    ?? await HealthyEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, "index usage rows", null, cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No index usage data available. Index/object stats are collected daily.");
             }
 
@@ -311,6 +313,19 @@ public sealed class DarlingMcpObjectStatsTools
         {
             return McpHelpers.FormatError("get_index_usage", ex);
         }
+    }
+
+    /// <summary>
+    /// #6453: the <c>empty</c> answer for an index_object_stats read with no stored snapshot when the collector's newest run
+    /// completed clean, or null so the caller keeps its <c>unavailable</c> text. The server-wide sentence is true of any
+    /// database filter, because no snapshot exists for any database.
+    /// </summary>
+    private static async Task<string?> HealthyEmptyAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, string what, string? databaseName, CancellationToken cancellationToken)
+    {
+        var message = await DarlingRuntimePrecondition.HealthyEmptyMessageAsync(
+            postgres, serverId, serverName, "index_object_stats", what, cancellationToken);
+        return message is null ? null : McpHelpers.StatusForDatabase("empty", message, databaseName);
     }
 
     /// <summary>
@@ -462,6 +477,19 @@ public sealed class DarlingMcpObjectStatsTools
                         "No lock/latch contention" + (scope is null ? "" : $"{inScope} or in any other database")
                         + $" on {resolved.DisplayName} at the latest snapshot."
                         + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
+                        optimizedLockingNote is null && separatelyMonitoredNote is null
+                            ? null
+                            : new { optimized_locking_note = optimizedLockingNote, separately_monitored_note = separatelyMonitoredNote });
+                }
+
+                /* #6453: no snapshot stored, but the index_object_stats collector's newest run completed clean: it looked and
+                   the server had nothing to report, which collection health calls HEALTHY. */
+                var healthyEmpty = await DarlingRuntimePrecondition.HealthyEmptyMessageAsync(
+                    postgres, resolved.ServerId, resolved.DisplayName, "index_object_stats", "locking or contention rows", cancellationToken);
+                if (healthyEmpty != null)
+                {
+                    return McpHelpers.Status("empty",
+                        healthyEmpty + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
                         optimizedLockingNote is null && separatelyMonitoredNote is null
                             ? null
                             : new { optimized_locking_note = optimizedLockingNote, separately_monitored_note = separatelyMonitoredNote });

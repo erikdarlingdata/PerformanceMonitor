@@ -750,6 +750,13 @@ FROM pg_catalog.pg_control_system() AS s";
             /* #6254: a server with a Query Store replica is tested on both connections, so a replica that cannot be reached shows now
                and not as a collection that quietly reads the primary. Its failure is a warning: the primary answered. */
             var (replicaHost, replicaError) = await ProbeQueryStoreReplicaAsync(config, runtime.Target.IsAzureSqlDb, logger, cancellationToken);
+            /* #6459: an Azure SQL Database has no readable-replica Query Store read, so the setting is saved and never used. The
+               replica is not opened (nothing to test), and the result says so, so the operator is told at save time and not left
+               to notice that read_source never fills in. */
+            var ignoredReplica = IgnoredQueryStoreReplica(config, runtime.Target.IsAzureSqlDb);
+            var replicaIgnored = ignoredReplica is not null;
+            replicaHost ??= ignoredReplica;
+
             return new ConnectionProbeResult(
                 Success: true,
                 MajorVersion: runtime.Target.SqlMajorVersion,
@@ -772,7 +779,8 @@ FROM pg_catalog.pg_control_system() AS s";
                 IsInRecovery: runtime.Target.IsInRecovery,
                 HasPgWaitSamplingExtension: runtime.Target.HasPgWaitSamplingExtension,
                 QueryStoreReplica: replicaHost,
-                QueryStoreReplicaError: replicaError);
+                QueryStoreReplicaError: replicaError,
+                QueryStoreReplicaIgnoredOnAzureSqlDb: replicaIgnored);
         }
         catch (OperationCanceledException)
         {
@@ -837,6 +845,17 @@ FROM pg_catalog.pg_control_system() AS s";
     }
 
     /// <summary>
+    /// #6459: the Query Store replica a SQL Server target has set and an Azure SQL Database will never read, or null (no replica set,
+    /// a PostgreSQL target, or a target that is not an Azure SQL Database). The one place the "set but unusable" rule is decided, so
+    /// the connection test and its callers cannot disagree about it (<see cref="ProbeQueryStoreReplicaAsync"/> is its twin: the
+    /// same targets, opened).
+    /// </summary>
+    internal static string? IgnoredQueryStoreReplica(MonitoredServer config, bool isAzureSqlDatabase) =>
+        isAzureSqlDatabase && !config.IsPostgres
+            ? PerformanceMonitor.Darling.Storage.QueryStoreReplicaSetting.Normalize(config.ConnectionIdentity.QueryStoreReplica)
+            : null;
+
+    /// <summary>
     /// #6254: the one line a connection test says about the Query Store replica, or null when the probed server has none.
     /// <paramref name="revealError"/> says whether the driver's text may be shown (the CLI and the Viewer, the operator's own
     /// surfaces, as for the primary); a caller that must not echo it (MCP and web replies) gets a fixed sentence and logs the text.
@@ -848,6 +867,12 @@ FROM pg_catalog.pg_control_system() AS s";
         if (string.IsNullOrEmpty(probe.QueryStoreReplica))
         {
             return null;
+        }
+
+        if (probe.QueryStoreReplicaIgnoredOnAzureSqlDb)
+        {
+            return $"Query Store replica {probe.QueryStoreReplica}: not used. Azure SQL Database has no readable-replica Query Store read, " +
+                   "so this setting has no effect and collection reads Query Store from the database itself. Remove query_store_replica.";
         }
 
         if (string.IsNullOrEmpty(probe.QueryStoreReplicaError))
@@ -965,7 +990,10 @@ public sealed record ConnectionProbeResult(
        replica (or is a PostgreSQL target or an Azure SQL Database). A set error leaves Success alone, because collection reads
        the primary when the replica cannot be reached. Trailing and defaulted, like the fields above. */
     string? QueryStoreReplica = null,
-    string? QueryStoreReplicaError = null)
+    string? QueryStoreReplicaError = null,
+    /* #6459: the server has a Query Store replica set and is an Azure SQL Database, which has no readable-replica Query Store read:
+       the setting is saved and never used, the replica was not opened, and the note says so. Trailing and defaulted. */
+    bool QueryStoreReplicaIgnoredOnAzureSqlDb = false)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually

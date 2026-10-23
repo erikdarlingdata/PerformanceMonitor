@@ -334,7 +334,7 @@ export function serverRows(data) {
    network, so the form built on top of them can be tested rule by rule.
    They mirror the service's edit (PlanEdit and ParseEditChanges in Mcp/DarlingMcpServerAdminTools.Edit.cs):
      - only the fields the form changed are sent, plus the read's opaque modified_at text as expected_modified_at;
-     - a SQL Server edit never sends port (the service refuses it, even 0) and a PostgreSQL edit never sends auth;
+     - a SQL Server edit never sends port (the service refuses a non-zero one; the page has no way to clear a stored one) and a PostgreSQL edit never sends auth;
      - a password is required when the connection of a SQL or ServicePrincipal server changes, because the stored one
        cannot be read back; and the service probes the new connection on ANY connection change (Windows and managed
        identity included) or whenever a password is sent.
@@ -523,7 +523,7 @@ export function validateEdit(original, values, password, externalId) {
         ? "Switching to ServicePrincipal authentication needs the client secret as password."
         : "Switching to SQL authentication needs the password.";
     }
-    return "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+    return "Changing the host, port or any other connection setting of this server needs its password sent with the change, because a saved password is only ever sent to the server it was saved for. Send the password together with the new settings.";
   }
   if (!Number.isFinite(next.monthly_cost_usd)) return "Monthly cost must be a number, zero or more.";
   return null;

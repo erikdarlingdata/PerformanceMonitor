@@ -49,6 +49,7 @@ public sealed class AgentActionPolicyTests
     [InlineData("mute_analysis_finding")]
     [InlineData("unmute_analysis_finding")]
     [InlineData("undo_plan_change")]
+    [InlineData("set_database_state_expected")]
     [InlineData("delete_notification_route")]
     [InlineData("set_notification_route_enabled")]
     [InlineData("set_notification_route_fallback")]

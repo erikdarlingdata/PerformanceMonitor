@@ -2171,6 +2171,12 @@ LIMIT 1";
             _logger.LogWarning("{Warning}", warning);
         }
 
+        /* #6583: a SQL Server entry's port is ignored (the connection uses the host as written); the store registry's entries are named when it is read. */
+        foreach (var warning in SqlServerPortAdvice.Warnings(config.Servers))
+        {
+            _logger.LogWarning("{Warning}", warning);
+        }
+
         /* #5307: a key under web.network / mcp.network (or their tls blocks, or web.network.oidc) that no config
            class declares is dropped at load; name each one so a mistyped key is visible. Paths only. */
         foreach (var warning in GetUnknownNetworkKeyWarnings(config))
@@ -3352,6 +3358,14 @@ LIMIT 1";
            else the darling.json servers, which is what this run will actually collect from either way. The
            MCP host's plan-fetch resolver reads this instead of re-reading the store as the mcp role. */
         _registryState.Publish(initialServers);
+        /* #6468: an install that has no servers yet is a normal first start, so say so once, at Information, and name the ways to add
+           one. The service keeps running: it picks up the first server the Viewer or the web dashboard registers, with no restart. */
+        if (initialServers.Count == 0)
+        {
+            _logger.LogInformation(
+                "No monitored servers are configured yet. Add one in the Viewer (Add Server) or with " +
+                "PerformanceMonitor.Darling.Service.exe --add-server; the service starts collecting from it without a restart.");
+        }
         /* #5812 (L1): the PLAN_REGRESSION candidate cache evicts the entries of servers outside this set on its next store. */
         PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RetainServers(initialServers.Select(s => s.ServerId));
 
@@ -5965,7 +5979,7 @@ LIMIT 1";
     /// five on-load collectors' once-a-day recapture, the catalog's 1440-minute collectors, and any collector an
     /// operator slows to a day or more.
     /// </summary>
-    internal const int DailyCollectorIntervalMinutes = 1440;
+    internal const int DailyCollectorIntervalMinutes = SweepPressureReport.DailyCollectorIntervalMinutes;
 
     /// <summary>
     /// #4938: the most detached daily runs that may be going at once across the whole fleet. Each holds a connection
@@ -6228,7 +6242,7 @@ LIMIT 1";
     /// interval, where an on-load collector's 0 has already become its daily recapture.
     /// </summary>
     internal static bool IsDailyInterval(int effectiveIntervalMinutes) =>
-        effectiveIntervalMinutes >= DailyCollectorIntervalMinutes;
+        SweepPressureReport.IsDailyInterval(effectiveIntervalMinutes);
 
     /// <summary>
     /// #4938, #4999: whether a finished run's cost goes into the sweep body's peer high-water mark (#2864). Not
@@ -6456,7 +6470,7 @@ LIMIT 1";
     /// the gate acquisition tests it once, and this is not that call.
     /// </summary>
     internal static bool IsDetachedByName(string name) =>
-        IsQueryStoreCollector(name) || IsPlanCorrectionCollector(name) || IsPgWaitSamplingCollector(name);
+        SweepPressureReport.IsDetachedByName(name);
 
     /// <summary>
     /// #4999: THE test for whether a collector's scheduled run leaves its server's sequential pass: the three
@@ -6467,7 +6481,7 @@ LIMIT 1";
     /// run is not part of the body, and a long run of it is not an overrun of the body.
     /// </summary>
     internal static bool RunsDetached(string name, int effectiveIntervalMinutes) =>
-        IsDetachedByName(name) || IsDailyInterval(effectiveIntervalMinutes);
+        SweepPressureReport.RunsDetached(name, effectiveIntervalMinutes);
 
     /// <summary>
     /// #4999: the (server, collector) slot an INLINE run of a daily collector takes: the at-connect run of an on-load

@@ -116,6 +116,7 @@ public partial class MainWindow : Window
     private readonly MuteRuleService _muteRuleService;
     /// <summary>#5750: the scoped notification-route store, for the Settings window (its writes invalidate the route cache).</summary>
     internal DuckDbNotificationRouteStore NotificationRouteStore { get; private set; } = null!;
+    private Func<IReadOnlyList<NotificationRoute>>? _routeLoader;
 
     /// <summary>The Level 1 investigation store (#5820): Lite's DuckDB twin of Darling's, behind the shared interface the
     /// route list (its use counts), the dispatcher and the MCP tools read.</summary>
@@ -192,7 +193,9 @@ public partial class MainWindow : Window
             _serverManager.GetKnownServerIds,
             RouteSecretAccess.CredentialManager());
         var routeStore = NotificationRouteStore;
-        NotificationRouteCache.Configure(() => Task.Run(() => routeStore.ListAsync()).GetAwaiter().GetResult());
+        /* The loader is installed in MainWindow_Loaded, right after the store is initialized: installing it here primed a load
+           against a store that did not have notification_routes yet (#6458). */
+        _routeLoader = () => Task.Run(() => routeStore.ListAsync()).GetAwaiter().GetResult();
         /* The edition comes from _engineEditions, the same as the alert sweep's: the live status when it has read
            one, else the edition seeded from the store in MainWindow_Loaded. */
         PerformanceMonitorLite.Analysis.AnalysisService.SeparatelyMonitoredDatabasesProvider = serverId =>
@@ -311,7 +314,7 @@ public partial class MainWindow : Window
             StatusText.Text = "Initializing database...";
 
             // Initialize the DuckDB database
-            await _databaseInitializer.InitializeAsync();
+            await NotificationRouteCache.InitializeStoreThenConfigureAsync(() => _databaseInitializer.InitializeAsync(), _routeLoader);
 
             /* The first run of the per-user record of confirmed server settings, before anything below connects: a user who
                used an earlier Lite gets bound the servers whose current host has rows in this store; a new user, and a
@@ -794,7 +797,27 @@ public partial class MainWindow : Window
                 return;
             }
 
-            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, InvestigationStore, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail, _pseudonymKeys);
+            /* The MCP token (Windows Credential Manager, this user's): read, or made the first time the server starts with
+               none, which includes the first start after an upgrade with MCP already on. With mcp_allow_tokenless_loopback
+               on there is none and nothing is made. A token that cannot be read or saved stops the start: serving without it
+               would drop the check, and a new one would break every client that holds the old one. */
+            var mcpToken = McpTokenStore.ForApp(new AppLoggerAdapter<McpTokenStore>())
+                .Resolve(mcpSettings, out var tokenFailure, out var tokenCreated);
+            if (tokenFailure is not null)
+            {
+                AppLogger.Error("MCP", $"The MCP server is not started: {tokenFailure}. Its token lives in Windows Credential Manager as PerformanceMonitorLite.Mcp_McpToken. " +
+                    $"Fix that entry and restart Lite, or set {McpSettings.AllowTokenlessLoopbackSetting} to true in settings.json to serve without a token.");
+                return;
+            }
+
+            if (tokenCreated)
+            {
+                AppLogger.Warn("MCP", "The MCP server now needs a token. A new one was made and saved for this Windows user. " +
+                    "Open Settings, Access tab, and use Copy MCP config to give your MCP client the new setup, or add the header Authorization: Bearer <token> to it. " +
+                    $"To serve without a token as before, set {McpSettings.AllowTokenlessLoopbackSetting} to true in settings.json.");
+            }
+
+            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, InvestigationStore, mcpToken, mcpSettings.AllowTokenlessLoopback, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail, _pseudonymKeys);
             _mcpDataDetail = mcpSettings.DataDetail;
             _ = _mcpService.StartAsync(_backgroundCts!.Token);
         }

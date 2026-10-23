@@ -35,14 +35,14 @@ namespace Lite.Tests;
 /// source registers. Darling's twin is <c>Darling.Tests/McpToolsListBudgetTests</c> (D6 lockstep).
 ///
 /// <para><b>D2's absolute caps apply to converted tools</b> (a description carrying the marker): the served head
-/// at most 1,000 characters (the target is 600), every parameter description at most 200, and every tail and
+/// at most 1,000 characters (the target is 600), every parameter description at most 230, and every tail and
 /// topic small enough to be served whole by one <c>get_tool_guide</c> answer.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
 public sealed class McpToolsListBudgetTests
 {
     private const int ConvertedHeadCap = 1_000;
-    private const int ConvertedParameterCap = 200;
+    private const int ConvertedParameterCap = 230; // longest served parameter description is 200 (Darling) and 195 (Lite); current plus about 15%
 
     [Fact]
     public void ConvertedTools_HonorD2sAbsoluteCaps_AndNoMarkerReachesTheWire()
@@ -129,8 +129,8 @@ public sealed class McpToolsListBudgetTests
     }
 
     /// <summary>What the four investigation tools may add to the served <c>tools/list</c> (heads, parameter descriptions and
-    /// schemas), measured at 3,280 bytes when L5c landed; raising it is a deliberate change.</summary>
-    private const int InvestigationToolsBytesBudget = 4_000;
+    /// schemas), measured at 3,280 bytes when L5c landed and 3,922 at the 3.11.0 release (the ceiling is that plus about 15%).</summary>
+    private const int InvestigationToolsBytesBudget = 4_500;
 
     private static (IReadOnlyList<string> Names, int Bytes) ServedList(bool allowWrites, bool allowInvestigations)
     {

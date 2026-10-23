@@ -453,6 +453,7 @@ public partial class ViewerServerTab
         await LoadPgPlanCaptureAsync(startUtc, endUtc);
         await LoadPgDeadlocksAsync(startUtc, endUtc);
         await LoadPgLogEventsAsync(startUtc, endUtc);
+        await LoadPgActivityTrendsAsync(startUtc, endUtc);
     }
 
     /// <summary>
@@ -941,6 +942,7 @@ public partial class ViewerServerTab
             "No wait time was recorded for this server in this window.");
 
         await LoadPgWaitSamplingAsync(startUtc, endUtc);
+        await LoadPgWaitTrendAsync(startUtc, endUtc);
     }
 
     /// <summary>I/O — <c>pg_stat_io</c>, differenced over the window.</summary>
@@ -964,6 +966,7 @@ public partial class ViewerServerTab
 
         await LoadPgWriteStatsAsync(startUtc, endUtc);
         await LoadPgBufferUsageAsync(startUtc, endUtc);
+        await LoadPgIoTrendAsync(startUtc, endUtc);
     }
 
     /// <summary>

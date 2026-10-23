@@ -53,7 +53,7 @@ public static class ViewerConfigDiagnostics
     /// machine, or --export-viewer-config on the service host for a viewer on another machine.
     /// </summary>
     public const string ConfigNotFoundMessage =
-        "darling.json was not found beside the viewer, one folder up, or at DARLING_CONFIG / --config. "
+        "darling.json was not found beside the viewer, one folder up, in the installed Darling service's folder, or at DARLING_CONFIG / --config. "
         + "On the service machine, create it from darling.sample.json. "
         + "On another machine, run PerformanceMonitor.Darling.Service.exe --export-viewer-config on the service host "
         + "and copy the folder it writes beside the viewer.";
@@ -198,6 +198,7 @@ public static class ViewerConfigDiagnostics
         ViewerConfigSource.EnvironmentVariable => "DARLING_CONFIG environment variable",
         ViewerConfigSource.BesideViewer => "beside the viewer executable",
         ViewerConfigSource.ServiceRoot => "the service root, one level above the viewer",
+        ViewerConfigSource.InstalledService => "the installed Darling service's folder (from its registered ImagePath)",
         _ => source.ToString(),
     };
 

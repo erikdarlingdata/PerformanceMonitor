@@ -395,7 +395,16 @@ public sealed class ServerEditCoreTests : IDisposable
         var (plan, error) = Plan(SqlRow(), "{\"port\":1444}");
 
         Assert.Null(plan);
-        Assert.Equal("A SQL Server port goes in host, as host,port.", error);
+        Assert.Equal(SqlServerPortAdvice.Refusal, error);
+    }
+
+    [Fact]
+    public void APortOfZeroOnASqlServerRow_IsAccepted_SoAStoredPortCanBeCleared()
+    {
+        var (plan, error) = Plan(SqlRow(), "{\"port\":0}");
+
+        Assert.Null(error);
+        Assert.NotNull(plan);
     }
 
     [Fact]
@@ -782,6 +791,11 @@ public sealed class ServerEditCoreTests : IDisposable
 
         Assert.Equal("invalid", answer["status"]!.GetValue<string>());
         Assert.Equal(Edit.EditPasswordNeededText, answer["message"]!.GetValue<string>());
+        // #6455: the refusal is about the move, not only the password: it names the host and port and why the password is needed.
+        var message = answer["message"]!.GetValue<string>();
+        Assert.Contains("host", message, StringComparison.Ordinal);
+        Assert.Contains("port", message, StringComparison.Ordinal);
+        Assert.Contains("only ever sent to the server it was saved for", message, StringComparison.Ordinal);
         Assert.Equal(0, probed);
         Assert.Equal(0, store.Writes);
     }

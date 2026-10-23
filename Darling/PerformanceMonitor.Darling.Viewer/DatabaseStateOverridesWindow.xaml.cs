@@ -12,6 +12,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -187,12 +188,7 @@ public partial class DatabaseStateOverridesWindow : Window
 
             /* The dropdown offers the standard state tokens plus (ignore), unioned with any state value
                actually present (a baseline or current state the token list doesn't enumerate, e.g. COPYING). */
-            var options = new List<string>
-            {
-                DatabaseStateTokens.Online, DatabaseStateTokens.Offline, DatabaseStateTokens.Restoring,
-                DatabaseStateTokens.Recovering, DatabaseStateTokens.RecoveryPending, DatabaseStateTokens.Suspect,
-                DatabaseStateTokens.Emergency, DatabaseStateTokens.Standby, DatabaseStateTokens.Ignore
-            };
+            var options = new List<string>(DatabaseStateExpectedStore.StandardStates);
             foreach (var extra in _rows.SelectMany(r => new[] { r.ExpectedState, r.CurrentState })
                          .Where(s => !string.IsNullOrEmpty(s) && !options.Contains(s)))
             {

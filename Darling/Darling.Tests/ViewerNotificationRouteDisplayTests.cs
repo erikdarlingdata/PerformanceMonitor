@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
-using System.Runtime.CompilerServices;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common.KnownPatterns;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Ui;
 using Xunit;
@@ -17,12 +19,10 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4766: the Notification Routes grid's Modified column. <c>modified_at</c> is written as
-/// <c>now() AT TIME ZONE 'UTC'</c>, so it is one UTC instant (the row reads it as <see cref="DateTimeKind.Utc"/>), and it
-/// used to be <c>ToLocalTime().ToString("g")</c>: this machine's clock in every display mode, and bare in the repeated
-/// autumn hour. It now goes through <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/> like the grids
-/// beside it, so it follows the mode and names the UTC offset of each 01:30 on a US Eastern server (autumn change
-/// 2026-11-01 at 06:00 UTC).
+/// #4766, #6457: the times in the three fleet-wide windows, Notification Routes (Modified), Threshold Overrides (Updated)
+/// and Known Patterns (Edited by). Each is one UTC instant and none belongs to a server, so "Server" display mode has no
+/// clock to apply: Modified used to apply the active server's offset (a route saved at 10:07 UTC read 03:07), Updated read
+/// this machine's time with no zone named, and Edited by read UTC. All three now read Local or UTC and name the zone.
 /// </summary>
 /* Flips the process-wide display mode and active server clock (each restored in Dispose); one shared collection
    serializes it with every other class that does. */
@@ -55,29 +55,38 @@ public sealed class ViewerNotificationRouteDisplayTests : IDisposable
         ModifiedAtUtc = DateTime.SpecifyKind(new DateTime(y, mo, d, h, mi, 0), DateTimeKind.Utc),
     };
 
-    [Fact]
-    public void Modified_InTheRepeatedHour_ReadsItsOffsetInServerMode_AndTheStoredInstantInUtcMode()
+    private static string LocalExpected(DateTime utc, string format)
     {
-        ViewerTimeHelper.ActiveServerClock = Eastern;
-
-        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
-        Assert.Equal("2026-11-01 01:30:00 -04:00", Route(2026, 11, 1, 5, 30).ModifiedDisplay);
-        Assert.Equal("2026-11-01 01:30:00 -05:00", Route(2026, 11, 1, 6, 30).ModifiedDisplay);
-        Assert.Equal("2026-11-01 02:30:00", Route(2026, 11, 1, 7, 30).ModifiedDisplay);
-
-        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
-        Assert.Equal("2026-11-01 05:30:00", Route(2026, 11, 1, 5, 30).ModifiedDisplay);
-        Assert.Equal("2026-11-01 06:30:00", Route(2026, 11, 1, 6, 30).ModifiedDisplay);
+        var zone = TimeZoneInfo.Local;
+        var name = zone.IsDaylightSavingTime(utc) ? zone.DaylightName : zone.StandardName;
+        return TimeZoneInfo.ConvertTimeFromUtc(utc, zone).ToString(format, CultureInfo.InvariantCulture) + " " + name;
     }
 
-    /// <summary>The column follows the display mode: a summer instant on the Eastern server reads its wall time, not this machine's.</summary>
-    [Fact]
-    public void Modified_InServerMode_ReadsTheServersWallTime_WhateverThisMachinesZoneIs()
+    /// <summary>Server mode used to apply the active server's offset to a fleet-wide row: a summer instant on a US Eastern server read its wall time (10:30), not the instant.</summary>
+    [Theory]
+    [InlineData(TimeDisplayMode.ServerTime)]
+    [InlineData(TimeDisplayMode.UTC)]
+    public void Modified_InServerAndUtcMode_ReadsUtc_AndSaysSo(TimeDisplayMode mode)
     {
         ViewerTimeHelper.ActiveServerClock = Eastern;
-        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        ViewerTimeHelper.CurrentDisplayMode = mode;
 
-        Assert.Equal("2026-07-01 10:30:00", Route(2026, 7, 1, 14, 30).ModifiedDisplay);
+        Assert.Equal("2026-07-01 14:30:00 UTC", Route(2026, 7, 1, 14, 30).ModifiedDisplay);
+        Assert.Equal("2026-11-01 05:30:00 UTC", Route(2026, 11, 1, 5, 30).ModifiedDisplay);
+        Assert.Equal("2026-11-01 06:30:00 UTC", Route(2026, 11, 1, 6, 30).ModifiedDisplay);
+    }
+
+    /// <summary>Local mode reads this machine's zone and names it, so the repeated autumn hour's two 01:30s carry different zone names where the machine has daylight saving.</summary>
+    [Fact]
+    public void Modified_InLocalMode_ReadsThisMachinesTime_AndNamesItsZone()
+    {
+        ViewerTimeHelper.ActiveServerClock = Eastern;
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+
+        foreach (var utc in new[] { new DateTime(2026, 7, 1, 14, 30, 0, DateTimeKind.Utc), new DateTime(2026, 11, 1, 5, 30, 0, DateTimeKind.Utc), new DateTime(2026, 11, 1, 6, 30, 0, DateTimeKind.Utc) })
+        {
+            Assert.Equal(LocalExpected(utc, "yyyy-MM-dd HH:mm:ss"), Route(utc.Year, utc.Month, utc.Day, utc.Hour, utc.Minute).ModifiedDisplay);
+        }
     }
 
     /// <summary>A route that has not been stored yet has no time to show.</summary>
@@ -87,17 +96,40 @@ public sealed class ViewerNotificationRouteDisplayTests : IDisposable
         Assert.Equal("", new NotificationRouteRow().ModifiedDisplay);
     }
 
-    /// <summary>The column is worded by the shared renderer and not by a <c>ToLocalTime()</c> of its own.</summary>
-    [Fact]
-    public void Modified_IsWordedByTheSharedRenderer()
+    /// <summary>The same instant reads the same way in the three windows in every display mode, which is the "one convention" the issue asked for.</summary>
+    [Theory]
+    [InlineData(TimeDisplayMode.ServerTime)]
+    [InlineData(TimeDisplayMode.UTC)]
+    [InlineData(TimeDisplayMode.LocalTime)]
+    public void TheThreeFleetWideWindows_ReadAnInstantTheSameWay(TimeDisplayMode mode)
     {
-        var source = ViewerTypedRangeTests.StripComments(
-            ViewerTypedRangeTests.MemberText(
-                ViewerTypedRangeTests.ViewerSource("ViewerDataService.NotificationRoutes.cs", ThisFile()), "ModifiedDisplay"));
+        ViewerTimeHelper.ActiveServerClock = Eastern;
+        ViewerTimeHelper.CurrentDisplayMode = mode;
+        var instant = new DateTime(2026, 7, 1, 10, 7, 0, DateTimeKind.Utc);
 
-        Assert.Contains("ViewerTimeHelper.FormatForDisplay(ModifiedAtUtc, \"yyyy-MM-dd HH:mm:ss\")", source);
-        Assert.DoesNotContain("ToLocalTime", source);
+        var modified = Route(2026, 7, 1, 10, 7).ModifiedDisplay;
+        var updated = new ThresholdOverrideViewRow(new ThresholdOverrideRow(7, "Prod", null, "cpu", 80, 90, "erik", null, instant)).UpdatedText;
+        var edited = new KnownPatternRow(
+            new KnownPattern(1, null, null, null, null, 10, "n", null, instant, null, "erik", instant),
+            new Dictionary<int, string>()).UpdatedDisplay;
+
+        var shown = mode == TimeDisplayMode.LocalTime ? LocalExpected(instant, "yyyy-MM-dd HH:mm") : "2026-07-01 10:07 UTC";
+        Assert.Equal(shown, updated);
+        Assert.Equal("erik, " + shown, edited);
+
+        /* Modified carries seconds, so compare the wall time to the minute and the zone name after it. */
+        var zoneName = shown[17..];
+        Assert.StartsWith(shown[..16], modified, StringComparison.Ordinal);
+        Assert.EndsWith(" " + zoneName, modified, StringComparison.Ordinal);
     }
 
-    private static string ThisFile([CallerFilePath] string thisFile = "") => thisFile;
+    /// <summary>An override stored with an unspecified-kind timestamp (a store read) is still one UTC instant, not this machine's wall time.</summary>
+    [Fact]
+    public void Updated_OfAnUnspecifiedKindTimestamp_IsReadAsUtc()
+    {
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+        var stamp = new DateTime(2026, 7, 1, 10, 5, 0, DateTimeKind.Unspecified);
+
+        Assert.Equal("2026-07-01 10:05 UTC", new ThresholdOverrideViewRow(new ThresholdOverrideRow(7, "Prod", null, "cpu", 80, null, "erik", null, stamp)).UpdatedText);
+    }
 }

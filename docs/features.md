@@ -8,7 +8,7 @@ Part of the [Performance Monitor documentation](../README.md#documentation).
 
 🚨 **Real-time alerts** for blocking, deadlocks, high CPU, low disk space, and the other conditions listed in [Alerts & Notifications](alerts.md) — system tray notifications, styled HTML emails with full XML attachments, and webhook notifications for external integrations
 
-📊 **NOC-style overview** with green/yellow/red health cards, auto-refresh, configurable time ranges, and dark/light themes
+📊 **NOC-style overview** with green/yellow/red health cards, auto-refresh, configurable time ranges, and Dark, Light and Cool Breeze themes
 
 📋 **Graphical plan viewer** with native ShowPlan rendering, 37-rule PlanAnalyzer, operator-level cost breakdown, and a standalone mode for opening `.sqlplan` files without a server connection
 

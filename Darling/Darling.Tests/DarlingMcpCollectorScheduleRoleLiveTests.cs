@@ -186,7 +186,7 @@ public sealed class DarlingMcpCollectorScheduleRoleLiveTests
     }
 
     [Fact]
-    public async Task TheProvisionedMcpLogin_CannotDeleteScheduleRows_CannotInsertTheDatabaseScope_AndCannotUpdateAnyColumnItWasNotGranted()
+    public async Task TheProvisionedMcpLogin_CannotInsertTheDatabaseScope_AndCannotUpdateAnyColumnItWasNotGranted()
     {
         await WithMcpStoreAsync(async (mcp, owner, ct) =>
         {
@@ -194,10 +194,8 @@ public sealed class DarlingMcpCollectorScheduleRoleLiveTests
             await DarlingMcpCollectorScheduleTools.DisableCollector(mcp, Daily, "role-alpha", cancellationToken: ct);
             await using var login = await mcp.OpenConnectionAsync(ct);
 
-            /* No DELETE on the override table: no tool removes a row, so the role has no reason to. */
-            var delete = await Assert.ThrowsAsync<PostgresException>(async () =>
-                await ExecAsync(login, "DELETE FROM config.config_collector_schedules", ct));
-            Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, delete.SqlState);
+            /* #6454: the role holds DELETE on the override table now, which remove_server uses to clear a removed server's rows. No schedule
+               tool removes a row. */
             Assert.Equal(2L, Convert.ToInt64(await ScalarAsync(owner, "SELECT count(*) FROM config.config_collector_schedules", ct), CultureInfo.InvariantCulture));
 
             /* The INSERT grant is the five columns the tools set (a new row is how a frequency or a retention starts): the database scope
