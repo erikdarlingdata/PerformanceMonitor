@@ -89,18 +89,7 @@ public sealed class ThresholdOverrideWebLiveTests
 
             /* #6600: the managed-shaped store. The web reads as the role above; a signed-in admin's change and its access check use the arm, a
                second small pool on a role that holds the admin role's grants. */
-            WebAdminArm? adminArm = null;
-            if (armed)
-            {
-                await ExecAsync(owner, $"CREATE ROLE {roleName}_arm LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
-                foreach (var statement in ViewerGrantReplay.StatementsFor(roleName + "_arm", scratch.DatabaseName, "admin"))
-                {
-                    await ExecAsync(owner, statement, ct);
-                }
-
-                var armConnection = new NpgsqlConnectionStringBuilder(asSeat) { Username = roleName + "_arm" }.ConnectionString;
-                adminArm = new WebAdminArm(() => armConnection);
-            }
+            var adminArm = await AdminArmLive.BuildAsync(owner, scratch, roleName, armed ? AdminArmShape.Admin : AdminArmShape.None, ct);
 
             using var armToDispose = adminArm;
 
@@ -154,9 +143,7 @@ public sealed class ThresholdOverrideWebLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
             {
                 NpgsqlConnection.ClearAllPools();
-                await using var drop = new NpgsqlCommand(
-                    $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}; " +
-                    $"DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{roleName}_arm') THEN DROP OWNED BY {roleName}_arm; DROP ROLE {roleName}_arm; END IF; END $$", connection);
+                await using var drop = new NpgsqlCommand(AdminArmLive.DropRolesSql(roleName), connection);
                 await drop.ExecuteNonQueryAsync(token);
             });
         }

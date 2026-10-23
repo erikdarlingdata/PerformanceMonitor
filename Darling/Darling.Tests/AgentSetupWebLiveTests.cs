@@ -84,7 +84,7 @@ public sealed class AgentSetupWebLiveTests
 
     private static async Task WithWebRoutesAsync(
         string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body, IPasswordKeyRing? ring = null,
-        DarlingWebSeat? seat = null, bool signedIn = true, bool managedStore = false, ArmShape arm = ArmShape.None)
+        DarlingWebSeat? seat = null, bool signedIn = true, bool managedStore = false, AdminArmShape arm = AdminArmShape.None)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the agent setup web live tests.");
@@ -114,7 +114,7 @@ public sealed class AgentSetupWebLiveTests
 
             /* #6600: the managed-shaped store. The web logs in as the read-only role above; the arm signs in as a second role that holds the admin
                role's grants (the managed `admin` login), or, for Refused, as a login the store rejects, so a request that opens it fails. */
-            using var adminArm = arm == ArmShape.None ? null : await BuildArmAsync(owner, scratch, roleName, arm, ct);
+            using var adminArm = await AdminArmLive.BuildAsync(owner, scratch, roleName, arm, ct);
 
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
@@ -208,36 +208,13 @@ public sealed class AgentSetupWebLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
             {
                 NpgsqlConnection.ClearAllPools();
-                await using var drop = new NpgsqlCommand(
-                    $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}; " +
-                    $"DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{roleName}_arm') THEN DROP OWNED BY {roleName}_arm; DROP ROLE {roleName}_arm; END IF; END $$", connection);
+                await using var drop = new NpgsqlCommand(AdminArmLive.DropRolesSql(roleName), connection);
                 await drop.ExecuteNonQueryAsync(token);
             });
         }
     }
 
     private const string Json = "application/json";
-
-    private enum ArmShape { None, Admin, Refused }
-
-    private static async Task<WebAdminArm> BuildArmAsync(NpgsqlDataSource owner, ScratchPostgres scratch, string webRole, ArmShape shape, CancellationToken ct)
-    {
-        var armRole = webRole + "_arm";
-        await ExecAsync(owner, $"CREATE ROLE {armRole} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
-        foreach (var statement in ViewerGrantReplay.StatementsFor(armRole, scratch.DatabaseName, "admin"))
-        {
-            await ExecAsync(owner, statement, ct);
-        }
-
-        var armConnection = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
-        {
-            Username = armRole,
-            Password = shape == ArmShape.Refused ? "not-the-password" : RolePassword,
-            SearchPath = "config,public",
-            Pooling = false,
-        }.ConnectionString;
-        return new WebAdminArm(() => armConnection);
-    }
 
     [Fact]
     public async Task AgentRoutes_CreateEditDelete_RoundTrip_KeepTheRoutesDestinations_AndDeleteClearsFallbacks()
@@ -576,7 +553,7 @@ public sealed class AgentSetupWebLiveTests
 
             Assert.Equal("person:alice", await ScalarAsync(owner, "SELECT modified_by FROM config.agent_environment_profiles", ct));
             Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed' AND actor = 'person:alice' AND route_id = " + seeded, ct));
-        }, DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.Generate()), seat: new DarlingWebSeat("alice", true), managedStore: true, arm: ArmShape.Admin);
+        }, DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.Generate()), seat: new DarlingWebSeat("alice", true), managedStore: true, arm: AdminArmShape.Admin);
     }
 
     /* #6600: a seat that is not a signed-in admin never opens the arm. Its login here is refused by the store, so a request that opened it would
@@ -595,7 +572,7 @@ public sealed class AgentSetupWebLiveTests
 
             Assert.Equal(403, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"agent_level\":3}")).Status);
             Assert.Equal("", await ScalarAsync(owner, $"SELECT agent_level FROM config_notification_routes WHERE route_id = {seeded}", ct));
-        }, DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.Generate()), seat: new DarlingWebSeat("viewer-person", false), managedStore: true, arm: ArmShape.Refused);
+        }, DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.Generate()), seat: new DarlingWebSeat("viewer-person", false), managedStore: true, arm: AdminArmShape.Refused);
     }
 
     /* #6600: with the switch off (no arm on a managed store) the answers are today's: list-only flags, a 403 on every write that now names the

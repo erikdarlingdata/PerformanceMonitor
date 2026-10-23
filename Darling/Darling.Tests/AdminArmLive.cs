@@ -44,7 +44,7 @@ internal static class AdminArmLive
         {
             Username = armRole,
             Password = shape == AdminArmShape.Refused ? "not-the-password" : ArmPassword,
-            SearchPath = "config,public",
+            SearchPath = DarlingManagedPostgres.SearchPath,
             Pooling = false,
         }.ConnectionString;
         return new WebAdminArm(() => armConnection);
