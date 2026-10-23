@@ -2726,11 +2726,165 @@ function Invoke-FirewallReconcile {
 
 Invoke-FirewallReconcile
 
-# -- 5. Start + confirm ---------------------------------------------------------------------------
+# -- 5. Start + wait until the service is ready (#6470) -------------------------------------------
+# "Running" only means the process is up. The first start still unpacks the bundled Postgres, runs initdb (its own timeout is
+# 180 seconds), migrates the store and provisions the roles before the collection loop starts, and a failure in any of those
+# leaves the service Running with nothing collected. So the install waits for the service's own words: its log, which is the
+# one place every service surface already writes. The service logs "Postgres store ready" when the store is created and
+# migrated, and "collection loop started" when collection begins; a startup it cannot get past logs a CRITICAL line instead.
+# The collection loop starting is the ready signal, not a row in collection_log: a fresh install may list no servers yet, and
+# then no collection would ever be written. The log is read by timestamp, so an upgrade does not mistake the previous run's
+# lines for this one's.
+$readyTimeoutSeconds = 420
+$serviceLogDirectory = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'PerformanceMonitorDarling\logs'
+
+# The service's log entries written at or after $since, oldest first. A line is "yyyy-MM-dd HH:mm:ss.fff [LEVEL] [category]
+# message"; a line that does not start that way continues the entry above it. The files are read with sharing, because the
+# service has today's open for append. Nothing here throws: a log that cannot be read yet is no entries. Callers wrap the call
+# in @() so zero or one entry is still an array.
+function Get-DarlingServiceLogEntries([string]$logDirectory, [datetime]$since) {
+    $entries = New-Object System.Collections.Generic.List[object]
+    if (-not (Test-Path -LiteralPath $logDirectory -PathType Container)) { return @() }
+    $files = @(Get-ChildItem -LiteralPath $logDirectory -Filter 'darling-service_*.log' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -ge $since } | Sort-Object Name)
+    foreach ($file in $files) {
+        try {
+            $stream = [System.IO.File]::Open($file.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            try { $text = (New-Object System.IO.StreamReader($stream)).ReadToEnd() } finally { $stream.Dispose() }
+        }
+        catch { continue }
+        $current = $null
+        foreach ($line in ($text -split "`r?`n")) {
+            if ($line -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[([A-Z? ]{5})\] \[[^\]]*\] (.*)$') {
+                $time = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss.fff', [System.Globalization.CultureInfo]::InvariantCulture)
+                if ($time -ge $since) {
+                    $current = [pscustomobject]@{ Time = $time; Level = $Matches[2].Trim(); Text = $Matches[3] }
+                    $entries.Add($current)
+                }
+                else { $current = $null }
+            }
+            elseif ($current -and $line.Trim()) { $current.Text += "`n" + $line.TrimEnd() }
+        }
+    }
+    return $entries.ToArray()
+}
+
+# What the entries say about the start: 'Ready' once the collection loop has started (whatever failed and retried before it),
+# 'Failed' when the service logged a startup failure it will not get past without help, otherwise 'Waiting'. The failure lines
+# are the service's CRITICAL startup lines only: a CRITICAL line about a file's permissions is a warning to read, not a start
+# that failed, so it does not stop the wait.
+function Get-DarlingStartupVerdict($entries) {
+    $failurePattern = '^(Cannot load configuration|Configuration problem|Managed Postgres bootstrap|Cannot reach or migrate the Postgres store|postgres\.managed = true requires)'
+    foreach ($entry in $entries) {
+        if ($entry.Text -match '^PerformanceMonitor Darling collection loop started') { return [pscustomobject]@{ State = 'Ready'; Lines = @() } }
+    }
+    $failures = @($entries | Where-Object { $_.Level -eq 'CRIT' -and $_.Text -match $failurePattern })
+    if ($failures.Count -gt 0) { return [pscustomobject]@{ State = 'Failed'; Lines = $failures } }
+    return [pscustomobject]@{ State = 'Waiting'; Lines = @() }
+}
+
+# The log lines that explain a start that did not finish: the warnings, errors and critical lines since the start, newest last.
+function Get-DarlingStartupProblemLines($entries, [int]$last = 12) {
+    $problems = @($entries | Where-Object { $_.Level -in @('WARN', 'ERROR', 'CRIT') })
+    if ($problems.Count -gt $last) { $problems = @($problems | Select-Object -Last $last) }
+    return @($problems | ForEach-Object {
+        $first = ($_.Text -split "`n")[0]
+        if ($first.Length -gt 400) { $first = $first.Substring(0, 400) + '...' }
+        '{0} [{1}] {2}' -f $_.Time.ToString('HH:mm:ss'), $_.Level, $first
+    })
+}
+
+# Waits until the service is ready, has logged a startup failure, has stopped, or $timeoutSeconds have passed, and says which:
+# State is Ready, Failed, Stopped or TimedOut, with the entries read last. Progress goes to the console: each step the service
+# logs once, and a line every 30 seconds with its latest log line, so a long initdb does not look like a hang. The log, the
+# service state and the sleep are parameters so a test can stand in for the machine; the elapsed time is the sum of the sleeps.
+function Wait-DarlingServiceReady([string]$serviceName, [string]$logDirectory, [datetime]$since, [int]$timeoutSeconds,
+    [int]$pollSeconds = 3, [scriptblock]$getEntries = $null, [scriptblock]$getStatus = $null, [scriptblock]$sleep = $null) {
+    if (-not $getEntries) { $getEntries = { param($dir, $from) Get-DarlingServiceLogEntries $dir $from } }
+    if (-not $getStatus) { $getStatus = { param($name) (Get-Service -Name $name -ErrorAction SilentlyContinue).Status } }
+    if (-not $sleep) { $sleep = { param($seconds) Start-Sleep -Seconds $seconds } }
+    $elapsed = 0
+    $reported = @{}
+    $lastBeat = 0
+    while ($true) {
+        $entries = @(& $getEntries $logDirectory $since)
+        $verdict = Get-DarlingStartupVerdict $entries
+        foreach ($step in @(
+                @{ Pattern = '^Loaded configuration from'; Text = 'darling.json read' },
+                @{ Pattern = '^Postgres store ready'; Text = 'store created and migrated' })) {
+            if (-not $reported.ContainsKey($step.Text) -and @($entries | Where-Object { $_.Text -match $step.Pattern }).Count -gt 0) {
+                $reported[$step.Text] = $true
+                Write-Host ("  [{0,3}s] {1}" -f $elapsed, $step.Text)
+            }
+        }
+        if ($verdict.State -ne 'Waiting') {
+            return [pscustomobject]@{ State = $verdict.State; Seconds = $elapsed; Entries = $entries }
+        }
+        $status = & $getStatus $serviceName
+        if ($status -ne 'Running' -and $status -ne 'StartPending') {
+            return [pscustomobject]@{ State = 'Stopped'; Seconds = $elapsed; Entries = $entries }
+        }
+        if ($elapsed -ge $timeoutSeconds) {
+            return [pscustomobject]@{ State = 'TimedOut'; Seconds = $elapsed; Entries = $entries }
+        }
+        if ($elapsed - $lastBeat -ge 30) {
+            $lastBeat = $elapsed
+            $latest = if ($entries.Count -gt 0) { (($entries[$entries.Count - 1].Text -split "`n")[0]) } else { 'nothing logged yet' }
+            if ($latest.Length -gt 100) { $latest = $latest.Substring(0, 100) + '...' }
+            Write-Host ("  [{0,3}s] still starting - latest log line: {1}" -f $elapsed, $latest)
+        }
+        & $sleep $pollSeconds
+        $elapsed += $pollSeconds
+    }
+}
+
+# The web dashboard address the service logged for this start ("Starting web dashboard on http://localhost:5153 ..."), or $null.
+function Get-DarlingWebAddress($entries) {
+    $address = $null
+    foreach ($entry in $entries) {
+        if ($entry.Text -match '^Starting web dashboard on (https?://\S+)') { $address = $Matches[1] }
+    }
+    return $address
+}
+
+# How many servers darling.json listed when the service loaded it, or $null when it did not log that yet.
+function Get-DarlingConfiguredServerCount($entries) {
+    $count = $null
+    foreach ($entry in $entries) {
+        if ($entry.Text -match '^Loaded configuration from .*: (\d+) server\(s\)') { $count = [int]$Matches[1] }
+    }
+    return $count
+}
+
+$startedAt = Get-Date
 Start-Service -Name $serviceName
 (Get-Service -Name $serviceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
-Write-Host "Service is Running. First start does real work (unpack pg-runtime, initdb, store migration, first collection cycle) - give it ~2 minutes." -ForegroundColor Green
-Write-Host "Primary log: %ProgramData%\PerformanceMonitorDarling\logs\darling-service_yyyyMMdd.log"
+Write-Host "Service is Running. Its first start unpacks the bundled Postgres, runs initdb (up to 3 minutes), migrates the store and starts collection." -ForegroundColor Green
+Write-Host "Waiting for it to be ready (up to $([int]($readyTimeoutSeconds / 60)) minutes). It has not hung; do not stop it..." -ForegroundColor Cyan
+$ready = Wait-DarlingServiceReady $serviceName $serviceLogDirectory $startedAt $readyTimeoutSeconds
+$startupProblem = $null
+if ($ready.State -eq 'Ready') {
+    Write-Host "Service is ready: the store is created and collection has started ($($ready.Seconds) seconds)." -ForegroundColor Green
+}
+else {
+    $startupProblem = switch ($ready.State) {
+        'Failed' { 'The service logged a startup failure and is not collecting.' }
+        'Stopped' { 'The service stopped while starting.' }
+        default { "The service was not ready after $($ready.Seconds) seconds." }
+    }
+    Write-Host ''
+    Write-Host "WARNING: $startupProblem" -ForegroundColor Red
+    $problemLines = @(Get-DarlingStartupProblemLines $ready.Entries)
+    if ($problemLines.Count -gt 0) {
+        Write-Host 'The log lines that explain it (newest last):' -ForegroundColor Yellow
+        foreach ($problemLine in $problemLines) { Write-Host "  $problemLine" -ForegroundColor Yellow }
+    }
+    else {
+        Write-Host 'The service has logged no warning or error since it started, so it may only be slow. Check again in a minute.' -ForegroundColor Yellow
+    }
+    Write-Host ''
+}
+Write-Host "Primary log: $serviceLogDirectory\darling-service_yyyyMMdd.log"
 
 # -- 5a. Re-reconcile the firewall on an UPGRADE (#2436) -------------------------------------------
 # The 4c call ran with the service stopped, which on a managed install means the store was down too - it is
@@ -2814,5 +2968,36 @@ if (-not $NoShortcuts) {
     }
 }
 
+# -- 7. Next steps (#6470) --------------------------------------------------------------------------
+# What the web dashboard's address is comes from the service's own log line for this start. The web host starts a few seconds
+# after the store is ready, so when darling.json turns the dashboard on, wait for that line briefly.
+$entriesNow = @(Get-DarlingServiceLogEntries $serviceLogDirectory $startedAt)
+$webAddress = Get-DarlingWebAddress $entriesNow
+if (-not $startupProblem -and -not $webAddress -and (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+    $configText = Get-Content -LiteralPath $configPath -Raw -ErrorAction SilentlyContinue
+    if ($configText -match '(?s)"web"\s*:\s*\{.*?"enabled"\s*:\s*true') {
+        for ($waited = 0; $waited -lt 15 -and -not $webAddress; $waited += 3) {
+            Start-Sleep -Seconds 3
+            $webAddress = Get-DarlingWebAddress @(Get-DarlingServiceLogEntries $serviceLogDirectory $startedAt)
+        }
+    }
+}
+$serverCount = Get-DarlingConfiguredServerCount $entriesNow
+
 Write-Host ''
-Write-Host 'Done.' -ForegroundColor Green
+if ($startupProblem) {
+    Write-Host "Installed, but not ready: $startupProblem" -ForegroundColor Red
+    Write-Host "The service keeps retrying a store it cannot reach. Fix what the lines above say, then restart it ('Restart-Service -Name `"$serviceName`"'), or re-run this script." -ForegroundColor Yellow
+    exit 1
+}
+Write-Host 'Done. Next steps:' -ForegroundColor Green
+Write-Host "  1. Open the Viewer: the 'Darling Viewer' shortcut on the Desktop or in the Start Menu, or $viewerExe"
+if ($serverCount -gt 0) {
+    Write-Host "  2. darling.json already lists $serverCount server(s), so collection for them has started and their first data appears within a few minutes. Add more with 'Add Server' in the Viewer."
+}
+else {
+    Write-Host "  2. Add your first SQL Server: click 'Add Server' in the Viewer's sidebar, or run:  & `"$serviceExe`" --add-server --help"
+}
+if ($webAddress) {
+    Write-Host "  3. The web dashboard is on: $webAddress   (sign in with the token from:  & `"$serviceExe`" --print-web-token )"
+}
