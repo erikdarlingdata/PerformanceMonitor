@@ -1604,7 +1604,7 @@ public sealed class DarlingMcpDataTools
 
             if (rows.Count == 0)
                 return await DarlingRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
-                    await EmptyAnswerAsync(), postgres, resolved.ServerId, databases, cancellationToken);
+                    await EmptyAnswerAsync(), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken);
 
             var approximate = read.DailyDaysUsed > 0 && read.DailySpan is not null;
             var result = rows.Select(r => new
