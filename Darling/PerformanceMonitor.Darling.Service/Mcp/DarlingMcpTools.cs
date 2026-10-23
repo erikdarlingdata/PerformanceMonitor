@@ -394,7 +394,7 @@ public sealed class DarlingMcpTools
                EVERY fact of every pass, so a property would be one null per fact per call. */
             var result = filtered
                 .OrderByDescending(f => f.Severity)
-                .Select(f => FactRanked.Attach(new
+                .Select(f => FactRanked.Attach(FactRanked.AttachSubject(new
                 {
                     source = f.Source,
                     key = f.Key,
@@ -421,7 +421,7 @@ public sealed class DarlingMcpTools
                             boost = a.Boost
                         })
                         : null
-                }, f.Ranked, McpHelpers.JsonOptions))
+                }, f, McpHelpers.JsonOptions), f.Ranked, McpHelpers.JsonOptions))
                 .ToList();
 
             return JsonSerializer.Serialize(collection.Attach(new

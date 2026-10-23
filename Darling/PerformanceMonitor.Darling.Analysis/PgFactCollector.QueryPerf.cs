@@ -62,6 +62,24 @@ AND   v.collection_time >= $2
 AND   v.collection_time <= $3
 AND   v.delta_execution_count > 0";
 
+    /// <summary>#6640: the queries behind QUERY_SPILLS, most spilled pages first. Same window, same filter and same
+    /// (database, query_hash) identity as the aggregate above, so the names are exactly the queries its spilling_query_count counts.
+    /// Run only when the aggregate found spills, and capped at the ranked-list cap.</summary>
+    public static readonly string QuerySpillsRankedSql = @"
+SELECT
+    v.database_name,
+    v.query_hash,
+    SUM(v.delta_spills) AS spills
+FROM v_query_stats AS v
+WHERE v.server_id = $1
+AND   v.collection_time >= $2
+AND   v.collection_time <= $3
+AND   v.delta_execution_count > 0
+AND   v.delta_spills > 0
+GROUP BY v.database_name, v.query_hash
+ORDER BY spills DESC, v.database_name, v.query_hash
+LIMIT " + FactRanked.MaxObjects + ";";
+
     /// <summary>
     /// Collects query-level aggregate facts from query_stats.
     /// Focuses on spills (memory grant misestimates) and high-parallelism queries.
@@ -86,6 +104,26 @@ AND   v.delta_execution_count > 0";
             var totalExecutions = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
             var totalCpuTimeUs = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
 
+            /* #6640: name the spilling queries, most spilled pages first. A second small read on the same connection,
+               only when the aggregate found spills. The aggregate's figures above are unchanged. */
+            var spillRanked = new List<RankedObject>();
+            if (totalSpills > 0)
+            {
+                await reader.CloseAsync();
+                using var rankCmd = new NpgsqlCommand(QuerySpillsRankedSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+                rankCmd.Parameters.AddWithValue(context.ServerId);
+                rankCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+                rankCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+                using var rankReader = await rankCmd.ExecuteReaderAsync(context.CancellationToken);
+                while (await rankReader.ReadAsync(context.CancellationToken))
+                {
+                    var db = rankReader.IsDBNull(0) ? string.Empty : rankReader.GetString(0);
+                    var hash = rankReader.IsDBNull(1) ? string.Empty : rankReader.GetString(1);
+                    var pages = rankReader.IsDBNull(2) ? 0.0 : Convert.ToDouble(rankReader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture);
+                    spillRanked.Add(new RankedObject(db + "/" + hash, db.Length == 0 ? null : db, pages));
+                }
+            }
+
             if (totalSpills > 0)
             {
                 facts.Add(new Fact
@@ -94,6 +132,8 @@ AND   v.delta_execution_count > 0";
                     Key = "QUERY_SPILLS",
                     Value = totalSpills,
                     ServerId = context.ServerId,
+                    ObjectName = spillRanked.Count > 0 ? spillRanked[0].ObjectName : null,
+                    Ranked = spillRanked,
                     Metadata = new Dictionary<string, double>
                     {
                         ["total_spills"] = totalSpills,
@@ -199,7 +239,10 @@ SELECT
     CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
     creation_time AS creation_time_local,
     svr.offset_minutes,
-    svr.time_zone_id
+    svr.time_zone_id,
+    database_name,
+    query_hash,
+    query_plan_hash
 FROM latest, svr
 WHERE rn = 1
 AND   min_worker_time >= 10000
@@ -235,6 +278,10 @@ ORDER BY worker_ratio DESC";
             var worstMaxWorker = 0L;
             var worstGrantRatio = 0.0;
             var worstSpillDivergence = 0;
+            /* #6640: the kept offenders, worst first, at most FactRanked.MaxObjects. The name is database/query_hash/
+               query_plan_hash: the plan hash is in the name because Figures holds numbers only, and one query with
+               two plans is two offenders. */
+            var ranked = new List<RankedObject>();
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
@@ -256,6 +303,23 @@ ORDER BY worker_ratio DESC";
                     worstGrantRatio = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3));
                     worstSpillDivergence = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4));
                 }
+                if (ranked.Count < FactRanked.MaxObjects)
+                {
+                    var db = reader.IsDBNull(8) ? string.Empty : reader.GetString(8);
+                    var hash = reader.IsDBNull(9) ? string.Empty : reader.GetString(9);
+                    var planHash = reader.IsDBNull(10) ? string.Empty : reader.GetString(10);
+                    ranked.Add(new RankedObject(
+                        db + "/" + hash + "/" + planHash,
+                        db.Length == 0 ? null : db,
+                        reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2)),
+                        new Dictionary<string, double>
+                        {
+                            ["min_worker_us"] = reader.IsDBNull(0) ? 0.0 : ToInt64(reader.GetValue(0)),
+                            ["max_worker_us"] = reader.IsDBNull(1) ? 0.0 : ToInt64(reader.GetValue(1)),
+                            ["grant_ratio"] = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3)),
+                            ["spill_divergence"] = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)),
+                        }));
+                }
                 offenderCount++;
                 if (offenderCount >= ParameterSensitivityMaxOffenders)
                     break;
@@ -269,6 +333,8 @@ ORDER BY worker_ratio DESC";
                 Key = "PARAMETER_SENSITIVITY",
                 Value = worstRatio,
                 ServerId = context.ServerId,
+                ObjectName = ranked[0].ObjectName,
+                Ranked = ranked,
                 Metadata = new Dictionary<string, double>
                 {
                     ["offender_count"] = offenderCount,
