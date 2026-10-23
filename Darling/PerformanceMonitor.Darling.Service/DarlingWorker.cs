@@ -2934,8 +2934,7 @@ LIMIT 1";
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                // install-darling.ps1 waits for this text (#6470): reword both together.
-                _logger.LogCritical(ex, "Cannot reach or migrate the Postgres store: {Message}", ex.Message);
+                _logger.LogCritical(ex, "Cannot reach or migrate the Postgres store: {Message}", ex.Message); // install-darling.ps1 waits for this text (#6470): reword both together.
                 /* #2953: AFTER the critical line, deliberately. The log line is the diagnosis of record and
                    predates this seam; publishing first would put a new call between the failure and the one
                    message an operator greps for. */
