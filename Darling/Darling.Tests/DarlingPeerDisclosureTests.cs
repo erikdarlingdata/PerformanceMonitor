@@ -364,7 +364,7 @@ public sealed class DarlingPeerDisclosureTests
     [Fact]
     public void Validate_PeerProblemsSurfaceThroughTheWholeConfigValidate()
     {
-        /* Reported even on a config with no servers — the peers check runs BEFORE that early return. */
+        /* Reported even on a config with no servers (a valid start since #6468). */
         var config = new DarlingConfig
         {
             Postgres = new PostgresConfig { ConnectionString = "Host=localhost;Database=darling" },
@@ -373,7 +373,7 @@ public sealed class DarlingPeerDisclosureTests
 
         var problems = config.Validate();
         Assert.Contains(problems, p => p.Contains("name is required", StringComparison.Ordinal));
-        Assert.Contains(problems, p => p.Contains("servers must contain at least one entry", StringComparison.Ordinal));
+        Assert.DoesNotContain(problems, p => p.Contains("at least one", StringComparison.Ordinal));
     }
 
     /* ───────────────────────── normalization + matching ───────────────────────── */

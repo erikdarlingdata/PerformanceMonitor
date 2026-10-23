@@ -394,6 +394,47 @@ FROM config.investigation_requests", ct, agentForcedAt);
         });
     }
 
+    /// <summary>#6550: a watch of automatic plan correction's forces and reverts is recorded and measured, and opens no request.</summary>
+    [Fact]
+    public async Task AWatchOfOnlyAutomaticPlanCorrection_OpensNoRequest_ButAWatchWithAManualForceDoes()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var at = h.Now.AddMinutes(-70);
+            await SeedWaitsAsync(h.Connection, at.AddMinutes(-60), 300, ct);
+            await SeedWaitsAsync(h.Connection, at, 8000, ct);
+            await h.Store.RecordChangesAsync(ServerId, ServerName, new[]
+            {
+                new ChangeWatchChange("plan_force:snapshot:Sales:1:10:x", "plan_force", at,
+                    "plan 10 of query 1 in Sales: forced" + ChangeWatchPlanForcing.Suffix("AUTO"), "Sales", 1, 10),
+                new ChangeWatchChange("plan_force:unforced:Sales:1:10:y", "plan_force", at.AddMinutes(5),
+                    "plan 10 of query 1 in Sales: unforced" + ChangeWatchPlanForcing.Suffix("AUTO"), "Sales", 1, 10),
+            }, ct);
+
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            Assert.Equal(0, await CountAsync(h.Connection, "SELECT count(*) FROM config.investigation_requests WHERE trigger_kind = 'change_watch'", ct));
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watches WHERE result = 'moved_auto_plan_correction'", ct));
+
+            /* One manual force in the window is somebody's change: the request opens as before. */
+            var later = h.Now.AddMinutes(-65).AddHours(-3);
+            await SeedWaitsAsync(h.Connection, later.AddMinutes(-60), 300, ct);
+            await SeedWaitsAsync(h.Connection, later, 8000, ct);
+            await h.Store.RecordChangesAsync(ServerId, ServerName, new[]
+            {
+                new ChangeWatchChange("plan_force:snapshot:Sales:2:20:x", "plan_force", later,
+                    "plan 20 of query 2 in Sales: forced" + ChangeWatchPlanForcing.Suffix("AUTO"), "Sales", 2, 20),
+                new ChangeWatchChange("plan_force:snapshot:Sales:3:30:x", "plan_force", later,
+                    "plan 30 of query 3 in Sales: forced" + ChangeWatchPlanForcing.Suffix("MANUAL"), "Sales", 3, 30),
+            }, ct);
+
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.investigation_requests WHERE trigger_kind = 'change_watch'", ct));
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watches WHERE result = 'request_opened'", ct));
+        });
+    }
+
     [Fact]
     public async Task AtASixtyMinuteFrequency_AnAgentsForceFiftyMinutesBeforeTheCaptureThatSawIt_IsTheAgentsChange()
     {

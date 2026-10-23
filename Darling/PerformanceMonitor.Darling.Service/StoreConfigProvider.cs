@@ -63,6 +63,7 @@ public sealed class StoreConfigProvider
     /// </summary>
     private int _viewReadFailureStreak;
     private (int Count, bool Waiting) _lastReenterLogged = (-1, false);
+    private string? _lastPortWarningsLogged;
 
     /// <summary>
     /// Says whether the one-time pin step is open and has not been able to run (#5456). Set by the worker right after the
@@ -1770,6 +1771,19 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
             var routes = await ReadNotificationRoutesAsync(connection, _logger, cancellationToken);
 
             var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken, pins);
+
+            /* #6583: a SQL Server registry row that holds a port, which is ignored. Once per change in the warnings, not once per reload. */
+            var portWarnings = SqlServerPortAdvice.Warnings(servers);
+            var portWarningKey = string.Join('\n', portWarnings);
+            if (portWarningKey != _lastPortWarningsLogged)
+            {
+                foreach (var warning in portWarnings)
+                {
+                    _logger?.LogWarning("{Warning}", warning);
+                }
+
+                _lastPortWarningsLogged = portWarningKey;
+            }
 
             /* Once per change, not once per reload: the count is the same on every reload until someone enters a password.
                #5456: while the one-time pin step is waiting to run, the same count is a different message (do not enter

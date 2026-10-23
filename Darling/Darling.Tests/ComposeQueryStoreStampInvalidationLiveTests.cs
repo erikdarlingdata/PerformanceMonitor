@@ -102,7 +102,7 @@ WHERE b.built_seq IS DISTINCT FROM b.late_seq", ct);
             await AssertSameAsOracleAsync(connection, start, end, replayHour, null, "replayed row, runner's StampThrough", ct);
 
             /* The rebuild makes it current. */
-            var rebuilt = await QueryStoreComposeStamp.RunTickAsync(source, DateTime.UtcNow, ComposeStampLiveSupport.RetentionDays, NullLogger.Instance, ct);
+            var rebuilt = await QueryStoreComposeStamp.RunTickAsync(source, ComposeStampLiveSupport.ClockWithin(hourNow), ComposeStampLiveSupport.RetentionDays, NullLogger.Instance, ct);
             Assert.Equal(0, rebuilt.Failed);
             Assert.Equal(1, rebuilt.BuiltStale);
             Assert.Equal(string.Empty, await StaleListAsync(connection, ct));
@@ -120,7 +120,7 @@ WHERE ctid = (SELECT ctid FROM collect.query_store_interval_wide WHERE server_id
             await AssertSameAsOracleAsync(connection, start, end, baseline, null, "moved-out row, stale arm", ct);
             await AssertSameAsOracleAsync(connection, start, end, baseline, new[] { "srv2" }, "moved-out row, stale arm, server 2", ct);
 
-            rebuilt = await QueryStoreComposeStamp.RunTickAsync(source, DateTime.UtcNow, ComposeStampLiveSupport.RetentionDays, NullLogger.Instance, ct);
+            rebuilt = await QueryStoreComposeStamp.RunTickAsync(source, ComposeStampLiveSupport.ClockWithin(hourNow), ComposeStampLiveSupport.RetentionDays, NullLogger.Instance, ct);
             Assert.Equal(0, rebuilt.Failed);
             Assert.Equal(1, rebuilt.BuiltStale);
             Assert.Equal(string.Empty, await StaleListAsync(connection, ct));

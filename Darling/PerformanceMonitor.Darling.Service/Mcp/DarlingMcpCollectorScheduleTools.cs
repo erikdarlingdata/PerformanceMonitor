@@ -63,7 +63,7 @@ public sealed class DarlingMcpCollectorScheduleTools
     private sealed record Edit(Change Kind, string Tool, string? Collector, string? Server, int? Number, bool Clear, string? RunAt, bool Inherit = false);
 
     [McpServerTool(Name = "disable_collector"), Description(
-        "Stops one collector: sets its enabled flag to false, for every monitored server (no server_name) or for ONE server. Nothing else on its row changes and data already collected stays. The service picks it up on its next config poll; no restart. The answer gives the previous state and the exact call that undoes it. Needs mcp.allowWrites; never offered to an investigation agent. inherit=true puts the enabled flag back to inherited (a server then follows the fleet-wide row again). Read the current state with get_collector_schedules; collector names are in get_collection_health.")]
+        "Stops one collector: sets its enabled flag to false, for every monitored server (no server_name) or for ONE server. Nothing else on its row changes and data already collected stays. The service picks it up on its next config poll; no restart. The answer gives the previous state and the exact call that undoes it. Needs mcp.allowWrites; never offered to an investigation agent. inherit=true puts the enabled flag back to inherited (a server then follows the fleet-wide row again). Without it, a call with a server_name stores a fixed value on that server's row and the server stops following the fleet-wide value. Read the current state with get_collector_schedules; collector names are in get_collection_health.")]
     public static Task<string> DisableCollector(
         NpgsqlDataSource postgres,
         [Description("Collector name, as get_collection_health reports it.")] string collector_name,
@@ -74,7 +74,7 @@ public sealed class DarlingMcpCollectorScheduleTools
         ApplyAsync(postgres, new Edit(Change.Disable, "disable_collector", collector_name, server_name, null, false, null, inherit), logger, cancellationToken);
 
     [McpServerTool(Name = "enable_collector"), Description(
-        "Starts one collector: sets its enabled flag to true, for every monitored server (no server_name) or for ONE server. Nothing else on its row changes. A collector that ships off (opt-in) is switched on by this. The service picks it up on its next config poll; no restart. The answer gives the previous state and the exact call that undoes it. inherit=true puts the enabled flag back to inherited (a server then follows the fleet-wide row again). Needs mcp.allowWrites; never offered to an investigation agent.")]
+        "Starts one collector: sets its enabled flag to true, for every monitored server (no server_name) or for ONE server. Nothing else on its row changes. A collector that ships off (opt-in) is switched on by this. The service picks it up on its next config poll; no restart. The answer gives the previous state and the exact call that undoes it. inherit=true puts the enabled flag back to inherited (a server then follows the fleet-wide row again). Without it, a call with a server_name stores a fixed value on that server's row and the server stops following the fleet-wide value. Needs mcp.allowWrites; never offered to an investigation agent.")]
     public static Task<string> EnableCollector(
         NpgsqlDataSource postgres,
         [Description("Collector name, as get_collection_health reports it.")] string collector_name,
@@ -483,6 +483,13 @@ public sealed class DarlingMcpCollectorScheduleTools
                 if (rowBefore is null)
                 {
                     notes.Add($"There was no {(serverId is null ? "fleet-wide" : "server")} row; one was created. Before it, the collector resolved to {(effectiveBefore ? "enabled" : "disabled")} here ({(serverId is null || fleetBefore is null ? "the code default" : "the fleet-wide row")}), and the row now stores an explicit value that wins over any later fleet-wide change. inherit=true puts it back.");
+                }
+
+                if (serverId is not null)
+                {
+                    /* #6454: a plain enable or disable stores a fixed value on the server's row, so the server stops following the fleet-wide
+                       value. Say so, and name the call that puts it back, rather than leaving the pin to be found in get_collector_schedules. */
+                    notes.Add($"This stores {(wanted ? "enabled" : "disabled")} on the server's own row, so it no longer follows the fleet-wide value. {edit.Tool} with inherit=true and the same server_name puts it back to inherited.");
                 }
 
                 if (serverId is null)

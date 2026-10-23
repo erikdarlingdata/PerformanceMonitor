@@ -77,8 +77,19 @@ WHERE server_id = $1";
             return null;
         }
 
-        return Envelope(serverName, engineEdition, engineKind, collectorName);
+        var engineEnvelope = Envelope(serverName, engineEdition, engineKind, collectorName);
+        if (engineEnvelope is not null || !IsReadableSecondaryGated(collectorName))
+        {
+            return engineEnvelope;
+        }
+
+        /* #6554: the collectors skip every readable-secondary database, so on a secondary these reads are empty by design. */
+        return await DarlingRuntimePrecondition.QueryStoreReadableSecondaryStatusAsync(postgres, serverId, serverName, cancellationToken);
     }
+
+    /// <summary>The collectors that skip a readable secondary's databases (bit 8 of readonly_reason), so a read of what they store can be empty by design there (#6554).</summary>
+    internal static bool IsReadableSecondaryGated(string collectorName) =>
+        collectorName is "query_store" or "query_store_forced_plans" or "plan_correction";
 
     /// <summary>
     /// #6439: the <c>not_collected</c> envelope for the tempdb file I/O read on an Azure SQL Database, or <c>null</c> on any other
