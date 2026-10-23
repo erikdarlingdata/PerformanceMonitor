@@ -72,12 +72,16 @@ public sealed class DarlingMcpChangeWatchTools
         "collector where that is its source, CPU from Performance Insights samples and statements from pg_stat_statements; a measure it has no source for is listed in not_measured with the reason " +
         "(for example no CPU source), never as flat. An open watch has no measures yet: it is still collecting its window. Pass state " +
         "open, evaluating, closed or failed to see only watches in that state, or a result (flat, request_opened, moved_no_request, " +
-        "moved_agent_change, no_data) to see only watches that closed with it. A read over the monitoring store; no monitored server is touched.")]
+        "moved_agent_change, no_data) to see only watches that closed with it. A closed watch that measured many queries can run to about 20 KB, " +
+        "so ask for a small limit (3 to 5), or pass watch_id to read one watch in any state. measures, not_measured and " +
+        "changes are sent once, at the top of the watch; result_detail holds the rest of the stored result (had_data, notes, window). " +
+        "A read over the monitoring store; no monitored server is touched.")]
     public static async Task<string> GetChangeWatches(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Only watches in this state (open, evaluating, closed, failed) or with this result (flat, request_opened, moved_no_request, moved_agent_change, no_data). Omit it, or pass all, for every state.")] string? state = null,
         [Description("Most watches to return, newest first. Default 20 (1-1000).")] int limit = 20,
+        [Description("Read one watch by its watch_id, in any state; state still applies if you give it. A watch_id that is not on this server answers not_found.")] string? watch_id = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -97,10 +101,27 @@ public sealed class DarlingMcpChangeWatchTools
         var limitError = McpHelpers.ValidateTop(limit);
         if (limitError != null) return limitError;
 
+        /* #6591: a watch_id that is not a GUID cannot match a watch; it answers like an id nobody holds. */
+        Guid? watchId = null;
+        if (!string.IsNullOrWhiteSpace(watch_id))
+        {
+            if (!Guid.TryParse(watch_id, out var parsed))
+            {
+                return McpHelpers.Status("not_found", $"watch_id '{watch_id}' is not a change watch id.");
+            }
+
+            watchId = parsed;
+        }
+
         try
         {
             var store = new ChangeWatchStore(postgres, McpCommandDeadlines.ReadSeconds);
-            var watches = await store.ListAsync(resolved.ServerId, state, limit, cancellationToken);
+            var watches = await store.ListAsync(resolved.ServerId, state, limit, watchId, cancellationToken);
+            if (watches.Count == 0 && watchId is not null)
+            {
+                return McpHelpers.Status("not_found", $"No change watch{(state is null ? "" : $" matching {state}")} with that watch_id is recorded for {resolved.DisplayName}.");
+            }
+
             if (watches.Count == 0)
             {
                 /* The change kinds belong to the target's engine: a PostgreSQL target records settings and extensions, never trace flags or plans. */
@@ -142,7 +163,7 @@ public sealed class DarlingMcpChangeWatchTools
                         }),
                         measures = detail?["measures"],
                         not_measured = detail?["not_measured"],
-                        result_detail = detail,
+                        result_detail = WithoutRepeats(detail),
                     };
                 }),
             });
@@ -151,6 +172,29 @@ public sealed class DarlingMcpChangeWatchTools
         {
             return McpHelpers.FormatError("get_change_watches", ex);
         }
+    }
+
+    /// <summary>
+    /// #6591: the stored result minus the keys the watch already carries at its top (<c>measures</c>, <c>not_measured</c>, <c>changes</c>), so
+    /// each fact is sent once. What is left (<c>had_data</c>, <c>notes</c>, <c>window</c>, or a failed watch's <c>error</c>) is only here.
+    /// </summary>
+    private static JsonNode? WithoutRepeats(JsonNode? detail)
+    {
+        if (detail is JsonObject stored)
+        {
+            var rest = new JsonObject();
+            foreach (var (key, value) in stored)
+            {
+                if (key is not ("measures" or "not_measured" or "changes"))
+                {
+                    rest[key] = value?.DeepClone();
+                }
+            }
+
+            return rest;
+        }
+
+        return detail;
     }
 
     /// <summary>The stored result as a JSON node, or null when the watch is still open or its text is not JSON.</summary>
