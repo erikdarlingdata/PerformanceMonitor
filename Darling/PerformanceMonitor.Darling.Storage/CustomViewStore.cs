@@ -20,9 +20,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <summary>
 /// Typed CRUD over <c>config.custom_views</c> (#1563) — the web dashboard's user-authored view/notebook
 /// definitions. Built from the web host's least-privilege VIEWER-role pool exactly like
-/// <c>DarlingAnalysisService</c> is built from it (<c>new CustomViewStore(postgres, McpCommandDeadlines.ReadSeconds)</c>); the viewer role
+/// <c>DarlingAnalysisService</c> is built from it (<c>new CustomViewStore(postgres, readSeconds)</c>, where the caller states its own deadline); the viewer role
 /// carries the single narrow <c>INSERT/UPDATE/DELETE ON config.custom_views</c> grant (see
-/// <see cref="DarlingManagedRoles"/>). Same store discipline as <c>ViewerDataService.Commands</c>: public-const
+/// <c>DarlingManagedRoles</c>). Same store discipline as <c>ViewerDataService.Commands</c>: public-const
 /// SQL, bound <c>$N</c> parameters, <c>definition</c> bound as <c>jsonb</c>. Bare table name — the viewer pool's
 /// <c>search_path = collect, config, public</c> resolves <c>custom_views</c> to <c>config.custom_views</c>
 /// (there is no such table in <c>collect</c>), mirroring <c>config_command</c> in ViewerDataService.Commands.

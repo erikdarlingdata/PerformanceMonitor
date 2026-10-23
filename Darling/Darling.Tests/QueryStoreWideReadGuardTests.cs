@@ -275,13 +275,13 @@ public sealed class QueryStoreWideReadRefusalLiveTests
         await InsertBuiltAsync(connection, OtherServerId, S.Date.AddDays(2), 50, ct);
         await InsertBuiltAsync(connection, disabledId, S.Date.AddDays(2), 9_999_999, ct);
 
-        var fleet = await QueryStoreWideReadGuard.EstimateAsync(postgres, null, null, ct);
+        var fleet = await QueryStoreWideReadGuard.EstimateAsync(postgres, null, null, StorageCommandDeadlines.McpReadSeconds, ct);
         Assert.Equal(new QueryStoreWideReadGuard.Estimate(750 + 9_999_999, 3), fleet);
 
-        var scoped = await QueryStoreWideReadGuard.EstimateAsync(postgres, new[] { ServerName }, null, ct);
+        var scoped = await QueryStoreWideReadGuard.EstimateAsync(postgres, new[] { ServerName }, null, StorageCommandDeadlines.McpReadSeconds, ct);
         Assert.Equal(new QueryStoreWideReadGuard.Estimate(700, 1), scoped);
 
-        var noBuilt = await QueryStoreWideReadGuard.EstimateAsync(postgres, new[] { "qsiw-refusal-nobuilt" }, null, ct);
+        var noBuilt = await QueryStoreWideReadGuard.EstimateAsync(postgres, new[] { "qsiw-refusal-nobuilt" }, null, StorageCommandDeadlines.McpReadSeconds, ct);
         Assert.Equal(new QueryStoreWideReadGuard.Estimate(0, 0), noBuilt);
         Assert.Null(QueryStoreWideReadGuard.Refusal(noBuilt, S, S.AddDays(30)));
 

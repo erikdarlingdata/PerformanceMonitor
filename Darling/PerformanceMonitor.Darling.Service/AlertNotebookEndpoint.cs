@@ -280,7 +280,7 @@ internal static partial class AlertNotebookEndpoint
     /// scoping the charts to whichever of them sorts first (what it did before the resolver refused such a name).
     /// A blank link server resolves to nothing here, never to the only registered server.</summary>
     internal static string? ScopeServerOf(
-        IReadOnlyList<DarlingServerResolver.RegisteredServer> registry,
+        IReadOnlyList<RegisteredServer> registry,
         DarlingAlertReader.AlertHistoryReadRow? matchedRow,
         string? linkServer)
     {

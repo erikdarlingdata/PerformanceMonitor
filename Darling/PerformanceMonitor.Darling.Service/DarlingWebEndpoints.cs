@@ -5943,7 +5943,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                exactly what the guard counted before #6115 for those servers, so a split panel is never let through that today's code would
                refuse for the same wide rows; the raw rows can only refuse more. A panel whose every server passes adds nothing and is
                unchanged. A log that cannot answer adds nothing: the guard fails open, as it always has. */
-            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, cancellationToken, limit, stampThrough, rawServerIds, start, McpCommandDeadlines.ReadSeconds) is { } tooBig)
+            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, McpCommandDeadlines.ReadSeconds, cancellationToken, limit, stampThrough, rawServerIds, start) is { } tooBig)
             {
                 return ComposeRunOutcome.BadRequest(tooBig);
             }
@@ -6010,7 +6010,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            route, so a panel the hourly-raw-edges route or a rollup serves is never counted. A panel whose hourly-edges guard did not pass
            holds the snapshot's connection, and the estimate reads there under a savepoint. Fails open, like the Query Store guard above. */
         if (QueryStoreWideReadGuard.RawCollectorFor(plan!.Measure.SourceTable, compiled!.Route) is { } rawCollector
-            && await QueryStoreWideReadGuard.CheckRawAsync(postgres, snapshot?.Connection, serverScope, rawCollector, start, end, logger, cancellationToken, McpCommandDeadlines.ReadSeconds) is { } rawTooBig)
+            && await QueryStoreWideReadGuard.CheckRawAsync(postgres, snapshot?.Connection, serverScope, rawCollector, start, end, logger, McpCommandDeadlines.ReadSeconds, cancellationToken) is { } rawTooBig)
         {
             return ComposeRunOutcome.BadRequest(rawTooBig);
         }
@@ -6280,7 +6280,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                compiler can bound the single-scan base CTE (buckets x members). Null for any other panel, and when unknown. */
             long? groupMembers = groupMembersFor is null
                 ? null
-                : await QueryStoreGroupMembers.ResolveAsync(connection, groupMembersFor, wideServers.Count, cancellationToken, ReadScope.Current?.Logger, McpCommandDeadlines.ReadSeconds);
+                : await QueryStoreGroupMembers.ResolveAsync(connection, groupMembersFor, wideServers.Count, McpCommandDeadlines.ReadSeconds, cancellationToken, ReadScope.Current?.Logger);
 
             /* #5582 part 3: where the compose rollup stops answering, on this same connection. Null (today's route) on any fault. */
             var stampThrough = await ResolveQueryStoreStampThroughAsync(
