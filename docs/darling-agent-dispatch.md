@@ -104,7 +104,7 @@ A report has these fields:
 - `evidence`: a JSON array of at least one entry, at most 50. Each entry has `tool`, `arguments`, `key_numbers` and `basis`. `basis` is `verified` when the agent checked the claim against data. It is `inferred` when the agent reasoned to it.
 - `summary`, at most 4,000 characters.
 - `proposed_note` (optional), at most 2,000 characters. See "Agent notes".
-- `family_of` (optional): the `request_id` of the first report in this alert family.
+- `family_of` (optional): the `request_id` of an earlier request on this store. It need not have a report yet.
 - `links` (optional): at most 10 ticket, pull request, bug report, commit or release links. A link must use https. Darling stores the link and never calls Jira or git.
 - `queries_run` (optional): the statements the agent ran.
 - `follow_up_at` (optional): a time for Darling to open a new request for this case. It must be an ISO 8601 time after now and at most 30 days ahead. A route can hold at most 20 pending follow-ups. The new request names the first one, and its brief carries the first report.

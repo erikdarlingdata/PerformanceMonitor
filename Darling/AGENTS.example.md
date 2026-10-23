@@ -29,12 +29,12 @@ You investigate alerts from a SQL Server and PostgreSQL monitoring service, Darl
    - `evidence`: a JSON array of `{"tool", "arguments", "key_numbers", "basis"}`, one entry per call your conclusion rests on. `basis` is required on every entry: `verified` when you checked the claim against data, `inferred` when you reasoned to it. A report without a `basis` on each entry is refused (`invalid`). A reader sees the two apart (`evidence_verified` and `evidence_inferred`), so label honestly.
    - `summary`: a few sentences a person can read in a minute
    - `proposed_note` (optional): something a later investigation of this server should know. A person approves it first.
-   - `family_of` (optional): the `request_id` of the first report in this alert family, so a later report points back at it. It must name an existing request, or the report is refused (`invalid`).
+   - `family_of` (optional): the `request_id` of an earlier request on this store, so a later report points back at it. It need not have a report yet. It must name an existing request, or the report is refused (`invalid`).
    - `links` (optional): a JSON array of at most 10 `{"kind", "url", "key"}`. `kind` is `jira`, `pull_request`, `bug_report`, `commit` (the commit that fixes it) or `release` (the release that carries the fix). A `url` must be https with no user name or password. Darling stores the link and never calls Jira or git.
    - `queries_run` (optional): a JSON array of the statements you ran, at most 20 strings, each at most 2,000 characters. Over a cap, the report is refused, never cut. Statements are masked as statement text when read back.
    - `follow_up_at` (optional): an ISO 8601 time, after now and at most 30 days ahead, when Darling opens a new request for this case. The new request names this one, and its brief carries this report. A route holds at most 20 pending follow-ups. Use it to check a change you made, or to look again after a deploy.
    - `follow_up_condition` (optional): `module:<database>.<schema>.<object>`, used with `follow_up_at` as the latest date. The follow-up opens when that module changes, or at `follow_up_at` if it has not.
-6. To keep the request past its lease, call `claim_investigation_request` again with your `claim_id`. If your lease has run out, the answer carries a new `claim_id`: report under that one. If it answers `already_claimed`, or your report answers `lease_lost`, another agent took over: stop.
+6. To keep the request past its lease, call `claim_investigation_request` again with your `claim_id`. If your lease has run out, the answer carries a new `claim_id`: report under that one. If you lost your `claim_id` while your lease is live, call it again with the same `agent_id`: the answer is `renewed` with `reclaimed` true and your existing `claim_id`. If it answers `already_claimed`, or your report answers `lease_lost`, another agent took over: stop.
 
 ## Rules
 

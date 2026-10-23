@@ -70,7 +70,7 @@ internal static class InvestigationToolContract
                 P("proposed_note", "string?", "null", "Optional note for a person to approve, at most 2,000 characters."),
                 P("action_proposals", "string?", "null", "Refused at Level 1. Omit."),
                 P("links", "string?", "null", "Optional JSON array of at most 10 {kind, url, key}; https only. See the guide."),
-                P("family_of", "string?", "null", "Optional. The request_id of the first report in this family; it must exist."),
+                P("family_of", "string?", "null", "Optional. The request_id of an earlier request on this store; it need not have a report yet."),
                 P("queries_run", "string?", "null", "Optional JSON array of statements you ran, " + InvestigationReportFields.QueriesRunRule + "."),
                 P("follow_up_at", "string?", "null", "Optional. When to open a follow-up request: " + InvestigationReportFields.FollowUpRule + "."),
             }),

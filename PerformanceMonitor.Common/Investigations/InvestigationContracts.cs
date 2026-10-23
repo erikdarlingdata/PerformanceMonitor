@@ -107,6 +107,10 @@ public enum InvestigationClaimOutcome
     /// <summary>Another claim holds a live lease.</summary>
     AlreadyClaimed,
 
+    /// <summary>#6576: the same agent id already holds the live lease. Its existing claim id comes back and the lease is
+    /// renewed; no new claim is made and the claim count does not move.</summary>
+    Reclaimed,
+
     /// <summary>The request is reported, closed or expired, or has used its three claims.</summary>
     NotOpen,
 
@@ -123,7 +127,7 @@ public enum InvestigationClaimOutcome
     JournalCapped,
 }
 
-/// <summary>The result of a claim. The lease and claim count are set only when <see cref="Outcome"/> is Claimed.</summary>
+/// <summary>The result of a claim. The claim id and lease are set when <see cref="Outcome"/> is Claimed or Reclaimed; the claim count is set for those two and for the refusals that read the row.</summary>
 public sealed record InvestigationClaimResult(
     InvestigationClaimOutcome Outcome, Guid? ClaimId, DateTime? LeaseUntilUtc, int ClaimCount, string? Reason);
 

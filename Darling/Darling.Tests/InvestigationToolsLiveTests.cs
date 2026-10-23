@@ -160,6 +160,39 @@ public sealed class InvestigationToolsLiveTests
         });
     }
 
+    /// <summary>#6576: through the tool, the agent that lost its claim_id claims again with the same agent_id and gets status
+    /// renewed, reclaimed true and the live claim_id, with the lease moved on; another agent_id answers already_claimed.</summary>
+    [Fact]
+    public async Task AReclaimByTheLeaseHolder_AnswersRenewedWithTheLiveClaimId_AndAnotherAgentIsRefused()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var openedId = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
+            var id = openedId.ToString();
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+
+            var first = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", null, null, ct));
+            var claimId = first.GetProperty("claim_id").GetString()!;
+            await ExecAsync(connection,
+                $"UPDATE config.investigation_requests SET lease_until = now() + interval '1 minute' WHERE request_id = '{id}'", ct);
+            var before = await ScalarAsync(connection,
+                $"SELECT lease_until::text FROM config.investigation_requests WHERE request_id = '{id}'", ct);
+
+            var again = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", null, null, ct));
+            Assert.Equal("renewed", again.GetProperty("status").GetString());
+            Assert.True(again.GetProperty("reclaimed").GetBoolean());
+            Assert.Equal(claimId, again.GetProperty("claim_id").GetString());
+            Assert.Equal("true", await ScalarAsync(connection,
+                $"SELECT (lease_until > '{before}'::timestamptz)::text FROM config.investigation_requests WHERE request_id = '{id}'", ct));
+
+            var other = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-b", null, null, ct));
+            Assert.Equal("already_claimed", other.GetProperty("status").GetString());
+            Assert.False(other.TryGetProperty("claim_id", out _));
+            Assert.Equal($"{claimId}|1", await ScalarAsync(connection,
+                $"SELECT claim_id || '|' || claim_count FROM config.investigation_requests WHERE request_id = '{id}'", ct));
+        });
+    }
+
     [Fact]
     public async Task List_WritesNothing_AndTheWebReadServesTheSameAnswer()
     {

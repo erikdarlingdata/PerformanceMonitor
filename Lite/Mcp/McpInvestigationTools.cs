@@ -94,6 +94,8 @@ public sealed class McpInvestigationTools
         "A claim is one conditional update, so two agents claiming at once cannot both win; a request takes at most three " +
         "claims. The lease is the route's agent_lease_minutes; a renewal moves it on by that much, never past the request's " +
         "expiry, and only while your claim still holds a live lease (otherwise the call claims afresh, with a new claim_id). " +
+        "If you lost your claim_id, claim again with the same agent_id while your lease is live: status renewed, reclaimed true, " +
+        "your existing claim_id and a renewed lease (a different agent_id still gets already_claimed). " +
         "The brief is composed at claim time, masked at mcp_data_detail, and stored; if it cannot be composed the claim is " +
         "released (it stays counted) and the answer is status error. brief_format: omit, or 1. agent_id names your agent " +
         "in the journal: 1-64 letters, digits, '.', '_', ':' or '-'. Return your findings with submit_investigation_report under this claim_id.")]
@@ -148,6 +150,19 @@ public sealed class McpInvestigationTools
             }
 
             var claim = await store.ClaimAsync(requestId, agent_id, cancellationToken);
+            if (claim.Outcome == InvestigationClaimOutcome.Reclaimed)
+            {
+                /* #6576: the same agent_id already holds the live lease. Its claim_id comes back and the lease is renewed. */
+                return JsonSerializer.Serialize(new
+                {
+                    status = "renewed",
+                    reclaimed = true,
+                    request_id = requestId,
+                    claim_id = claim.ClaimId,
+                    lease_until = claim.LeaseUntilUtc,
+                }, McpHelpers.JsonOptions);
+            }
+
             if (claim.Outcome != InvestigationClaimOutcome.Claimed)
                 return InvestigationToolCore.Status(InvestigationToolCore.ClaimStatus(claim.Outcome), InvestigationToolCore.ClaimMessage(claim));
 
@@ -208,7 +223,7 @@ public sealed class McpInvestigationTools
         "pull request, bug report, commit or release you opened or found. A url must be https with no user name or password; http, file and UNC " +
         "(\\\\server\\share, //server/share) links are refused (invalid). Each URL is journaled once per request as link_recorded. " +
         "Lite stores the link and never calls Jira or git. " +
-        "family_of (optional) is the request_id of the first report in this family; it must name a request (else invalid). " +
+        "family_of (optional) is the request_id of an earlier request on this store, which need not have a report yet; it must name a request (else invalid). " +
         "queries_run (optional) is a JSON array of the statements you ran, " + InvestigationReportFields.QueriesRunRule + " (over a cap: refused, never cut); " +
         "it is masked as statement text. " +
         "follow_up_at (optional) asks Lite to open a new request for this case later: " + InvestigationReportFields.FollowUpRule + ". " +
@@ -227,7 +242,7 @@ public sealed class McpInvestigationTools
         [Description("Optional note for a person to approve, at most 2,000 characters.")] string? proposed_note = null,
         [Description("Refused at Level 1. Omit.")] string? action_proposals = null,
         [Description("Optional JSON array of at most 10 {kind, url, key}; https only. See the guide.")] string? links = null,
-        [Description("Optional. The request_id of the first report in this family; it must exist.")] string? family_of = null,
+        [Description("Optional. The request_id of an earlier request on this store; it need not have a report yet.")] string? family_of = null,
         [Description("Optional JSON array of statements you ran, " + InvestigationReportFields.QueriesRunRule + ".")] string? queries_run = null,
         [Description("Optional. When to open a follow-up request: " + InvestigationReportFields.FollowUpRule + ".")] string? follow_up_at = null,
         CancellationToken cancellationToken = default) =>
@@ -304,7 +319,7 @@ public sealed class McpInvestigationTools
             }
 
             if (familyOf is { } family && !await store.RequestExistsAsync(family, cancellationToken))
-                problems.Add($"family_of: no investigation request has id {family}; give the request_id of the first report in this family.");
+                problems.Add($"family_of: no investigation request has id {family}; give the request_id of an earlier request on this store.");
 
             if (problems.Count > 0)
             {

@@ -241,6 +241,42 @@ FROM config.investigation_requests WHERE request_id = '{id}'", ct));
         });
     }
 
+    /// <summary>#6576: an agent that lost its claim_id claims again under the same agent_id while its lease is live and gets the
+    /// live claim_id back with a renewed lease and an unchanged claim count; another agent_id is still refused; a lapsed lease
+    /// claims afresh as before.</summary>
+    [Fact]
+    public async Task AClaimByTheLeaseHolder_ReturnsTheLiveClaimId_AndRenews_AnotherAgentIsStillRefused()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0), ct)).RequestId!.Value;
+            var first = await store.ClaimAsync(id, "agent-a", ct);
+            Assert.Equal(InvestigationClaimOutcome.Claimed, first.Outcome);
+
+            _now = T0.AddMinutes(5);
+            var again = await store.ClaimAsync(id, "agent-a", ct);
+            Assert.Equal(InvestigationClaimOutcome.Reclaimed, again.Outcome);
+            Assert.Equal(first.ClaimId, again.ClaimId);
+            Assert.Equal(1, again.ClaimCount);
+            Assert.True(again.LeaseUntilUtc > first.LeaseUntilUtc);
+            Assert.Equal(first.LeaseUntilUtc!.Value.AddMinutes(5), again.LeaseUntilUtc);
+
+            /* A different agent_id never receives the claim_id. */
+            var other = await store.ClaimAsync(id, "agent-b", ct);
+            Assert.Equal(InvestigationClaimOutcome.AlreadyClaimed, other.Outcome);
+            Assert.Null(other.ClaimId);
+            Assert.Equal($"{first.ClaimId}|agent-a|1", await ScalarAsync(connection,
+                $"SELECT claim_id || '|' || claimed_by || '|' || claim_count FROM config.investigation_requests WHERE request_id = '{id}'", ct));
+
+            /* Past the renewed lease: the holder claims afresh, with a new claim_id, counted. */
+            _now = T0.AddMinutes(30);
+            var afresh = await store.ClaimAsync(id, "agent-a", ct);
+            Assert.Equal(InvestigationClaimOutcome.Claimed, afresh.Outcome);
+            Assert.NotEqual(first.ClaimId, afresh.ClaimId);
+            Assert.Equal(2, afresh.ClaimCount);
+        });
+    }
+
     [Fact]
     public async Task ALateReport_UnderALapsedLease_IsAccepted_UntilANewerClaimSupersedesIt()
     {
