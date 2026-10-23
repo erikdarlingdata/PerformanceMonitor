@@ -16,7 +16,7 @@
 
 import { el, mount, apiGet, apiWrite, listOnlyNote, noticeStrip } from "../util.js";
 import { getSession } from "../views-api.js";
-import { VIZ } from "../panels.js";
+import { VIZ, getPanelSignal } from "../panels.js";
 
 const POLL_MS = 1000;
 /* The desktop viewer waits 60 s for the service (which caps the SQL read at about 30 s); a little more here for the first poll. */
@@ -80,16 +80,60 @@ export function liveUnavailableNote(managedStore) {
     : "This dashboard's store login cannot queue a live read. Re-run Darling/tools/provision-roles.sql on the store, or use the Viewer's Current Active Queries to read the active queries live.";
 }
 
+/* #6386: what the page says for each server, kept here and not in the elements. The server page replaces its whole panel grid on every
+   auto-refresh tick (every 60 s by default, 30 s if the operator picks it), which is shorter than a read may take (GIVE_UP_MS), so the
+   read's last words and its lock must outlive the bar that started it: collector-run.js keeps the same state for the same reason. */
+/* Servers with a read in flight, so a rebuilt bar comes up with its button off instead of queueing a second read (the store refuses it with DL409). */
+const running = new Set();
+/* The Run-live-now buttons on the page for each server; a button the rebuild dropped is forgotten the next time something changes. */
+const buttons = new Map();
+/* The status line, result slot and grid columns of the bar that is on the page now, for each server. */
+const bars = new Map();
+/* The status text and the finished rows for each server. */
+const shown = new Map();
+
+function notify(server) {
+  const set = buttons.get(server);
+  if (!set) return;
+  for (const button of [...set]) {
+    if (!button.isConnected) set.delete(button);
+    else button.disabled = running.has(server);
+  }
+}
+
+function track(server, button) {
+  const set = buttons.get(server) || new Set();
+  set.add(button);
+  buttons.set(server, set);
+  button.disabled = running.has(server);
+}
+
+/* Draw what is known for the server into the bar that is on the page now. */
+function paint(server) {
+  const bar = bars.get(server);
+  if (!bar) return;
+  const state = shown.get(server) || { text: "", rows: [] };
+  bar.status.textContent = state.text;
+  mount(bar.output, state.rows.length ? [VIZ.table({ rows: state.rows }, { rowsKey: "rows", columns: bar.columns })] : []);
+}
+
+function say(server, text, rows) {
+  shown.set(server, { text, rows: rows || [] });
+  paint(server);
+}
+
 /**
  * The "Run live now" block for the Active Queries panel. `columns` are the stored grid's columns. Empty for a read-only seat.
  */
 export function activeQueriesLiveBar(server, columns) {
   const slot = el("div", { class: "active-live" }, []);
   slot.style.gridColumn = "1 / -1";
+  /* The probe takes this render's abort signal (taken now, the panel signal moves on), so a render the next tick replaced does not leave it running. */
+  const signal = getPanelSignal();
   (async () => {
     const session = await getSession();
     if (!session || !session.can_edit) return;
-    const avail = await apiGet("/api/active-queries/live/available");
+    const avail = await apiGet("/api/active-queries/live/available", signal);
     if (avail.kind !== "data" || !avail.data) return;
     if (avail.data.can_queue !== true) {
       mount(slot, [noticeStrip(liveUnavailableNote(avail.data.managed_store === true))]);
@@ -108,23 +152,27 @@ export function activeQueriesLiveBar(server, columns) {
       ["Run live now"]
     );
     button.addEventListener("click", async () => {
-      if (button.disabled) return;
-      button.disabled = true;
-      status.textContent = "Reading the running requests now...";
-      mount(output, []);
+      if (running.has(server)) return;
+      running.add(server);
+      notify(server);
+      say(server, "Reading the running requests now...", []);
       try {
         const outcome = await runLiveActiveQueries(server);
         if (!outcome.ok) {
-          status.textContent = "Not read: " + outcome.message;
+          say(server, "Not read: " + outcome.message, []);
           return;
         }
         const rows = liveRows(outcome.result);
-        status.textContent = rows.length === 0
-          ? "Nothing is running on this server right now."
-          : rows.length + (rows.length === 1 ? " running request" : " running requests") + " read live, kept on the store for about an hour.";
-        if (rows.length) mount(output, [VIZ.table({ rows }, { rowsKey: "rows", columns })]);
+        say(
+          server,
+          rows.length === 0
+            ? "Nothing is running on this server right now."
+            : rows.length + (rows.length === 1 ? " running request" : " running requests") + " read live, kept on the store for about an hour.",
+          rows
+        );
       } finally {
-        button.disabled = false;
+        running.delete(server);
+        notify(server);
       }
     });
     const note = el("span", { class: "muted" }, [
@@ -132,6 +180,9 @@ export function activeQueriesLiveBar(server, columns) {
     ]);
     mount(slot, [el("div", {}, [button, note]), status, output]);
     slot.dataset.status = "ready";
+    track(server, button);
+    bars.set(server, { status, output, columns });
+    paint(server);
   })();
   return slot;
 }

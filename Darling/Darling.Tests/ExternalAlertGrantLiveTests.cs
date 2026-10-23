@@ -990,6 +990,63 @@ SET search_path = pg_temp, config, public", ct);
     }
 
     /// <summary>
+    /// #6386: the script's own copy of <c>config.request_active_queries_live</c> (the one a store brought along runs; managed
+    /// provisioning rebuilds its own) refuses a REPEATABLE READ transaction with DL400 and queues nothing, and a read committed call
+    /// from the same login still queues the read. The other behavior facts run against the managed copy
+    /// (<c>ActiveQueriesLiveWebTests</c>); no test compares the two texts, so this one runs the script's.
+    /// </summary>
+    [Fact]
+    public async Task TheByoScript_ActiveQueriesLiveFunction_RefusesARepeatableReadTransaction_WithDl400_AndQueuesNothing()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(owner, ct);
+            Assert.SkipWhen(
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct),
+                "A cluster-wide admin/viewer/mcp role already exists on this rig; the script would refuse it.");
+            Assert.SkipUnless(
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'darling')", ct),
+                "The script names the store owner 'darling', and this rig has no such role.");
+            await ExecAsync(owner,
+                "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES (4242, 'aq-script', 'aq-script', TRUE)", ct);
+
+            var script = ComposeStoreRolesLiveTests.WithoutPsqlMetaCommands(
+                    System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql")))
+                .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_ADMIN_PASSWORD", "ScriptAdmin5654", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_VIEWER_PASSWORD", "ScriptViewer5654", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal);
+            await ExecAsync(owner, script, ct);
+
+            await using (var viewer = await LoginAsync(scratch, "viewer", "ScriptViewer5654", ct))
+            {
+                await ExecAsync(viewer, "BEGIN ISOLATION LEVEL REPEATABLE READ", ct);
+                await ExecAsync(viewer, "SELECT 1", ct);
+                var refused = await Assert.ThrowsAsync<PostgresException>(() =>
+                    ScalarAsync<long>(viewer, "SELECT config.request_active_queries_live(4242, 'web')", ct));
+                Assert.Equal("DL400", refused.SqlState);
+                Assert.Contains("READ COMMITTED", refused.MessageText, StringComparison.Ordinal);
+                await ExecAsync(viewer, "ROLLBACK", ct);
+
+                Assert.Equal(0L, await ScalarAsync<long>(owner, "SELECT count(*) FROM config.config_command", ct));
+                Assert.True(await ScalarAsync<long>(viewer, "SELECT config.request_active_queries_live(4242, 'web')", ct) > 0);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
     /// A store whose default privileges would give a role write access to new <c>config</c> tables (the state the
     /// provisioning script leaves) gets the three tables with no write privilege for that role, from the rung itself.
     /// </summary>
