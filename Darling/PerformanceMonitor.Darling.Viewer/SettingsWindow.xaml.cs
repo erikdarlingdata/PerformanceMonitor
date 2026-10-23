@@ -607,11 +607,13 @@ public partial class SettingsWindow : Window
     private void CopyMcpCommandButton_Click(object sender, RoutedEventArgs e)
     {
         var port = McpPortTextBox.Text;
-        var command = $"claude mcp add --transport http --scope user sql-monitor-darling http://localhost:{port}/";
+        /* The service needs the MCP token on loopback too unless mcp.allowTokenlessLoopback is on, so the command
+           carries the header with a placeholder; the token itself never reaches the clipboard from here. */
+        var command = $"claude mcp add --transport http --scope user sql-monitor-darling http://localhost:{port}/ "
+            + "--header \"Authorization: Bearer <token>\"";
         /* SetDataObject with copy=false avoids WPF's problematic Clipboard.Flush(). */
         McpStatusText.Text = ClipboardText.TrySetDataObject(command)
-            ? "Copied to clipboard! If the service has an MCP token, the client must also send "
-              + "--header \"Authorization: Bearer <token>\"; --print-mcp-token on the service host prints it."
+            ? "Copied to clipboard! Replace <token> with the MCP token: --print-mcp-token on the service host prints it."
             : "Couldn't copy: the clipboard is in use.";
     }
 

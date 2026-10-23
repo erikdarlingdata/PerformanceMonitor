@@ -18,7 +18,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <summary>
 /// The switch in front of every MCP tool that CHANGES monitoring configuration. MCP is off by default, but
 /// once an operator turns it on, every tool the server registers is callable by any client that reaches the
-/// port, and the loopback bind needs no token. A client that approves tool calls automatically could then
+/// port and presents the token (or by any local client, under <c>mcp.allowTokenlessLoopback</c>). A client that approves tool calls automatically could then
 /// mute every alert on every server (<c>create_mute_rule</c> with no fields), delete notification routes, or
 /// register a server the service would connect to as its own account. So the write tools are behind two
 /// settings in <c>darling.json</c>, both default OFF:
