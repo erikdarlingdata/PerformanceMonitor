@@ -10,6 +10,10 @@ Only four Darling tools act on a monitored server: `force_query_store_plan` (wit
 
 ### Setup
 
+Lite and Darling set up MCP in different ways. Follow the part for your edition, then ask a question.
+
+#### Lite
+
 1. Enable the MCP server in Settings (checkbox + port, default `5151`)
    - The port must be between **1024** and **65535**. Ports 0–1023 are well-known privileged ports reserved by the operating system.
    - On save, the app checks whether the chosen port is already in use and warns you if there is a conflict.
@@ -26,12 +30,40 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/ 
 
    To serve local clients with no token, as earlier builds did, set `mcp_allow_tokenless_loopback` to `true` in `settings.json` and restart Lite. Lite then serves the read tools only: the write tools and the investigation tools need a token (at least 16 characters, with at least 6 different ones), so they stay off, and Lite logs one Critical line for each one you asked for. Import Settings never brings `mcp_allow_tokenless_loopback`, `mcp_allow_writes` or `mcp_allow_investigations` in from another folder.
 
-3. Open a new Claude Code session and ask questions like:
-   - "What servers are being monitored?"
-   - "What are the top wait types on my server?"
-   - "Are there any blocking or deadlock issues?"
-   - "Show me CPU utilization for the last 4 hours"
-   - "What are the most expensive queries by CPU?"
+#### Darling
+
+1. Turn MCP on. It is off by default, and its port is `5152`. Use one of these:
+   - In the Viewer, open Settings and turn on MCP.
+   - On Windows with the bundled (managed) store, run `PerformanceMonitor.Darling.Service.exe --enable-mcp`. The running service applies it within one collection sweep, with no restart. With your own PostgreSQL, or on Linux and in the compose container, run `UPDATE config.config_service SET mcp_enabled = true;` against the store's PostgreSQL instead. The service picks it up within one sweep.
+   - Set `mcp.enabled` to `true` in `darling.json`. The service reads this value only to seed the store at its first start. After that, the Viewer or `--enable-mcp` and `--disable-mcp` decide.
+2. Set a token. A Darling MCP server that is on but has no token does not start. The service log names the settings to add. Make a token of at least 16 characters with at least 6 different ones. A shorter or more repetitive token still gates every request, but the write and investigation tools stay off. Put the token in `darling.json` and restart the service:
+
+```json
+"mcp": {
+  "enabled": true,
+  "network": { "encryptedToken": "<output of --encrypt-password>" }
+}
+```
+
+   On Windows, use `encryptedToken`, which holds the output of `--encrypt-password`. `mcp.network.token` takes the token itself, or an `env:NAME` or `file:PATH` reference, and suits Linux and the compose container, where there is no DPAPI. Leave `mcp.network.listen` out to keep the server on loopback. `--configure-network` makes a 32-character token, and the [Darling README](../Darling/README.md#mcp-endpoint-assistant-over-the-lan) has a PowerShell command that makes one. If you lose the token, run `--print-mcp-token` elevated on the service host.
+
+   To serve local clients with no token, set `mcp.allowTokenlessLoopback` to `true`. Darling then serves the read tools only, and logs a line at every start saying so.
+3. Register with Claude Code. Send the token as a header on every request:
+
+```
+claude mcp add --transport http --scope user sql-monitor-darling http://localhost:5152/ --header "Authorization: Bearer <token>"
+```
+
+   Replace `<token>` with your token. A project's `.mcp.json` must read the token from an environment variable, because project files get committed. The [Darling README](../Darling/README.md#mcp) shows how.
+
+#### Ask a question
+
+Open a new Claude Code session and ask questions like:
+- "What servers are being monitored?"
+- "What are the top wait types on my server?"
+- "Are there any blocking or deadlock issues?"
+- "Show me CPU utilization for the last 4 hours"
+- "What are the most expensive queries by CPU?"
 
 ### Available Tools
 
@@ -44,6 +76,15 @@ The table below names the main tools, not all of them. The `tools/list` call on 
 By default Lite serves 97 tools, all of them reads. Its twelve write tools are served when `mcp_allow_writes` is `true` in `settings.json`. They are `mute_analysis_finding`, `unmute_analysis_finding`, `set_notification_route_enabled`, `delete_notification_route`, and the eight query tag tools (`create_query_tag`, `update_query_tag`, `delete_query_tag`, `assign_query_tag`, `unassign_query_tag`, `create_query_tag_rule`, `update_query_tag_rule` and `delete_query_tag_rule`). Restart Lite after you change it. While the setting is off, a call to a write tool fails as an unknown tool. Mutes that already exist stay in force. The write tools also need the MCP token: with `mcp_allow_tokenless_loopback` on, they stay off whatever this setting says, and Lite logs one Critical line. Any client that has the token can use them when the setting is on.
 
 Two more file settings, both off or at `full` by default and read at start (restart Lite after a change). `mcp_allow_investigations` serves the four investigation tools (`list_investigation_requests`, `claim_investigation_request`, `submit_investigation_report` and `get_investigation_reports`) only when it is `true` AND `mcp_allow_writes` is `false`; with both on, the investigation tools stay off and Lite logs one Critical line. They also need the MCP token, so with `mcp_allow_tokenless_loopback` on they stay off, and Lite logs one Critical line. `mcp_data_detail` sets how much collected data the tool answers hand out: `full` (the default), `maskLiterals` (statement text keeps its shape with every literal replaced) or `metadataOnly` (statement text, error text, plans and input buffers are withheld, and logins and host names are masked, each as `login#` or `host#` plus 8 hex characters of a keyed hash that is the same in every answer from one store; Lite keeps its key in Windows Credential Manager). Any other word keeps the MCP endpoint off and the log names the accepted words.
+
+Darling has its own switches, under `mcp` in `darling.json`. All of them default to off, except `mcp.dataDetail`, which defaults to `full`. A change needs a restart of the service:
+
+- `mcp.allowWrites` serves the tools that change the monitoring store's configuration, such as alert settings and notification routes, mute rules, custom alert rules and Custom Views.
+- `mcp.allowServerAdmin` also serves `add_servers`, `edit_server`, `remove_server` and `set_server_action`. It has no effect while `mcp.allowWrites` is off.
+- `mcp.allowInvestigations` serves `claim_investigation_request`, `submit_investigation_report` and the agent action tools. It works only while `mcp.allowWrites` is off.
+- `mcp.dataDetail` sets how much collected data the answers hand out: `full` (the default), `maskLiterals` or `metadataOnly`. These mean the same as Lite's `mcp_data_detail`.
+
+The write tools and the investigation tools need the token, and every request must present it, loopback included. Without a token that is at least 16 characters with 6 different ones, they stay off, and the service log says why. While a switch is off, a call to its tools fails as an unknown tool. The [Darling README](../Darling/README.md#mcp) lists each key.
 
 #### Investigation tools (Lite)
 
@@ -104,6 +145,6 @@ Most tools accept optional `server_name` and `hours_back` parameters. If only on
 
 ### MCP network access (Darling)
 
-Darling's MCP server listens on loopback, port 5152, by default. A `network` block under `mcp` in `darling.json` exposes it to other machines. That needs a `listen` address that is not loopback, managed mode, a bearer token, and `allowFrom`, a list of allowed address ranges in CIDR form. If any of these is missing or invalid, the listener stays loopback-only and the service logs a Critical line.
+Darling's MCP server listens on loopback, port 5152, by default. A `network` block under `mcp` in `darling.json` exposes it to other machines. That needs a `listen` address that is not loopback, managed mode or the compose container, a bearer token, and `allowFrom`, a list of allowed address ranges in CIDR form. If any of these is missing or invalid, the listener stays loopback-only and the service logs a Critical line.
 
 Without a `tls` block, the network listener is plain HTTP. A `tls` block under `mcp.network` (a PKCS#12 file, or a PEM certificate and key) makes it serve HTTPS, with TLS 1.2 or 1.3 only. If the certificate cannot be loaded, the listener stays loopback-only. The service raises a self-alert when that happens, and an "MCP TLS Certificate Expiring" alert 30 days before the certificate expires.
