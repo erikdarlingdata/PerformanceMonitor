@@ -33,7 +33,7 @@ namespace Darling.Tests;
 /// needs makes these fail with 42501. The owner-side reads prove what the write left alone.
 /// </summary>
 [Collection("darling-owned-secrets")]
-public sealed class ServerEditLiveTests : IDisposable
+public sealed partial class ServerEditLiveTests : IDisposable
 {
     private readonly DarlingOwnedSet _ownedBefore = DarlingOwnedSecrets.Current;
 
