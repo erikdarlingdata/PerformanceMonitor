@@ -67,9 +67,7 @@ public sealed class DarlingMcpServiceFlagToolsLiveTests
             await PgMigrations.MigrateAsync(owner, ct);
             await using var existing = new NpgsqlCommand("SELECT COALESCE(string_agg(rolname, ', ' ORDER BY rolname), '') FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp')", owner);
             var names = (string)(await existing.ExecuteScalarAsync(ct))!;
-            Assert.True(
-                names.Length == 0,
-                $"The cluster already has the login role(s) {names}. They are cluster-wide and this test creates and drops all three of admin, viewer and mcp, so it will not adopt them: drop them first.");
+            Assert.SkipWhen(names.Length > 0, $"The cluster already has the login role(s) {names}; they are cluster-wide and this test creates and drops all of admin, viewer and mcp, so it will not adopt them.");
         }
 
         var bodySucceeded = false;

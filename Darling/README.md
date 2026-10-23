@@ -1198,6 +1198,8 @@ The writes run the same plans as `--enable-collector`, `--disable-collector` and
 
 These tools are never offered to an agent that Darling sends to investigate an alert: it may read with `get_collector_schedules` and may not stop, start or reschedule collection.
 
+The `mcp` database role gets `INSERT, UPDATE, DELETE` on `config.config_collector_schedules` and `config.config_collector_run_times` when the service provisions roles (every start). A bring-your-own store needs `tools/provision-roles.sql` run again to add the same two grants.
+
 ### Set the service flags from MCP (#6393)
 
 With `mcp.allowWrites` on (and a token), `update_service_flags` sets the collection flags the Viewer's Settings window saves under Data Collection. Send only the ones to change; an omitted argument keeps the stored value.
@@ -1214,7 +1216,9 @@ The ranges are the Settings window's: both call one class (`ServiceFlagLimits`).
 
 The MCP on/off flag and port, the web on/off flag and port, and pause are not settable from MCP: turning MCP off from MCP would lock the admin out, and the `mcp` role's column grant covers only these five columns. Change those in the Viewer. Like the schedule tools, `update_service_flags` is never offered to an investigation agent. Lite's MCP server has no write tools, so none of this applies to Lite.
 
-The `mcp` database role gets `INSERT, UPDATE, DELETE` on `config.config_collector_schedules` and `config.config_collector_run_times` when the service provisions roles (every start). It gets no other new privilege. A bring-your-own store needs `tools/provision-roles.sql` run again to add the same two grants.
+The service grants the `mcp` role `UPDATE` on exactly those five `config.config_service` columns when it provisions roles (every start). A bring-your-own store needs `tools/provision-roles.sql` run again to add that grant; until then `update_service_flags` answers `error` with a permission failure from the store.
+
+
 
 ### Drop the Extended Events sessions a removed server left behind (`--drop-xe-sessions`)
 
