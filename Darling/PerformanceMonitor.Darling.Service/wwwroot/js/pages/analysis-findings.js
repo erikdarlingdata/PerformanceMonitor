@@ -185,7 +185,9 @@ export async function runAnalyzeNow(server) {
     await sleep(POLL_MS);
     const r = await apiGet("/api/analyze-now/" + id);
     if (r.kind === "data" && r.data && r.data.finished) {
-      return r.data.succeeded ? { ok: true, message: "" } : { ok: false, message: "Analysis did not complete: " + (r.data.result_status || r.data.status) };
+      if (!r.data.succeeded) return { ok: false, message: "Analysis did not complete: " + (r.data.result_status || r.data.status) };
+      /* A pass that finds too little collected history finishes as a success with no findings; say so, or the tab only reads "No findings". */
+      return { ok: true, message: r.data.result_status === "insufficient data" ? "Not enough collected data yet to analyze this server." : "Analysis complete." };
     }
   }
   return { ok: false, message: "Analysis is still running. Refresh in a moment." };
@@ -240,7 +242,7 @@ function generateBar(server) {
       say(server, "Analyzing " + server + "...");
       try {
         const outcome = await runAnalyzeNow(server);
-        say(server, outcome.ok ? "" : outcome.message);
+        say(server, outcome.message);
         const reload = reloaders.get(server);
         if (reload) await reload();
       } finally {
