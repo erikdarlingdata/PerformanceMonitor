@@ -1025,9 +1025,10 @@ LIMIT 1";
                           "(integrated/Kerberos auth is not supported for PostgreSQL targets).");
         }
 
-        if (!isPostgres && c.Port is not null)
+        /* #6583: a non-zero port is refused for a SQL Server row. Zero is allowed so an edit can clear a port saved before this rule. */
+        if (!isPostgres && c.Port is > 0)
         {
-            return (null, "A SQL Server port goes in host, as host,port.");
+            return (null, SqlServerPortAdvice.Refusal);
         }
 
         /* #6254: a Query Store replica is a SQL Server setting; the check is on a replica the request names. */

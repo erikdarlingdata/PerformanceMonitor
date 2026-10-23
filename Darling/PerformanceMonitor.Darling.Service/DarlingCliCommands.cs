@@ -558,6 +558,12 @@ public static partial class DarlingCliCommands
 
         await ReportAgentDispatchAsync(config, output, cancellationToken);
 
+        /* #6583: a warning, not an error, so a config that works today still starts: the port is ignored for a SQL Server target. */
+        foreach (var warning in SqlServerPortAdvice.Warnings(targets))
+        {
+            output.WriteLine("WARNING: " + warning);
+        }
+
         /* #6265: a warning, not an error, so a setup that started before still starts; the web refuses that token for sign-in. */
         if (DarlingAgentDispatchChecks.WebTokenFinding(config) is { } webTokenFinding)
         {
