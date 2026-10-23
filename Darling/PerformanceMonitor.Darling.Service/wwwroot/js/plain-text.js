@@ -104,7 +104,7 @@ const PAGE_FOR_TOOL = new Map(PAGE_FOR_TOOLS.flatMap(([page, tools]) => tools.ma
 /** The label=value measurement labels the collectors write (the CollectorMeasurement labels). A lone label=value pair is
     rewritten only when its label is one of these; WebPlainTextTests checks the list against the collectors' source. */
 export const MEASUREMENT_LABELS = [
-  "csv_records_discarded", "event_file_buffer_cut", "event_file_error", "event_file_events", "event_file_fallback",
+  "csv_records_discarded", "event_file_buffer_cut", "event_file_error", "event_file_events", "event_file_fallback", "event_file_wildcard",
   "events_read", "events_stored", "foreign_zone_lines_skipped", "forged_captures_skipped",
   "identity_epoch_changes", "job_history_identity_regressions", "job_history_identity_store_watermark",
   "job_history_identity_target_row", "json_records_discarded", "log_bytes_skipped", "log_files_skipped_by_rotation",
