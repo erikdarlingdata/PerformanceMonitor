@@ -994,7 +994,7 @@ public sealed class DarlingWebHostService : BackgroundService
                     "Starting web dashboard on {Scheme}://{Listen}:{Port} (LAN-exposed to {Cidr} behind a token->cookie gate + in-app CIDR; "
                     + "{Loopback}, and since #1649 it authenticates too) — "
                     + "enabled/port from {Origin}; listen/allowFrom/token/tls from darling.json web.network (file-only, restart-only)",
-                    serverCertificate is null ? "http" : "https", primaryBind, effectivePort, allowedCidr,
+                    serverCertificate is null ? "http" : "https", DarlingListenUrl.FormatHost(primaryBind), effectivePort, allowedCidr,
                     DarlingListenerTls.DescribeLoopbackListener(
                         "loopback also bound over plain HTTP", serverCertificate is not null, primaryBind),
                     origin);
