@@ -18,7 +18,6 @@ on:
     branches: [dev, main]
 
 permissions:
-  actions: read
   contents: read
   statuses: write
   issues: write
@@ -81,39 +80,8 @@ jobs:
           fi
           echo "$(wc -l < changed.txt) changed file(s)"
 
-          # The jobs queued or in progress in this repo's other runs, so a pull request asks for the runners that are free
-          # and not for 16 that will wait (run 40016922106: legs queued 37-459 s). Every workflow shares the pool. A failed
-          # call leaves busy empty and the plan keeps its weight-based leg count. Dev pushes stay at 4 legs and skip this.
-          busy=""
-          if [ "${EVENT_NAME}" = "pull_request" ] && [ "${IS_DRAFT}" != "true" ]; then
-            busy_total=0
-            busy_ok=1
-            for state in in_progress queued; do
-              if ! run_ids=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs?status=${state}&per_page=100" \
-                  --jq ".workflow_runs[] | select(.id != ${GITHUB_RUN_ID}) | .id"); then
-                busy_ok=0
-                break
-              fi
-              while read -r run_id; do
-                [ -n "${run_id}" ] || continue
-                if ! n=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
-                    --jq '[.jobs[] | select(.status == "queued" or .status == "in_progress")] | length' | awk '{s += $1} END {print s + 0}'); then
-                  busy_ok=0
-                  break 2
-                fi
-                busy_total=$((busy_total + n))
-              done <<< "${run_ids}"
-            done
-            if [ "${busy_ok}" = "1" ]; then
-              busy="${busy_total}"
-            else
-              echo "::notice title=Busy-runner count unavailable::The Actions API call failed, so the leg count is the weight-based one."
-            fi
-          fi
-          echo "busy jobs in other runs: ${busy:-unknown}"
-
           python -I .github/scripts/ci-plan.py --event "${EVENT_NAME}" --base "${BASE_REF}" --head-ref "${HEAD_REF}" \
-            --draft "${IS_DRAFT}" --labels "${LABELS}" --files-file changed.txt --busy "${busy}" --github-output "${GITHUB_OUTPUT}"
+            --draft "${IS_DRAFT}" --labels "${LABELS}" --files-file changed.txt --github-output "${GITHUB_OUTPUT}"
 
       # Pending from the moment the plan says the run goes. A fork's read-only token cannot write it (the verdict job
       # says so in one notice), and a draft sets nothing.

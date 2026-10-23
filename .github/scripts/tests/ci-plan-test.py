@@ -129,8 +129,8 @@ big = {"classes": {"darling": classes([f"B{i}" for i in range(100)]), "lite": l_
 SERVICE = "Darling/PerformanceMonitor.Darling.Service/X.cs"
 
 
-def run(files, event="pull_request", base="dev", head="feature/x", draft=False, labels=(), cat=catalog, busy=None):
-    return cp.plan(event, base, head, draft, list(labels), files, rules, cat, busy=busy)
+def run(files, event="pull_request", base="dev", head="feature/x", draft=False, labels=(), cat=catalog):
+    return cp.plan(event, base, head, draft, list(labels), files, rules, cat)
 
 
 # --- the gate -------------------------------------------------------------------------------------------------
@@ -217,13 +217,6 @@ check("legs: a push is a fixed 4, however small", cp.leg_count(0.02, "push"), 4)
 check("legs: a push is a fixed 4, however big", cp.leg_count(500, "push"), 4)
 check("legs: a push with no tests is 0", cp.leg_count(0, "push"), 0)
 
-# --- the leg count cut to the free runners ----------------------------------------------------------------------
-check("busy: nothing else running keeps 16", cp.cap_legs(16, 0), 16)
-check("busy: 10 other jobs leave 8", cp.cap_legs(16, 10), 8)
-check("busy: 30 other jobs hit the floor of 6", cp.cap_legs(16, 30), 6)
-check("busy: count unavailable keeps the weight-based 16", cp.cap_legs(16, None), 16)
-check("busy: a small run keeps its legs even when the pool is full", cp.cap_legs(3, 30), 3)
-check("busy: no tests stays 0", cp.cap_legs(0, 5), 0)
 r = run(["Darling/X.cs"], cat=big)
 check("big suite: capped legs", (r["legs"], r["legs_json"]), ("16", json.dumps(list(range(1, 17)), separators=(",", ":"))))
 full = {"classes": {"darling": classes([f"F{i}" for i in range(131)]), "lite": l_cls},
@@ -231,10 +224,6 @@ full = {"classes": {"darling": classes([f"F{i}" for i in range(131)]), "lite": l
 check("full all-areas PR run: 16 legs", run(["tools/odd.txt"], cat=full)["legs"], "16")
 check("same change as a dev push: 4 legs", run(["tools/odd.txt"], event="push", cat=full)["legs"], "4")
 check("a dev push's legs_json", run(["README.md"], event="push", cat=full)["legs_json"], "[1,2,3,4]")
-check("busy: a PR plan at 10 busy gets 8 legs", run(["tools/odd.txt"], cat=full, busy=10)["legs"], "8")
-check("busy: a PR plan with an unknown count gets 16", run(["tools/odd.txt"], cat=full, busy=None)["legs"], "16")
-check("busy: the weight-based count is still reported", run(["tools/odd.txt"], cat=full, busy=10)["legs_by_weight"], "16")
-check("busy: a dev push stays 4 however busy", run(["tools/odd.txt"], event="push", cat=full, busy=30)["legs"], "4")
 
 # an unknown class weighs the mean; a missing Lite table falls back to the stand-in constants
 mean_cat = {"classes": {"darling": classes(["D1", "D2", "New"]), "lite": {}},

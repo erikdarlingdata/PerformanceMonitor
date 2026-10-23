@@ -57,11 +57,6 @@ TRAIN_BRANCH_PREFIX = "train/"
 MINUTES_PER_LEG = 8.5
 MAX_LEGS = 16
 DEV_PUSH_LEGS = 4
-# The measured number of jobs the free plan runs at once across the repo (run 40016922106: legs queued 37-459 s while other
-# PRs and dev pushes held the pool). A pull request cuts its legs to what is free: POOL - busy - POOL_HEADROOM, never below MIN_PR_LEGS.
-POOL = 20
-POOL_HEADROOM = 2
-MIN_PR_LEGS = 6
 # The GitHub pull request files API returns at most 3000 files; a list that long may have been cut short.
 FILES_API_CAP = 3000
 
@@ -218,24 +213,15 @@ def leg_count(test_minutes: float, event: str = "pull_request") -> int:
     return min(MAX_LEGS, max(1, math.ceil(test_minutes / MINUTES_PER_LEG)))
 
 
-def cap_legs(legs: int, busy: "int | None") -> int:
-    """A pull request's legs cut to the runners that are free. busy is the count of queued and in-progress jobs in the
-    repo's other runs, or None when it could not be counted (then the weight-based count stands). The cap has a floor of
-    MIN_PR_LEGS, and a run that already needs fewer legs keeps them."""
-    if busy is None or legs <= 0:
-        return legs
-    return min(legs, max(MIN_PR_LEGS, POOL - busy - POOL_HEADROOM))
-
-
 # ---------------------------------------------------------------------------------------------------------
 # The plan.
 # ---------------------------------------------------------------------------------------------------------
 def plan(event: str, base: str, head_ref: str, draft: bool, labels: "list[str]", files: "list[str]",
-         rules, catalog: "dict | None" = None, busy: "int | None" = None) -> "dict[str, str]":
+         rules, catalog: "dict | None" = None) -> "dict[str, str]":
     outcome, why = gate(event, head_ref, draft, labels)
     out = {"run": "true" if outcome == "run" else "false", "outcome": outcome, "why": why,
            "areas": "none", "darling_scope": "none", "lite_scope": "none", "build": "false",
-           "test_minutes": "0", "legs": "0", "legs_json": "[]", "legs_by_weight": "0",
+           "test_minutes": "0", "legs": "0", "legs_json": "[]",
            "actionlint": "false", "check_web_js": "false", "deprecated_tests": "false"}
     if outcome != "run":
         return out
@@ -251,9 +237,7 @@ def plan(event: str, base: str, head_ref: str, draft: bool, labels: "list[str]",
     if out["build"] == "true":
         d_min, l_min = estimate(catalog if catalog is not None else load_catalog(), c["darling_scope"], c["lite_scope"])
         total = d_min + l_min
-        n_weight = leg_count(total, event)
-        n = cap_legs(n_weight, busy) if event == "pull_request" else n_weight
-        out["legs_by_weight"] = str(n_weight)
+        n = leg_count(total, event)
         out["test_minutes"] = f"{total:.1f}"
         out["legs"] = str(n)
         out["legs_json"] = json.dumps(list(range(1, n + 1)), separators=(",", ":"))
@@ -289,7 +273,6 @@ def main(argv: "list[str]") -> int:
     ap.add_argument("--draft", default="false")
     ap.add_argument("--labels", default="", help="a JSON array or a comma list")
     ap.add_argument("--files-file", help="changed files, one a line (default: stdin)")
-    ap.add_argument("--busy", default="", help="queued and in-progress jobs in the repo's other runs; empty when unknown")
     ap.add_argument("--github-output", help="also append the outputs to this file ($GITHUB_OUTPUT)")
     args = ap.parse_args(argv)
 
@@ -300,14 +283,12 @@ def main(argv: "list[str]") -> int:
         text = sys.stdin.read()
     files = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
-    busy = int(args.busy) if args.busy.strip().isdigit() else None
     out = plan(args.event, args.base, args.head_ref, parse_bool(args.draft), parse_labels(args.labels), files,
-               _CS.Rules(), busy=busy)
+               _CS.Rules())
     lines = [f"{k}={v}" for k, v in out.items()]
     print("\n".join(lines))
     if out["legs"] != "0":
-        elsewhere = "busy count unknown" if busy is None else f"{busy} jobs busy in other runs, pool {POOL}"
-        print(f"legs: {out['legs']} chosen ({out['legs_by_weight']} by weight; {elsewhere})")
+        print(f"legs: {out['legs']} chosen ({out['test_minutes']} weighted test minutes)")
     if args.github_output:
         with open(args.github_output, "a", encoding="utf-8", newline="\n") as fh:
             fh.write("\n".join(lines) + "\n")
