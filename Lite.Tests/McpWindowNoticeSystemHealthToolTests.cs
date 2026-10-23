@@ -676,6 +676,39 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, 'ring_buffer_t
         Assert.Contains("genuinely quiet", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
+    /* #6453: nothing of any type ever stored. The newest run read the live session through its event_file target and found
+       nothing: a true negative, `empty`. A fallback to the ring buffer, a ring buffer read with no note, and a newest run
+       that was an ERROR keep `unavailable`, because the ring buffer path also records SUCCESS for a dead session. */
+    [Theory]
+    [InlineData(Tool.SystemHealth, "event_file_events=0", "SUCCESS", "empty")]
+    [InlineData(Tool.SignificantWaits, "event_file_events=0", "SUCCESS", "empty")]
+    [InlineData(Tool.SystemHealth, "event_file_fallback=1", "SUCCESS", "unavailable")]
+    [InlineData(Tool.SystemHealth, "event_file_fallback=1 event_file_error=297", "SUCCESS", "unavailable")]
+    [InlineData(Tool.SignificantWaits, "event_file_fallback=1", "SUCCESS", "unavailable")]
+    [InlineData(Tool.SystemHealth, null, "SUCCESS", "unavailable")]
+    [InlineData(Tool.SystemHealth, "event_file_events=0", "ERROR", "unavailable")]
+    public async Task NothingEverStored_IsEmptyOnlyAfterAnEventFileRead(Tool tool, string? note, string status, string expected)
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await ExecuteAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
+VALUES ($1, $2, $3, 'system_health_events', $4, 12, $5, 0, $6)",
+            _nextId++, _serverId, ServerName, Naive(Anchor), status, note);
+
+        var root = Root(await CallAsync(tool));
+
+        Assert.Equal(expected, root.GetProperty("status").GetString());
+        Assert.Equal(expected == "empty", root.GetProperty("source_observed").GetBoolean());
+        if (expected == "empty")
+        {
+            Assert.Contains("true negative", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains("NOT an all-clear", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        }
+    }
+
     private async Task SeedLogRunsAsync(DateTime firstUtc, DateTime lastUtc, int everyMinutes)
     {
         await ExecuteAsync($@"

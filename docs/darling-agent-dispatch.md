@@ -140,7 +140,7 @@ The agent calls these tools in order:
 1. `wait_for_investigation_requests` waits up to 25 seconds for a request to open on the routes you name. It answers each new request's id, route, server, family and time, with a cursor. Call it again with the cursor. `list_investigation_requests` lists the open requests instead.
 2. `claim_investigation_request` takes one request. The first claim wins. The answer holds a `claim_id` and the brief. To keep a request past its lease, claim it again with the same `claim_id`.
 3. The agent calls the read tools that the brief names. The brief has a budget of minutes and tool calls.
-4. `get_investigation_evidence` reads the evidence sections that Darling froze for the request. A section that is still collecting says `pending`. The call never waits.
+4. `get_investigation_evidence` reads the evidence sections that Darling froze for the request. A section that is still collecting says `pending`. The call never waits. A request that a Client Timeouts alert opened also gets a `client_timeouts` section. It lists the top client applications, client hosts, databases and statements of the alert window, and the brief names `get_client_timeouts` first in `next_calls`.
 5. `submit_investigation_report` ends the work.
 
 ### The brief
@@ -157,7 +157,7 @@ A report has these fields:
 - `evidence`: a JSON array of at least one entry, at most 50. Each entry has `tool`, `arguments`, `key_numbers` and `basis`. `basis` is `verified` when the agent checked the claim against data. It is `inferred` when the agent reasoned to it.
 - `summary`, at most 4,000 characters.
 - `proposed_note` (optional), at most 2,000 characters. See "Agent notes".
-- `family_of` (optional): the `request_id` of the first report in this alert family.
+- `family_of` (optional): the `request_id` of an earlier request on this store. It need not have a report yet.
 - `links` (optional): at most 10 ticket, pull request, bug report, commit or release links. A link must use https. Darling stores the link and never calls Jira or git.
 - `queries_run` (optional): the statements the agent ran.
 - `follow_up_at` (optional): a time for Darling to open a new request for this case. It must be an ISO 8601 time after now and at most 30 days ahead. A route can hold at most 20 pending follow-ups. The new request names the first one, and its brief carries the first report.

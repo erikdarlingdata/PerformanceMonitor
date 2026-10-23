@@ -571,6 +571,7 @@ internal static class InvestigationToolCore
     internal static string ClaimStatus(InvestigationClaimOutcome outcome) => outcome switch
     {
         InvestigationClaimOutcome.Claimed => "claimed",
+        InvestigationClaimOutcome.Reclaimed => "renewed",
         InvestigationClaimOutcome.AlreadyClaimed => "already_claimed",
         InvestigationClaimOutcome.NotOpen => "not_open",
         InvestigationClaimOutcome.NotFound => "not_found",

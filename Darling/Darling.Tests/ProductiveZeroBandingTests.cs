@@ -54,7 +54,7 @@ public sealed class ProductiveZeroBandingTests
     /// success clock reads ONE MINUTE, so every staleness arm says HEALTHY and the floor is the whole
     /// verdict.
     ///
-    /// <para>On <c>query_stats</c>, a dense one-minute collector that stores rows on nearly every cycle,
+    /// <para>On <c>memory_grant_stats</c>, a dense one-minute collector whose source has rows on every cycle,
     /// rather than on <c>job_history</c>, the measured case: since #4620 job_history is in the
     /// activity-sourced set, which also needs <see cref="CollectorHealthClassifier.ActivitySourcedQuietBar"/>
     /// of quiet before it flags (pinned further down). The streak-only rule these tests pin is the one every
@@ -62,7 +62,7 @@ public sealed class ProductiveZeroBandingTests
     /// </summary>
     private static CollectorHealth ProducedThenStopped(long trailingZeroRuns = 3) => new()
     {
-        CollectorName = "query_stats",
+        CollectorName = "memory_grant_stats",
         TotalRuns = 10_080,
         SuccessCount = 10_080,
         ErrorCount = 0,
@@ -233,11 +233,11 @@ public sealed class ProductiveZeroBandingTests
     [Fact]
     public void WithNoProductiveHistory_TheWindowHoldsNoRegression()
     {
-        Assert.False(CollectorHealthClassifier.ProducedThenStopped("query_stats", 10_080, null));
+        Assert.False(CollectorHealthClassifier.ProducedThenStopped("memory_grant_stats", 10_080, null));
 
         /* The positive control for the negation above: the same call with the instant present is true, so
            a mutation that returned false unconditionally cannot pass here. */
-        Assert.True(CollectorHealthClassifier.ProducedThenStopped("query_stats", 3, Now.AddHours(-4)));
+        Assert.True(CollectorHealthClassifier.ProducedThenStopped("memory_grant_stats", 3, Now.AddHours(-4)));
     }
 
     /// <summary>
@@ -564,26 +564,52 @@ public sealed class ProductiveZeroBandingTests
 
     /// <summary>
     /// A dense collector outside the set keeps the three-run rule, minutes after its last productive run.
-    /// <c>memory_grant_stats</c> is named in the issue but reads a view that has rows whether or not
-    /// anything runs, and <c>query_stats</c> stored rows on 99.6-100% of its runs everywhere measured: a zero
-    /// streak on either is a fault, and the longer leash would only hide it.
+    /// <c>memory_grant_stats</c> reads a view that has rows whether or not anything runs, so a zero streak
+    /// there is a fault and the longer leash would only hide it.
     /// </summary>
-    [Theory]
-    [InlineData("query_stats")]
-    [InlineData("memory_grant_stats")]
-    public void ADenseCollectorOutsideTheSet_IsStillFlaggedAtThreeRuns(string name)
+    [Fact]
+    public void ADenseCollectorOutsideTheSet_IsStillFlaggedAtThreeRuns()
     {
-        Assert.False(CollectorHealthClassifier.IsActivitySourcedCollector(name));
+        Assert.False(CollectorHealthClassifier.IsActivitySourcedCollector("memory_grant_stats"));
 
         var row = ProducedThenStopped();
-        row.CollectorName = name;
+        row.CollectorName = "memory_grant_stats";
 
         Assert.True(row.ProducedThenStopped);
         Assert.Equal(CollectorHealthClassifier.Warning, row.HealthStatus);
 
         var twoRuns = ProducedThenStopped(trailingZeroRuns: 2);
-        twoRuns.CollectorName = name;
+        twoRuns.CollectorName = "memory_grant_stats";
         Assert.False(twoRuns.ProducedThenStopped);
+    }
+
+    /// <summary>
+    /// #6453: <c>query_stats</c> reads only statements that executed in the last ten minutes, so an idle Azure SQL
+    /// Database target (serverless, Hyperscale) records SUCCESS with zero rows run after run and read WARNING
+    /// <c>regressed_from_productive</c> three runs after its last busy cycle. It now reads HEALTHY through the
+    /// row, as an idle activity-sourced collector does, and is still flagged once the quiet outlasts the bar.
+    /// The classifier has no engine input, so this holds for any engine's history.
+    /// </summary>
+    [Fact]
+    public void QueryStats_OnAnIdleTarget_ReadsHealthyAtThreeZeroRuns_AndIsFlaggedPastTheBar()
+    {
+        var idle = ProducedThenStopped();
+        idle.CollectorName = "query_stats";
+        idle.LastProductiveTime = Now.AddHours(-5);
+        idle.TrailingZeroRowSuccessRuns = 28;
+
+        Assert.False(idle.ProducedThenStopped);
+        Assert.False(idle.AnyRegression);
+        Assert.Equal(CollectorHealthClassifier.Healthy, idle.HealthStatus);
+        Assert.Null(idle.AnyRegressionFinding);
+
+        var stopped = ProducedThenStopped();
+        stopped.CollectorName = "query_stats";
+        stopped.LastProductiveTime = Now.AddHours(-73);
+        stopped.TrailingZeroRowSuccessRuns = 28;
+
+        Assert.True(stopped.ProducedThenStopped);
+        Assert.Equal(CollectorHealthClassifier.Warning, stopped.HealthStatus);
     }
 
     /// <summary>
@@ -600,18 +626,18 @@ public sealed class ProductiveZeroBandingTests
     }
 
     /// <summary>
-    /// The set, by name: exactly the seven the ruling named, and not the two dense collectors beside them.
+    /// The set, by name: the seven the #4620 ruling named plus query_stats (#6453), and not memory_grant_stats.
     /// It must also stay disjoint from the event, on-load and interval sets, because the predicate checks
     /// those first: a member that was also an event collector could never reach this arm. Both suites pin
     /// the names against the catalog in SwallowedItemFailureTests.
     /// </summary>
     [Fact]
-    public void TheActivitySourcedSet_NamesTheSevenActivityReads_AndNothingElse()
+    public void TheActivitySourcedSet_NamesTheEightActivityReads_AndNothingElse()
     {
         var expected = new[]
         {
             "waiting_tasks", "query_snapshots", "running_jobs", "job_history",
-            "procedure_stats", "pg_lock_stats", "pg_session_states",
+            "procedure_stats", "pg_lock_stats", "pg_session_states", "query_stats",
         };
 
         Assert.Equal(
@@ -627,7 +653,6 @@ public sealed class ProductiveZeroBandingTests
         }
 
         Assert.False(CollectorHealthClassifier.IsActivitySourcedCollector("memory_grant_stats"));
-        Assert.False(CollectorHealthClassifier.IsActivitySourcedCollector("query_stats"));
         Assert.False(CollectorHealthClassifier.IsActivitySourcedCollector("query_store"));
         Assert.False(CollectorHealthClassifier.IsActivitySourcedCollector(null));
     }
