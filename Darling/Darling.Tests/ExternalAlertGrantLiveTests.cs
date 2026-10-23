@@ -46,6 +46,8 @@ public sealed class ExternalAlertGrantLiveTests
 
     private readonly string RoleSuper;
 
+    private readonly string RoleTableOwner;
+
     private readonly string[] CleanupRoles;
 
     /* The names are instance fields: xUnit builds a new instance per test, so no test sees another's roles. */
@@ -56,7 +58,8 @@ public sealed class ExternalAlertGrantLiveTests
         RoleB = "ea_src_b_" + RunSuffix;
         RoleUnmarked = "ea_plain_" + RunSuffix;
         RoleSuper = "ea_su_" + RunSuffix;
-        CleanupRoles = ["admin", "viewer", "mcp", RoleA, RoleB, RoleUnmarked, RoleSuper, DarlingManagedRoles.AlertSourceGroupRoleName];
+        RoleTableOwner = "ea_tblown_" + RunSuffix;
+        CleanupRoles = ["admin", "viewer", "mcp", RoleA, RoleB, RoleUnmarked, RoleSuper, RoleTableOwner, DarlingManagedRoles.AlertSourceGroupRoleName];
     }
 
     private const string SourcePassword = "ExtAlertSrcPw0123456789abcdef01";
@@ -919,6 +922,120 @@ SET search_path = pg_temp, config, public", ct);
             finally
             {
                 await RestoreOwnerCommentAsync(owner, ownerComment, ct);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// The queue functions run as the owner of <c>config.config_command</c>, whoever runs the script: here a role that is not the
+    /// owner (a superuser on some stores) runs it on a store whose command table belongs to another role, and every definer-rights
+    /// function the script creates in <c>config</c> ends up owned by the table owner.
+    /// </summary>
+    [Fact]
+    public async Task TheByoScript_HandsTheQueueFunctionsToTheOwnerOfTheCommandTable()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(owner, ct);
+            Assert.SkipWhen(
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct),
+                "A cluster-wide admin/viewer/mcp role already exists on this rig; the script would refuse it.");
+            Assert.SkipUnless(
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'darling')", ct),
+                "The script names the store owner 'darling', and this rig has no such role.");
+            Assert.True(await ScalarAsync<bool>(owner, "SELECT rolsuper FROM pg_roles WHERE rolname = current_user", ct),
+                "The script is run by a superuser here, the case the owner step is for.");
+            await ExecAsync(owner, $"CREATE ROLE {RoleTableOwner} NOLOGIN; ALTER TABLE config.config_command OWNER TO {RoleTableOwner}", ct);
+
+            var script = ComposeStoreRolesLiveTests.WithoutPsqlMetaCommands(
+                    System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql")))
+                .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_ADMIN_PASSWORD", "ScriptAdmin5654", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_VIEWER_PASSWORD", "ScriptViewer5654", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal);
+            await ExecAsync(owner, script, ct);
+
+            foreach (var function in new[]
+            {
+                "config.request_snapshot_now(integer, text, text)",
+                "config.request_active_queries_live(integer, text)",
+                "config.request_mcp_command(text, integer, integer, text)",
+                "config.read_mcp_command_result(bigint)",
+                "config.submit_external_alert(text, text, text, text, text, text, double precision)",
+                "config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric)",
+            })
+            {
+                Assert.Equal(RoleTableOwner, await ScalarAsync<string>(owner,
+                    $"SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid = '{function}'::regprocedure", ct));
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// #6386: the script's own copy of <c>config.request_active_queries_live</c> (the one a store brought along runs; managed
+    /// provisioning rebuilds its own) refuses a REPEATABLE READ transaction with DL400 and queues nothing, and a read committed call
+    /// from the same login still queues the read. The other behavior facts run against the managed copy
+    /// (<c>ActiveQueriesLiveWebTests</c>); no test compares the two texts, so this one runs the script's.
+    /// </summary>
+    [Fact]
+    public async Task TheByoScript_ActiveQueriesLiveFunction_RefusesARepeatableReadTransaction_WithDl400_AndQueuesNothing()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(owner, ct);
+            Assert.SkipWhen(
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct),
+                "A cluster-wide admin/viewer/mcp role already exists on this rig; the script would refuse it.");
+            Assert.SkipUnless(
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'darling')", ct),
+                "The script names the store owner 'darling', and this rig has no such role.");
+            await ExecAsync(owner,
+                "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES (4242, 'aq-script', 'aq-script', TRUE)", ct);
+
+            var script = ComposeStoreRolesLiveTests.WithoutPsqlMetaCommands(
+                    System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql")))
+                .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_ADMIN_PASSWORD", "ScriptAdmin5654", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_VIEWER_PASSWORD", "ScriptViewer5654", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal);
+            await ExecAsync(owner, script, ct);
+
+            await using (var viewer = await LoginAsync(scratch, "viewer", "ScriptViewer5654", ct))
+            {
+                await ExecAsync(viewer, "BEGIN ISOLATION LEVEL REPEATABLE READ", ct);
+                await ExecAsync(viewer, "SELECT 1", ct);
+                var refused = await Assert.ThrowsAsync<PostgresException>(() =>
+                    ScalarAsync<long>(viewer, "SELECT config.request_active_queries_live(4242, 'web')", ct));
+                Assert.Equal("DL400", refused.SqlState);
+                Assert.Contains("READ COMMITTED", refused.MessageText, StringComparison.Ordinal);
+                await ExecAsync(viewer, "ROLLBACK", ct);
+
+                Assert.Equal(0L, await ScalarAsync<long>(owner, "SELECT count(*) FROM config.config_command", ct));
+                Assert.True(await ScalarAsync<long>(viewer, "SELECT config.request_active_queries_live(4242, 'web')", ct) > 0);
             }
 
             bodySucceeded = true;
