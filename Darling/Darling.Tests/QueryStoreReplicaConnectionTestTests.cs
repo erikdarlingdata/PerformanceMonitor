@@ -232,7 +232,7 @@ public sealed class QueryStoreReplicaConnectionTestTests : IDisposable
 
     private static string AddBody() => JsonSerializer.Serialize(new[]
     {
-        new { host = "sql-test-01", port = 1444, auth = "SQL", username = "monitor", password = Password },
+        new { host = "sql-test-01,1444", auth = "SQL", username = "monitor", password = Password },
     });
 
     private static JsonNode AddedResult(string answer) => JsonNode.Parse(answer)!["results"]![0]!;

@@ -473,7 +473,8 @@ public sealed class DarlingMcpWritePolicyTests
     /// <see cref="DarlingMcpHostService.RequireTokenWhenLoopbackOnly"/>: the start path calls the same members,
     /// so no value here is computed a second way.</summary>
     internal static async Task<TestServer> BuildServer(
-        McpConfig mcp, string bearerToken, string postgresConnection = "Host=localhost;Database=postgres;Username=darling")
+        McpConfig mcp, string bearerToken, string postgresConnection = "Host=localhost;Database=postgres;Username=darling",
+        DarlingMcpTokenSet? tokens = null, bool? requireToken = null)
     {
         var builder = DarlingMcpHostService.CreateHostBuilder();
         builder.WebHost.UseTestServer();
@@ -494,9 +495,13 @@ public sealed class DarlingMcpWritePolicyTests
         builder.Services.AddSingleton<IGcfOutputFormat>(new FixedGcfOutputFormat(false));
 
         var writes = DarlingMcpWritePolicy.ResolveForStart(mcp, bearerToken, out _);
+        /* #6542: with named tokens (the tokens: argument, built the way the start builds it) the start serves the union of every token's
+           set, and each request is narrowed again to its own token's. Without them nothing here changes. */
+        if (tokens is { HasNamed: true })
+            writes = tokens.Union;
         DarlingMcpHostService.ConfigureMcpServices(
             builder.Services, DarlingPeerDirectory.Snapshot.Empty, writes: writes,
-            addServers: new DarlingMcpAddServersPolicy(mcp.AllowWindowsAuthOverUnverifiedTls));
+            addServers: new DarlingMcpAddServersPolicy(mcp.AllowWindowsAuthOverUnverifiedTls), tokens: tokens);
 
         var app = builder.Build();
 
@@ -511,7 +516,8 @@ public sealed class DarlingMcpWritePolicyTests
             networkListenIp: null,
             allowedCidr: IPNetwork.Parse("192.168.1.0/24"),
             bearerToken: bearerToken,
-            requireTokenWhenLoopbackOnly: DarlingMcpHostService.RequireTokenWhenLoopbackOnly(false, bearerToken));
+            requireTokenWhenLoopbackOnly: requireToken ?? DarlingMcpHostService.RequireTokenWhenLoopbackOnly(false, bearerToken, tokens),
+            tokens: tokens);
 
         await app.StartAsync();
         return app.GetTestServer();
@@ -539,7 +545,7 @@ public sealed class DarlingMcpWritePolicyTests
         return (ctx.Response.StatusCode, body);
     }
 
-    private static async Task<(int StatusCode, string Body)> ToolsListAsync(TestServer server, string? bearer)
+    internal static async Task<(int StatusCode, string Body)> ToolsListAsync(TestServer server, string? bearer)
     {
         var ctx = await server.SendAsync(c =>
         {
@@ -587,7 +593,7 @@ public sealed class DarlingMcpWritePolicyTests
 
     /// <summary>The tools/list result keyed by tool name. The transport may frame the reply as one SSE
     /// <c>data:</c> line or as bare JSON; both parse the same way.</summary>
-    private static System.Collections.Generic.Dictionary<string, JsonElement> ToolsOf(string body)
+    internal static System.Collections.Generic.Dictionary<string, JsonElement> ToolsOf(string body)
     {
         var dataLine = body.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
         var json = dataLine is null ? body : dataLine["data:".Length..].Trim();
