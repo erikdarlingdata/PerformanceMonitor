@@ -314,7 +314,7 @@ public sealed class AnalyzeNowWebTests
     }
 
     [Fact]
-    public async Task TheFunction_RemovesOnlyThisServersFinishedReadsOlderThanAnHour_AndLeavesEverythingElse()
+    public async Task TheFunction_QueuesARow_AndDeletesNoCommandRows()
     {
         await WithViewerAsync(async (owner, asRole, ct) =>
         {
@@ -353,23 +353,77 @@ public sealed class AnalyzeNowWebTests
             var oldPending = await SeedAsync("analyze_now", ServerId, "pending", "2 hours");
             var store = new PostgresAnalyzeNowStore(asRole);
 
-            /* A pending read refuses the request before anything is removed. */
+            /* A pending read refuses the request and nothing is removed. */
             Assert.Equal("DL409", (await Assert.ThrowsAsync<PostgresException>(() => store.EnqueueAsync(ServerId, "web", ct))).SqlState);
             Assert.Contains(oldSucceeded, await RowsAsync());
 
-            /* Once that read finished a minute ago, the next request removes the two reads finished over an hour ago and nothing else. */
+            /* Once that read finished a minute ago, the next request queues a new row and removes no row: command history is kept
+               by the retention purge, so a finished row older than an hour is still there. */
             await ExecAsync(owner,
                 $"UPDATE config.config_command SET status = 'succeeded', completed_at = (now() AT TIME ZONE 'UTC') - interval '1 minute', created_at = (now() AT TIME ZONE 'UTC') - interval '2 minutes' WHERE command_id = {oldPending}", ct);
             var queued = await store.EnqueueAsync(ServerId, "web", ct);
 
             var left = await RowsAsync();
-            Assert.DoesNotContain(oldSucceeded, left);
-            Assert.DoesNotContain(oldFailed, left);
-            Assert.Equivalent(new[] { recentFinished, otherServerOld, otherTypeOld, oldPending, queued }, left);
+            Assert.Equivalent(new[] { oldSucceeded, oldFailed, recentFinished, otherServerOld, otherTypeOld, oldPending, queued }, left);
+        });
+    }
+
+    [Fact]
+    public async Task TheFunction_RefusesWhileAnMcpRequestForTheSameServerHoldsTheMcpGuard()
+    {
+        await WithViewerAsync(async (owner, asRole, ct) =>
+        {
+            var store = new PostgresAnalyzeNowStore(asRole);
+
+            /* A second session is inside request_mcp_command for this server: it holds the MCP function's key for an analyze_now. */
+            await using (var holder = await owner.OpenConnectionAsync(ct))
+            {
+                await using (var begin = new NpgsqlCommand("BEGIN", holder))
+                {
+                    await begin.ExecuteNonQueryAsync(ct);
+                }
+
+                await using (var take = new NpgsqlCommand($"SELECT pg_advisory_xact_lock(6230, hashtext('analyze_now:' || {ServerId}::text))", holder))
+                {
+                    await take.ExecuteScalarAsync(ct);
+                }
+
+                var refused = await Assert.ThrowsAsync<PostgresException>(() => store.EnqueueAsync(ServerId, "web", ct));
+                Assert.Equal("DL409", refused.SqlState);
+
+                await using var rollback = new NpgsqlCommand("ROLLBACK", holder);
+                await rollback.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var count = owner.CreateCommand("SELECT count(*) FROM config.config_command");
+            Assert.Equal(0L, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+
+            /* With the guard released the same request queues. */
+            Assert.True((await store.EnqueueAsync(ServerId, "web", ct)) > 0);
         });
     }
 
     // ------------------------------------------------------------------ Ask AI
+
+    [Fact]
+    public async Task AskAi_ATitleWithAQuoteAndALineBreak_StaysOnOneLineInsideItsQuotes()
+    {
+        await WithViewerAsync(async (owner, _, ct) =>
+        {
+            await using var app = await StartAsync(new FakeStore(), canEdit: false, owner);
+            using var client = app.GetTestClient();
+
+            var title = "Table \"dbo\".\"a\" grew\nand then more";
+            var url = "/api/analysis/ask-ai-prompt?server=known&title=" + Uri.EscapeDataString(title) +
+                      "&start=" + Uri.EscapeDataString("2026-03-01T11:00:00.0000000Z") + "&end=" + Uri.EscapeDataString("2026-03-01T12:30:00.0000000Z");
+            using var doc = JsonDocument.Parse(await client.GetStringAsync(url, ct));
+            var prompt = doc.RootElement.GetProperty("prompt").GetString()!;
+
+            Assert.DoesNotContain('\n', prompt);
+            Assert.Contains("\"Table 'dbo'.'a' grew and then more\"", prompt, StringComparison.Ordinal);
+            Assert.Equal(4, prompt.Count(c => c == '"'));
+        });
+    }
 
     /// <summary>The web route's prompt is the Viewer card's prompt: the finding's window is shown on the server's own collected clock
     /// (here UTC-5 with no daylight change in March of the window), the same text <see cref="RecommendationsViewModel.BuildAskAiPrompt"/> builds.</summary>
