@@ -103,7 +103,7 @@ public sealed class McpRouteRoleLiveTests
             {
                 return await Assert.ThrowsAsync<PostgresException>(async () =>
                 {
-                    await using var call = asMcp.CreateCommand("SELECT config.update_notification_route($1, $2, 'x', true, NULL, NULL, NULL, NULL)");
+                    await using var call = asMcp.CreateCommand("SELECT config.update_notification_route($1, NULL, $2, 'x', true, NULL, NULL, NULL, NULL)");
                     call.Parameters.AddWithValue(routeId);
                     call.Parameters.AddWithValue(columns);
                     await call.ExecuteNonQueryAsync(ct);
@@ -116,7 +116,7 @@ public sealed class McpRouteRoleLiveTests
             Assert.Equal("DL404", (await CallAsync(99, ["metric_match"])).SqlState);
 
             /* The enabled flag is still open on a route with a destination of its own. */
-            await using (var call = asMcp.CreateCommand("SELECT config.update_notification_route(2, ARRAY['enabled'], 'x', false, NULL, NULL, NULL, NULL)"))
+            await using (var call = asMcp.CreateCommand("SELECT config.update_notification_route(2, NULL, ARRAY['enabled'], 'x', false, NULL, NULL, NULL, NULL)"))
             {
                 await call.ExecuteNonQueryAsync(ct);
             }
@@ -146,7 +146,7 @@ public sealed class McpRouteRoleLiveTests
             async Task CallAsync(int routeId, string columns, string match = "x", bool enabled = true, string tag = "NULL")
             {
                 await using var call = asMcp.CreateCommand(
-                    $"SELECT config.update_notification_route($1, ARRAY[{columns}]::text[], $2, $3, NULL, {tag}, NULL, NULL)");
+                    $"SELECT config.update_notification_route($1, NULL, ARRAY[{columns}]::text[], $2, $3, NULL, {tag}, NULL, NULL)");
                 call.Parameters.AddWithValue(routeId);
                 call.Parameters.AddWithValue(match);
                 call.Parameters.AddWithValue(enabled);

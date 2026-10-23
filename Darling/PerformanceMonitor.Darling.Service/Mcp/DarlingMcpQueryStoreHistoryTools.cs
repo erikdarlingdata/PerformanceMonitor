@@ -279,7 +279,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         try
         {
             var read = await DarlingForcedPlanStateReader.ReadAsync(
-                postgres, serverId, DatabaseFilter.One(databaseName), queryId, start, end, null, McpCommandDeadlines.ReadSeconds, cancellationToken);
+                postgres, serverId, DatabaseFilter.One(databaseName), queryId, start, end, null, McpCommandDeadlines.ReadSeconds, cancellationToken: cancellationToken);
             var facts = PickForces(read.Plans, queryId);
             return (facts, read.Captures.Count == 0 ? "no_capture_in_window" : "ok");
         }

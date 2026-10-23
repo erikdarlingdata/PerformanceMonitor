@@ -112,6 +112,25 @@ public sealed class NotificationRouteFallbackLiveTests
             var set = JsonDocument.Parse(await DarlingMcpAlertTools.SetNotificationRouteFallback(source, routeId, target));
             Assert.Equal("updated", set.RootElement.GetProperty("status").GetString());
             Assert.Equal(target, await FallbackOfAsync(source, routeId, ct));
+
+            /* #6403: the answer carries the previous fallback (none) and an undo call that, run, puts it back. */
+            Assert.Equal(JsonValueKind.Null, set.RootElement.GetProperty("previous").GetProperty("fallback_route_id").ValueKind);
+            var undo = set.RootElement.GetProperty("undo");
+            Assert.Equal("set_notification_route_fallback", undo.GetProperty("tool").GetString());
+            Assert.False(undo.GetProperty("arguments").TryGetProperty("fallback_route_id", out _));
+            await DarlingMcpAlertTools.SetNotificationRouteFallback(source, undo.GetProperty("arguments").GetProperty("route_id").GetInt32());
+            Assert.Null(await FallbackOfAsync(source, routeId, ct));
+            var again = JsonDocument.Parse(await DarlingMcpAlertTools.SetNotificationRouteFallback(source, routeId, target));
+            Assert.Equal("updated", again.RootElement.GetProperty("status").GetString());
+
+            var off = JsonDocument.Parse(await DarlingMcpAlertTools.SetNotificationRouteEnabled(source, routeId, false)).RootElement;
+            Assert.Equal("updated", off.GetProperty("status").GetString());
+            Assert.True(off.GetProperty("previous").GetProperty("enabled").GetBoolean());
+            Assert.Equal("set_notification_route_enabled", off.GetProperty("undo").GetProperty("tool").GetString());
+            Assert.True(off.GetProperty("undo").GetProperty("arguments").GetProperty("enabled").GetBoolean());
+            var back = JsonDocument.Parse(await DarlingMcpAlertTools.SetNotificationRouteEnabled(source, routeId, true)).RootElement;
+            Assert.False(back.GetProperty("previous").GetProperty("enabled").GetBoolean());
+
             Assert.Equal("unchanged", JsonDocument.Parse(await DarlingMcpAlertTools.SetNotificationRouteFallback(source, routeId, target))
                 .RootElement.GetProperty("status").GetString());
 
