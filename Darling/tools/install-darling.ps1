@@ -1646,13 +1646,20 @@ function Get-DarlingElevationAction([bool]$isAdministrator, [bool]$interactive) 
 }
 
 # The arguments for the elevated restart: this script, with the execution policy bypassed for that one process
-# (never Set-ExecutionPolicy), and every switch the person passed. -NoExit keeps the new window open so its output
+# (never Set-ExecutionPolicy), and every switch and valued parameter the person passed. -NoExit keeps the new window open so its output
 # can be read once the script ends.
 function Get-DarlingElevatedArguments([string]$scriptPath, [hashtable]$boundParameters) {
     $list = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', ('"' + $scriptPath + '"'))
     foreach ($name in @($boundParameters.Keys | Sort-Object)) {
         $value = $boundParameters[$name]
-        if ($value -is [System.Management.Automation.SwitchParameter] -and $value.IsPresent) { $list += "-$name" }
+        if ($value -is [System.Management.Automation.SwitchParameter]) {
+            if ($value.IsPresent) { $list += "-$name" }
+        }
+        elseif ($null -ne $value) {
+            # A valued parameter (-AddOperator, #6478): without it the elevated run would never add that account.
+            $list += "-$name"
+            $list += ('"' + [string]$value + '"')
+        }
     }
     return $list
 }

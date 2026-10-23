@@ -7,8 +7,8 @@ rem changed, and the script file is not unblocked or altered. Any arguments are 
 rem example:  Install-Darling.cmd -Network
 rem
 rem The window stays open when the installer stops with an error, so the message can be read. The elevated window
-rem this launcher opens for itself stays open at the end either way, because it would otherwise close with the
-rem output in it.
+rem this launcher opens for itself, or that Explorer opens for Run as administrator, stays open at the end either
+rem way, because it would otherwise close with the output in it.
 setlocal
 set "DARLING_SCRIPT=%~dp0install-darling.ps1"
 set "DARLING_LAUNCHER=%~f0"
@@ -17,6 +17,10 @@ set "DARLING_ARGS="
 
 if /i "%~1"=="/ownwindow" set "DARLING_OWN_WINDOW=1"
 if /i "%~1"=="/ownwindow" shift
+rem Explorer's right-click > Run as administrator starts this file as  cmd.exe /c ""<file>""  in a window of its own, so the
+rem window would close on success with the installer's last lines in it. A typed run from a console has no /c.
+if not defined DARLING_OWN_WINDOW echo %cmdcmdline%| find /i " /c " >nul
+if not defined DARLING_OWN_WINDOW if not errorlevel 1 set "DARLING_OWN_WINDOW=1"
 
 :collect
 if "%~1"=="" goto :collected

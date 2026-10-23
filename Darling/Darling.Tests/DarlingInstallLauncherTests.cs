@@ -24,7 +24,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DarlingInstallLauncherTests
 {
-    private static string Script => ReadRepoFile("Darling", "tools", "install-darling.ps1").Replace("\r\n", "\n", StringComparison.Ordinal);
+    private static string Script => ReadRepoFileLf("Darling", "tools", "install-darling.ps1");
 
     private static string Functions(params string[] names) =>
         string.Join("\n", names.Select(name => DarlingInstallerConfigStepTests.ExtractFunction(Script, name)));
@@ -83,6 +83,26 @@ public sealed class DarlingInstallLauncherTests
             lines[0]);
     }
 
+    /// <summary>-AddOperator is the script's one valued parameter. The elevated restart must carry it, or the elevated
+    /// run never adds that account (#6469 review). The script below binds real parameters, so the
+    /// <c>$PSBoundParameters</c> to <c>[hashtable]</c> coercion the installer relies on runs too.</summary>
+    [Fact]
+    public void TheElevatedRestart_KeepsAValuedParameter_FromTheRealBoundParameters()
+    {
+        var lines = Run(Functions("Get-DarlingElevatedArguments") + """
+
+            function Invoke-Bound([switch]$Network, [string]$AddOperator, [string]$Unset) {
+                (Get-DarlingElevatedArguments 'C:\x\install-darling.ps1' $PSBoundParameters) -join '|'
+            }
+            Invoke-Bound -AddOperator 'CONTOSO\alice' -Network
+            """);
+
+        Assert.Single(lines);
+        Assert.Equal(
+            "-NoProfile|-ExecutionPolicy|Bypass|-NoExit|-File|\"C:\\x\\install-darling.ps1\"|-AddOperator|\"CONTOSO\\alice\"|-Network",
+            lines[0]);
+    }
+
     /// <summary>The refusal of an extract folder prints a command that extracts the zip beside it, or says where the
     /// zip path goes when no zip sits beside the folder.</summary>
     [Fact]
@@ -94,18 +114,22 @@ public sealed class DarlingInstallLauncherTests
         {
             var withZip = Path.Combine(parent, "PerformanceMonitorDarling-9.9.9");
             var withoutZip = Path.Combine(parent, "elsewhere o'dear");
+            var apostropheZip = Path.Combine(parent, "o'dear-1.0");
             File.WriteAllBytes(withZip + ".zip", new byte[] { 0x50, 0x4B });
+            File.WriteAllBytes(apostropheZip + ".zip", new byte[] { 0x50, 0x4B });
 
             var lines = Run(Functions("Get-DarlingExtractCommand") + $$"""
 
                 (Get-DarlingExtractCommand '{{withZip}}\')
                 (Get-DarlingExtractCommand '{{withoutZip.Replace("'", "''", StringComparison.Ordinal)}}')
+                (Get-DarlingExtractCommand '{{apostropheZip.Replace("'", "''", StringComparison.Ordinal)}}')
                 """);
 
             var programFiles = Environment.GetEnvironmentVariable("ProgramFiles") + "\\PerformanceMonitorDarling";
-            Assert.Equal(2, lines.Count);
+            Assert.Equal(3, lines.Count);
             Assert.Equal($"Expand-Archive -LiteralPath '{withZip}.zip' -DestinationPath '{programFiles}'", lines[0]);
             Assert.Equal($"Expand-Archive -LiteralPath '<path to the Darling zip you downloaded>' -DestinationPath '{programFiles}'", lines[1]);
+            Assert.Equal($"Expand-Archive -LiteralPath '{apostropheZip.Replace("'", "''", StringComparison.Ordinal)}.zip' -DestinationPath '{programFiles}'", lines[2]);
         }
         finally
         {
@@ -123,7 +147,7 @@ public sealed class DarlingInstallLauncherTests
         try
         {
             var launcher = Path.Combine(folder, "Install-Darling.cmd");
-            File.Copy(Path.Combine(RepoRoot(), "Darling", "tools", "Install-Darling.cmd"), launcher);
+            File.Copy(PathTo("Darling", "tools", "Install-Darling.cmd"), launcher);
 
             var startInfo = new ProcessStartInfo("cmd.exe", $"/d /c \"\"{launcher}\" -Network\"")
             {
@@ -147,42 +171,5 @@ public sealed class DarlingInstallLauncherTests
         }
     }
 
-    private static string RepoRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Darling", "tools", "Install-Darling.cmd")))
-        {
-            directory = directory.Parent;
-        }
-
-        Assert.NotNull(directory);
-        return directory!.FullName;
-    }
-
-    private static List<string> Run(string script)
-    {
-        var path = Path.Combine(Path.GetTempPath(), $"darling-launcher-{Guid.NewGuid():N}.ps1");
-        File.WriteAllText(path, script);
-        try
-        {
-            using var process = Process.Start(WindowsPowerShellStartInfo.ForScript(path))!;
-            var stdoutTask = process.StandardOutput.ReadToEndAsync();
-            var stderrTask = process.StandardError.ReadToEndAsync();
-            var exited = process.WaitForExit(120_000);
-            if (!exited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-
-            var stdout = stdoutTask.GetAwaiter().GetResult();
-            var stderr = stderrTask.GetAwaiter().GetResult();
-            Assert.True(exited, $"powershell.exe did not exit within 120 seconds. Output so far:\n{stdout}\n{stderr}");
-            Assert.True(string.IsNullOrWhiteSpace(stderr), $"powershell.exe reported an error:\n{stderr}");
-            return stdout.Split('\n').Select(line => line.Trim()).Where(line => line.Length > 0).ToList();
-        }
-        finally
-        {
-            File.Delete(path);
-        }
-    }
+    private static List<string> Run(string script) => DarlingInstallerConfigStepTests.RunWindowsPowerShell(script);
 }
