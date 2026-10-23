@@ -98,6 +98,10 @@ async function shoot(browser, spec, ctx) {
     timezoneId: "UTC",
     bypassCSP: true,
   });
+  /* The dashboard asks for its token on loopback too: run-ui-smoke.ps1 signs in once and passes the session cookie. */
+  if (process.env.UI_SMOKE_SESSION_COOKIE) {
+    await context.addCookies([{ name: "darling_web_session", value: process.env.UI_SMOKE_SESSION_COOKIE, url: baseUrl }]);
+  }
   const page = await context.newPage();
   const asOf = new Date(anchorMs + AS_OF_AFTER_ANCHOR_MS).toISOString();
   let shiftedCount = 0;
@@ -162,7 +166,9 @@ export async function runShots({ config, baseUrl, outDir, only, settle }) {
   let seen = "no answer from /api/fleet";
   for (;;) {
     try {
-      const fleet = await (await fetch(baseUrl + "/api/fleet")).json();
+      /* The signed-in session, like the browser pages: a bare fetch is refused with 401 now that the dashboard asks for its token. */
+      const cookie = process.env.UI_SMOKE_SESSION_COOKIE ? { Cookie: "darling_web_session=" + process.env.UI_SMOKE_SESSION_COOKIE } : {};
+      const fleet = await (await fetch(baseUrl + "/api/fleet", { headers: cookie })).json();
       const cards = fleet.cards || [];
       const stale = cards.filter((c) => c.collection_stale === true).length;
       const offline = cards.filter((c) => c.is_online === false).length;

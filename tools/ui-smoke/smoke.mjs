@@ -98,6 +98,10 @@ async function settle(page) {
 async function checkPage(browser, spec) {
   const problems = [];
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  /* The dashboard asks for its token on loopback too: run-ui-smoke.ps1 signs in once and passes the session cookie. */
+  if (process.env.UI_SMOKE_SESSION_COOKIE) {
+    await context.addCookies([{ name: "darling_web_session", value: process.env.UI_SMOKE_SESSION_COOKIE, url: baseUrl }]);
+  }
   /* A trace of every page load; kept only for a page that fails (out/<page>.trace.zip, open with `npx playwright show-trace`). */
   await context.tracing.start({ screenshots: true, snapshots: true });
   const page = await context.newPage();
