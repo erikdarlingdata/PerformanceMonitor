@@ -226,6 +226,9 @@ HAVING sum(delta_execution_count) > 0";
     public static bool CpuMoved(double baseline, double after) => after - baseline >= CpuRisePoints;
 
     /// <summary>The duration test: the after-window's average is at least <see cref="DurationFactor"/> times the baseline's.</summary>
+    /// <summary>#6581: a change that names one Query Store query (a forced or unforced plan, a Query Store hint set, changed or cleared). A watch of only these measures those queries.</summary>
+    internal static bool IsQueryScopedKind(string kind) => kind is "plan_force" or "query_store_hint";
+
     public static bool DurationMoved(double baselineAvgUs, double afterAvgUs) => baselineAvgUs > 0 && afterAvgUs >= baselineAvgUs * DurationFactor;
 
     /// <summary>One plan's runtime in a window (#6555): executions and total elapsed microseconds.</summary>
@@ -488,15 +491,15 @@ HAVING sum(delta_execution_count) > 0";
         hadData |= AddRateMeasure("avg_cpu_percent", "%", cpuAfter, afterSeconds, cpuBefore, beforeSeconds, cpuWeek, afterSeconds,
             CpuMoved, window => $"the cpu_utilization_stats collector stored no samples for this target in the {window} window", measures, notMeasured, notes);
 
-        /* Query duration. A watch of plan changes alone measures THAT query (Query Store's own runtime intervals, the source the duration
+        /* Query duration. A watch of plan or Query Store hint changes alone measures THAT query (Query Store's own runtime intervals, the source the duration
            trend reads, keyed by database and query_id); where Query Store has no usable intervals for it, the top 20 by total duration
            of the changed databases are measured instead and the result says so. Any other mix reads the top 20 server-wide.
            The before-window holds only intervals that ENDED at or before the change and the after-window only intervals that STARTED at or
            after it (QueryStoreByEndSql, QueryStoreByStartSql): at Query Store's default 60-minute interval an interval that straddles the change
            holds executions from both sides, and counting it as "before" compared the regressed plan with itself. */
-        var planDatabases = watch.Changes.Where(c => c.Kind == "plan_force" && c.DatabaseName is not null)
+        var planDatabases = watch.Changes.Where(c => IsQueryScopedKind(c.Kind) && c.DatabaseName is not null)
             .Select(c => c.DatabaseName!).Distinct(StringComparer.Ordinal).ToArray();
-        var onlyPlan = watch.Changes.Count > 0 && watch.Changes.All(c => c.Kind == "plan_force");
+        var onlyPlan = watch.Changes.Count > 0 && watch.Changes.All(c => IsQueryScopedKind(c.Kind));
         var scope = onlyPlan && planDatabases.Length > 0 ? planDatabases : null;
         var needTopQueries = true;
         if (onlyPlan)
