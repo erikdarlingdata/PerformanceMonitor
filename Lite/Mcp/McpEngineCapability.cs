@@ -56,7 +56,14 @@ internal static class McpEngineCapability
            Server collector on a SQL Server target makes no kind claim either way) and cannot become wrong.
            The parameter is REQUIRED rather than defaulted so that decision is visible at the call site
            instead of being made by omission. */
-        return Envelope(serverName, engineEdition, collectorName);
+        var engineEnvelope = Envelope(serverName, engineEdition, collectorName);
+        if (engineEnvelope is not null || collectorName is not ("query_store" or "plan_correction"))
+        {
+            return engineEnvelope;
+        }
+
+        /* #6554: the collectors skip every readable-secondary database, so on a secondary these reads are empty by design. */
+        return await McpRuntimePrecondition.QueryStoreReadableSecondaryStatusAsync(dataService, serverId, serverName);
     }
 
     /// <summary>The <c>not_collected</c> envelope for this engine and collector, or <c>null</c> when the collector can run there.
