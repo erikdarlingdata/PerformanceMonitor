@@ -29,6 +29,10 @@ namespace PerformanceMonitor.Common;
 /// </summary>
 public sealed class InvestigationBriefComposer
 {
+    /// <summary>The Client Timeouts alert's metric name (#6553): the value of <c>AlertFamily.ClientTimeoutsMetric</c>, which this assembly cannot
+    /// reference. A request opened on it names <c>get_client_timeouts</c> first in <c>next_calls</c>.</summary>
+    public const string ClientTimeoutsMetric = "Client Timeouts";
+
     /// <summary>The whole brief's size cap in characters (about 6,000 tokens).</summary>
     public const int TotalCharCap = 24_000;
 
@@ -520,6 +524,10 @@ public sealed class InvestigationBriefComposer
 
             calls.Add(new InvestigationNextCall(tool, merged, why));
         }
+
+        /* #6553: a request opened by the Client Timeouts alert names its own read first: who was timing out, from where, on what. */
+        if (!request.IsPostgres && string.Equals(request.FirstMetric, ClientTimeoutsMetric, StringComparison.Ordinal))
+            Add("get_client_timeouts", null, "The request opened on a Client Timeouts alert: this read names the client applications, hosts and statements behind the timeouts.");
 
         /* #6007: a plan-change hint's pointer goes first, so its reason is the one the agent reads for that tool. */
         foreach (var hint in PlanHints(request, evidence))

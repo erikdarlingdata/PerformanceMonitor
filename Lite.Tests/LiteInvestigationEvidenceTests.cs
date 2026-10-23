@@ -271,6 +271,70 @@ VALUES (4, '{Ts(at)}', {Server}, 'srv', 'AppDb', 'READ_ONLY', 'READ_WRITE', 8, 0
         Assert.Equal(5000000L, queryStore["window_cpu_us"]!.GetValue<long>());
     }
 
+    private int _attentionId;
+
+    private void AttentionRow(DateTime at, string kind, int count, string? app, string? host, string? fingerprint, string? text) =>
+        Exec($@"INSERT INTO attention_events (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, client_hostname, statement_fingerprint, statement_text)
+VALUES ({++_attentionId}, '{Ts(at)}', {Server}, 'srv', '{kind}', {count}, {(app is null ? "NULL" : "'AppDb'")}, {(app is null ? "NULL" : $"'{app}'")}, {(host is null ? "NULL" : $"'{host}'")}, {(fingerprint is null ? "NULL" : $"'{fingerprint}'")}, {(text is null ? "NULL" : $"'{text}'")})");
+
+    /// <summary>#6579: a Client Timeouts request freezes the exact count and the top apps, hosts and statements of the window, the statement
+    /// text under a statement-class field (so metadataOnly masks it), cut at a text-element boundary; a row outside the window does not count.</summary>
+    [Fact]
+    public async Task ClientTimeoutsSection_FreezesTheCountTopAppsHostsAndStatements_TheTextIsMaskedAtMetadataOnly_AndTheCutKeepsSurrogatePairsWhole()
+    {
+        var opened = await Open("Client Timeouts", "query_performance");
+        var longText = new string('a', LiteInvestigationEvidenceCapture.ClientTimeoutStatementMaxChars - 1) + "😀 tail";
+        AttentionRow(T0.AddMinutes(-2), "count", 4, null, null, null, null);
+        AttentionRow(T0.AddMinutes(-2), "sample", 0, "SSMS", "WS-ERIK", "fp-a", "SELECT ''CANARYTEXT'' FROM t");
+        AttentionRow(T0.AddMinutes(-2), "sample", 0, "SSMS", "WS-ERIK", "fp-a", "SELECT ''CANARYTEXT'' FROM t");
+        AttentionRow(T0.AddMinutes(-2), "sample", 0, "SSMS", "WS-ERIK", "fp-a", "SELECT ''CANARYTEXT'' FROM t");
+        AttentionRow(T0.AddMinutes(-2), "sample", 0, "web", "APP01", "fp-b", longText);
+        AttentionRow(T0.AddHours(-3), "sample", 0, "old-app", "OLD01", "fp-old", "SELECT 3");
+        CollectorRan("attention", T0.AddMinutes(2));
+        _now = T0.AddMinutes(3);
+        await Capture().CaptureOnceAsync(Ct);
+
+        var section = Assert.Single(await _store.ReadEvidenceAsync(opened.RequestId, Ct), r => r.Section == "client_timeouts");
+        Assert.Equal("ready", section.State);
+        var row = OnlyRow(JsonNode.Parse(section.ContentJson!)!);
+        Assert.Equal(4L, row["count"]!.GetValue<long>());
+        var hosts = row["top_hosts"]!.AsArray();
+        Assert.Equal(new[] { "WS-ERIK", "APP01" }, hosts.Select(h => h!["client_hostname"]!.GetValue<string>()).ToArray());
+        Assert.Equal(3L, hosts[0]!["sampled_events"]!.GetValue<long>());
+        Assert.Equal(new[] { "SSMS", "web" }, row["top_client_apps"]!.AsArray().Select(a => a!["client_app_name"]!.GetValue<string>()).ToArray());
+        var statements = row["top_statements"]!.AsArray();
+        Assert.Equal(new[] { "fp-a", "fp-b" }, statements.Select(st => st!["statement_fingerprint"]!.GetValue<string>()).ToArray());
+
+        /* Every field that carries the statement text is masked at metadataOnly. */
+        var first = statements[0]!.AsObject();
+        var carriers = first.Where(p => p.Value is JsonValue v && v.TryGetValue<string>(out var t) && t.Contains("CANARYTEXT", StringComparison.Ordinal)).ToList();
+        Assert.NotEmpty(carriers);
+        foreach (var carrier in carriers)
+        {
+            var text = carrier.Value!.GetValue<string>();
+            Assert.DoesNotContain("CANARYTEXT", McpDataDetailMasker.MaskField(carrier.Key, text, McpDataDetail.MetadataOnly), StringComparison.Ordinal);
+            Assert.Equal(text, McpDataDetailMasker.MaskField(carrier.Key, text, McpDataDetail.Full));
+        }
+
+        var cut = statements[1]!["sql_text"]!.GetValue<string>();
+        Assert.False(char.IsHighSurrogate(cut[^1]), "the cut left a lone high surrogate");
+        Assert.True(cut.Length <= LiteInvestigationEvidenceCapture.ClientTimeoutStatementMaxChars);
+    }
+
+    /// <summary>#6579: no timeouts in the window freezes a ready section with no rows (a true negative).</summary>
+    [Fact]
+    public async Task ClientTimeoutsSection_WithNoTimeoutsInTheWindow_FreezesEmpty()
+    {
+        var opened = await Open("Client Timeouts", "query_performance");
+        CollectorRan("attention", T0.AddMinutes(2));
+        _now = T0.AddMinutes(3);
+        await Capture().CaptureOnceAsync(Ct);
+
+        var section = Assert.Single(await _store.ReadEvidenceAsync(opened.RequestId, Ct), r => r.Section == "client_timeouts");
+        Assert.Equal("ready", section.State);
+        Assert.Empty(JsonNode.Parse(section.ContentJson!)!["rows"]!.AsArray());
+    }
+
     [Fact]
     public async Task RegressionTargetsSection_FreezesTheRegressedQueryWithItsGoodAndBadPlan()
     {
