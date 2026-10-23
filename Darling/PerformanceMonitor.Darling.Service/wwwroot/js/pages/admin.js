@@ -1256,7 +1256,7 @@ async function buildRoutes(body, generation) {
   /* A failed signing read leaves the strip out; the routes below are the page. */
   const signingNodes = signing && signing.kind === "data" ? signingStatusLines(signing.data).map((t) => noticeStrip(t)) : [];
   mount(body, [
-    ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes(access.message, access.managed)),
+    ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes(access.message, access.managed, access.adminWritesOff)),
     noticeStrip(ROUTES_NOTE),
     ...signingNodes,
     VIZ.table({ routes: rows }, {
@@ -1331,7 +1331,7 @@ export const FEEDBACK_NOTE =
   "one that did. A second feedback from the same person replaces their first. Reports are listed newest first.";
 
 /* Shown instead of the form when the store says this dashboard's login may not record (can_record false). */
-export const feedbackListOnly = (managed) => listOnlyNote(managed, "this page is list-only", "To record feedback");
+export const feedbackListOnly = (managed, adminWritesOff) => listOnlyNote(managed, "this page is list-only", "To record feedback", adminWritesOff);
 
 /* What the counts and the list are taken over, in words: the answer's own window (hours_back). */
 export function feedbackWindowLabel(hours) {
@@ -1453,7 +1453,7 @@ async function buildFeedback(body, generation) {
   const rerender = () => buildFeedback(body, generation);
   const canRecord = session.can_edit === true && data.can_record === true;
   const nodes = [noticeStrip(FEEDBACK_NOTE)];
-  if (data.can_record !== true) nodes.push(noticeStrip(feedbackListOnly(session.managed_store === true)));
+  if (data.can_record !== true) nodes.push(noticeStrip(feedbackListOnly(session.managed_store === true, session.admin_writes_off === true)));
   nodes.push(el("h3", { class: "section-title", text: "False positives by alert family" }));
   nodes.push(el("p", { class: "mute-label", "data-fb-window": "1", text: feedbackWindowLabel(data.hours_back) }));
   nodes.push(VIZ.table({ families }, {
@@ -1815,9 +1815,9 @@ export const OVERRIDE_COLUMNS = [
 const OVERRIDES_NOTE_EDITING =
   "A threshold held for one server, or for one database on it, that differs from the global value. The alert engine uses it for that server only " +
   "and applies a change within its reload interval. To silence an alert, mute it.";
-const overridesNoteReadOnly = (managed) =>
+const overridesNoteReadOnly = (managed, adminWritesOff) =>
   "A threshold held for one server, or for one database on it, that differs from the global value. " +
-  listOnlyNote(managed, "this page lists them only", "To change an override");
+  listOnlyNote(managed, "this page lists them only", "To change an override", adminWritesOff);
 const OVERRIDE_DENIED = "Changing a threshold override needs";
 
 /** The rows of the overrides grid from the list read's body. `database` and `server_id` stay on the row for Edit and Remove. */
@@ -1969,7 +1969,7 @@ async function buildOverrides(body, generation) {
      the store login holds the write grant on this table. */
   const canEdit = session.can_edit === true && !!res.data && res.data.can_edit === true;
   const keys = Array.isArray(res.data && res.data.keys) ? res.data.keys : [];
-  nodes.push(noticeStrip(canEdit ? OVERRIDES_NOTE_EDITING : overridesNoteReadOnly(session.managed_store === true)));
+  nodes.push(noticeStrip(canEdit ? OVERRIDES_NOTE_EDITING : overridesNoteReadOnly(session.managed_store === true, session.admin_writes_off === true)));
   if (res.data && typeof res.data.note === "string" && res.data.note) nodes.push(noticeStrip(res.data.note));
   if (canEdit) nodes.push(overrideFormNode(Array.isArray(res.data.servers) ? res.data.servers : [], keys));
   nodes.push(VIZ.table({ overrides: overrideRows(res.data) }, {
