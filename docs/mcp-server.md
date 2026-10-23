@@ -29,9 +29,9 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-**Lite** exposes 113 tools (97 by default). **Darling** exposes 247 (180 by default). The deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). 112 tool names are the same in Lite and Darling. Darling has 135 more. They are the PostgreSQL reads, Custom Views, custom alert rules, query tags, collector control, agent actions, investigation reads and fleet-wide reads.
+**Lite** exposes 113 tools (97 by default). **Darling** exposes 248 (180 by default). The deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). 112 tool names are the same in Lite and Darling. Darling has 136 more. They are the PostgreSQL reads, Custom Views, custom alert rules, query tags, collector control, agent actions, investigation reads and fleet-wide reads.
 
-Of Darling's 247 tools, `mcp.allowWrites` with a token serves 61. `mcp.allowServerAdmin` adds 4 more. `mcp.allowInvestigations` with a token adds the last 2, and only while `mcp.allowWrites` is off. A service started before an upgrade reports the older, smaller count until you restart it.
+Of Darling's 248 tools, `mcp.allowWrites` with a token serves 62. `mcp.allowServerAdmin` adds 4 more. `mcp.allowInvestigations` with a token adds the last 2, and only while `mcp.allowWrites` is off. A service started before an upgrade reports the older, smaller count until you restart it.
 
 The table below names the main tools, not all of them. The `tools/list` call on a running server gives the full list.
 
@@ -90,6 +90,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Collector control (Darling) | `get_collector_schedules`, `get_collector_cost`, `enable_collector`, `disable_collector`, `set_collector_frequency`, `set_collector_retention`, `set_collector_run_at`, `run_collectors_now` |
 | Collection state (Darling) | `get_collection_state`, `pause_collection`, `resume_collection`, `disable_server`, `enable_server`, `set_server_excluded_databases`, `test_connection`, `analyze_now`, and `purge_now` (needs `confirm`) |
 | Quiet windows (Darling) | `set_quiet_window` and `clear_quiet_window` set and end a time-boxed mute for one server or the whole fleet |
+| Mute rule purge (Darling) | `purge_expired_mute_rules` deletes every expired mute rule (the Viewer's Purge Expired) and returns each rule it deleted |
 | Alert tuning (Darling) | `backtest_custom_alert_rule` (where a rule fired over stored history), `set_alert_threshold_override`, `dismiss_alert_history` and `restore_alert_history`, and route tools such as `create_notification_route`, `update_notification_route` and `set_notification_route_fallback` |
 
 Most tools accept optional `server_name` and `hours_back` parameters. If only one server is configured, `server_name` is auto-resolved. Every tool that takes `hours_back` also takes an optional `as_of` — an ISO-8601 UTC instant that moves the END of the window off "now", so a past incident is one call (`as_of` its end, `hours_back` its length) rather than a very wide window filtered by hand. The MCP server binds to `localhost` only and does not accept remote connections. (Darling adds windowed-trend and fleet-overview tools plus agent-driven write tools — Custom Views authoring, alert-settings and mute-rule tuning, and bulk add/remove servers — and supports an opt-in LAN endpoint — see [Darling/README.md](../Darling/README.md).)

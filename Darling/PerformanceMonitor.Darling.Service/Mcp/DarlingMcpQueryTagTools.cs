@@ -284,7 +284,7 @@ public sealed class DarlingMcpQueryTagTools
     {
         try
         {
-            var key = BuildKey(kind, queryHash, databaseName, schemaName, objectName, serverId, out var keyRefusal);
+            var key = BuildKey(kind, queryHash, databaseName, schemaName, objectName, serverId, out var keyRefusal, requireHashShape: true);
             if (keyRefusal is not null)
             {
                 return keyRefusal;
@@ -473,7 +473,8 @@ public sealed class DarlingMcpQueryTagTools
 
     /// <summary>Validates and trims a key's arguments. Null key plus a ready envelope when the arguments cannot be used.</summary>
     private static QueryTagKey? BuildKey(
-        string? kind, string? queryHash, string? databaseName, string? schemaName, string? objectName, int? serverId, out string? refusal)
+        string? kind, string? queryHash, string? databaseName, string? schemaName, string? objectName, int? serverId, out string? refusal,
+        bool requireHashShape = false)
     {
         refusal = null;
         var cleanKind = kind?.Trim().ToLowerInvariant();
@@ -512,8 +513,16 @@ public sealed class DarlingMcpQueryTagTools
                 return null;
             }
 
-            /* The resolver matches a hash ignoring case, so the key stores one spelling of it (#6020). A hash that is not a
-               hash at all (all zeros, or neither hex nor decimal) is kept as typed. */
+            /* #6455: a NEW assignment must name something a query hash can be; unassign skips this so a key stored before the check
+               can still be removed. */
+            if (requireHashShape && !QueryHashIdentity.IsAssignableHash(hash))
+            {
+                refusal = Refusal("invalid", "bad_key", "query_hash must be hexadecimal: 0x followed by 1 to 16 hex digits (for example 0x1A2B3C4D5E6F7081), or the decimal number the long-query trace stores.");
+                return null;
+            }
+
+            /* The resolver matches a hash ignoring case, so the key stores one spelling of it (#6020). Unassign skips the shape
+               check above, so a key stored before it (all zeros, or neither hex nor decimal) is kept as typed and can be removed. */
             return new QueryTagKey(KindHash, serverId, QueryHashIdentity.CanonicalKey(hash) ?? hash, null, null, null);
         }
 

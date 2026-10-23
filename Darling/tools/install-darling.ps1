@@ -8,8 +8,10 @@ Run from an ELEVATED PowerShell, from the folder you extracted the Darling zip i
 installs the service pointing at THAT folder - extract to the final location first, e.g.
 C:\Program Files\PerformanceMonitorDarling). What it does, in order:
 
-  1. Verifies elevation, the service exe, and darling.json (offers to copy darling.sample.json
-     and stops so you can edit it - the service is not installed with an unedited sample).
+  1. Verifies elevation, the service exe, and darling.json. When darling.json does not exist it writes a
+     minimal one (the bundled PostgreSQL store, no servers) and carries on: the service starts with no
+     monitored servers and you add the first one afterwards in the Viewer (#6468). darling.sample.json stays
+     beside it as the full reference.
   1a. REFUSES an install tree an ordinary local user can ALREADY write to, before anything - including
      the lock at 1b2 - has run (#4043): the usual case is Authenticated Users: Modify, inherited from
      C:\. A lock closes FURTHER writes; it cannot undo one made before it existed, so this recursively
@@ -1789,17 +1791,39 @@ if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
 }
 Invoke-InstallTreeLock $lockAccount -StopOnOpen
 
-if (-not (Test-Path -LiteralPath $configPath)) {
-    if (Test-Path -LiteralPath $samplePath) {
-        Copy-Item -LiteralPath $samplePath -Destination $configPath
-        Write-Host ''
-        Write-Host 'darling.json did not exist, so darling.sample.json was copied to darling.json.' -ForegroundColor Yellow
-        Write-Host 'EDIT IT NOW (servers to monitor, auth) and re-run this script. The sample is heavily commented.' -ForegroundColor Yellow
-        Write-Host "  notepad `"$configPath`"" -ForegroundColor Yellow
-        exit 2
-    }
+# A first install needs no hand-edited darling.json (#6468). The service starts with no monitored servers, so a
+# missing darling.json is answered with a minimal one (the bundled store only) and the install carries on. The
+# first server is added afterwards in the Viewer. The full sample is left beside it as the reference.
+function New-DarlingMinimalConfigText {
+    return @'
+{
+  // Written by install-darling.ps1. The service keeps everything else in its own PostgreSQL store.
+  // darling.sample.json beside this file is the full, commented reference for every setting.
+  //
+  // No server is named here on purpose: the service starts with none. Add the first one in the Viewer
+  // (Add Server). Once the service has started, the store is authoritative for the server list, so adding
+  // servers to this file later changes nothing.
+  "postgres": {
+    "managed": true,
+    "port": 5641
+  },
+  "servers": []
+}
+'@
+}
 
-    Fail 'Neither darling.json nor darling.sample.json found beside this script - the zip looks incomplete.'
+# Writes the minimal file as UTF-8 without a byte-order mark, so every reader (the service's, this script's
+# regexes, Windows PowerShell 5.1) sees the same bytes.
+function Write-DarlingMinimalConfig([string]$path) {
+    [System.IO.File]::WriteAllText($path, (New-DarlingMinimalConfigText), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+if (-not (Test-Path -LiteralPath $configPath)) {
+    Write-DarlingMinimalConfig $configPath
+    Write-Host ''
+    Write-Host 'darling.json did not exist, so a minimal one was written: the bundled PostgreSQL store and no servers.' -ForegroundColor Yellow
+    Write-Host 'Nothing needs editing before the install. Add your first server afterwards, in the Viewer (Add Server).' -ForegroundColor Yellow
+    Write-Host 'darling.sample.json beside it is the full reference for every other setting.' -ForegroundColor Yellow
 }
 
 # -- 2. Pre-flight --------------------------------------------------------------------------------
