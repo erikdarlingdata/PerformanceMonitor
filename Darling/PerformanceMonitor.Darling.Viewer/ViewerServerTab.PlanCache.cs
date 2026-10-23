@@ -48,16 +48,22 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
-        using var readFanOut = ViewerReadFanOut.Of(2);
+        using var readFanOut = ViewerReadFanOut.Of(3);
 
         var trendTask = _dataService.GetPlanCacheTrendAsync(_server.ServerId, startUtc, endUtc);
+        /* #6388: Plan Cache by Type, the same read get_plan_cache_bloat serves as cache_types. */
+        var byTypeTask = _dataService.GetPlanCacheByTypeAsync(_server.ServerId, startUtc, endUtc);
         /* The summary strip's totals come from a dedicated uncapped aggregate (not a capped grid),
            so "Total Plans" is exact (Dashboard parity). */
         var summaryTask = _dataService.GetPlanCacheSummaryAsync(_server.ServerId, startUtc, endUtc);
-        await Task.WhenAll(trendTask, summaryTask);
+        await Task.WhenAll(trendTask, summaryTask, byTypeTask);
+
+        /* The three reads are done; the by-type engine-gap probe below is a store read, so release or it is priced at this width. */
+        readFanOut.Release();
 
         RenderPlanCacheChart(trendTask.Result);
         RenderPlanCacheSummary(summaryTask.Result);
+        await RenderPlanCacheByTypeAsync(byTypeTask.Result);
     }
 
     private void RenderPlanCacheChart(List<PlanCacheTrendPoint> data)

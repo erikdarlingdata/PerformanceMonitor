@@ -112,6 +112,11 @@ public sealed class SignatureMergeLiveTests
 
             var answer = Parse(await Merge(c, SigA, SigB));
             Assert.Equal("merged", (string?)answer["status"]);
+            /* #6403: no tool call undoes a merge, so the answer carries the previous value, a null undo and a note saying where the undo is. */
+            Assert.Equal(SigA, (string?)answer["previous"]!["counted_as"]);
+            Assert.Null(answer["previous"]!["merged_into"]);
+            Assert.Null(answer["undo"]);
+            Assert.Contains("Agent changes", (string?)answer["undo_note"]);
 
             /* A is counted as B: one row, the two days added, and A has none of its own. */
             Assert.Equal(new Dictionary<string, int> { [SigB] = 8, [SigC] = 1 }, await TodayAsync(c));
