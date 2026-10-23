@@ -85,7 +85,7 @@ public static partial class FactRanked
     {
         ArgumentNullException.ThrowIfNull(payload);
         ArgumentNullException.ThrowIfNull(fact);
-        if (!NamesItsSubjectInPayload(fact.Key) || string.IsNullOrEmpty(fact.ObjectName))
+        if (!NamesItsSubjectInPayload(fact.Key) || fact.ObjectName is not null || string.IsNullOrEmpty(fact.ObjectName))
             return payload;
 
         var node = JsonSerializer.SerializeToNode(payload, options)?.AsObject()
