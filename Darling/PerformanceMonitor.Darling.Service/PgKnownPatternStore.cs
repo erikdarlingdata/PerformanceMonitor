@@ -28,8 +28,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Writes</b> go through the owner-rights functions <c>config.insert_known_pattern</c>, <c>update_known_pattern</c> and
 /// <c>delete_known_pattern</c> (<see cref="DarlingManagedRoles.BuildKnownPatternFunctionsSql"/>), the only write the viewer and admin roles
 /// hold on the table. Input is checked first with <see cref="KnownPatternInput.Validate"/>, so a refusal reads the same in every
-/// editor; a refused write throws <see cref="ArgumentException"/> carrying that reason. The writes are operator-only: no MCP tool calls
-/// them.</para>
+/// editor; a refused write throws <see cref="ArgumentException"/> carrying that reason. The web editor, the Viewer and the admin MCP write tools
+/// (<see cref="Mcp.DarlingMcpKnownPatternWriteTools"/>, #6398) all write through them, and <c>insert_known_pattern</c> refuses an add once
+/// <see cref="KnownPatternMatcher.MaxEntries"/> entries exist (DL409).</para>
 /// </summary>
 public sealed class PgKnownPatternStore
 {
@@ -171,8 +172,9 @@ public sealed class PgKnownPatternStore
         {
             return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
         }
-        catch (PostgresException ex) when (ex.SqlState == "DL404")
+        catch (PostgresException ex) when (ex.SqlState is "DL404" or "DL409")
         {
+            /* DL409: the table already holds KnownPatternMatcher.MaxEntries entries (#6398). */
             throw new ArgumentException(ex.MessageText, nameof(input));
         }
     }

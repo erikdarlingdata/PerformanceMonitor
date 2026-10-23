@@ -147,6 +147,33 @@ public sealed class KnownPatternStoreHardeningLiveTests
     }
 
     [Fact]
+    public async Task AnAddPastTheEntryCap_IsRefusedWithTheCountAndTheCap_ForTheStoreAndADirectCall_AndAnEditAndDeleteStillWork()
+    {
+        await WithStoreAsync(async (owner, viewer, _, ct) =>
+        {
+            /* The viewer and web editors write through PgKnownPatternStore (as the viewer role); the function itself is the shared check. */
+            await ExecAsync(owner, $"INSERT INTO config.config_known_patterns (note) SELECT 'bulk ' || g FROM generate_series(1, {KnownPatternMatcher.MaxEntries - 1}) g", ct);
+            var store = new PgKnownPatternStore(viewer);
+            var last = await store.InsertAsync(new KnownPatternInput(null, null, null, null, null, "the 500th", null), "erik", ct);
+            Assert.Equal(KnownPatternMatcher.MaxEntries, await CountAsync(owner, ct));
+
+            var refused = await Assert.ThrowsAsync<ArgumentException>(() =>
+                store.InsertAsync(new KnownPatternInput(null, null, null, null, null, "the 501st", null), "erik", ct));
+            Assert.Contains("500 entries and 500 exist", refused.Message, StringComparison.Ordinal);
+            Assert.Contains("Delete", refused.Message, StringComparison.Ordinal);
+            var direct = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(viewer, InsertCall(), ct));
+            Assert.Equal("DL409", direct.SqlState);
+            Assert.Equal(KnownPatternMatcher.MaxEntries, await CountAsync(owner, ct));
+
+            /* Edit and delete are not capped; a delete makes room for exactly one add. */
+            Assert.True(await store.UpdateAsync(last, new KnownPatternInput(null, null, null, null, null, "edited at the cap", null), "priya", ct));
+            Assert.True(await new PgKnownPatternStore(owner).DeleteAsync(last, ct));
+            await store.InsertAsync(new KnownPatternInput(null, null, null, null, null, "back to 500", null), "erik", ct);
+            Assert.Equal(KnownPatternMatcher.MaxEntries, await CountAsync(owner, ct));
+        });
+    }
+
+    [Fact]
     public async Task TheStore_TurnsAServerThatIsNotRegistered_IntoAnArgumentException_ForAnAddAndAnEdit()
     {
         await WithStoreAsync(async (owner, viewer, _, ct) =>

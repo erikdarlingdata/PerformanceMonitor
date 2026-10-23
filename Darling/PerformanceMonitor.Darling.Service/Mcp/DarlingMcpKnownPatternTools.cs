@@ -74,7 +74,7 @@ public sealed class DarlingMcpKnownPatternTools
                 return McpHelpers.Status(
                     "empty",
                     all.Count == 0
-                        ? "No known patterns are recorded in this store. An operator adds them in the web admin or the Viewer."
+                        ? "No known patterns are recorded in this store. They are added in the web admin, the Viewer, or with create_known_pattern when MCP writes are on."
                         : $"No known pattern matches the filter: {all.Count} entr{(all.Count == 1 ? "y exists" : "ies exist")} but none in this scope"
                             + (include_expired ? "." : " that has not expired (pass include_expired=true to list expired ones)."),
                     new { configured_count = all.Count });

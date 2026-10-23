@@ -143,6 +143,39 @@ public sealed class DarlingMcpKnownPatternWriteToolsLiveTests
     }
 
     [Fact]
+    public async Task ACreatePastTheCap_IsRefusedWithTheCountAndTheCap_AndWritesNothing_While499Succeeds()
+    {
+        await RunAsync(async (mcp, owner, ct) =>
+        {
+            const int cap = PerformanceMonitor.Common.KnownPatterns.KnownPatternMatcher.MaxEntries;
+            await using (var fill = new NpgsqlCommand($"INSERT INTO config.config_known_patterns (note) SELECT 'bulk ' || g FROM generate_series(1, {cap - 1}) g", owner))
+            {
+                await fill.ExecuteNonQueryAsync(ct);
+            }
+
+            /* 499 rows: the create succeeds and makes the 500th. */
+            var last = Parse(await DarlingMcpKnownPatternWriteTools.CreateKnownPattern(mcp, "the 500th", cancellationToken: ct));
+            Assert.Equal("created", (string)last["status"]!);
+            Assert.Equal(cap.ToString(System.Globalization.CultureInfo.InvariantCulture), await ScalarAsync(owner, "SELECT count(*) FROM config.config_known_patterns", ct));
+
+            /* 500 rows: refused in plain words, nothing written. */
+            var refused = Parse(await DarlingMcpKnownPatternWriteTools.CreateKnownPattern(mcp, "the 501st", cancellationToken: ct));
+            Assert.Equal("invalid", (string)refused["status"]!);
+            var message = (string)refused["message"]!;
+            Assert.Contains("500 entries and 500 exist", message, StringComparison.Ordinal);
+            Assert.Contains("Delete", message, StringComparison.Ordinal);
+            Assert.Contains("Nothing was changed", message, StringComparison.Ordinal);
+            Assert.Equal(cap.ToString(System.Globalization.CultureInfo.InvariantCulture), await ScalarAsync(owner, "SELECT count(*) FROM config.config_known_patterns", ct));
+
+            /* Edit and delete still work at the cap, and the delete makes room for one create. */
+            var id = (long)last["id"]!;
+            Assert.Equal("updated", (string)Parse(await DarlingMcpKnownPatternWriteTools.UpdateKnownPattern(mcp, id, "edited at the cap", cancellationToken: ct))["status"]!);
+            Assert.Equal("deleted", (string)Parse(await DarlingMcpKnownPatternWriteTools.DeleteKnownPattern(mcp, id, cancellationToken: ct))["status"]!);
+            Assert.Equal("created", (string)Parse(await DarlingMcpKnownPatternWriteTools.CreateKnownPattern(mcp, "room again", cancellationToken: ct))["status"]!);
+        });
+    }
+
+    [Fact]
     public async Task AnIdThatMatchesNoEntry_IsNotFound_ForUpdateAndDelete_AndChangesNothing()
     {
         await RunAsync(async (mcp, owner, ct) =>

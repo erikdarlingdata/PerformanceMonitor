@@ -43,7 +43,7 @@ public sealed class DarlingMcpKnownPatternWriteTools
         "Adds a known-pattern entry: operator context about an alert that recurs, such as 'the backup job pushes High CPU every night at 02:00'. " +
         "note is required (at most 500 characters). server_id, metric_name, time_of_day and the other scope fields are optional; a field left out means any " +
         "server, any metric, any time of day, UTC and the default window, and no expiry. Answers with the new entry's id, the entry after, and an undo call " +
-        "(delete_known_pattern). Needs mcp.allowWrites; never offered to an investigation agent. " + NoteFraming)]
+        "(delete_known_pattern). At most 500 entries exist; a create past that is refused until some are deleted. Needs mcp.allowWrites; never offered to an investigation agent. " + NoteFraming)]
     public static async Task<string> CreateKnownPattern(
         NpgsqlDataSource postgres,
         [Description("What the operator knows about the pattern (1-500 characters).")] string note,
@@ -197,6 +197,7 @@ public sealed class DarlingMcpKnownPatternWriteTools
             : sentence.StartsWith("expires_at_utc", StringComparison.Ordinal) ? "expires_at_utc"
             : sentence.StartsWith("window_minutes", StringComparison.Ordinal) ? "window_minutes"
             : sentence.StartsWith("server_id", StringComparison.Ordinal) ? "server_id"
+            : sentence.StartsWith("Known patterns are capped", StringComparison.Ordinal) ? "known_patterns"
             : sentence.Contains("metric name", StringComparison.Ordinal) ? "metric_name"
             : sentence.Contains("time zone", StringComparison.Ordinal) ? "time_zone"
             : "note";

@@ -2458,9 +2458,14 @@ SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
    v_id bigint;
+   v_count bigint;
 BEGIN
    IF p_server_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_server_id) THEN
       RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   SELECT count(*) INTO v_count FROM {config}.config_known_patterns;
+   IF v_count >= 500 THEN
+      RAISE EXCEPTION 'Known patterns are capped at 500 entries and % exist. Delete entries you no longer need to make room.', v_count USING ERRCODE = 'DL409';
    END IF;
    INSERT INTO {config}.config_known_patterns
       (server_id, metric_name, time_of_day, time_zone, window_minutes, note, created_by, expires_at_utc)
