@@ -185,7 +185,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "the request equals the stored values, nothing was written. updated returns {status, server, display_name, " +
         "server_id, changed:[field names], reconnects, tested, query_store_replica_test, modified_at, note}; reconnects says whether the " +
         "service drops and re-opens its connection to the server; query_store_replica_test is the replica's own connection result when the " +
-        "server has one and the edit was tested (a replica that does not open is a note, the edit is still saved). server_name is resolved as remove_server resolves it.")]
+        "server has one and the edit was tested (a replica that does not open is a note, the edit is still saved; on an Azure SQL Database it says the setting has no effect, because that engine has no readable-replica Query Store read). server_name is resolved as remove_server resolves it.")]
     public static Task<string> EditServer(
         NpgsqlDataSource postgres,
         [Description("The monitored server to edit: its display name or storage name / address. A partial name is accepted only when it matches exactly one definition.")] string server_name,

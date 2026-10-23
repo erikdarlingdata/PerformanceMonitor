@@ -332,16 +332,16 @@ public sealed class ViewerSettingsTests
             var missing = Path.Combine(viewerDirectory, "darling.json");
 
             /* Neither location has a config: report the viewer's own (missing) path. */
-            Assert.Equal(missing, ViewerSettings.ResolveConfigPath(baseDirectory: viewerDirectory));
+            Assert.Equal(missing, ViewerSettings.ResolveConfigPath(baseDirectory: viewerDirectory, installedServiceFolder: () => null));
 
             /* Only the service root has one — the shipped-zip case. */
             var atServiceRoot = Path.Combine(root.FullName, "darling.json");
             File.WriteAllText(atServiceRoot, "{}");
-            Assert.Equal(atServiceRoot, ViewerSettings.ResolveConfigPath(baseDirectory: viewerDirectory));
+            Assert.Equal(atServiceRoot, ViewerSettings.ResolveConfigPath(baseDirectory: viewerDirectory, installedServiceFolder: () => null));
 
             /* Beside the viewer binary still wins over the parent when both exist. */
             File.WriteAllText(missing, "{}");
-            Assert.Equal(missing, ViewerSettings.ResolveConfigPath(baseDirectory: viewerDirectory));
+            Assert.Equal(missing, ViewerSettings.ResolveConfigPath(baseDirectory: viewerDirectory, installedServiceFolder: () => null));
         }
         finally
         {
