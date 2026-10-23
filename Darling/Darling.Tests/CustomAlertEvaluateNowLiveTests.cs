@@ -80,7 +80,7 @@ public sealed class CustomAlertEvaluateNowLiveTests
             }
 
             var created = Assert.IsType<CustomAlertRuleResult.Ok>(
-                await new CustomAlertRuleStore(dataSource).CreateAsync(ruleName, null, definition, true, "test", ct));
+                await new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds).CreateAsync(ruleName, null, definition, true, "test", ct));
             ruleId = created.Rule!.Id;
 
             var json = await DarlingMcpCustomAlertTools.TestCustomAlertRule(dataSource, ruleId, definition: null);

@@ -13,7 +13,7 @@ using System.Linq;
 using System.Text.Json.Nodes;
 using PerformanceMonitor.Notifications;
 
-namespace PerformanceMonitor.Darling.Service;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>The comparison a rule's value is tested against: a one-sided scalar bar
 /// (<see cref="GreaterThan"/>..<see cref="LessOrEqual"/>) or a two-sided range band

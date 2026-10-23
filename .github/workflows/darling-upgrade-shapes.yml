@@ -12,15 +12,10 @@ name: Darling upgrade shapes
 #       the folder's own write entry, and prints the move steps
 # U1, U2 and U3 run both install-darling.ps1 and upgrade-darling.ps1 as separate legs; U4 runs install-darling.ps1.
 #
-# Triggers: a pull request touching the scripts (or this check), the nightly (as a reusable workflow), and a
-# manual dispatch. `pull_request`, never `pull_request_target`: the legs run the pull request's own scripts,
-# so they must run with the pull request's read-only token and no secrets.
+# Triggers: the nightly (as a reusable workflow) and a manual dispatch. It no longer runs on pull requests (#6656):
+# the pull request workflow (pr.yml) is the one per-PR CI system, so these legs are a nightly and on-demand check.
+# Never add `pull_request_target`: the legs run the checked-out scripts, which must not get a write token or secrets.
 on:
-  pull_request:
-    paths:
-      - 'Darling/tools/*.ps1'
-      - '.github/workflows/darling-upgrade-shapes.yml'
-      - '.github/scripts/darling-upgrade-shapes.ps1'
   workflow_call:
   workflow_dispatch:
 
