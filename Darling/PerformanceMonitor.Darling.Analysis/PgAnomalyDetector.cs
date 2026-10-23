@@ -307,12 +307,15 @@ LIMIT 6";
        snapshot's event_time IS its collection time. The BASELINE this count is judged against comes from the
        continuous aggregates, which bucket the hypertable's own column (collection_time) by design. */
     public const string BlockingWindowSql = @"
+/* #6645: a row whose blocked and blocking spid are the same is a parallel query waiting on itself, not blocking. */
 SELECT
     COALESCE(NULLIF(
         (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4), 0),
+         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4
+         AND   NOT COALESCE(blocked_spid = blocking_spid, FALSE)), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3)) AS current_blocking,
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+         AND   NOT COALESCE(blocked_spid = blocking_spid, FALSE))) AS current_blocking,
     (SELECT COUNT(*) FROM v_deadlocks
      WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3 AND collection_time >= $4) AS current_deadlocks";
 
@@ -325,9 +328,11 @@ SELECT
     COALESCE(NULLIF(
         (SELECT COUNT(*) FROM v_blocked_process_reports
          WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $5
+         AND   NOT COALESCE(blocked_spid = blocking_spid, FALSE)
          AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
          WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+         AND   NOT COALESCE(blocked_spid = blocking_spid, FALSE)
          AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))))) AS current_blocking,
     0::bigint AS current_deadlocks";
 

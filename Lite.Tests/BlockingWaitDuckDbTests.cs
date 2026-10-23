@@ -134,6 +134,29 @@ public class BlockingWaitDuckDbTests : IClassFixture<SharedDuckDbFixture>, IDisp
         Assert.Equal(55_000.0, (await BlockingFactAsync()).Metadata["max_wait_time_ms"]);
     }
 
+    /// <summary>
+    /// #6645: the threads of one parallel query write reports with blocked_spid = blocking_spid (a different ecid
+    /// each). That is the query waiting on itself, not blocking, so it is no wait and no head blocker: the fact,
+    /// the overview card, the C# rule and the current-wait snapshot all leave it out.
+    /// </summary>
+    [Fact]
+    public async Task ParallelQuerySelfWaits_AreNotBlocking()
+    {
+        await SeedWaitAsync(59, 59, Ago(40), reports: 4);
+        await SeedWaitAsync(59, 59, Ago(30), reports: 3, dmv: true);
+        await SeedWaitAsync(52, 51, Ago(20), reports: 5);
+
+        await AssertAllThreeAgreeAsync(1);
+
+        /* The real lock wait's blocker is the only head blocker; the parallel query's own spid is not one. */
+        Assert.Equal(1.0, (await BlockingFactAsync()).Metadata["distinct_head_blockers"]);
+
+        var snapshot = await new LocalDataService(_duckDb).GetCurrentBlockingWaitAsync(ServerId);
+        Assert.NotNull(snapshot);
+        Assert.Equal(0, snapshot!.Value.BlockedSessionCount);
+        Assert.Equal(0L, snapshot.Value.TotalWaitMs);
+    }
+
     [Fact]
     public async Task TheAuditsElevenNineNineAndSixReports_AreFourWaits()
     {

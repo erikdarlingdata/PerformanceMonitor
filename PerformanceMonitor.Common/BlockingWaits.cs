@@ -71,7 +71,8 @@ public static class BlockingWaits
         (eventTime - DateTime.UnixEpoch).TotalMilliseconds - waitTimeMs;
 
     /// <summary>
-    /// Collapses reports to one row per wait: the report with the longest wait time (the latest one on a tie).
+    /// Collapses reports to one row per wait (a report whose blocked and blocking spid are the same, and not 0, is a
+    /// parallel query waiting on itself, #6645, and is dropped): the report with the longest wait time (the latest one on a tie).
     /// <paramref name="partition"/> keeps rows that must never merge apart (the report source, for one). A row with
     /// no event time or no wait time has no derived start and cannot be placed in a wait, so it stays a wait of
     /// its own (the SQL form does the same). The result is ordered by the
@@ -89,6 +90,15 @@ public static class BlockingWaits
         var placeable = new List<(T Row, double Start, DateTime Time, long Wait)>();
         foreach (var row in reports)
         {
+            /* #6645: a parallel query's threads report waits on their own session (same spid, different ecid).
+               That is the query waiting on itself, not blocking. Spid 0 is a report that named no session (a
+               withheld-whole marker, stored with NULL spids), which is still a blocking event: the SQL form keeps
+               it too, as NULL = NULL is not true. */
+            if (blockedSpid(row) == blockingSpid(row) && blockedSpid(row) != 0)
+            {
+                continue;
+            }
+
             var time = eventTime(row);
             var wait = waitTimeMs(row);
             if (time is null || wait is null)
@@ -187,6 +197,10 @@ public static class BlockingWaits
 {name}_marked AS (
     SELECT s.*, {epochMs} - s.wait_time_ms AS wait_start_ms
     FROM ({source}) AS s
+    /* #6645: a parallel query's threads write reports with blocked_spid = blocking_spid (different ecid). That is
+       the query waiting on itself, not blocking: it is no wait, no head blocker and no report. A report that
+       names no session (NULL spids) is kept: the comparison is not true for it. */
+    WHERE NOT COALESCE(s.blocked_spid = s.blocking_spid, FALSE)
 ),
 {name}_gapped AS (
     SELECT m.*,

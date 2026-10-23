@@ -45,11 +45,14 @@ public partial class LocalDataService
            DuckDB.NET materializes as System.Numerics.BigInteger — a type Convert.ToInt64 cannot convert
            (BigInteger does not implement IConvertible), so the read threw at alert-check time without
            them. COUNT is cast for the same reason its result is read as an int. */
+        /* #6645: a row whose blocked and blocking spid are the same is a parallel query waiting on itself, not
+           blocking. FILTER (not WHERE) so a newest snapshot of only such rows still reads as a snapshot with
+           nothing blocked, its time and freshness intact. */
         command.CommandText = @"
 SELECT
     collection_time,
-    CAST(COALESCE(SUM(wait_time_ms), 0) AS BIGINT) AS total_wait_ms,
-    CAST(COUNT(DISTINCT blocked_spid) AS INTEGER) AS blocked_sessions
+    CAST(COALESCE(SUM(wait_time_ms) FILTER (WHERE NOT COALESCE(blocked_spid = blocking_spid, FALSE)), 0) AS BIGINT) AS total_wait_ms,
+    CAST(COUNT(DISTINCT blocked_spid) FILTER (WHERE NOT COALESCE(blocked_spid = blocking_spid, FALSE)) AS INTEGER) AS blocked_sessions
 FROM v_dmv_blocking_snapshots
 WHERE server_id = $1
 AND   collection_time = (
