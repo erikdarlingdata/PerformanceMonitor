@@ -1136,6 +1136,8 @@ try {
        the person is told why). */
     feedback: async (kind) => {
       state.canEdit = kind !== "listonly";
+      /* #6600: "nostoreoff" is the managed store with web.allowAdminWrites off: the session says so, and the page's note names the switch. */
+      if (kind === "nostoreoff") state.sessionReply = () => ({ status: 200, body: { can_edit: true, signed_in_admin: true, managed_store: true, admin_writes_off: true } });
       const id = "11111111-1111-1111-1111-111111111111";
       let held = [];
       const report = () => ({
@@ -1151,7 +1153,7 @@ try {
       };
       state.responder = (method, url, sent) => {
         if (method === "GET" && url === "/api/investigation-feedback") {
-          return { status: 200, body: { hours_back: 168, can_record: kind !== "nostore", requests_returned: 1, truncated: false,
+          return { status: 200, body: { hours_back: 168, can_record: !kind.startsWith("nostore"), requests_returned: 1, truncated: false,
             families: [{ family: "blocking", reported: 1, with_feedback: held.length, marked_wrong: 0, agent_false_positives: 0, false_positives: 0 }], requests: [report()] } };
         }
         if (method === "PUT" && url === "/api/investigation-feedback/" + id) return (answers[kind] || answers.recorded)(sent);
