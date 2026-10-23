@@ -1057,7 +1057,7 @@ public sealed class McpAnalysisTools
         }
     }
 
-    [McpServerTool(Name = "mute_analysis_finding"), Description("Write: stores a per-pattern, not per-occurrence, mute row in the monitoring store for story_path_hash, scoped to server_name (all servers when omitted), so it is skipped in later analysis runs. registered: a NEW row was stored this call. already_muted: the scope already held the hash; nothing was written. matched_now: retained findings in scope carrying the hash now. status: muted (registered, matched_now at least 1), muted_unmatched (registered, matched_now 0; maybe a mistyped hash), already_muted (nothing changed), error (the write failed; nothing is muted). <<GUIDE>> Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether a NEW mute row was stored by this call, already_muted says the registry already held this hash in this scope (per server, or across all servers when server_name is omitted) so nothing was written, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is newly registered AND matched_now is at least 1; \"muted_unmatched\" when it is newly registered but matched_now is 0 — the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it); \"already_muted\" when the same scope already muted this hash (the mute is in force, this call changed nothing, and a different reason is not recorded). server_name resolves by an exact match on the server, display or storage name, else a partial match on the server or display name, and unlike the read tools it never takes the first of several matches: a name that matches more than one server answers \"ambiguous\" with the candidates (pass a candidate's server value back to pick it), and one that matches none, or a blank one, answers \"not_found\" with the servers that exist (omit server_name to mute across all servers); either way nothing is muted, and a successful call echoes the resolved server name. story_path is the diagnostic chain the registry row names, resolved from the retained findings that carry the hash; it is null when none does, and the row then holds the hash as a placeholder.")]
+    [McpServerTool(Name = "mute_analysis_finding"), Description("Write: stores a per-pattern, not per-occurrence, mute row in the monitoring store for story_path_hash, scoped to server_name (all servers when omitted), so it is skipped in later analysis runs. registered: a NEW row was stored this call. already_muted: the scope already held the hash; nothing was written. matched_now: retained findings in scope carrying the hash now. status: muted (registered, matched_now at least 1), muted_unmatched (registered, matched_now 0; maybe a mistyped hash), already_muted (nothing changed), error (the write failed; nothing is muted). <<GUIDE>> previous is null for a new mute, and undo is the unmute_analysis_finding call for the same scope (None needed when the mute was already there). Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether a NEW mute row was stored by this call, already_muted says the registry already held this hash in this scope (per server, or across all servers when server_name is omitted) so nothing was written, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is newly registered AND matched_now is at least 1; \"muted_unmatched\" when it is newly registered but matched_now is 0 — the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it); \"already_muted\" when the same scope already muted this hash (the mute is in force, this call changed nothing, and a different reason is not recorded). server_name resolves by an exact match on the server, display or storage name, else a partial match on the server or display name, and unlike the read tools it never takes the first of several matches: a name that matches more than one server answers \"ambiguous\" with the candidates (pass a candidate's server value back to pick it), and one that matches none, or a blank one, answers \"not_found\" with the servers that exist (omit server_name to mute across all servers); either way nothing is muted, and a successful call echoes the resolved server name. story_path is the diagnostic chain the registry row names, resolved from the retained findings that carry the hash; it is null when none does, and the row then holds the hash as a placeholder.")]
     public static async Task<string> MuteAnalysisFinding(
         AnalysisService analysisService,
         ServerManager serverManager,
@@ -1122,6 +1122,18 @@ public sealed class McpAnalysisTools
                 reason,
                 registered,
                 already_muted = !registered,
+                /* #6403: a new mute had no row before it, so previous is null and the undo is the unmute call for the same scope; a mute
+                   that was already there is left as it was, so there is nothing to undo. */
+                previous = registered ? null : new { muted = true },
+                undo = registered
+                    ? (object)new
+                    {
+                        tool = "unmute_analysis_finding",
+                        arguments = server_name != null
+                            ? new Dictionary<string, object?> { ["story_path_hash"] = story_path_hash, ["server_name"] = scope.Label }
+                            : new Dictionary<string, object?> { ["story_path_hash"] = story_path_hash },
+                    }
+                    : "None needed: the mute was already in force and nothing was written.",
                 matched_now = matchedNow,
                 note = !registered
                     ? $"This scope already mutes this story_path_hash; nothing was written and the existing mute stays in force ({matchedNow} stored finding(s) in this scope carry the hash). A reason passed on this call is not recorded."
@@ -1136,7 +1148,7 @@ public sealed class McpAnalysisTools
         }
     }
 
-    [McpServerTool(Name = "unmute_analysis_finding"), Description("Write: removes the mute that mute_analysis_finding registered for story_path_hash, in the scope of server_name (all servers when omitted), so the pattern appears in later analysis runs again. status: unmuted (removed is at least 1), not_muted (that scope held no mute; nothing changed), error (the delete failed; the mute may still be in force). <<GUIDE>> Undoes a mute. Served only when the operator sets mcp_allow_writes to true in settings.json, with mute_analysis_finding. A mute registered for all servers is not removed by naming one server, and a per-server mute is not removed by omitting server_name: pass the same server_name (or none) the mute used. removed is the number of registry rows deleted. Findings the pattern would have produced while it was muted were never stored, so nothing comes back until the next analysis pass finds the pattern again.")]
+    [McpServerTool(Name = "unmute_analysis_finding"), Description("Write: removes the mute that mute_analysis_finding registered for story_path_hash, in the scope of server_name (all servers when omitted), so the pattern appears in later analysis runs again. status: unmuted (removed is at least 1), not_muted (that scope held no mute; nothing changed), error (the delete failed; the mute may still be in force). <<GUIDE>> Undoes a mute. Served only when the operator sets mcp_allow_writes to true in settings.json, with mute_analysis_finding. A mute registered for all servers is not removed by naming one server, and a per-server mute is not removed by omitting server_name: pass the same server_name (or none) the mute used. removed is the number of registry rows deleted; previous lists them (mute_id, story_path, reason, muted_utc), and undo is the mute_analysis_finding call that puts the mute back in the same scope (None needed when nothing was removed). Findings the pattern would have produced while it was muted were never stored, so nothing comes back until the next analysis pass finds the pattern again.")]
     public static async Task<string> UnmuteAnalysisFinding(
         AnalysisService analysisService,
         ServerManager serverManager,
@@ -1158,7 +1170,22 @@ public sealed class McpAnalysisTools
                 serverId = resolved.ServerId;
             }
 
-            var removed = await analysisService.UnmuteFindingAsync(serverId, story_path_hash);
+            var removedRows = await analysisService.UnmuteFindingAsync(serverId, story_path_hash);
+            var removed = removedRows.Count;
+
+            /* #6403, the same answer as Darling's twin: the rows the unmute removed as previous, and the mute call that puts the
+               mute back in the same scope with the reason a removed row carried. */
+            var undoArguments = new Dictionary<string, object?> { ["story_path_hash"] = story_path_hash };
+            if (server_name != null)
+            {
+                undoArguments["server_name"] = server_name;
+            }
+
+            var earlierReason = removedRows.Select(r => r.Reason).FirstOrDefault(r => !string.IsNullOrEmpty(r));
+            if (earlierReason != null)
+            {
+                undoArguments["reason"] = earlierReason;
+            }
 
             return JsonSerializer.Serialize(new
             {
@@ -1166,6 +1193,14 @@ public sealed class McpAnalysisTools
                 story_path_hash,
                 server = server_name ?? "(all servers)",
                 removed,
+                previous = removedRows.Select(r => new
+                {
+                    mute_id = r.MuteId,
+                    story_path = r.StoryPath,
+                    reason = r.Reason,
+                    muted_utc = r.MutedDate,
+                }).ToList(),
+                undo = removed > 0 ? (object)new { tool = "mute_analysis_finding", arguments = undoArguments } : "None needed: nothing was removed.",
                 note = removed > 0
                     ? $"Removed {removed} mute row(s) for this scope. The pattern is no longer skipped and is reported again when a later analysis pass finds it."
                     : "This scope holds no mute for this story_path_hash, so nothing changed. A mute registered for all servers is removed by omitting server_name; a per-server mute by naming that server.",

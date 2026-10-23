@@ -251,7 +251,8 @@ public static class DarlingServiceConnectionTest
                 ConnectedDatabase: TryString(root, "connectedDatabase"),
                 MachineIdentity: TryString(root, "machineIdentity"),
                 QueryStoreReplica: TryString(root, "queryStoreReplica"),
-                QueryStoreReplicaError: TryString(root, "queryStoreReplicaError"));
+                QueryStoreReplicaError: TryString(root, "queryStoreReplicaError"),
+                MissingGrantsNote: TryString(root, "missingGrantsNote"));
         }
         catch (JsonException)
         {
