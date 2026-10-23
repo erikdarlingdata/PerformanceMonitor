@@ -237,7 +237,7 @@ public sealed class CustomAlertClockStepTests
             Definition = definition!;
 
             Evaluator = new CustomAlertEvaluator(
-                new CustomAlertRuleStore(_dataSource), new CustomAlertStateStore(_dataSource), _dataSource, Deliverer,
+                new CustomAlertRuleStore(_dataSource, StorageCommandDeadlines.McpReadSeconds), new CustomAlertStateStore(_dataSource, StorageCommandDeadlines.McpReadSeconds), _dataSource, Deliverer,
                 isAlertMuted: _ => false, alertsEnabled: static () => true, new PgAlertHistoryStore(_dataSource),
                 defaultIntervalSeconds: 0, cacheTtl: TimeSpan.Zero, Log);
         }

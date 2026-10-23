@@ -42,7 +42,7 @@ public sealed class CustomViewStore
 
     /// <summary><paramref name="commandTimeoutSeconds"/> is the deadline of every statement this store runs (the service passes its own).
     /// A caller that passes nothing gets <see cref="StorageCommandDeadlines.McpReadSeconds"/>.</summary>
-    public CustomViewStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds)
+    public CustomViewStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds)
     {
         _dataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
         _commandTimeoutSeconds = commandTimeoutSeconds;

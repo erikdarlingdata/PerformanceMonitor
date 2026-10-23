@@ -44,7 +44,7 @@ public sealed class CustomAlertRuleStore
     /// <paramref name="commandTimeoutSeconds"/> is the deadline of every statement this store runs. The service passes its own MCP/web read
     /// deadline; a caller that passes nothing gets <see cref="StorageCommandDeadlines.McpReadSeconds"/>.
     /// </summary>
-    public CustomAlertRuleStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds)
+    public CustomAlertRuleStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds)
     {
         _dataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
         _commandTimeoutSeconds = commandTimeoutSeconds;
@@ -56,7 +56,7 @@ public sealed class CustomAlertRuleStore
     /// row are one commit. A refused result (a duplicate name, a stale version) is the caller's to roll back by abandoning
     /// the transaction; this store never rolls it back.
     /// </summary>
-    internal CustomAlertRuleStore(NpgsqlConnection connection, NpgsqlTransaction transaction, int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds)
+    internal CustomAlertRuleStore(NpgsqlConnection connection, NpgsqlTransaction transaction, int commandTimeoutSeconds)
     {
         _commandTimeoutSeconds = commandTimeoutSeconds;
         _connection = connection ?? throw new ArgumentNullException(nameof(connection));

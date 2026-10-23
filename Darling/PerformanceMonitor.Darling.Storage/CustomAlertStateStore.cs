@@ -36,7 +36,7 @@ public sealed class CustomAlertStateStore
     private readonly int _commandTimeoutSeconds;
 
     /// <summary><paramref name="commandTimeoutSeconds"/> is the deadline of every statement this store runs (the service passes its own).</summary>
-    public CustomAlertStateStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds)
+    public CustomAlertStateStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds)
     {
         _dataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
         _commandTimeoutSeconds = commandTimeoutSeconds;

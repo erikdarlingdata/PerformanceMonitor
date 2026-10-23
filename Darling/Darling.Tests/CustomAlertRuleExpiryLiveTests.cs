@@ -144,8 +144,8 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
         var prefix = "car_exp_" + Guid.NewGuid().ToString("N") + "_";
         var definition = DefinitionFor(storage);
         var deliverer = new CapturingDeliverer();
-        var rules = new CustomAlertRuleStore(dataSource);
-        var state = new CustomAlertStateStore(dataSource);
+        var rules = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
+        var state = new CustomAlertStateStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
         var bodySucceeded = false;
         try
         {
@@ -205,7 +205,7 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
                 dataSource, prefix + "past", definition, expires_at_utc: DateTime.UtcNow.AddMinutes(-5).ToString("o", CultureInfo.InvariantCulture)))!;
             Assert.Equal("invalid", (string?)refused["status"]);
             Assert.Contains("in the past", (string?)refused["message"] ?? (string?)refused["error"] ?? refused.ToJsonString());
-            Assert.DoesNotContain(await new CustomAlertRuleStore(dataSource).ListAsync(ct), r => r.Name == prefix + "past");
+            Assert.DoesNotContain(await new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds).ListAsync(ct), r => r.Name == prefix + "past");
 
             // A future expiry saves, and the create answer says when the rule expires.
             var expiry = DateTime.UtcNow.AddDays(3);
@@ -271,7 +271,7 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
         await using var dataSource = await MigrateAndOpenAsync(connectionString, ct);
 
         var prefix = "car_expc_" + Guid.NewGuid().ToString("N") + "_";
-        var rules = new CustomAlertRuleStore(dataSource);
+        var rules = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
         var bodySucceeded = false;
         try
         {
