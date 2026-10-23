@@ -647,10 +647,11 @@
                     <!-- Performance Trends (Lite ServerTab.xaml:259-282): 2x2 grid of per-second trend
                          charts (query / procedure / Query Store duration + execution count). -->
                     <TabItem Header="Performance Trends">
-                        <Grid>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #6652: scrolls when the charts cannot all keep their minimum height -->
+                        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="300">
                             <Grid.RowDefinitions>
-                                <RowDefinition Height="*"/>
-                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                             </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
@@ -669,6 +670,7 @@
                                 <scottplot:WpfPlot x:Name="ExecutionCountTrendChart"/>
                             </Border>
                         </Grid>
+                        </ScrollViewer>
                     </TabItem>
                     <!-- Active Queries (Lite ServerTab.xaml:283-403): the hourly slicer + ~26-column
                          snapshot grid. "Latest Snapshot" sends a snapshot_now command so the service captures a fresh
@@ -1755,115 +1757,115 @@
                                       RowStyle="{StaticResource QueryStorePlanGridRowStyle}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding LastExecutionTimeLocal}" Width="150" SortMemberPath="LastExecutionTime">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding LastExecutionTimeLocal}" Width="150" MinWidth="150" SortMemberPath="LastExecutionTime">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Execution" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTemplateColumn Width="*" MinWidth="300" SortMemberPath="QueryTextSample">
-                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryTextSample" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
+                                    <DataGridTemplateColumn Width="320" MinWidth="200" SortMemberPath="QueryTextSample">
+                                        <DataGridTemplateColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryTextSample" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTemplateColumn.Header>
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
                                                 <TextBlock Text="{Binding QueryTextSample}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2" ToolTip="{Binding QueryTextSample}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
-                                    <DataGridTextColumn Binding="{Binding Severity}" Width="80">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Severity" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Severity" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding Severity}" Width="80" MinWidth="80">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Severity" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Severity" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RegressionReason}" Width="110">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RegressionReason" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Why" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding RegressionReason}" Width="110" MinWidth="110">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RegressionReason" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Why" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120" MinWidth="120">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding QueryId}" ElementStyle="{StaticResource NumericCell}" Width="80">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryId" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query ID" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding QueryId}" ElementStyle="{StaticResource NumericCell}" Width="80" MinWidth="80">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryId" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query ID" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding AdditionalDurationMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AdditionalDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Impact (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding AdditionalDurationMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="110" MinWidth="110">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AdditionalDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Impact (ms)" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding BaselineExecCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineExecCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Base Execs" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding BaselineExecCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90" MinWidth="90">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineExecCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Base Execs" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RecentExecCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentExecCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Execs" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding RecentExecCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90" MinWidth="90">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentExecCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Execs" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding BaselinePlanCount}" ElementStyle="{StaticResource NumericCell}" Width="80">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselinePlanCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Base Plans" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding BaselinePlanCount}" ElementStyle="{StaticResource NumericCell}" Width="80" MinWidth="80">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselinePlanCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Base Plans" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RecentPlanCount}" ElementStyle="{StaticResource NumericCell}" Width="80">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentPlanCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Plans" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding RecentPlanCount}" ElementStyle="{StaticResource NumericCell}" Width="80" MinWidth="80">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentPlanCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Plans" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding DurationRegressionPercent, StringFormat='{}{0:N2}%'}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationRegressionPercent" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Duration &#x0394;%" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding DurationRegressionPercent, StringFormat='{}{0:N2}%'}" ElementStyle="{StaticResource NumericCell}" Width="110" MinWidth="110">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationRegressionPercent" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Duration &#x0394;%" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding BaselineDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Base Dur (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding BaselineDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100" MinWidth="100">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Base Dur (ms)" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RecentDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Dur (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding RecentDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110" MinWidth="110">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Dur (ms)" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding CpuRegressionPercent, StringFormat='{}{0:N2}%'}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CpuRegressionPercent" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="CPU &#x0394;%" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding CpuRegressionPercent, StringFormat='{}{0:N2}%'}" ElementStyle="{StaticResource NumericCell}" Width="100" MinWidth="100">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CpuRegressionPercent" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="CPU &#x0394;%" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding BaselineCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Base CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding BaselineCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100" MinWidth="100">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Base CPU (ms)" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RecentCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding RecentCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110" MinWidth="110">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent CPU (ms)" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding BaselineAbortedCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineAbortedCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Timeouts" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding BaselineAbortedCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100" MinWidth="100">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineAbortedCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Timeouts" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RecentAbortedCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentAbortedCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Timeouts" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding RecentAbortedCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100" MinWidth="100">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentAbortedCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Timeouts" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding BaselineAbortedCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineAbortedCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Timeouts CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding BaselineAbortedCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130" MinWidth="130">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineAbortedCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Timeouts CPU (ms)" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RecentAbortedCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentAbortedCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Timeouts CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding RecentAbortedCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130" MinWidth="130">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentAbortedCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Timeouts CPU (ms)" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding BaselineAbortedDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineAbortedDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Timeouts Dur (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding BaselineAbortedDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130" MinWidth="130">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineAbortedDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Timeouts Dur (ms)" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RecentAbortedDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentAbortedDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Timeouts Dur (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding RecentAbortedDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130" MinWidth="130">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentAbortedDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Timeouts Dur (ms)" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding BaselineAbortedPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineAbortedPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Timeouts/hr" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding BaselineAbortedPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110" MinWidth="110">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineAbortedPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Timeouts/hr" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RecentAbortedPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentAbortedPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Timeouts/hr" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding RecentAbortedPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110" MinWidth="110">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentAbortedPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Timeouts/hr" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding BaselineExceptionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineExceptionCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Errors" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding BaselineExceptionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100" MinWidth="100">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineExceptionCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Errors" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RecentExceptionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentExceptionCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Errors" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding RecentExceptionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100" MinWidth="100">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentExceptionCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Errors" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding BaselineExceptionCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineExceptionCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Errors CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding BaselineExceptionCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130" MinWidth="130">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineExceptionCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Errors CPU (ms)" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RecentExceptionCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentExceptionCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Errors CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding RecentExceptionCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130" MinWidth="130">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentExceptionCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Errors CPU (ms)" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding BaselineExceptionDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineExceptionDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Errors Dur (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding BaselineExceptionDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130" MinWidth="130">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineExceptionDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Errors Dur (ms)" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RecentExceptionDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentExceptionDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Errors Dur (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding RecentExceptionDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130" MinWidth="130">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentExceptionDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Errors Dur (ms)" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding BaselineExceptionPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineExceptionPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Errors/hr" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding BaselineExceptionPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110" MinWidth="110">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineExceptionPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Errors/hr" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RecentExceptionPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentExceptionPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Errors/hr" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding RecentExceptionPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110" MinWidth="110">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentExceptionPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Errors/hr" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding BaselineRegularPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineRegularPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Execs/hr" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding BaselineRegularPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110" MinWidth="110">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineRegularPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Execs/hr" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RecentRegularPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentRegularPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Execs/hr" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding RecentRegularPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110" MinWidth="110">
+                                        <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentRegularPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Execs/hr" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
@@ -2512,10 +2514,11 @@
                             ItemContainerStyle="{DynamicResource SubTabItemStyle}"
                             SelectionChanged="FileIoSubTabs_SelectionChanged">
                     <TabItem Header="File I/O Latency">
-                        <Grid>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #6652: scrolls when the charts cannot all keep their minimum height -->
+                        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="300">
                             <Grid.RowDefinitions>
-                                <RowDefinition Height="*"/>
-                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                             </Grid.RowDefinitions>
                             <Border Grid.Row="0" Margin="0,0,0,4">
                                 <scottplot:WpfPlot x:Name="FileIoReadChart"/>
@@ -2524,6 +2527,7 @@
                                 <scottplot:WpfPlot x:Name="FileIoWriteChart"/>
                             </Border>
                         </Grid>
+                        </ScrollViewer>
                     </TabItem>
                     <TabItem Header="File I/O Throughput">
                         <Grid>
@@ -2546,11 +2550,12 @@
              space usage (user/internal/version-store), total allocated size, and per-file I/O
              latency. -->
         <TabItem Header="tempdb">
-            <Grid Margin="8">
+            <ScrollViewer Margin="8" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #6652: scrolls when the charts cannot all keep their minimum height -->
+            <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="450">
                 <Grid.RowDefinitions>
-                    <RowDefinition Height="*"/>
-                    <RowDefinition Height="*"/>
-                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                 </Grid.RowDefinitions>
 
                 <Border Grid.Row="0" Margin="0,0,0,4">
@@ -2565,6 +2570,7 @@
                     <scottplot:WpfPlot x:Name="TempDbFileIoChart"/>
                 </Border>
             </Grid>
+            </ScrollViewer>
         </TabItem>
 
         <!-- Blocking Tab — Lite's full sub-tab structure (ServerTab.xaml:1435-1672): "Trends" (lock-wait
@@ -2583,14 +2589,15 @@
                             ItemContainerStyle="{DynamicResource SubTabItemStyle}"
                             SelectionChanged="BlockingSubTabs_SelectionChanged">
                     <TabItem Header="Trends">
-                        <Grid>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #6652: scrolls when the charts cannot all keep their minimum height -->
+                        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="540">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                             </Grid.RowDefinitions>
                             <!-- One "Showing since" banner per chart (#4966): the three charts draw from three different floors
                                  (wait_stats, the blocked-process-report sources, deadlocks), so no one note is true of all of them. -->
@@ -2616,6 +2623,7 @@
                                 <scottplot:WpfPlot x:Name="DeadlockTrendChart"/>
                             </Border>
                         </Grid>
+                        </ScrollViewer>
                     </TabItem>
                     <!-- Blocking Stats — the blocking- AND deadlock-SEVERITY companion to the count-only
                          "Trends" tab (the "are blocks/deadlocks getting WORSE, not just more frequent" signal).
@@ -4019,7 +4027,7 @@
                         <DataGrid x:Name="CollectionHealthGrid" Style="{StaticResource DarkGrid}"
                                   MouseDoubleClick="CollectionHealthGrid_MouseDoubleClick">
                             <DataGrid.Columns>
-                                <DataGridTemplateColumn Header="Run now" Width="85" CanUserSort="False">
+                                <DataGridTemplateColumn Header="Run now" Width="85" MinWidth="85" CanUserSort="False">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
                                             <Button Content="Run now" Click="RunCollectorNow_Click"
@@ -4028,48 +4036,48 @@
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>
-                                <DataGridTextColumn Binding="{Binding CollectorName}" Width="180">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectorName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collector" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding CollectorName}" Width="180" MinWidth="180">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectorName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collector" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding HealthStatus}" Width="90">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HealthStatus" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding HealthStatus}" Width="90" MinWidth="90">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HealthStatus" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding TotalRuns, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalRuns" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Runs" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding TotalRuns, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80" MinWidth="80">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalRuns" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Runs" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding SuccessCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SuccessCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Success" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding SuccessCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80" MinWidth="80">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SuccessCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Success" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding ErrorCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ErrorCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Errors" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding ErrorCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80" MinWidth="80">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ErrorCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Errors" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding YieldCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="YieldCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Yields" FontWeight="Bold" VerticalAlignment="Center" ToolTip="Deliberate 1-second lock-timeout yields: the snapshot collector stepped aside instead of joining a blocking chain. A signal about lock contention on the monitored server, not a collection failure."/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding YieldCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80" MinWidth="80">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="YieldCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Yields" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap" ToolTip="Deliberate 1-second lock-timeout yields: the snapshot collector stepped aside instead of joining a blocking chain. A signal about lock contention on the monitored server, not a collection failure."/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding AbandonedCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AbandonedCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Abandoned" FontWeight="Bold" VerticalAlignment="Center" ToolTip="Cycles the 120-second whole-server wall-clock budget gave up on. Unlike a yield, which retries, an abandoned cycle stored nothing and advanced no watermark - it is collected data you do not have. A sustained rate above 0.5% bands the collector WARNING."/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding AbandonedCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90" MinWidth="90">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AbandonedCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Abandoned" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap" ToolTip="Cycles the 120-second whole-server wall-clock budget gave up on. Unlike a yield, which retries, an abandoned cycle stored nothing and advanced no watermark - it is collected data you do not have. A sustained rate above 0.5% bands the collector WARNING."/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding FailureRatePercent, StringFormat=N1}" ElementStyle="{StaticResource NumericCell}" Width="85">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FailureRatePercent" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Fail %" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding FailureRatePercent, StringFormat=N1}" ElementStyle="{StaticResource NumericCell}" Width="85" MinWidth="85">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FailureRatePercent" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Fail %" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding AvgDurationFormatted}" Width="120" SortMemberPath="AvgDurationMs">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding AvgDurationFormatted}" Width="120" MinWidth="120" SortMemberPath="AvgDurationMs">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Duration" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding LastSuccessFormatted}" Width="140" SortMemberPath="LastSuccessTime">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSuccessFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Success" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding LastSuccessFormatted}" Width="140" MinWidth="140" SortMemberPath="LastSuccessTime">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSuccessFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Success" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding LastRunFormatted}" Width="140" SortMemberPath="LastRunTime">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastRunFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Run" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding LastRunFormatted}" Width="140" MinWidth="140" SortMemberPath="LastRunTime">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastRunFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Run" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding LastErrorFormatted}" Width="140" SortMemberPath="LastErrorTime">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastErrorFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error At" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding LastErrorFormatted}" Width="140" MinWidth="140" SortMemberPath="LastErrorTime">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastErrorFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error At" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding LastError}" Width="*">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastError" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding LastError}" Width="*" MinWidth="160">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastError" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <!-- #1837: what a NON-failing run reported. Blank for a plainly healthy collector; "(all N runs)" is the persistently-empty case. A collector's label=value counts read as its latest NOTED run's ("latest run:" when every run carried them). Informational only - the Status column's band is unchanged. -->
-                                <DataGridTextColumn Binding="{Binding NoteFormatted}" Width="*">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="NoteFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Note" FontWeight="Bold" VerticalAlignment="Center" ToolTip="What a non-failing run reported: an enumeration that came back with 0 items, or items whose enumeration probe failed. Not an error - an empty target is legitimately empty. A collector's label=value counts are its latest noted run's, not a window total."/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding NoteFormatted}" Width="*" MinWidth="160">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="NoteFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Note" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap" ToolTip="What a non-failing run reported: an enumeration that came back with 0 items, or items whose enumeration probe failed. Not an error - an empty target is legitimately empty. A collector's label=value counts are its latest noted run's, not a window total."/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>
