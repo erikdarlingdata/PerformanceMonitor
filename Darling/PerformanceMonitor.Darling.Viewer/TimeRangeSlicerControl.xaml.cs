@@ -247,6 +247,55 @@ public partial class TimeRangeSlicerControl : UserControl
         return Math.Clamp((double)(utc.Ticks - DataStartUtc.Ticks) / span, 0, 1);
     }
 
+    /// <summary>
+    /// #6651 (#5644 W7): the runs of consecutive points the strip draws as separate pieces, as (first index, count). A jump between two
+    /// neighbouring times of more than <see cref="TimeSeriesGaps"/>'s threshold (three times the median spacing; a series of fewer than
+    /// three points has none) ends a run, so a stretch with no samples is a break and not a line across it. Times ascend.
+    /// </summary>
+    internal static List<(int Start, int Count)> SplitAtGaps(IReadOnlyList<DateTime> times)
+    {
+        var xs = new double[times.Count];
+        var indexes = new double[times.Count];
+        for (var i = 0; i < xs.Length; i++)
+        {
+            xs[i] = times[i].ToOADate();
+            indexes[i] = i;
+        }
+
+        var (_, broken) = TimeSeriesGaps.BreakAtGaps(xs, indexes);
+        var runs = new List<(int Start, int Count)>();
+        var start = -1;
+        var count = 0;
+        foreach (var value in broken)
+        {
+            if (double.IsNaN(value))
+            {
+                if (count > 0)
+                {
+                    runs.Add((start, count));
+                }
+
+                start = -1;
+                count = 0;
+                continue;
+            }
+
+            if (count == 0)
+            {
+                start = (int)value;
+            }
+
+            count++;
+        }
+
+        if (count > 0)
+        {
+            runs.Add((start, count));
+        }
+
+        return runs;
+    }
+
     // ── Drawing ──
 
     public void Redraw()
@@ -278,13 +327,20 @@ public partial class TimeRangeSlicerControl : UserControl
             linePoints.Add(new Point(x, y));
         }
 
+        /* #6651 (#5644 W7): a stretch with no samples (the service host was off overnight) is a break in the strip, not a ramp or a flat
+           line across it. The break rule is the one the Viewer's line charts use (TimeSeriesGaps, three times the median spacing). */
+        var runs = SplitAtGaps(_data.Select(d => d.BucketTime).ToList());
+
         var fillBrush = FindBrush("SlicerChartFillBrush", "#332EAEF1");
         var areaGeo = new StreamGeometry();
         using (var ctx = areaGeo.Open())
         {
-            ctx.BeginFigure(new Point(linePoints[0].X, chartBottom), true, true);
-            foreach (var pt in linePoints) ctx.LineTo(pt, true, false);
-            ctx.LineTo(new Point(linePoints[^1].X, chartBottom), true, false);
+            foreach (var (start, count) in runs)
+            {
+                ctx.BeginFigure(new Point(linePoints[start].X, chartBottom), true, true);
+                for (int i = start; i < start + count; i++) ctx.LineTo(linePoints[i], true, false);
+                ctx.LineTo(new Point(linePoints[start + count - 1].X, chartBottom), true, false);
+            }
         }
         SlicerCanvas.Children.Add(new Path { Data = areaGeo, Fill = fillBrush });
 
@@ -292,8 +348,11 @@ public partial class TimeRangeSlicerControl : UserControl
         var lineGeo = new StreamGeometry();
         using (var ctx = lineGeo.Open())
         {
-            ctx.BeginFigure(linePoints[0], false, false);
-            for (int i = 1; i < linePoints.Count; i++) ctx.LineTo(linePoints[i], true, false);
+            foreach (var (start, count) in runs)
+            {
+                ctx.BeginFigure(linePoints[start], false, false);
+                for (int i = start + 1; i < start + count; i++) ctx.LineTo(linePoints[i], true, false);
+            }
         }
         SlicerCanvas.Children.Add(new Path { Data = lineGeo, Stroke = lineBrush, StrokeThickness = 1.5 });
 
