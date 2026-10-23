@@ -494,7 +494,7 @@ public sealed partial class DarlingMcpInvestigationTools
     }
 
     [McpServerTool(Name = "get_investigation_evidence"), Description(
-        "Reads the frozen evidence sections of one investigation request. Writes nothing. status ok, empty, not_found or " +
+        "Reads the frozen evidence sections of one investigation request, reported ones too. Writes nothing. status ok, empty, not_found or " +
         "already_claimed. <<GUIDE>> " +
         "The brief is composed once, at claim time; evidence that freezes later reaches you only as an evidence_ready event " +
         "from wait_for_investigation_requests. Call this with that event's request_id to read it. Each section carries its " +

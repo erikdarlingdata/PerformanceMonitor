@@ -2181,6 +2181,17 @@ if ($AddOperator) {
 # $existing was resolved back at 1b, which needs to know fresh-versus-upgrade before it decides whether a
 # bad install location is a refusal or a question. Nothing between there and here creates or removes the
 # service, so it is the same answer.
+# The registered path carries its quotes, as the MSI registers it (#6597). sc.exe strips a plain pair of quotes as it
+# parses its command line, which is why "`"$serviceExe`"" registered the path bare, so the value has to go in as
+# "\"path\"" (the outer pair is stripped, the \" pair is kept). How PowerShell turns a quoted native argument into a
+# command line differs between Windows PowerShell 5.1 and PowerShell 7.x (and by $PSNativeCommandArgumentPassing), so
+# the command line is handed over verbatim as ONE string through Start-Process, which behaves the same in all of them.
+function Invoke-ScWithQuotedBinPath([string]$verb, [string]$restOfLine) {
+    $argLine = "$verb `"$serviceName`" binPath= `"\`"$serviceExe\`"`" $restOfLine".TrimEnd()
+    $p = Start-Process -FilePath "$env:SystemRoot\System32\sc.exe" -ArgumentList $argLine -Wait -PassThru -NoNewWindow
+    return $p.ExitCode
+}
+
 if ($existing) {
     Write-Host "Service already exists - upgrading its binPath in place (config, store data, and credentials untouched)."
     if ($existing.Status -ne 'Stopped') {
@@ -2188,15 +2199,15 @@ if ($existing) {
         (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(60))
     }
 
-    & sc.exe config $serviceName binPath= "`"$serviceExe`"" | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "sc config failed ($LASTEXITCODE)." }
+    $scExit = Invoke-ScWithQuotedBinPath 'config' ''
+    if ($scExit -ne 0) { Fail "sc config failed ($scExit)." }
 }
 else {
     # The space after binPath=/start=/obj= is sc.exe syntax. The virtual service account is
     # password-less, per-service, unprivileged - and mandatory-in-practice for the bundled
     # PostgreSQL, which refuses to run with administrative privileges (LocalSystem bricks it).
-    & sc.exe create $serviceName binPath= "`"$serviceExe`"" start= auto obj= "NT SERVICE\$serviceName" | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "sc create failed ($LASTEXITCODE)." }
+    $scExit = Invoke-ScWithQuotedBinPath 'create' "start= auto obj= `"NT SERVICE\$serviceName`""
+    if ($scExit -ne 0) { Fail "sc create failed ($scExit)." }
     Write-Host "Created service '$serviceName' (NT SERVICE virtual account, automatic start)."
 }
 
