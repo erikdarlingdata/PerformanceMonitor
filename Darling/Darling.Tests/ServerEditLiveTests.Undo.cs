@@ -47,15 +47,15 @@ public sealed partial class ServerEditLiveTests
         var ok = false;
         try
         {
-            await SeedServerAsync(rig.Owner, 5301, "undo-01", "undo-01.example.test", "integrated", null, null, ct);
+            await SeedServerAsync(rig.Owner, 5301, "zeta-01", "zeta-01.example.test", "integrated", null, null, ct);
             var before = await ScalarAsync<string>(rig.Owner, DefinitionSignatureSql + 5301, ct);
 
-            var edited = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "undo-01.example.test",
-                "{\"display_name\":\"Orders\",\"monthly_cost_usd\":120,\"host\":\"undo-09.example.test\",\"trust_server_certificate\":true}", Reachable, TestKeyRings.Healthy, null, ct));
+            var edited = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "zeta-01.example.test",
+                "{\"display_name\":\"Orders\",\"monthly_cost_usd\":120,\"host\":\"zeta-09.example.test\",\"trust_server_certificate\":true}", Reachable, TestKeyRings.Healthy, null, ct));
             Assert.Equal("updated", (string)edited["status"]!);
             Assert.NotEqual(before, await ScalarAsync<string>(rig.Owner, DefinitionSignatureSql + 5301, ct));
-            Assert.Equal("undo-01", (string)edited["previous"]!["display_name"]!);
-            Assert.Equal("undo-01.example.test", (string)edited["previous"]!["host"]!);
+            Assert.Equal("zeta-01", (string)edited["previous"]!["display_name"]!);
+            Assert.Equal("zeta-01.example.test", (string)edited["previous"]!["host"]!);
             Assert.False((bool)edited["previous"]!["trust_server_certificate"]!);
             Assert.Null(edited["undo_note"]);
 
@@ -64,8 +64,8 @@ public sealed partial class ServerEditLiveTests
             Assert.Equal(before, await ScalarAsync<string>(rig.Owner, DefinitionSignatureSql + 5301, ct));
 
             /* The undo carries the modified_at the edit returned, so a change made after the edit makes the replay a conflict, not an overwrite. */
-            var second = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "undo-01.example.test", "{\"display_name\":\"Second\"}", Reachable, TestKeyRings.Healthy, null, ct));
-            var later = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "undo-01.example.test", "{\"monthly_cost_usd\":9}", Reachable, TestKeyRings.Healthy, null, ct));
+            var second = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "zeta-01.example.test", "{\"display_name\":\"Second\"}", Reachable, TestKeyRings.Healthy, null, ct));
+            var later = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "zeta-01.example.test", "{\"monthly_cost_usd\":9}", Reachable, TestKeyRings.Healthy, null, ct));
             Assert.Equal("updated", (string)later["status"]!);
             var stale = Parse(await ReplayEditAsync(rig.Mcp, second["undo"], ct));
             Assert.Equal("conflict", (string)stale["status"]!);
@@ -86,26 +86,26 @@ public sealed partial class ServerEditLiveTests
         var ok = false;
         try
         {
-            await SeedServerAsync(rig.Owner, 5302, "undo-02", "undo-02.example.test", "sql", "monitor", "blob-02", ct);
+            await SeedServerAsync(rig.Owner, 5302, "zeta-02", "zeta-02.example.test", "sql", "monitor", "rem-blob-b2", ct);
 
-            var passwordOnly = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "undo-02.example.test", "{\"password\":\"Synth-Undo-Pw-2\"}", Reachable, TestKeyRings.Healthy, null, ct));
+            var passwordOnly = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "zeta-02.example.test", "{\"password\":\"Synth-Undo-Pw-2\"}", Reachable, TestKeyRings.Healthy, null, ct));
             Assert.Equal("updated", (string)passwordOnly["status"]!);
             Assert.Null(passwordOnly["undo"]);
             Assert.Contains("password", (string)passwordOnly["undo_note"]!, StringComparison.Ordinal);
             Assert.DoesNotContain("Synth-Undo-Pw-2", passwordOnly.ToJsonString(), StringComparison.Ordinal);
 
-            var mixed = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "undo-02.example.test",
+            var mixed = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "zeta-02.example.test",
                 "{\"display_name\":\"Renamed\",\"password\":\"Synth-Undo-Pw-3\"}", Reachable, TestKeyRings.Healthy, null, ct));
             Assert.Equal("updated", (string)mixed["status"]!);
             var arguments = mixed["undo"]!["arguments"]!.AsObject();
             var changes = JsonNode.Parse((string)arguments["changes_json"]!)!.AsObject();
-            Assert.Equal("undo-02", (string)changes["display_name"]!);
+            Assert.Equal("zeta-02", (string)changes["display_name"]!);
             Assert.False(changes.ContainsKey("password"));
             Assert.DoesNotContain("Synth-Undo-Pw", mixed.ToJsonString(), StringComparison.Ordinal);
             Assert.NotNull(mixed["undo_note"]);
 
             Assert.Equal("updated", (string)Parse(await ReplayEditAsync(rig.Mcp, mixed["undo"], ct))["status"]!);
-            Assert.Equal("undo-02", await ScalarAsync<string>(rig.Owner, "SELECT name FROM config_monitored_servers WHERE server_id = 5302", ct));
+            Assert.Equal("zeta-02", await ScalarAsync<string>(rig.Owner, "SELECT name FROM config_monitored_servers WHERE server_id = 5302", ct));
             ok = true;
         }
         finally
@@ -122,10 +122,10 @@ public sealed partial class ServerEditLiveTests
         var ok = false;
         try
         {
-            await SeedServerAsync(rig.Owner, 5305, "undo-05", "undo-05.example.test", "integrated", null, null, ct);
+            await SeedServerAsync(rig.Owner, 5305, "zeta-05", "zeta-05.example.test", "integrated", null, null, ct);
             await ExecAsync(rig.Owner, "UPDATE config_monitored_servers SET port = 1444 WHERE server_id = 5305", ct);
 
-            var cleared = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "undo-05.example.test", "{\"port\":0}", Reachable, TestKeyRings.Healthy, null, ct));
+            var cleared = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "zeta-05.example.test", "{\"port\":0}", Reachable, TestKeyRings.Healthy, null, ct));
             Assert.Equal("updated", (string)cleared["status"]!);
             Assert.Equal(1444, (int)cleared["previous"]!["port"]!);
             Assert.Contains("refused", (string)cleared["undo_note"]!, StringComparison.Ordinal);
@@ -151,9 +151,9 @@ public sealed partial class ServerEditLiveTests
         var ok = false;
         try
         {
-            await SeedServerAsync(rig.Owner, 5303, "undo-03", "undo-03.example.test", "integrated", null, null, ct);
+            await SeedServerAsync(rig.Owner, 5303, "zeta-03", "zeta-03.example.test", "integrated", null, null, ct);
             var answer = Parse(await Edit.AddServersAsync(rig.Owner,
-                "[{\"host\":\"undo-10.example.test\"},{\"host\":\"undo-03.example.test\"}]", Reachable, ct, TestKeyRings.Healthy));
+                "[{\"host\":\"zeta-10.example.test\"},{\"host\":\"zeta-03.example.test\"}]", Reachable, ct, TestKeyRings.Healthy));
             Assert.Equal(1, (int)answer["added"]!);
             var results = answer["results"]!.AsArray();
             Assert.Equal("added", (string)results[0]!["status"]!);
@@ -185,20 +185,20 @@ public sealed partial class ServerEditLiveTests
         var ok = false;
         try
         {
-            await SeedServerAsync(rig.Owner, 5304, "undo-04", "undo-04.example.test", "sql", "monitor", "blob-04", ct);
+            await SeedServerAsync(rig.Owner, 5304, "zeta-04", "zeta-04.example.test", "sql", "monitor", "rem-blob-b4", ct);
             await ExecAsync(rig.Owner, "UPDATE config_monitored_servers SET trust_server_certificate = TRUE, encrypt_mode = 'Strict', read_only_intent = TRUE WHERE server_id = 5304", ct);
             var tags = new ServerTagStore(rig.Owner, 30);
             var tag = Assert.IsType<ServerTagWriteResult.Ok>(await tags.CreateAsync("East", null, null, ct)).Tag!;
             await tags.AssignAsync(tag.Id, [5304], ct);
 
-            var removed = Parse(await Edit.RemoveServer(rig.Owner, "undo-04"));
+            var removed = Parse(await Edit.RemoveServer(rig.Owner, "zeta-04"));
             Assert.Equal("removed", (string)removed["status"]!);
             Assert.Equal(0L, await ScalarAsync<long>(rig.Owner, "SELECT count(*) FROM config_monitored_servers", ct));
             var previous = removed["previous"]!;
-            Assert.Equal("undo-04.example.test", (string)previous["host"]!);
+            Assert.Equal("zeta-04.example.test", (string)previous["host"]!);
             Assert.Equal("Strict", (string)previous["encrypt_mode"]!);
             Assert.Equal(Edit.PasswordPlaceholder, (string)previous["password"]!);
-            Assert.DoesNotContain("blob-04", removed.ToJsonString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("rem-blob-b4", removed.ToJsonString(), StringComparison.Ordinal);
             Assert.Contains("tag assignments", (string)removed["undo_note"]!, StringComparison.Ordinal);
 
             var undo = removed["undo"]!;
@@ -208,7 +208,7 @@ public sealed partial class ServerEditLiveTests
             Assert.Equal(1, (int)replay["added"]!);
 
             /* The definition is back (same id: it is derived from the connection); the tag assignment the removal deleted is not. */
-            Assert.Equal("undo-04|undo-04.example.test|sql|monitor|Strict|t|t",
+            Assert.Equal("zeta-04|zeta-04.example.test|sql|monitor|Strict|t|t",
                 await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', name, host, auth, username, encrypt_mode, trust_server_certificate, read_only_intent) FROM config_monitored_servers", ct));
             Assert.Equal(0L, await ScalarAsync<long>(rig.Owner, "SELECT count(*) FROM server_tag_map", ct));
             ok = true;

@@ -274,6 +274,61 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
     }
 
     [Fact]
+    public async Task UpdateUndo_OnAnUnchangedResendOfAPassedExpiry_RestoresThatSameExpiry_WithNoNote()
+    {
+        // #6514 round 2: an update that resends the rule's own already-passed expiry unchanged (the tool accepts it, it is the current
+        // value) while it changes another field did not touch the expiry. Its undo must put the same expiry back and carry no
+        // "already passed" note; the clear-and-note path is only for a call that actually changed the expiry.
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var dataSource = await MigrateAndOpenAsync(connectionString, ct);
+
+        var prefix = "car_expu_" + Guid.NewGuid().ToString("N") + "_";
+        var definition = DefinitionFor("no_such_server_" + prefix);
+        var bodySucceeded = false;
+        try
+        {
+            var created = JsonNode.Parse(await DarlingMcpCustomAlertTools.CreateCustomAlertRule(
+                dataSource, prefix + "resend", definition,
+                expires_at_utc: DateTime.UtcNow.AddDays(3).ToString("o", CultureInfo.InvariantCulture)))!;
+            var id = (long)created["id"]!;
+            await using (var age = dataSource.CreateCommand(
+                "UPDATE custom_alert_rules SET expires_at_utc = (now() AT TIME ZONE 'UTC') - interval '1 minute' WHERE id = $1"))
+            {
+                age.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
+                await age.ExecuteNonQueryAsync(ct);
+            }
+
+            var got = JsonNode.Parse(await DarlingMcpCustomAlertTools.GetCustomAlertRule(dataSource, id))!;
+            Assert.True((bool)got["expired"]!);
+            var passedExpiry = (string)got["expires_at_utc"]!;
+
+            // Resend the same passed expiry and change the description.
+            var resent = JsonNode.Parse(await DarlingMcpCustomAlertTools.UpdateCustomAlertRule(
+                dataSource, id, (int)got["version"]!, description: "resent", expires_at_utc: passedExpiry))!;
+            Assert.NotEqual("invalid", (string?)resent["status"]);
+            Assert.Equal(passedExpiry, (string?)resent["expires_at_utc"]);
+            Assert.Null((string?)resent["undo_note"]);
+            var undoArguments = resent["undo"]!["arguments"]!;
+            Assert.Equal(passedExpiry, (string?)undoArguments["expires_at_utc"]);
+
+            // The undo replays cleanly and the expiry is unchanged.
+            var replayed = JsonNode.Parse(await DarlingMcpCustomAlertTools.UpdateCustomAlertRule(
+                dataSource, (long)undoArguments["rule_id"]!, (int)undoArguments["version"]!,
+                description: (string?)undoArguments["description"], expires_at_utc: (string?)undoArguments["expires_at_utc"]))!;
+            Assert.NotEqual("invalid", (string?)replayed["status"]);
+            var after = JsonNode.Parse(await DarlingMcpCustomAlertTools.GetCustomAlertRule(dataSource, id))!;
+            Assert.Equal(passedExpiry, (string?)after["expires_at_utc"]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanAsync(connectionString, bodySucceeded, prefix, 0);
+        }
+    }
+
+    [Fact]
     public async Task EnabledCap_DoesNotCountAnExpiredRule()
     {
         var connectionString = RequireLivePostgres();
