@@ -22,6 +22,7 @@ permissions:
   statuses: write
   issues: write
   pull-requests: read
+  actions: read # the verdict job asks whether a newer run of this workflow exists for the pull request (#6656)
 
 # A new push to a pull request cancels that pull request's earlier run. Dev pushes never cancel a running run: at most one
 # runs and one newest waits, so every run covers every merge up to its SHA.
@@ -338,8 +339,6 @@ jobs:
     steps:
       - name: Set CI result
         id: verdict
-        # A cancelled workflow run posts no CI result: a newer run on the same head owns the status, or it stays pending; a test leg that times out still posts failure.
-        if: ${{ !cancelled() }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -352,6 +351,7 @@ jobs:
           BUILD_RESULT: ${{ needs.build.result }}
           TEST_RESULT: ${{ needs.test.result }}
           TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           set -uo pipefail
 
@@ -370,6 +370,19 @@ jobs:
             want_test=skipped;  [ "${PLAN_LEGS}" != "0" ] && want_test=success
             [ "${BUILD_RESULT}" = "${want_build}" ] || { state=failure; failed="${failed} build (${BUILD_RESULT})"; }
             [ "${TEST_RESULT}" = "${want_test}" ]   || { state=failure; failed="${failed} test (${TEST_RESULT})"; }
+          fi
+          # #6656: a run that a newer push or ready-for-review replaced is cancelled, but cancelled() inside this job reports the
+          # job's own state, so the step cannot tell. Ask the API instead: when a newer run of this workflow exists for this pull
+          # request, it sets CI result and this one posts no failure. A test leg that hits its timeout also reports cancelled, but
+          # no newer run exists then, so that failure still posts. If the call fails, post as before.
+          if [ "${state}" = "failure" ] && [ "${EVENT_NAME}" = "pull_request" ]; then
+            newer=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/pr.yml/runs?event=pull_request&branch=${HEAD_REF}&per_page=20"               --jq "[.workflow_runs[] | select(.id > ${GITHUB_RUN_ID})] | length" 2>/dev/null) || newer=""
+            if [[ "${newer}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::notice title=CI result left to a newer run::A newer run of this workflow exists on this pull request, so it sets CI result and this run (${failed# }) posts no failure."
+              echo "state=" >> "${GITHUB_OUTPUT}"
+              echo "failed=" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
           fi
           if [ "${state}" = "failure" ] && [ "${PLAN_OUTCOME}" != "train-blocked" ]; then
             desc="CI failed: ${failed# }"
