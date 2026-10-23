@@ -132,6 +132,9 @@ public sealed class TuningStartPathOneBuildTests
     /// (drop_chunks, decompress_chunk, VACUUM FULL). It must give up at the create lock bound, not at the 300 s setup
     /// timeout, then fail closed onto the one-build budget (with a Warning naming the table), and the connection must stay
     /// usable: the sweep goes on to the CREATE on the same connection, which finds the table busy too, and a later start builds the index.
+    /// #6539: the ALTER TABLE ... SET statements on the same table are bounded the same way, so the WHOLE start returns in well
+    /// under a minute (it sat on the first ALTER for the full 300 s setup timeout before), logs the skipped table at Information,
+    /// and a later pass applies the setting.
     /// </summary>
     [Fact]
     public async Task AnEmptinessCheck_ThatFindsTheTableLockedExclusively_GivesUpQuickly_AndALaterSweepBuildsTheIndex()
@@ -149,6 +152,8 @@ public sealed class TuningStartPathOneBuildTests
         await TuningStartPasses.ConvergeAsync(body, ct);
         await SeedStatsRowsAsync(body, ct);
         await Exec(body, "DROP INDEX collect." + PgTableTuning.QueryStatsRestartRowIndexName, ct);
+        await Exec(body, "ALTER TABLE collect.query_stats RESET (autovacuum_vacuum_insert_scale_factor, autovacuum_vacuum_insert_threshold)", ct);
+        Assert.False(await InsertTuningAppliedAsync(body, ct));
 
         await using var holder = new NpgsqlConnection(scratch.ConnectionString);
         await holder.OpenAsync(ct);
@@ -158,11 +163,11 @@ public sealed class TuningStartPathOneBuildTests
             await Exec(holder, "LOCK TABLE collect.query_stats IN ACCESS EXCLUSIVE MODE", ct);
             var busy = new CapturingTestLogger();
 
-            /* The sweep's later ALTER TABLE ... SET statements are unbounded and queue behind this lock for the full
-               setup timeout (a separate, older gap), so the sweep is cut off at 40 s. By then the bounded emptiness check
-               (5 s) and the bounded CREATE (5 s) have both given up and logged; with the old 300 s check, neither has. */
+            /* The whole start is bounded: the emptiness check (5 s), the CREATE (5 s) and each ALTER TABLE ... SET on the
+               locked table (5 s apiece) all give up, about 20 s in all. The token is cut at 60 s: a start that is still
+               waiting then (the ALTER waited the full 300 s before #6539) fails the cut assertion below. */
             using var cut = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cut.CancelAfter(TimeSpan.FromSeconds(40));
+            cut.CancelAfter(TimeSpan.FromSeconds(60));
             try
             {
                 await PgTableTuning.ApplyAsync(body, busy, cut.Token);
@@ -170,6 +175,12 @@ public sealed class TuningStartPathOneBuildTests
             catch (OperationCanceledException) when (cut.IsCancellationRequested && !ct.IsCancellationRequested)
             {
             }
+
+            Assert.False(cut.IsCancellationRequested, "the whole start should give up on the locked table in well under 60 s: " + busy.Joined);
+            Assert.Contains(busy.Lines, l => l.StartsWith("Information:", StringComparison.Ordinal)
+                && l.Contains("collect.query_stats", StringComparison.Ordinal)
+                && l.Contains("not applied this pass", StringComparison.Ordinal));
+            Assert.False(await InsertTuningAppliedAsync(body, ct), busy.Joined);
 
             Assert.Contains(busy.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal)
                 && l.Contains("collect.query_stats", StringComparison.Ordinal)
@@ -189,6 +200,15 @@ public sealed class TuningStartPathOneBuildTests
         var later = new CapturingTestLogger();
         await PgTableTuning.ApplyAsync(restart, later, ct);
         Assert.True(await IndexExistsAsync(restart, PgTableTuning.QueryStatsRestartRowIndexName, ct), later.Joined);
+        Assert.True(await InsertTuningAppliedAsync(restart, ct), later.Joined);
+    }
+
+    private static async Task<bool> InsertTuningAppliedAsync(NpgsqlConnection c, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand(
+            "SELECT COALESCE(array_to_string(c.reloptions, ','), '') LIKE '%insert_scale_factor%' FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            + "WHERE n.nspname = 'collect' AND c.relname = 'query_stats'", c);
+        return (bool)(await cmd.ExecuteScalarAsync(ct))!;
     }
 
     /// <summary>The first-missing index in list order is the earliest start-path index, so the legacy-row index goes before the restart-row ones.</summary>
