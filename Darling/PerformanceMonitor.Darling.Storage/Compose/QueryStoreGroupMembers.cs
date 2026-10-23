@@ -14,7 +14,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 
-namespace PerformanceMonitor.Darling.Service;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// #5582: how many members the group dimension of a Query Store RankedTimeSeries panel has, so the compiler can bound the
@@ -72,7 +72,8 @@ WHERE n.nspname = 'collect'
     /// cancellation: a fault leaves it unknown, which compiles the two-scan text.
     /// </summary>
     internal static async Task<long?> ResolveAsync(
-        NpgsqlConnection connection, PanelPlan plan, int serversInScope, CancellationToken cancellationToken)
+        NpgsqlConnection connection, PanelPlan plan, int serversInScope, CancellationToken cancellationToken,
+        ILogger? logger = null, int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds)
     {
         if (plan.Mode != PanelMode.RankedTimeSeries)
         {
@@ -96,7 +97,7 @@ WHERE n.nspname = 'collect'
                 else if (string.Equals(dimension.Column, "database_name", StringComparison.Ordinal)
                     || string.Equals(dimension.Column, "module_name", StringComparison.Ordinal))
                 {
-                    counts.Add(new MemberCount(await NDistinctMembersAsync(connection, dimension.Column, cancellationToken), true));
+                    counts.Add(new MemberCount(await NDistinctMembersAsync(connection, dimension.Column, cancellationToken, commandTimeoutSeconds: commandTimeoutSeconds), true));
                 }
                 else
                 {
@@ -108,7 +109,7 @@ WHERE n.nspname = 'collect'
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ReadScope.Current?.Logger?.LogDebug(ex, "The #5582 Query Store group-member count could not be read; the panel compiles the two-scan text.");
+            logger?.LogDebug(ex, "The #5582 Query Store group-member count could not be read; the panel compiles the two-scan text.");
             return null;
         }
     }
@@ -134,9 +135,9 @@ WHERE n.nspname = 'collect'
     }
 
     /// <summary>One column's member count from <c>pg_stats</c>, or null when there is no statistics row or no usable <c>reltuples</c>.</summary>
-    internal static async Task<double?> NDistinctMembersAsync(NpgsqlConnection connection, string column, CancellationToken cancellationToken, string table = WideTable)
+    internal static async Task<double?> NDistinctMembersAsync(NpgsqlConnection connection, string column, CancellationToken cancellationToken, string table = WideTable, int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds)
     {
-        await using var command = new NpgsqlCommand(NDistinctSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+        await using var command = new NpgsqlCommand(NDistinctSql, connection) { CommandTimeout = commandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Name, Value = column });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Name, Value = table });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

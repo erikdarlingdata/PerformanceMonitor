@@ -57,7 +57,7 @@ public sealed class ChartWindowDomainTests
         "Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"));
 
     private static string ComposeSpecCs => ReadRepoFileLf(Path.Combine(
-        "Darling", "PerformanceMonitor.Darling.Service", "Compose", "ComposeSpec.cs"));
+        "Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposeSpec.cs"));
 
     /// <summary>
     /// The renderer honours an optional window as its x-domain, keeps the data extent SEPARATE (so a sparse
