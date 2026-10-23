@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -24,6 +25,49 @@ public sealed class DarlingMcpQueryStoreHistoryToolsTests
 {
     private static MethodInfo Tool() =>
         typeof(DarlingMcpQueryStoreHistoryTools).GetMethod(nameof(DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory))!;
+
+    private static ForcedPlanFact Fact(long plan, ForcedPlanState state, DateTime lastSeen, long query = 1) =>
+        new("Db", query, plan, state, lastSeen, lastSeen, null, lastSeen, null, 0, null, 0, null, Array.Empty<ForcedPlanOtherPlan>());
+
+    /// <summary>#6598: one plan with a REMOVED fact and a standing fact gives one fact, the standing one, even when the REMOVED one is newer.</summary>
+    [Fact]
+    public void PickForces_KeepsOneFactPerPlan_AndAStandingForceBeatsARemovedOne()
+    {
+        var t = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var picked = DarlingMcpQueryStoreHistoryTools.PickForces(new[]
+        {
+            Fact(7, ForcedPlanState.Removed, t.AddHours(2)),
+            Fact(7, ForcedPlanState.Working, t),
+            Fact(8, ForcedPlanState.Removed, t),
+            Fact(8, ForcedPlanState.Removed, t.AddHours(1)),
+            Fact(9, ForcedPlanState.Working, t, query: 2),
+        }, 1);
+        Assert.Equal(new long[] { 7, 8 }, picked.Select(f => f.PlanId).ToArray());
+        Assert.Equal(ForcedPlanState.Working, picked[0].State);
+        Assert.Equal(t.AddHours(1), picked[1].LastSeen);
+    }
+
+    /// <summary>#6598: a REMOVED force never pushes a standing force out of the cap.</summary>
+    [Fact]
+    public void PickForces_ListsStandingForcesBeforeRemovedOnes()
+    {
+        var t = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var facts = Enumerable.Range(1, 30).Select(i => Fact(i, ForcedPlanState.Removed, t)).Append(Fact(99, ForcedPlanState.Failing, t)).ToList();
+        var picked = DarlingMcpQueryStoreHistoryTools.PickForces(facts, 1);
+        Assert.Equal(99, picked[0].PlanId);
+        Assert.Contains(picked, f => f.PlanId == 99);
+    }
+
+    /// <summary>#6598: a REMOVED fact alone does not make a plan forced. Sampled-forced stays forced.</summary>
+    [Fact]
+    public void IsForced_IsSampledOrStanding_AndARemovedFactAloneIsNeither()
+    {
+        var t = DateTime.UtcNow;
+        Assert.False(DarlingMcpQueryStoreHistoryTools.IsForced(false, Fact(1, ForcedPlanState.Removed, t)));
+        Assert.True(DarlingMcpQueryStoreHistoryTools.IsForced(true, Fact(1, ForcedPlanState.Removed, t)));
+        Assert.True(DarlingMcpQueryStoreHistoryTools.IsForced(false, Fact(1, ForcedPlanState.Working, t)));
+        Assert.False(DarlingMcpQueryStoreHistoryTools.IsForced(false, null));
+    }
 
     [Fact]
     public void TheToolName_AndItsHeadDescription_AreWithinTheBudget()
