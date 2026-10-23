@@ -1836,7 +1836,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <c>not_found</c>); a server that took no write is 502. A viewer-role store is 403 before anything else, as the store kinds' undo answers it
     /// (the route checks that, then sweeps what this returns).
     /// </summary>
-    private static async Task<(JsonObject Body, int Status)> UndoPlanChangeAsync(HttpContext context, AgentChangeUndo changes, StoreOwnerSource? ownerSource, ILogger logger,
+    internal static async Task<(JsonObject Body, int Status)> UndoPlanChangeAsync(HttpContext context, AgentChangeUndo changes, StoreOwnerSource? ownerSource, ILogger logger,
         long id, string login)
     {
         var confirm = false;
@@ -1860,7 +1860,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
         }
 
-        var answer = await Mcp.DarlingMcpPlanForceTools.UndoPlanChangeAsync(changes, ownerSource?.Read(), logger, id, login, confirm, shown, context.RequestAborted);
+        /* #6569: an undo whose reply is lost journals a result-unknown action_called row, which only the store owner may write, so the plan undo runs on the owner source, as the
+           MCP undo does. The gate above (IsSignedInAdmin, CanDecide) stays on the web login: it is the web's own, not the journal writer's. */
+        var owner = ownerSource?.Read();
+        var planChanges = owner is null ? changes : new AgentChangeUndo(owner, McpCommandDeadlines.ReadSeconds);
+        var answer = await Mcp.DarlingMcpPlanForceTools.UndoPlanChangeAsync(planChanges, owner, logger, id, login, confirm, shown, context.RequestAborted);
         if (answer.Succeeded)
         {
             return (answer.ToJson(), StatusCodes.Status200OK);

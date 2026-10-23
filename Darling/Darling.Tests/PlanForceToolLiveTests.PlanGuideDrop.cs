@@ -208,6 +208,34 @@ public sealed partial class PlanForceToolLiveTests
         });
     }
 
+    /// <summary>
+    /// #6569 final review: the Undo re-creates a dropped guide through the create's own checks, so a guide that would not pass them (here, hints over the
+    /// 4,000,000-character cap, which the server took) is refused on a dry run and on a write, and nothing is dropped or journaled as a change.
+    /// </summary>
+    [Fact]
+    public async Task AGuideTheUndoCouldNotReCreate_IsRefusedOnADryRunAndOnAWrite_AndDropsNothing()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var name = "p_" + Guid.NewGuid().ToString("N")[..8];
+            var guide = "g_" + name;
+            await MakeProcedureAsync(c, name);
+            await MakeObjectGuideAsync(c, guide, name, hints: "OPTION (RECOMPILE /*" + new string('x', PerformanceMonitor.Darling.Remediation.PlanGuideDefinition.MaxText) + "*/)");
+            await TurnDropOnAsync(c);
+            var original = await GuideRowAsync(c, guide);
+            Assert.NotNull(original);
+
+            foreach (var dryRun in new[] { true, false })
+            {
+                var answer = Parse(await DropGuideAsync(c, guide, dryRun));
+                Assert.Equal("refused", (string?)answer["status"]);
+                Assert.Equal(DarlingMcpPlanForceTools.GuideNotUndoable, (string?)answer["reason"]);
+                Assert.Equal(original, await GuideRowAsync(c, guide));
+                Assert.Equal(0, await JournalActionRowsAsync(c));
+            }
+        });
+    }
+
     [Fact]
     public async Task ALoginWithAlterOnTheProcedureOnly_DropsAnObjectGuide_AndIsRefusedASqlGuideWithThePermissionSentence()
     {

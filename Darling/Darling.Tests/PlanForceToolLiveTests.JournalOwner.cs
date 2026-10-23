@@ -75,6 +75,59 @@ public sealed partial class PlanForceToolLiveTests
         return await DarlingMcpPlanUndoTools.RunAsync(mcp, c.Source, c.Log, calledId, confirm: true, (string?)shown["statement"], c.Ct);
     }
 
+    /// <summary>
+    /// #6569 final review: the web's plan Undo builds its journal writer on the store owner's source, as the MCP undo does, and keeps only the sign-in gate on the web login.
+    /// Here the web login is a login the journal's trigger holds (an admin login is held the same way): an Undo whose reply is lost still journals its result-unknown
+    /// row (kind plan_undo, result unknown, the person's name), which that login could not write itself.
+    /// </summary>
+    [Fact]
+    public async Task AWebPlanUndo_OnAStoreWhoseWebLoginIsHeldByTheJournalTrigger_JournalsItsResultUnknownRowOnTheOwner()
+    {
+        await RunAsMcpLoginAsync(async (c, webLogin) =>
+        {
+            var (query, planA, _) = await c.Sql.TwoPlansAsync("pjo6", c.Ct);
+            var forced = Parse(await DarlingMcpPlanForceTools.RunAsync(webLogin, c.Source, c.Log, force: true, "srv-7", c.Sql.Database, query, planA, c.Arg, dry_run: false, c.Ct));
+            Assert.Equal("done", (string?)forced["status"]);
+            var calledId = (long)forced["journal_id"]!;
+
+            var ownerSeam = new StoreOwnerSource();
+            ownerSeam.Publish(c.Source);
+            async Task<(JsonObject Body, int Status)> WebUndoAsync(string payload)
+            {
+                var http = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+                http.Request.Body = new System.IO.MemoryStream(System.Text.Encoding.UTF8.GetBytes(payload));
+                return await DarlingWebEndpoints.UndoPlanChangeAsync(http, new AgentChangeUndo(webLogin, 30), ownerSeam, c.Log, calledId, "alice");
+            }
+
+            var (shown, shownStatus) = await WebUndoAsync("{}");
+            Assert.Equal(200, shownStatus);
+            Assert.Equal(PlanUndoAnswer.Confirm, (string?)shown["status"]);
+            var confirm = new JsonObject { ["confirm"] = true, ["statement"] = (string?)shown["statement"] }.ToJsonString();
+
+            /* The real procedure runs and unforces the plan; then the reply is lost. */
+            PerformanceMonitor.Darling.Remediation.SqlServerRemediationExecutor.PlanWriteSeam.Value = async (command, token) =>
+            {
+                await command.ExecuteNonQueryAsync(token);
+                throw new System.IO.IOException("The connection was reset.");
+            };
+            (JsonObject Body, int Status) lost;
+            try
+            {
+                lost = await WebUndoAsync(confirm);
+            }
+            finally
+            {
+                PerformanceMonitor.Darling.Remediation.SqlServerRemediationExecutor.PlanWriteSeam.Value = null;
+            }
+
+            Assert.Equal(PlanUndoAnswer.OutcomeUnknown, (string?)lost.Body["status"]);
+            var attempt = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes, x => x.CalledId != calledId);
+            Assert.Equal("person:alice", attempt.Actor);
+            Assert.Equal(AgentChangeKinds.PlanUndo, attempt.Kind);
+            Assert.Equal(AgentChangeResult.Unknown, attempt.Result);
+        });
+    }
+
     [Fact]
     public async Task AForceThroughTheMcpLogin_JournalsItsRowsOnTheOwner_AndTheUndoStillWorks()
     {

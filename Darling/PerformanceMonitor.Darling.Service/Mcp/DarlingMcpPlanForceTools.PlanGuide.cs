@@ -34,6 +34,9 @@ public sealed partial class DarlingMcpPlanForceTools
     /// <summary>The refusal reason for an Azure SQL target (#6569).</summary>
     internal const string EngineNotSupported = "engine_not_supported";
 
+    /// <summary>The refusal reason for a drop of a guide its Undo could not re-create (#6569): the definition read does not pass the checks a create makes.</summary>
+    internal const string GuideNotUndoable = "guide_not_undoable";
+
     /* SERVERPROPERTY('EngineEdition') as the registry stores it: 5 is an Azure SQL Database, 8 an Azure SQL Managed Instance. */
     private const int AzureSqlDatabaseEdition = 5;
     private const int AzureManagedInstanceEdition = 8;
@@ -366,8 +369,20 @@ public sealed partial class DarlingMcpPlanForceTools
                     new { dry_run, statement = dry.Statement ?? statementText, before = new { database } });
             }
 
-            var disabled = dry.GuideDisabled == true;
             var read = dry.Guide;
+
+            /* 4b: the Undo re-creates the guide through the create's own checks, so a guide that would not pass them (hints or statement over the 4,000,000-character cap,
+               an OBJECT guide on a module name that does not normalize) is not dropped: the drop could not be undone. Refused on a dry run as well as a write, before the gate's permit is used. */
+            var (undoable, _, undoMessage) = PlanGuideDefinition.TryCreate(read.Name, read.Statement, read.Type, read.ModuleOrBatch, read.Params, read.Hints);
+            if (undoable is null)
+            {
+                var notUndoable = "Plan guide " + guideName + " was not dropped: its definition does not pass the checks a create makes ("
+                    + undoMessage!.Replace(" Nothing was run.", "", StringComparison.Ordinal) + "), so the Undo could not re-create it. Nothing was run.";
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, GuideNotUndoable, ct);
+                return Answer("refused", GuideNotUndoable, notUndoable, new { dry_run, statement = dry.Statement ?? statementText, before = new { database } });
+            }
+
+            var disabled = dry.GuideDisabled == true;
             var before = new { database, guide = GuideImage(read, disabled) };
             if (dry_run)
                 return Answer("dry_run", null, dry.Message + " A person can undo the drop from Agent changes: the undo re-creates the guide from the definition journaled with the drop.",
