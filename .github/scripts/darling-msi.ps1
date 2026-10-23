@@ -16,12 +16,26 @@
         'msiexec /i ... /qn' and takes the same snapshot. The two must be equal. The service must be Running, the
         store must come up (PostgreSQL accepting connections, data directory initialised), and the MSI log must
         carry the scripts' own output (it is how an install that rolled back is diagnosed).
+    M2-M3  The older release's script install (the 3.10.0 zip) is not taken over: the MSI is refused with 1603 and the
+        machine snapshot, darling.json and the Running service are unchanged (M2). The script's own uninstall, then the
+        MSI, installs over the kept folder and store, and darling.json is byte-identical and the store is the same one
+        (M3).
+    M4-M6  A major upgrade from one MSI to a newer one (built on the runner with a higher version) keeps the service
+        and darling.json, finds the install folder from the InstallFolder registry value and ignores an INSTALLFOLDER=
+        given on the upgrade (M4). An uninstall keeps the store and darling.json and the uninstall script runs to its
+        end (M5). An install and an uninstall with PURGEDATA=1 removes the store (M6).
+    M7  An install the script refuses (a folder under a user profile) fails in the PreStart custom action and rolls
+        back clean: no service, no marker, no files, no group, no firewall rules, no store.
 #>
 param(
-    [Parameter(Mandatory)][ValidateSet('M1')][string]$Leg,
+    [Parameter(Mandatory)][ValidateSet('M1', 'M2-M3', 'M4-M6', 'M7')][string]$Leg,
     [Parameter(Mandatory)][string]$Workspace,
     [Parameter(Mandatory)][string]$Payload,
-    [Parameter(Mandatory)][string]$Msi
+    [Parameter(Mandatory)][string]$Msi,
+    # M4-M6: the second, newer MSI (built from the same payload with a higher version).
+    [string]$MsiNew,
+    # M2-M3: the older release whose script install the MSI must refuse to take over.
+    [string]$OldRelease = '3.10.0'
 )
 $ErrorActionPreference = 'Continue'
 $svc = 'PerformanceMonitor Darling'
@@ -29,6 +43,7 @@ $groupName = 'PerformanceMonitor Darling Operators'
 $installRoot = 'C:\Program Files\PerformanceMonitorDarling'
 $storeFolder = 'C:\ProgramData\PerformanceMonitorDarling'
 $work = 'C:\darling-msi-work'
+$repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { 'erikdarlingdata/PerformanceMonitor' }
 $clock = [System.Diagnostics.Stopwatch]::StartNew()
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
@@ -144,63 +159,278 @@ function Get-Marker {
     return $v
 }
 
+# Compares two snapshots section by section and fails the leg on any difference.
+function Compare-Snapshots($ref, $diff, [string]$what) {
+    $bad = @()
+    foreach ($k in $ref.Keys) {
+        $d = Compare-Object -ReferenceObject (@("(section)") + @($ref[$k])) -DifferenceObject (@("(section)") + @($diff[$k]))
+        if ($d) {
+            $bad += $k
+            Write-Host "DIFFERENT: $k   (<= before, => after)"
+            $d | ForEach-Object { Write-Host "  $($_.SideIndicator) $($_.InputObject)" }
+        }
+        else { Write-Host "same: $k ($(@($ref[$k]).Count) lines)" }
+    }
+    if ($bad.Count -gt 0) { Fail-Leg "$what differs in: $($bad -join ', ')" }
+}
+
+# Runs msiexec, logging verbosely to <work>\<tag>.log, and returns its exit code. Each property is passed as NAME="value".
+function Invoke-Msi([string]$verb, [string]$msi, [string[]]$props, [string]$tag, [int]$timeoutMin = 20) {
+    $log = Join-Path $work "$tag.log"
+    $argList = @($verb, "`"$msi`"", '/qn', '/norestart', '/l*v', "`"$log`"") + $props
+    Write-Host "RUN msiexec.exe $($argList -join ' ')"
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList $argList -PassThru -NoNewWindow
+    $null = $p.Handle
+    if (-not $p.WaitForExit($timeoutMin * 60 * 1000)) { try { $p.Kill() } catch { }; Fail-Leg "msiexec $verb ($tag) did not finish within $timeoutMin minutes" }
+    $p.WaitForExit()
+    Write-Host "msiexec $verb ($tag) exit code $($p.ExitCode) after $([int]$sw.Elapsed.TotalSeconds)s"
+    return [int]$p.ExitCode
+}
+
+function Show-MsiLogErrors([string]$tag) {
+    Select-String -LiteralPath (Join-Path $work "$tag.log") -Pattern 'Return value 3|Error \d+\.|install-darling|uninstall-darling|WixQuietExec|Launch condition' | Select-Object -Last 25 | ForEach-Object { Write-Host $_.Line }
+}
+
+function Test-LogHas([string]$tag, [string]$text) {
+    return [bool](Select-String -LiteralPath (Join-Path $work "$tag.log") -SimpleMatch -Pattern $text -Quiet)
+}
+
+function Assert-MsiOk([int]$code, [string]$what, [string]$tag) {
+    if ($code -ne 0 -and $code -ne 3010) { Show-MsiLogErrors $tag; Fail-Leg "$what exited with $code" }
+}
+
+# The Add/Remove Programs record of THIS package: its DisplayVersion, or $null.
+function Get-ArpVersion {
+    $k = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
+        Get-ItemProperty -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'PerformanceMonitor Darling' } | Select-Object -First 1
+    if ($k) { return [string]$k.DisplayVersion } else { return $null }
+}
+
+function Get-ServicePath { return (@(& sc.exe qc $svc 2>&1 | Where-Object { $_ -match 'BINARY_PATH_NAME' }) -join '') }
+
+function Get-FileSha([string]$path) { if (Test-Path -LiteralPath $path) { return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash } else { return '(missing)' } }
+
+# A release zip is run elevated, so its SHA-256 is compared with the release's own SHA256SUMS.txt before anything is
+# extracted (the same check darling-upgrade-shapes.ps1 makes).
+function Get-ReleaseZip([string]$version) {
+    $zip = Join-Path $work "PerformanceMonitorDarling-$version.zip"
+    if (-not (Test-Path $zip)) {
+        gh release download "v$version" -R $repo -p "PerformanceMonitorDarling-$version.zip" -D $work --clobber
+        if ($LASTEXITCODE -ne 0) { Fail-Leg "could not download the $version release zip" }
+    }
+    $sums = Join-Path $work "SHA256SUMS-$version.txt"
+    if (-not (Test-Path $sums)) {
+        gh release download "v$version" -R $repo -p 'SHA256SUMS.txt' -O $sums --clobber
+        if ($LASTEXITCODE -ne 0) { Fail-Leg "the $version release ships no SHA256SUMS.txt to check its zip against" }
+    }
+    $name = Split-Path -Leaf $zip
+    $expected = @()
+    foreach ($line in (Get-Content -LiteralPath $sums)) {
+        if ($line -match '^\s*([0-9a-fA-F]{64})\s+\*?(\S+)\s*$' -and $Matches[2] -eq $name) { $expected += $Matches[1] }
+    }
+    if ($expected.Count -ne 1) { Fail-Leg "SHA256SUMS.txt of the $version release lists $name $($expected.Count) times, expected once" }
+    $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+    if ($actual -ne $expected[0]) { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue; Fail-Leg "$name does not match the SHA-256 in the $version release's SHA256SUMS.txt" }
+    Write-Host "checksum ok: $name $actual"
+    return $zip
+}
+
 if (-not [Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Fail-Leg 'the runner is not elevated' }
 if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { Fail-Leg "the runner already has a '$svc' service, so the leg would not start from a clean machine" }
 foreach ($p in $Payload, $Msi) { if (-not (Test-Path -LiteralPath $p)) { Fail-Leg "missing input: $p" } }
 if (-not (Test-Path -LiteralPath (Join-Path $Payload 'pg-runtime.zip'))) { Fail-Leg "the payload has no pg-runtime.zip, so the store could not come up" }
 
-# ---------------------------------------------------------------------------------------------------------------------
-Say 'ORACLE: install the payload with install-darling.ps1'
-New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
-Copy-Item -Path (Join-Path $Payload '*') -Destination $installRoot -Recurse -Force
-$code = Run-Script (Join-Path $installRoot 'install-darling.ps1') @('-NoOperatorPrompt') 'script-install' 900
-if ($code -ne '0') { Fail-Leg "install-darling.ps1 exited with $code" }
-Wait-StoreUp 'script install'
-$scriptSnap = Get-Snapshot
-Save-Snapshot $scriptSnap 'snapshot-script.txt'
-if ($null -ne (Get-Marker)) { Fail-Leg 'a script install wrote the MSI marker' }
+if ($Leg -eq 'M1') {
+    # ---------------------------------------------------------------------------------------------------------------------
+    Say 'ORACLE: install the payload with install-darling.ps1'
+    New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+    Copy-Item -Path (Join-Path $Payload '*') -Destination $installRoot -Recurse -Force
+    $code = Run-Script (Join-Path $installRoot 'install-darling.ps1') @('-NoOperatorPrompt') 'script-install' 900
+    if ($code -ne '0') { Fail-Leg "install-darling.ps1 exited with $code" }
+    Wait-StoreUp 'script install'
+    $scriptSnap = Get-Snapshot
+    Save-Snapshot $scriptSnap 'snapshot-script.txt'
+    if ($null -ne (Get-Marker)) { Fail-Leg 'a script install wrote the MSI marker' }
 
-Say 'ORACLE: remove the script install (uninstall-darling.ps1 keeps the store and darling.json; the leg deletes both, the group stays)'
-$code = Run-Script (Join-Path $installRoot 'uninstall-darling.ps1') @() 'script-uninstall' 600
-if ($code -ne '0') { Fail-Leg "uninstall-darling.ps1 exited with $code" }
-if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { Fail-Leg 'the service is still registered after uninstall-darling.ps1' }
-Remove-Tree $installRoot
-Remove-Tree $storeFolder
+    Say 'ORACLE: remove the script install (uninstall-darling.ps1 keeps the store and darling.json; the leg deletes both, the group stays)'
+    $code = Run-Script (Join-Path $installRoot 'uninstall-darling.ps1') @() 'script-uninstall' 600
+    if ($code -ne '0') { Fail-Leg "uninstall-darling.ps1 exited with $code" }
+    if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { Fail-Leg 'the service is still registered after uninstall-darling.ps1' }
+    Remove-Tree $installRoot
+    Remove-Tree $storeFolder
 
-# ---------------------------------------------------------------------------------------------------------------------
-Say 'MSI: silent install'
-$log = Join-Path $work 'msi.log'
-$sw = [System.Diagnostics.Stopwatch]::StartNew()
-$p = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', "`"$Msi`"", '/qn', '/norestart', '/l*v', "`"$log`"") -PassThru -NoNewWindow
-$null = $p.Handle
-if (-not $p.WaitForExit(20 * 60 * 1000)) { try { $p.Kill() } catch { }; Fail-Leg 'msiexec /i did not finish within 20 minutes' }
-$p.WaitForExit()
-Write-Host "msiexec /i exit code $($p.ExitCode) after $([int]$sw.Elapsed.TotalSeconds)s"
-if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
-    Select-String -LiteralPath $log -Pattern 'Return value 3|Error \d+\.|install-darling|WixQuietExec' | Select-Object -Last 25 | ForEach-Object { Write-Host $_.Line }
-    Fail-Leg "msiexec /i exited with $($p.ExitCode)"
-}
-Wait-StoreUp 'MSI install'
-
-$marker = Get-Marker
-if (-not $marker -or $marker.InstalledBy -ne 'msi') { Fail-Leg 'the MSI install did not write HKLM\SOFTWARE\PerformanceMonitor Darling InstalledBy=msi' }
-if (-not (Select-String -LiteralPath $log -SimpleMatch -Pattern 'PreStart done' -Quiet)) { Fail-Leg 'the MSI log does not carry the PreStart script output (WixQuietExec logging)' }
-$msiSnap = Get-Snapshot
-Save-Snapshot $msiSnap 'snapshot-msi.txt'
-
-# ---------------------------------------------------------------------------------------------------------------------
-Say 'COMPARE: the MSI install against the script install'
-$bad = @()
-foreach ($k in $scriptSnap.Keys) {
-    $d = Compare-Object -ReferenceObject (@("(section)") + @($scriptSnap[$k])) -DifferenceObject (@("(section)") + @($msiSnap[$k]))
-    if ($d) {
-        $bad += $k
-        Write-Host "DIFFERENT: $k   (<= script install, => MSI install)"
-        $d | ForEach-Object { Write-Host "  $($_.SideIndicator) $($_.InputObject)" }
+    # ---------------------------------------------------------------------------------------------------------------------
+    Say 'MSI: silent install'
+    $log = Join-Path $work 'msi.log'
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', "`"$Msi`"", '/qn', '/norestart', '/l*v', "`"$log`"") -PassThru -NoNewWindow
+    $null = $p.Handle
+    if (-not $p.WaitForExit(20 * 60 * 1000)) { try { $p.Kill() } catch { }; Fail-Leg 'msiexec /i did not finish within 20 minutes' }
+    $p.WaitForExit()
+    Write-Host "msiexec /i exit code $($p.ExitCode) after $([int]$sw.Elapsed.TotalSeconds)s"
+    if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+        Select-String -LiteralPath $log -Pattern 'Return value 3|Error \d+\.|install-darling|WixQuietExec' | Select-Object -Last 25 | ForEach-Object { Write-Host $_.Line }
+        Fail-Leg "msiexec /i exited with $($p.ExitCode)"
     }
-    else { Write-Host "same: $k ($(@($scriptSnap[$k]).Count) lines)" }
+    Wait-StoreUp 'MSI install'
+
+    $marker = Get-Marker
+    if (-not $marker -or $marker.InstalledBy -ne 'msi') { Fail-Leg 'the MSI install did not write HKLM\SOFTWARE\PerformanceMonitor Darling InstalledBy=msi' }
+    if (-not (Select-String -LiteralPath $log -SimpleMatch -Pattern 'PreStart done' -Quiet)) { Fail-Leg 'the MSI log does not carry the PreStart script output (WixQuietExec logging)' }
+    $msiSnap = Get-Snapshot
+    Save-Snapshot $msiSnap 'snapshot-msi.txt'
+
+    # ---------------------------------------------------------------------------------------------------------------------
+    Say 'COMPARE: the MSI install against the script install'
+    Compare-Snapshots $scriptSnap $msiSnap 'the MSI install (against the script install)'
 }
-if ($bad.Count -gt 0) { Fail-Leg "the MSI install differs from the script install in: $($bad -join ', ')" }
+
+# ---------------------------------------------------------------------------------------------------------------------
+if ($Leg -eq 'M2-M3') {
+    Say "BASE: the $OldRelease release installed with its own install-darling.ps1 (the script install the MSI must not take over)"
+    $zip = Get-ReleaseZip $OldRelease
+    New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+    tar -xf $zip -C $installRoot
+    if ($LASTEXITCODE -ne 0) { Fail-Leg "could not extract $zip" }
+    $cfg = '{ "postgres": { "managed": true, "port": 5641, "dataDirectory": null, "connectAs": "admin" }, "servers": [ { "name": "nosuch", "host": "nosuch.invalid", "auth": "integrated" } ] }'
+    $configPath = Join-Path $installRoot 'darling.json'
+    Set-Content -LiteralPath $configPath -Value $cfg
+    $baseScript = Join-Path $installRoot 'install-darling.ps1'
+    $declared = @(Select-String -LiteralPath $baseScript -Pattern '^\s*\[switch\]\$(\w+)' | ForEach-Object { $_.Matches[0].Groups[1].Value })
+    $a = @(); foreach ($w in 'SkipPreflight', 'NoShortcuts', 'NoOperatorPrompt') { if ($declared -contains $w) { $a += "-$w" } }
+    $code = Run-Script $baseScript $a 'base-install' 900
+    if ($code -ne '0') { Fail-Leg "the $OldRelease install-darling.ps1 exited with $code" }
+    Wait-StoreUp "$OldRelease script install"
+    $pgVersion = Join-Path $storeFolder 'pg\PG_VERSION'
+    $storeBorn = (Get-Item -LiteralPath $pgVersion).CreationTimeUtc
+    $cfgSha = Get-FileSha $configPath
+    $before = Get-Snapshot
+    Save-Snapshot $before 'snapshot-m2-before.txt'
+
+    # M2: refused, and nothing changed.
+    Say 'M2: the MSI over the script install is refused with 1603 and changes nothing'
+    $code = Invoke-Msi '/i' $Msi @() 'm2-refused'
+    if ($code -ne 1603) { Show-MsiLogErrors 'm2-refused'; Fail-Leg "M2: msiexec /i over a script install exited with $code, expected 1603" }
+    if (-not (Test-LogHas 'm2-refused' 'LaunchConditions. Return value 3')) { Fail-Leg 'M2: the refusal did not come from the LaunchConditions action' }
+    if ($null -ne (Get-Marker)) { Fail-Leg 'M2: the refused install wrote the MSI marker' }
+    if ($null -ne (Get-ArpVersion)) { Fail-Leg 'M2: the refused install left an Add/Remove Programs record' }
+    if ((Get-Service -Name $svc).Status -ne 'Running') { Fail-Leg 'M2: the script-installed service is no longer Running' }
+    if ((Get-FileSha $configPath) -ne $cfgSha) { Fail-Leg 'M2: darling.json changed' }
+    $after = Get-Snapshot
+    Save-Snapshot $after 'snapshot-m2-after.txt'
+    Compare-Snapshots $before $after 'M2: the machine after the refused MSI'
+    Write-Host 'M2: PASS'
+
+    # M3: the script's own uninstall, then the MSI over the kept folder and store.
+    Say 'M3: uninstall-darling.ps1, then the MSI installs; darling.json is byte-identical and the store is the same one'
+    $code = Run-Script (Join-Path $installRoot 'uninstall-darling.ps1') @() 'old-uninstall' 600
+    if ($code -ne '0') { Fail-Leg "M3: the $OldRelease uninstall-darling.ps1 exited with $code" }
+    if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { Fail-Leg 'M3: the service is still registered after uninstall-darling.ps1' }
+    if (-not (Test-Path -LiteralPath $pgVersion) -or (Get-FileSha $configPath) -ne $cfgSha) { Fail-Leg 'M3: the script uninstall did not keep the store and darling.json' }
+    $code = Invoke-Msi '/i' $Msi @() 'm3-install'
+    Assert-MsiOk $code 'M3: msiexec /i over the kept install' 'm3-install'
+    Wait-StoreUp 'M3 MSI install'
+    $marker = Get-Marker
+    if (-not $marker -or $marker.InstalledBy -ne 'msi') { Fail-Leg 'M3: the MSI install did not write the InstalledBy=msi marker' }
+    if ((Get-FileSha $configPath) -ne $cfgSha) { Fail-Leg 'M3: darling.json is not byte-identical after the MSI install' }
+    if ((Get-Item -LiteralPath $pgVersion).CreationTimeUtc -ne $storeBorn) { Fail-Leg 'M3: the store was re-created, not kept' }
+    if ((Get-FileSha (Join-Path $installRoot 'install-darling.ps1')) -ne (Get-FileSha (Join-Path $Payload 'install-darling.ps1'))) { Fail-Leg 'M3: install-darling.ps1 in the install folder is not the MSI''s (the older release''s file was kept)' }
+    Write-Host 'M3: PASS'
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+if ($Leg -eq 'M4-M6') {
+    if (-not $MsiNew -or -not (Test-Path -LiteralPath $MsiNew)) { Fail-Leg 'M4-M6 needs -MsiNew (the newer package)' }
+    $alt = 'C:\Program Files\DarlingAlt'
+    $other = 'C:\Program Files\DarlingOther'
+    $altExe = Join-Path $alt 'PerformanceMonitor.Darling.Service.exe'
+    $altConfig = Join-Path $alt 'darling.json'
+    $pgVersion = Join-Path $storeFolder 'pg\PG_VERSION'
+
+    Say 'M4: install the older package into a folder of the operator''s choosing'
+    $code = Invoke-Msi '/i' $Msi @("INSTALLFOLDER=`"$alt`"") 'm4-install-old'
+    Assert-MsiOk $code 'M4: msiexec /i (older package)' 'm4-install-old'
+    Wait-StoreUp 'M4 first install'
+    $marker = Get-Marker
+    if (-not $marker -or $marker.InstalledBy -ne 'msi') { Fail-Leg 'M4: the install did not write the InstalledBy=msi marker' }
+    if (([string]$marker.InstallFolder).TrimEnd('\') -ne $alt) { Fail-Leg "M4: InstallFolder is '$($marker.InstallFolder)', expected '$alt'" }
+    if (-not (Test-Path -LiteralPath $altExe)) { Fail-Leg "M4: the service exe is not in $alt" }
+    if (Test-Path -LiteralPath $installRoot) { Fail-Leg "M4: files went to the default folder $installRoot as well" }
+    $oldVersion = Get-ArpVersion
+    $cfgSha = Get-FileSha $altConfig
+    if ($cfgSha -eq '(missing)') { Fail-Leg "M4: the install wrote no darling.json in $alt" }
+    $storeBorn = (Get-Item -LiteralPath $pgVersion).CreationTimeUtc
+    Write-Host "older package: version $oldVersion, darling.json $cfgSha"
+
+    Say 'M4: a major upgrade to the newer package, with an INSTALLFOLDER= that must be ignored'
+    $code = Invoke-Msi '/i' $MsiNew @("INSTALLFOLDER=`"$other`"") 'm4-upgrade'
+    Assert-MsiOk $code 'M4: msiexec /i (newer package over the older)' 'm4-upgrade'
+    Wait-StoreUp 'M4 upgrade'
+    $newVersion = Get-ArpVersion
+    if (-not $newVersion -or $newVersion -eq $oldVersion) { Fail-Leg "M4: Add/Remove Programs shows '$newVersion' after the upgrade (was '$oldVersion')" }
+    $marker = Get-Marker
+    if (-not $marker -or ([string]$marker.InstallFolder).TrimEnd('\') -ne $alt) { Fail-Leg "M4: InstallFolder after the upgrade is '$($marker.InstallFolder)', expected '$alt'" }
+    if (Test-Path -LiteralPath $other) { Fail-Leg "M4: the INSTALLFOLDER= given on the upgrade was used ($other exists)" }
+    if (-not (Test-Path -LiteralPath $altExe)) { Fail-Leg "M4: the service exe is gone from $alt after the upgrade" }
+    if ((Get-ServicePath) -notmatch [regex]::Escape($alt)) { Fail-Leg "M4: the service record does not point into ${alt}: $(Get-ServicePath)" }
+    if ((Get-FileSha $altConfig) -ne $cfgSha) { Fail-Leg 'M4: darling.json changed across the upgrade' }
+    if ((Get-Item -LiteralPath $pgVersion).CreationTimeUtc -ne $storeBorn) { Fail-Leg 'M4: the store was re-created across the upgrade' }
+    if (Test-LogHas 'm4-upgrade' 'Windows Installer removes it') { Fail-Leg 'M4: the uninstall script ran during the upgrade (it must not)' }
+    Write-Host "M4: PASS (upgraded $oldVersion to $newVersion)"
+
+    Say 'M5: an uninstall keeps the store and darling.json'
+    $code = Invoke-Msi '/x' $MsiNew @() 'm5-uninstall'
+    Assert-MsiOk $code 'M5: msiexec /x' 'm5-uninstall'
+    if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { Fail-Leg 'M5: the service is still registered after the uninstall' }
+    if ($null -ne (Get-Marker)) { Fail-Leg 'M5: the marker is still there after the uninstall' }
+    if ($null -ne (Get-ArpVersion)) { Fail-Leg 'M5: the Add/Remove Programs record is still there after the uninstall' }
+    if (Test-Path -LiteralPath $altExe) { Fail-Leg 'M5: the service exe is still in the install folder' }
+    if (Test-Path -LiteralPath (Join-Path $alt 'pg-runtime')) { Fail-Leg 'M5: pg-runtime was left behind in the install folder' }
+    if ((Get-FileSha $altConfig) -ne $cfgSha) { Fail-Leg 'M5: darling.json was changed or removed by the uninstall' }
+    if (-not (Test-Path -LiteralPath $pgVersion) -or (Get-Item -LiteralPath $pgVersion).CreationTimeUtc -ne $storeBorn) { Fail-Leg 'M5: the store did not survive the uninstall' }
+    if (@(Get-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *' -ErrorAction SilentlyContinue).Count -ne 0) { Fail-Leg 'M5: firewall rules were left behind' }
+    # The uninstall script is not cut off by the custom action's one-minute default: it ran to its last line.
+    if (-not (Test-LogHas 'm5-uninstall' 'Windows Installer removes it')) { Fail-Leg 'M5: the MSI log has no stop line from uninstall-darling.ps1 -MsiUninstall' }
+    if (-not (Test-LogHas 'm5-uninstall' 'Left in place')) { Fail-Leg 'M5: uninstall-darling.ps1 did not run to its last line (cut off?)' }
+    Write-Host 'M5: PASS'
+
+    Say 'M6: install again over the kept store, then uninstall with PURGEDATA=1'
+    $code = Invoke-Msi '/i' $MsiNew @() 'm6-install'
+    Assert-MsiOk $code 'M6: msiexec /i over the kept store' 'm6-install'
+    Wait-StoreUp 'M6 reinstall'
+    if ((Get-Item -LiteralPath $pgVersion).CreationTimeUtc -ne $storeBorn) { Fail-Leg 'M6: the reinstall did not reuse the kept store' }
+    $code = Invoke-Msi '/x' $MsiNew @('PURGEDATA=1') 'm6-purge'
+    Assert-MsiOk $code 'M6: msiexec /x PURGEDATA=1' 'm6-purge'
+    if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { Fail-Leg 'M6: the service is still registered after the uninstall' }
+    if (Test-Path -LiteralPath $storeFolder) { Fail-Leg "M6: PURGEDATA=1 left $storeFolder behind" }
+    if (-not (Test-LogHas 'm6-purge' 'Store, credentials, and logs deleted.')) { Fail-Leg 'M6: the MSI log has no purge line from uninstall-darling.ps1' }
+    Write-Host 'M6: PASS'
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+if ($Leg -eq 'M7') {
+    # A folder under a user profile is a real trigger the script refuses on a first install (the service account cannot read
+    # it): the refusal happens in the PreStart custom action, after the files and the service record exist, so the rollback
+    # has real work to undo.
+    $profileDir = Join-Path $env:USERPROFILE 'DarlingMsiProfile'
+    Say "M7: an install into $profileDir (under a user profile) fails in PreStart and rolls back clean"
+    $code = Invoke-Msi '/i' $Msi @("INSTALLFOLDER=`"$profileDir`"") 'm7-install'
+    if ($code -ne 1603) { Show-MsiLogErrors 'm7-install'; Fail-Leg "M7: msiexec /i into a profile folder exited with $code, expected 1603" }
+    if (-not (Test-LogHas 'm7-install' 'This folder is under a user profile')) { Show-MsiLogErrors 'm7-install'; Fail-Leg 'M7: the install did not fail on the script''s profile-folder refusal' }
+    if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { Fail-Leg 'M7: the service record was left behind' }
+    if ($null -ne (Get-Marker)) { Fail-Leg 'M7: the marker was left behind' }
+    if ($null -ne (Get-ArpVersion)) { Fail-Leg 'M7: an Add/Remove Programs record was left behind' }
+    foreach ($dir in $profileDir, $installRoot) {
+        $left = @(Get-ChildItem -LiteralPath $dir -Recurse -Force -File -ErrorAction SilentlyContinue)
+        if ($left.Count -gt 0) { Fail-Leg "M7: $($left.Count) file(s) were left in $dir (first: $($left[0].FullName))" }
+    }
+    if (Test-Path -LiteralPath $storeFolder) { Fail-Leg "M7: $storeFolder was created" }
+    if (@(Get-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *' -ErrorAction SilentlyContinue).Count -ne 0) { Fail-Leg 'M7: firewall rules were left behind' }
+    $grp = try { (New-Object System.Security.Principal.NTAccount($groupName)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { $null }
+    if ($grp) { Fail-Leg "M7: the operator group '$groupName' was created ($grp)" }
+    Write-Host 'M7: PASS'
+}
 
 Write-Host "RESULT ${Leg}: PASS"
 if ($env:GITHUB_STEP_SUMMARY) { "- $Leg - PASS ($([int]$clock.Elapsed.TotalSeconds)s)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8 }

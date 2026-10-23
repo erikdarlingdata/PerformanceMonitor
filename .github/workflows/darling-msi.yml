@@ -6,7 +6,14 @@ name: Darling MSI
 #       the store up, and the service record, the install root's, darling.json's and the store folder's security
 #       descriptors, the operator group, the firewall rules and the shortcuts equal to a snapshot taken after the
 #       script installed the same payload on the same runner (the script is the oracle)
-# More legs (upgrade, uninstall, purge, rollback) are added to the same script as they land.
+#   M2  the MSI over a script install of the older release is refused with 1603 and changes nothing
+#   M3  then that script's uninstall, then the MSI installs; darling.json is byte-identical and the store is kept
+#   M4  a major upgrade from one MSI to a newer one (built here with a higher version) keeps the service and darling.json,
+#       finds the install folder from the InstallFolder value and ignores an INSTALLFOLDER= given on the upgrade
+#   M5  an uninstall keeps the store and darling.json
+#   M6  an uninstall with PURGEDATA=1 removes the store
+#   M7  an install a script step refuses (a profile folder) fails in the custom action and rolls back clean
+# M2+M3 and M4+M5+M6 share a job each, because each continues from the state the one before left.
 #
 # Only logs are uploaded, never the MSI: nothing here publishes anything. The release job does not build or sign the
 # package yet.
@@ -38,11 +45,15 @@ jobs:
     # Two publishes, the package build (compression of about 450 MB), the script install, the MSI install and a cold
     # pg-runtime fetch (about 340 MB). The legs' own waits add up to well under this.
     timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # The release whose script install M2-M3 must not take over (the one darling-upgrade-shapes.yml uses as current).
+      DARLING_OLD_RELEASE: '3.10.0'
     strategy:
       fail-fast: false
       matrix:
         os: [ windows-2022, windows-2025 ]
-        leg: [ M1 ]
+        leg: [ M1, M2-M3, M4-M6, M7 ]
     steps:
       # The commit under test, not a branch name that can move while the run is queued.
       - uses: actions/checkout@v7
@@ -90,13 +101,29 @@ jobs:
           dotnet build Darling/msi/PerformanceMonitor.Darling.Msi.wixproj -c Release -m:1 -p:UseSharedCompilation=false "-p:PayloadDir=${{ github.workspace }}\publish\DarlingMsiPayload"
           if ($LASTEXITCODE -ne 0) { throw "MSI build failed ($LASTEXITCODE)" }
           Get-ChildItem Darling/msi/bin/Release -Filter *.msi | ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+          # Out of the output folder, so the next build cannot be mistaken for it.
+          New-Item -ItemType Directory -Force -Path build/msi-current | Out-Null
+          Move-Item Darling/msi/bin/Release/*.msi build/msi-current
+
+      # M4 upgrades from the package above to a newer one: the same payload with a higher version. --no-incremental,
+      # because a changed version alone does not make the incremental build redo the package.
+      - name: Build the newer MSI (M4-M6)
+        if: matrix.leg == 'M4-M6'
+        shell: pwsh
+        run: |
+          dotnet build Darling/msi/PerformanceMonitor.Darling.Msi.wixproj -c Release -m:1 --no-incremental -p:UseSharedCompilation=false -p:Version=98.0.0 "-p:PayloadDir=${{ github.workspace }}\publish\DarlingMsiPayload"
+          if ($LASTEXITCODE -ne 0) { throw "newer MSI build failed ($LASTEXITCODE)" }
+          New-Item -ItemType Directory -Force -Path build/msi-new | Out-Null
+          Move-Item Darling/msi/bin/Release/*.msi build/msi-new
+          Get-ChildItem build/msi-current, build/msi-new -Filter *.msi | ForEach-Object { "{0}  {1:N1} MB" -f $_.FullName, ($_.Length / 1MB) }
 
       - name: Run the leg
         shell: pwsh
         timeout-minutes: 40
         run: |
-          $msi = (Get-ChildItem '${{ github.workspace }}\Darling\msi\bin\Release' -Filter *.msi | Select-Object -First 1).FullName
-          ./.github/scripts/darling-msi.ps1 -Leg '${{ matrix.leg }}' -Workspace '${{ github.workspace }}' -Payload '${{ github.workspace }}\publish\DarlingMsiPayload' -Msi $msi
+          $msi = (Get-ChildItem '${{ github.workspace }}\build\msi-current' -Filter *.msi | Select-Object -First 1).FullName
+          $msiNew = Get-ChildItem '${{ github.workspace }}\build\msi-new' -Filter *.msi -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          ./.github/scripts/darling-msi.ps1 -Leg '${{ matrix.leg }}' -Workspace '${{ github.workspace }}' -Payload '${{ github.workspace }}\publish\DarlingMsiPayload' -Msi $msi -MsiNew $msiNew -OldRelease '${{ env.DARLING_OLD_RELEASE }}'
 
       - name: Service log tail
         if: always()
