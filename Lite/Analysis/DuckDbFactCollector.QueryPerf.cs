@@ -100,7 +100,8 @@ AND   v.delta_execution_count > 0";
             var totalExecutions = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
             var totalCpuTimeUs = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
 
-            /* #6640: name the spilling queries, most spilled pages first. A second small read on the same connection,
+            /* #6640: SUM(BIGINT) is a HUGEINT, which DuckDB.NET returns as BigInteger: Convert.ToDouble throws on it, so read it with ToInt64.
+               Name the spilling queries, most spilled pages first. A second small read on the same connection,
                only when the aggregate found spills. The aggregate's figures above are unchanged. */
             var spillRanked = new List<RankedObject>();
             if (totalSpills > 0)
@@ -116,7 +117,7 @@ AND   v.delta_execution_count > 0";
                 {
                     var db = rankReader.IsDBNull(0) ? string.Empty : rankReader.GetString(0);
                     var hash = rankReader.IsDBNull(1) ? string.Empty : rankReader.GetString(1);
-                    var pages = rankReader.IsDBNull(2) ? 0.0 : Convert.ToDouble(rankReader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture);
+                    var pages = rankReader.IsDBNull(2) ? 0.0 : ToInt64(rankReader.GetValue(2));
                     spillRanked.Add(new RankedObject(db + "/" + hash, db.Length == 0 ? null : db, pages));
                 }
             }
