@@ -106,4 +106,15 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
     /// </summary>
     public const string InheritServerEnabled =
         "UPDATE config.config_collector_schedules SET enabled = NULL WHERE server_id = $1 AND lower(collector_name) = lower($2)";
+
+    /// <summary>
+    /// #6454: the statements both server-removal paths (the MCP <c>remove_server</c> tool and the Viewer's Remove) run in the removal's own
+    /// transaction to clear a removed server's collector overrides and run times. One server's rows by id ($1 server_id), never the fleet-wide
+    /// ones (server_id NULL). Left behind, a set override would come back when the server is re-added (the id is a hash of the name).
+    /// </summary>
+    public static readonly string[] ClearForServerSqls =
+    {
+        "DELETE FROM config.config_collector_schedules WHERE server_id = $1",
+        "DELETE FROM config.config_collector_run_times WHERE server_id = $1",
+    };
 }

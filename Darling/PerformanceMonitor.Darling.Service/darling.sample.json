@@ -417,6 +417,15 @@
     // off while "allowWrites" is on: one token cannot tell an agent from a person. Default off.
     // "allowInvestigations": true,
 
+    // Uncomment to give an operator and your investigation agents their own tokens on one service (#6542).
+    // Each token has a name (1-64 of A-Za-z0-9._:-) and a role, "operator" (the reads and the write tools) or
+    // "agent" (the reads, the investigation tools and the Level 2 action tools). An agent's agent_id must be the
+    // token's name. Each name and each value is used once. Every request, loopback included, must present a token.
+    // "tokens": [
+    //   { "name": "ops-lead",   "encryptedToken": "<from --encrypt-password>", "role": "operator" },
+    //   { "name": "triage-bot", "encryptedToken": "<from --encrypt-password>", "role": "agent" }
+    // ],
+
     // Uncomment to expose MCP on the LAN (a comma already follows "port" above):
     // "network": {
     //   "listen": "192.168.1.205",                     // specific bind IP preferred; "0.0.0.0" = all interfaces.

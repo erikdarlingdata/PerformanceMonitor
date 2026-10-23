@@ -33,7 +33,7 @@ public sealed class McpToolGuideHeadsPlatformCTests
     /// <summary>The per-tool guardrail phrase each head must state.</summary>
     private static readonly (string Tool, string Fact)[] HeadFacts =
     [
-        ("get_collector_stall_probes", "not_collected empty answer is EXPECTED and healthy"),
+        ("get_collector_stall_probes", "an empty answer is EXPECTED and healthy"),
         ("get_collector_stall_probes", "scheduler_count is the sample's denominator"),
         ("get_collector_stall_probes", "outcome_census is never filtered to successes"),
         ("get_collector_stall_probes", "Unbanded, untrended"),
