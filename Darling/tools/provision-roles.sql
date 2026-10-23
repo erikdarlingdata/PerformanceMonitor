@@ -1480,9 +1480,6 @@ BEGIN
    IF NOT FOUND THEN
       RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
    END IF;
-   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 AND NOT v_operator THEN
-      RAISE EXCEPTION 'That route is an agent route: it is changed in the Viewer, not over MCP.' USING ERRCODE = 'DL403';
-   END IF;
    -- What a route matches and which servers it covers decide which servers an agent route covers, so a route with an
    -- explicit agent setting (Off included) keeps both in the Viewer. A route's own destinations do not stop a change
    -- to what it matches: the destinations are set over MCP too. (#6231)
