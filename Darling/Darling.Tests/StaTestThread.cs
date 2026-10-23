@@ -294,6 +294,9 @@ internal sealed class StaHost
 
         try
         {
+            /* #6632: the drain runs in the body's own dispatcher operation, so without its own step a drain that stuck would be
+               reported under the body's last step. */
+            Step("the host's drain after the body: closing leftover windows, then waiting for application idle");
             CloseLeftoverWindows();
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
         }
