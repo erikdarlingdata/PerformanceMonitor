@@ -3352,6 +3352,14 @@ LIMIT 1";
            else the darling.json servers, which is what this run will actually collect from either way. The
            MCP host's plan-fetch resolver reads this instead of re-reading the store as the mcp role. */
         _registryState.Publish(initialServers);
+        /* #6468: an install that has no servers yet is a normal first start, so say so once, at Information, and name the ways to add
+           one. The service keeps running: it picks up the first server the Viewer or the web dashboard registers, with no restart. */
+        if (initialServers.Count == 0)
+        {
+            _logger.LogInformation(
+                "No monitored servers are configured yet. Add one in the Viewer (Add Server) or with " +
+                "PerformanceMonitor.Darling.Service.exe --add-server; the service starts collecting from it without a restart.");
+        }
         /* #5812 (L1): the PLAN_REGRESSION candidate cache evicts the entries of servers outside this set on its next store. */
         PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RetainServers(initialServers.Select(s => s.ServerId));
 

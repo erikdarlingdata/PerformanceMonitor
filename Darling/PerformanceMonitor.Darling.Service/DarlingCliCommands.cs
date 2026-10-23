@@ -564,6 +564,13 @@ public static partial class DarlingCliCommands
             output.WriteLine("WARNING: " + webTokenFinding);
         }
 
+        /* #6468: no servers yet is a valid start. Say so plainly rather than print "All servers reachable." over an empty list. */
+        if (targets.Count == 0)
+        {
+            output.WriteLine("No monitored servers are configured yet, so there is nothing to test. Add one in the Viewer (Add Server) or with --add-server.");
+            return 0;
+        }
+
         output.WriteLine($"Validating connectivity to {targets.Count} server(s)...");
 
         var allReachable = true;
