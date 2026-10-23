@@ -891,7 +891,7 @@ public static partial class DarlingCliCommands
 
             if (ensureStoreSearchPath && !managedCredential)
             {
-                connectionString = DarlingWorker.EnsureStoreSearchPath(connectionString);
+                connectionString = DarlingStoreConnection.EnsureStoreSearchPath(connectionString);
             }
 
             using var proof = new NpgsqlConnection(
