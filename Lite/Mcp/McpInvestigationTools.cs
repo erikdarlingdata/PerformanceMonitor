@@ -208,7 +208,7 @@ public sealed class McpInvestigationTools
         "pull request, bug report, commit or release you opened or found. A url must be https with no user name or password; http, file and UNC " +
         "(\\\\server\\share, //server/share) links are refused (invalid). Each URL is journaled once per request as link_recorded. " +
         "Lite stores the link and never calls Jira or git. " +
-        "family_of (optional) is the request_id of the first report in this family; it must name a request (else invalid). " +
+        "family_of (optional) is the request_id of an earlier request on this store, which need not have a report yet; it must name a request (else invalid). " +
         "queries_run (optional) is a JSON array of the statements you ran, " + InvestigationReportFields.QueriesRunRule + " (over a cap: refused, never cut); " +
         "it is masked as statement text. " +
         "follow_up_at (optional) asks Lite to open a new request for this case later: " + InvestigationReportFields.FollowUpRule + ". " +
@@ -227,7 +227,7 @@ public sealed class McpInvestigationTools
         [Description("Optional note for a person to approve, at most 2,000 characters.")] string? proposed_note = null,
         [Description("Refused at Level 1. Omit.")] string? action_proposals = null,
         [Description("Optional JSON array of at most 10 {kind, url, key}; https only. See the guide.")] string? links = null,
-        [Description("Optional. The request_id of the first report in this family; it must exist.")] string? family_of = null,
+        [Description("Optional. The request_id of an earlier request on this store; it need not have a report yet.")] string? family_of = null,
         [Description("Optional JSON array of statements you ran, " + InvestigationReportFields.QueriesRunRule + ".")] string? queries_run = null,
         [Description("Optional. When to open a follow-up request: " + InvestigationReportFields.FollowUpRule + ".")] string? follow_up_at = null,
         CancellationToken cancellationToken = default) =>
@@ -304,7 +304,7 @@ public sealed class McpInvestigationTools
             }
 
             if (familyOf is { } family && !await store.RequestExistsAsync(family, cancellationToken))
-                problems.Add($"family_of: no investigation request has id {family}; give the request_id of the first report in this family.");
+                problems.Add($"family_of: no investigation request has id {family}; give the request_id of an earlier request on this store.");
 
             if (problems.Count > 0)
             {

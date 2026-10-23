@@ -2260,6 +2260,35 @@ function Get-DarlingInstallRootFromService([string]$name) {
     catch { return $null }
 }
 
+# #6597: a service a released install-darling.ps1 registered carries its image path bare, which is how the MSI never
+# registered it, and the upgrade never touched the registration. When the registered path is exactly this install's
+# service exe and has no quotes, register it again in quotes. A quoted path, a path with arguments after it and a path
+# to some other folder are left alone. Call it with the service stopped. Returns $true when it re-registered.
+# sc.exe strips a plain pair of quotes as it parses its command line, so the value goes in as "\"path\"" (the outer
+# pair is stripped, the \" pair is kept). PowerShell 5.1 and 7.x turn a quoted native argument into a command line
+# differently, so the command line is handed over verbatim as ONE string through Start-Process (same as install-darling.ps1).
+function Set-DarlingServiceQuotedPath([string]$name, [string]$exePath) {
+    try {
+        $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='$name'" -ErrorAction Stop
+    }
+    catch {
+        return $false
+    }
+    if (-not $service -or [string]::IsNullOrWhiteSpace($service.PathName)) { return $false }
+
+    $registered = $service.PathName.Trim()
+    if ($registered.StartsWith('"')) { return $false }
+
+    try { $sameExe = [string]::Equals([IO.Path]::GetFullPath($registered), [IO.Path]::GetFullPath($exePath), [StringComparison]::OrdinalIgnoreCase) }
+    catch { return $false }
+    if (-not $sameExe) { return $false }
+
+    $argLine = "config `"$name`" binPath= `"\`"$exePath\`"`""
+    $p = Start-Process -FilePath "$env:SystemRoot\System32\sc.exe" -ArgumentList $argLine -Wait -PassThru -NoNewWindow
+    if ($p.ExitCode -ne 0) { Fail "sc config failed ($($p.ExitCode)) while registering the service path in quotes. The new build IS in place and the service is STOPPED: fix the cause and re-run this script." }
+    return $true
+}
+
 # Every process whose executable lives under $root, so the copy can refuse instead of failing half-way.
 #
 # It NAMES them. It never kills one, and no version of this script ever should: the bundled PostgreSQL runs
@@ -3794,6 +3823,11 @@ else {
     catch {
         Warn "The store folder '$storeFolder' could not be secured: $($_.Exception.Message) The service will start, and refuses a store it cannot trust. Fix the folder, then re-run this script."
     }
+}
+
+# #6597: the registered path keeps its quotes, as the MSI registers it. The service is stopped here and the new build is in place.
+if (Set-DarlingServiceQuotedPath $serviceName (Join-Path $InstallRoot $serviceExeName)) {
+    Good "Service path re-registered in quotes."
 }
 
 Note "Starting '$serviceName'..."

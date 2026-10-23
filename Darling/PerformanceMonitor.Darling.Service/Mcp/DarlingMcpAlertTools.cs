@@ -89,7 +89,7 @@ public sealed partial class DarlingMcpAlertTools
            positional C# caller can be re-bound by. */
         [Description("Include alerts an operator has dismissed in the Viewer. Default false, which is the Alert History grid's own read.")] bool include_dismissed = false,
         [Description("Only alerts with this metric name (e.g. 'High CPU', 'Blocking Detected'), matched exactly, ignoring case. Omit for every metric.")] string? metric_name = null,
-        [Description("Only alerts of this family: self-monitor, reports, agent-jobs, performance or external. Omit for every family.")] string? family = null,
+        [Description("Alert family: self-monitor, reports, agent-jobs, performance or external. Not an investigation family such as blocking or resources: filter those with metric_name. Omit for all.")] string? family = null,
         [Description("Add streak_days to each row: days in a row (up to 7) this metric fired at this time of day before the alert, muted fires counting. Default false: rows are unchanged.")] bool include_streak = false,
         McpDataDetailSetting? maskSetting = null,
         CancellationToken cancellationToken = default)
