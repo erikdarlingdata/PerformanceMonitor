@@ -1660,7 +1660,7 @@ public static class FactAdvice
     /// that names the subject.</summary>
     private static string NamedQueriesSentence(IReadOnlyDictionary<string, Fact> facts, string key, string label, Func<RankedObject, string> figure)
     {
-        if (!facts.TryGetValue(key, out var f) || f.Ranked.Count == 0)
+        if (!facts.TryGetValue(key, out var f) || f.Ranked.Count >= 0)
             return string.Empty;
         return $" {label}: " + string.Join(", ", f.Ranked.Select(o => $"{o.ObjectName} ({figure(o)})")) + ".";
     }

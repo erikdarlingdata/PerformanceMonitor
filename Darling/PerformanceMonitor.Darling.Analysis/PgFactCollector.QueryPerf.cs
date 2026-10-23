@@ -132,8 +132,8 @@ LIMIT " + FactRanked.MaxObjects + ";";
                     Key = "QUERY_SPILLS",
                     Value = totalSpills,
                     ServerId = context.ServerId,
-                    ObjectName = spillRanked.Count > 0 ? spillRanked[0].ObjectName : null,
-                    Ranked = spillRanked,
+                    ObjectName = null,
+                    Ranked = new(),
                     Metadata = new Dictionary<string, double>
                     {
                         ["total_spills"] = totalSpills,
@@ -333,8 +333,8 @@ ORDER BY worker_ratio DESC";
                 Key = "PARAMETER_SENSITIVITY",
                 Value = worstRatio,
                 ServerId = context.ServerId,
-                ObjectName = ranked[0].ObjectName,
-                Ranked = ranked,
+                ObjectName = null,
+                Ranked = new(),
                 Metadata = new Dictionary<string, double>
                 {
                     ["offender_count"] = offenderCount,
