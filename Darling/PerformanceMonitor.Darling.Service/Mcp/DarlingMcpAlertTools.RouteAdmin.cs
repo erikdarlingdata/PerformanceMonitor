@@ -448,7 +448,7 @@ public sealed partial class DarlingMcpAlertTools
     // ── Alert history dismiss ──
 
     [McpServerTool(Name = "dismiss_alert_history"), Description(
-        "Dismisses alert history rows: they leave get_alert_history's default read (include_dismissed true still shows them) and nothing else changes. The rows stay stored. Pass the rows to dismiss as alert_time, server_id and metric_name exactly as get_alert_history returned them. Returns dismissed (counts: requested, dismissed, already_dismissed, unknown) with the undo call, restore_alert_history. Dismissing is a flag, not a delete, so it is fully undone." +
+        "Dismisses alert history rows: they leave get_alert_history's default read (include_dismissed true still shows them) and nothing else changes. The rows stay stored. Pass the rows to dismiss as alert_time, server_id and metric_name exactly as get_alert_history returned them. Returns status dismissed (counts: requested, dismissed, already_dismissed, unknown) with the undo call, restore_alert_history; status not_found when no key names a row, unchanged when every named row was dismissed already. Dismissing is a flag, not a delete, so it is fully undone." +
         "<<GUIDE>>" +
         "Dismisses alert history rows the way the web dashboard's Dismiss does (the same store call): sets the dismissed flag on each named row and no other column. " +
         "alerts_json is a JSON array of up to 1000 objects {\"alert_time\":\"...\",\"server_id\":1,\"metric_name\":\"...\"}, copied from get_alert_history rows. " +
@@ -473,7 +473,7 @@ public sealed partial class DarlingMcpAlertTools
             LogAlertWrite(logger, "dismiss_alert_history", outcome.Dismissed);
             return JsonSerializer.Serialize(new
             {
-                status = "dismissed",
+                status = DismissStatus(outcome),
                 requested = outcome.Requested,
                 dismissed = outcome.Dismissed,
                 already_dismissed = Math.Max(0, outcome.Known - outcome.Dismissed),
@@ -488,7 +488,7 @@ public sealed partial class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "restore_alert_history"), Description(
-        "Brings dismissed alert history rows back into get_alert_history's default read: the undo of dismiss_alert_history. Pass the rows as alert_time, server_id and metric_name. Returns restored (counts: requested, restored, not_dismissed_or_unknown) with the call that dismisses them again." +
+        "Brings dismissed alert history rows back into get_alert_history's default read: the undo of dismiss_alert_history. Pass the rows as alert_time, server_id and metric_name. Returns status restored (counts: requested, restored, not_dismissed_or_unknown) with the call that dismisses them again; status not_found when no key names a row, unchanged when the named rows were not dismissed." +
         "<<GUIDE>>" +
         "Clears the dismissed flag on each named row and no other column. alerts_json has the same shape dismiss_alert_history takes, " +
         "and its answer's undo carries exactly the rows to pass. A row that was not dismissed, or that names no row, is counted and left alone. " +
@@ -511,7 +511,7 @@ public sealed partial class DarlingMcpAlertTools
             LogAlertWrite(logger, "restore_alert_history", outcome.Dismissed);
             return JsonSerializer.Serialize(new
             {
-                status = "restored",
+                status = RestoreStatus(outcome),
                 requested = outcome.Requested,
                 restored = outcome.Dismissed,
                 not_dismissed_or_unknown = Math.Max(0, outcome.Requested - outcome.Dismissed),
@@ -523,6 +523,19 @@ public sealed partial class DarlingMcpAlertTools
             return McpHelpers.FormatError("restore_alert_history", ex);
         }
     }
+
+    /// <summary>
+    /// The status a dismiss answers with (#6455): <c>dismissed</c> only when it dismissed a row. A call whose keys name no row is
+    /// <c>not_found</c>, and one whose rows were all dismissed already is <c>unchanged</c>, so a success word never sits on a call that
+    /// changed nothing.
+    /// </summary>
+    internal static string DismissStatus(AlertDismissOutcome outcome) =>
+        outcome.Dismissed > 0 ? "dismissed" : outcome.Known == 0 ? "not_found" : "unchanged";
+
+    /// <summary>The status a restore answers with (#6455): <c>restored</c> only when it brought a row back; keys that name no row are
+    /// <c>not_found</c>, and rows that were not dismissed are <c>unchanged</c>.</summary>
+    internal static string RestoreStatus(AlertDismissOutcome outcome) =>
+        outcome.Dismissed > 0 ? "restored" : outcome.Known == 0 ? "not_found" : "unchanged";
 
     /// <summary>One Information line per dismiss or restore call: the tool, who called, and how many rows changed.</summary>
     private static void LogAlertWrite(ILogger? logger, string tool, int rows) =>
