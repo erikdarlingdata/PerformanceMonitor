@@ -140,6 +140,30 @@ public sealed class InvestigationEvidenceFamiliesLiveTests
     }
 
     [Fact]
+    public async Task ARegressionOfSqlServersOwnCleanup_IsLeftOut_SoTheApplicationQueryLeads()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            /* #6548: change tracking cleanup regressed 100 times over; the application query 10 times over. */
+            await PlantQueryStoreAsync(setup.Connection, ct, 511, 21, 1, cpuUs: 1_000, lastExec: AlertAt.AddMinutes(-4));
+            await PlantQueryStoreAsync(setup.Connection, ct, 511, 22, 2, cpuUs: 10_000, lastExec: AlertAt.AddMinutes(-1));
+            await PlantQueryStoreAsync(setup.Connection, ct, 512, 23, 1, cpuUs: 1_000, lastExec: AlertAt.AddMinutes(-4));
+            await PlantQueryStoreAsync(setup.Connection, ct, 512, 24, 2, cpuUs: 100_000, lastExec: AlertAt.AddMinutes(-1));
+            foreach (var (queryId, text) in new[] { (511L, "SELECT * FROM dbo.Orders"), (512L, "delete top(@batch_size) from sys.change_tracking_1234567 where x < @y") })
+            {
+                await DarlingMcpTestData.ExecAsync(setup.Connection, ct,
+                    "INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen) VALUES ($1, $2, $3, $4, $5)",
+                    ServerId, Db, queryId, text, DarlingMcpTestData.Naive(AlertAt));
+            }
+
+            var requestId = await OpenQueryPerformanceAndCaptureAsync(setup, ct);
+
+            var target = Assert.Single(Rows(await setup.Requests.ReadEvidenceAsync(requestId, ct), "regression_targets"));
+            Assert.Equal(511, target["query_id"]!.GetValue<long>());
+        });
+    }
+
+    [Fact]
     public async Task GoodAndBadCompiledValues_BothAppear_AndNeitherSurvivesMetadataOnly()
     {
         await RunAsync(async (setup, ct) =>
