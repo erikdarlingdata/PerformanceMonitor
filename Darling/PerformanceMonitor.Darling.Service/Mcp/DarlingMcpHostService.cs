@@ -1222,6 +1222,9 @@ public sealed class DarlingMcpHostService : BackgroundService
         services.AddSingleton<ILogger>(logger);
     }
 
+    /// <summary>The key the legacy single token's instructions are kept under beside the roles' (#6542); no role is named this.</summary>
+    private const string LegacyRoleKey = "(legacy)";
+
     /// <summary>
     /// Registers the MCP server, its stateless HTTP transport, every tool class, and the two call-tool
     /// filters — the same registration <c>TryStartServerAsync</c> used to build inline. Extracted (#4128)
@@ -1322,12 +1325,35 @@ public sealed class DarlingMcpHostService : BackgroundService
            #5789: the instructions are rendered HERE, from the names before and after the narrowing, so their
            tool census counts the set tools/list serves and names the switch that is off. They used to carry a
            fixed catalog count (182 while 160 were served with the writes off). */
+        /* #6542: with named tokens served the instructions are rendered once per role here, over the tools that role is served and its
+           own policy, and the request's session options pick the presented token's. The start-wide text above is the union's, which
+           names tools an agent token's tools/list lacks. Empty without named tokens, so that path is untouched. */
+        var roleInstructions = new Dictionary<string, string>(StringComparer.Ordinal);
         services.PostConfigure<ModelContextProtocol.Server.McpServerOptions>(options =>
         {
             var catalog = DarlingMcpWritePolicy.ToolNames(options.ToolCollection);
             DarlingMcpWritePolicy.Apply(options.ToolCollection, writes);
             options.ServerInstructions = DarlingMcpInstructions.Build(
                 declaredPeers, catalog, DarlingMcpWritePolicy.ToolNames(options.ToolCollection));
+
+            if (tokens is { HasNamed: true })
+            {
+                roleInstructions.Clear();
+                if (tokens.LegacyToken.Length > 0)
+                {
+                    roleInstructions[LegacyRoleKey] = DarlingMcpInstructions.Build(
+                        declaredPeers, catalog,
+                        DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(options.ToolCollection, tokens.LegacyPolicy)));
+                }
+
+                foreach (var entry in tokens.Named)
+                {
+                    var policy = tokens.PolicyFor(entry);
+                    roleInstructions[entry.Role] = DarlingMcpInstructions.BuildForNamedToken(
+                        declaredPeers, catalog,
+                        DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(options.ToolCollection, policy)), policy);
+                }
+            }
         });
 
         services
@@ -1370,8 +1396,16 @@ public sealed class DarlingMcpHostService : BackgroundService
                        token, when one is served beside them, gets the set its settings give it. */
                     if (tokens is { HasNamed: true })
                     {
-                        var policy = DarlingMcpTokenSet.CallerOf(context)?.Policy ?? tokens.LegacyPolicy;
+                        var caller = DarlingMcpTokenSet.CallerOf(context);
+                        var policy = caller?.Policy ?? tokens.LegacyPolicy;
                         sessionOptions.ToolCollection = DarlingMcpWritePolicy.FilterToolCollection(sessionOptions.ToolCollection, policy);
+
+                        /* The instructions follow the token too (#6542): the tools its role is served and the sentences its role needs. */
+                        var role = caller?.Name is { } name
+                            ? tokens.Named.FirstOrDefault(e => string.Equals(e.Name, name, StringComparison.Ordinal))?.Role
+                            : LegacyRoleKey;
+                        if (role is not null && roleInstructions.TryGetValue(role, out var instructions))
+                            sessionOptions.ServerInstructions = instructions;
                     }
 
                     if (DarlingCoreToolProfile.IsCorePath(context.Request.Path))

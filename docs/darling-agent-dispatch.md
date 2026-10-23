@@ -75,7 +75,7 @@ What each role sees:
 
 | Role | Sees | Never sees |
 |---|---|---|
-| `operator` | The reads and the write tools. The server admin tools (`add_servers`, `edit_server`, `remove_server`) only with `mcp.allowServerAdmin`. | `claim_investigation_request` and `submit_investigation_report`. |
+| `operator` | The reads and the write tools. The four server admin tools (`add_servers`, `edit_server`, `remove_server` and `set_server_action`) only when `mcp.allowWrites` and `mcp.allowServerAdmin` are both on. | `claim_investigation_request` and `submit_investigation_report`. |
 | `agent` | The reads, the two investigation tools, and the Level 2 action tools through the `agent_action` gate. | Every tool in the never-agent list: the route tools, alert settings, Custom Views, tags, collector and server controls. |
 
 `tools/list` shows only that set. A call to a tool outside it fails as an unknown tool. An unknown token gets 401, and so does a request with no token, loopback included.

@@ -10,8 +10,13 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -32,9 +37,10 @@ public sealed class DarlingMcpNamedTokenTests
     private static McpTokenEntry Entry(string? name, string? token, string? role) =>
         new() { Name = name, Token = token, Role = role };
 
-    private static McpConfig TwoTokens(bool serverAdmin = false) => new()
+    private static McpConfig TwoTokens(bool serverAdmin = false, bool writes = false) => new()
     {
         AllowServerAdmin = serverAdmin,
+        AllowWrites = writes,
         Tokens = new List<McpTokenEntry>
         {
             Entry("ops-lead", OperatorToken, "operator"),
@@ -53,6 +59,134 @@ public sealed class DarlingMcpNamedTokenTests
         var (status, body) = await DarlingMcpWritePolicyTests.ToolsListAsync(server, bearer);
         Assert.Equal(StatusCodes.Status200OK, status);
         return DarlingMcpWritePolicyTests.ToolsOf(body).Keys.ToHashSet(StringComparer.Ordinal);
+    }
+
+    /// <summary>The <c>instructions</c> an <c>initialize</c> request returns to the token presented; the transport may frame the
+    /// reply as an SSE <c>data:</c> line or as bare JSON.</summary>
+    private static async Task<string> InstructionsAsync(Microsoft.AspNetCore.TestHost.TestServer server, string bearer)
+    {
+        var ctx = await server.SendAsync(c =>
+        {
+            c.Request.Method = "POST";
+            c.Request.Path = "/";
+            c.Request.Headers.Host = "localhost";
+            c.Request.Headers.Accept = "application/json, text/event-stream";
+            c.Request.ContentType = "application/json";
+            var bytes = Encoding.UTF8.GetBytes(
+                "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\"," +
+                "\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}");
+            c.Request.Body = new System.IO.MemoryStream(bytes);
+            c.Request.ContentLength = bytes.Length;
+            c.Connection.RemoteIpAddress = IPAddress.Loopback;
+            c.Request.Headers.Authorization = "Bearer " + bearer;
+        });
+
+        using var reader = new System.IO.StreamReader(ctx.Response.Body);
+        var body = await reader.ReadToEndAsync();
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+        var dataLine = body.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
+        using var document = JsonDocument.Parse(dataLine is null ? body : dataLine["data:".Length..].Trim());
+        return document.RootElement.GetProperty("result").GetProperty("instructions").GetString() ?? "";
+    }
+
+    /// <summary>Every registered tool whose name the text carries, backticked or not (a tool name is a whole snake_case word).</summary>
+    private static List<string> ToolsNamedIn(string text, IEnumerable<string> catalog) =>
+        catalog.Where(n => Regex.IsMatch(text, @"(?<![A-Za-z0-9_])" + Regex.Escape(n) + @"(?![A-Za-z0-9_])", RegexOptions.CultureInvariant))
+            .OrderBy(n => n, StringComparer.Ordinal).ToList();
+
+    private static readonly string[] ServerAdminToolNames = { "add_servers", "edit_server", "remove_server", "set_server_action" };
+
+    [Fact]
+    public void ServerAdminToolsList_IsTheFourToolsTheDocsName()
+    {
+        Assert.Equal(ServerAdminToolNames.OrderBy(n => n, StringComparer.Ordinal), DarlingMcpWritePolicy.ServerAdminTools.OrderBy(n => n, StringComparer.Ordinal));
+    }
+
+    /// <summary>Review round 2, finding 2 of 2: <c>mcp.allowServerAdmin</c> does nothing unless <c>mcp.allowWrites</c> is on
+    /// (<see cref="DarlingMcpWritePolicy.Resolve"/>). An operator token keeps that precondition, so adding <c>mcp.tokens</c> to a
+    /// service with <c>allowServerAdmin: true, allowWrites: false</c> does not turn on the four server admin tools.</summary>
+    [Theory]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, false)]
+    [InlineData(true, true, true)]
+    public async Task AnOperatorToken_SeesTheServerAdminTools_OnlyWithBothAllowWritesAndAllowServerAdmin(bool writes, bool serverAdmin, bool expected)
+    {
+        var mcp = TwoTokens(serverAdmin: serverAdmin, writes: writes);
+        using var server = await DarlingMcpWritePolicyTests.BuildServer(mcp, "", tokens: SetFor(mcp));
+
+        var operatorTools = await ToolNamesAsync(server, OperatorToken);
+        var agentTools = await ToolNamesAsync(server, AgentToken);
+
+        foreach (var tool in ServerAdminToolNames)
+        {
+            Assert.Equal(expected, operatorTools.Contains(tool));
+            Assert.DoesNotContain(tool, agentTools);
+        }
+
+        /* The ordinary write tools come from the role either way, as documented. */
+        Assert.Contains("create_mute_rule", operatorTools);
+        Assert.Contains("update_alert_settings", operatorTools);
+    }
+
+    /// <summary>Review round 2, finding 1 of 2: the instructions follow the token. Each token's <c>initialize</c> instructions name
+    /// no tool its own <c>tools/list</c> lacks (#5789), and the write-policy paragraph names the role, not the settings that govern
+    /// the legacy token.</summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task EachTokensInstructions_NameNoToolItsOwnToolsListLacks(bool writes, bool serverAdmin)
+    {
+        var mcp = TwoTokens(serverAdmin: serverAdmin, writes: writes);
+        using var server = await DarlingMcpWritePolicyTests.BuildServer(mcp, "", tokens: SetFor(mcp));
+        var catalog = DarlingMcpWritePolicy.ToolNames(McpToolsListBudgetTests.BuildServedTools().Tools);
+
+        var operatorTools = await ToolNamesAsync(server, OperatorToken);
+        var agentTools = await ToolNamesAsync(server, AgentToken);
+        var operatorText = await InstructionsAsync(server, OperatorToken);
+        var agentText = await InstructionsAsync(server, AgentToken);
+
+        Assert.Empty(ToolsNamedIn(operatorText, catalog).Where(n => !operatorTools.Contains(n)));
+        Assert.Empty(ToolsNamedIn(agentText, catalog).Where(n => !agentTools.Contains(n)));
+
+        /* The case the review found: the mute step is in NeverAgentTools, so the agent's Workflow line must not name it. */
+        Assert.DoesNotContain("mute_analysis_finding", agentTools);
+        Assert.DoesNotContain("mute_analysis_finding", agentText, StringComparison.Ordinal);
+        Assert.Contains("mute_analysis_finding", operatorText, StringComparison.Ordinal);
+
+        /* The census counts what each token is served, and the sentences name the role. */
+        Assert.Contains($"exposes {agentTools.Count} of its {catalog.Count} tools", agentText, StringComparison.Ordinal);
+        Assert.Contains($"exposes {operatorTools.Count} of its {catalog.Count} tools", operatorText, StringComparison.Ordinal);
+        Assert.Contains("agent role", agentText, StringComparison.Ordinal);
+        Assert.Contains("operator role", operatorText, StringComparison.Ordinal);
+        foreach (var text in new[] { operatorText, agentText })
+        {
+            Assert.DoesNotContain("are served when darling.json sets mcp.allowWrites", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("mcp.allowInvestigations", text, StringComparison.Ordinal);
+        }
+
+        /* The two roles are told different things, and the unnamed start-wide union text is neither. */
+        Assert.NotEqual(operatorText, agentText);
+        Assert.DoesNotContain("claim_investigation_request", operatorText, StringComparison.Ordinal);
+        Assert.Contains("claim_investigation_request", agentText, StringComparison.Ordinal);
+    }
+
+    /// <summary>With a legacy token beside the named ones, the legacy token's instructions are the ones its own settings give it.</summary>
+    [Fact]
+    public async Task ALegacyTokenBesideNamedTokens_GetsTheInstructionsItsSettingsGiveIt()
+    {
+        const string legacy = "legacy-single-token-value-cccccc-3";
+        var mcp = TwoTokens(serverAdmin: true, writes: true);
+        var catalog = DarlingMcpWritePolicy.ToolNames(McpToolsListBudgetTests.BuildServedTools().Tools);
+        using var plain = await DarlingMcpWritePolicyTests.BuildServer(new McpConfig { AllowWrites = true, AllowServerAdmin = true }, legacy);
+        using var server = await DarlingMcpWritePolicyTests.BuildServer(mcp, legacy, tokens: SetFor(mcp, legacy));
+
+        var expected = await InstructionsAsync(plain, legacy);
+        var actual = await InstructionsAsync(server, legacy);
+
+        Assert.Equal(expected, actual);
+        var served = await ToolNamesAsync(server, legacy);
+        Assert.Empty(ToolsNamedIn(actual, catalog).Where(n => !served.Contains(n)));
     }
 
     [Fact]
@@ -327,6 +461,24 @@ public sealed class DarlingMcpNamedTokenTests
 
         Assert.True(mcp.HasNamedTokens);
         Assert.False(SetFor(mcp).HasAnyToken);
+    }
+
+    /// <summary>Review round 2: a legacy token beside <c>mcp.tokens</c> is a supported setup, so its advice logs at Warning. A token
+    /// that is not served logs at Critical.</summary>
+    [Fact]
+    public void Resolve_LogsTheLegacyBesideNamedAdviceAtWarning_AndAnUnservedTokenAtCritical()
+    {
+        const string legacy = "legacy-single-token-value-cccccc-3";
+        var advice = new CapturingTestLogger();
+        DarlingMcpTokenSet.Resolve(TwoTokens(), legacy, DarlingMcpWritePolicy.Effective.Off, advice);
+        Assert.Equal(1, advice.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, advice.CountAtLevel(LogLevel.Critical));
+
+        var unserved = new CapturingTestLogger();
+        var broken = new McpConfig { Tokens = new List<McpTokenEntry> { Entry("ops-lead", OperatorToken, "operator"), Entry("bad", "tooshort", "agent") } };
+        DarlingMcpTokenSet.Resolve(broken, legacy, DarlingMcpWritePolicy.Effective.Off, unserved);
+        Assert.Equal(1, unserved.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(1, unserved.CountAtLevel(LogLevel.Critical));
     }
 
     [Fact]

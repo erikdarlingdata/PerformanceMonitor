@@ -61,8 +61,8 @@ internal sealed class DarlingMcpTokenSet
     /// <summary>True when any token at all gates the listener.</summary>
     internal bool HasAnyToken => LegacyToken.Length > 0 || HasNamed;
 
-    /// <summary>The policy a named token's role is served: an operator gets the reads and the writes (the server admin tools only with
-    /// <c>mcp.allowServerAdmin</c>) and never the investigation tools; an agent gets the reads, the investigation tools and the Level 2
+    /// <summary>The policy a named token's role is served: an operator gets the reads and the writes (the server admin tools only when
+    /// <c>mcp.allowWrites</c> AND <c>mcp.allowServerAdmin</c> are both on, the one rule <see cref="DarlingMcpWritePolicy.Resolve"/> applies) and never the investigation tools; an agent gets the reads, the investigation tools and the Level 2
     /// action tools, never a write in <see cref="DarlingMcpWritePolicy.NeverAgentTools"/>.</summary>
     internal DarlingMcpWritePolicy.Effective PolicyFor(Entry entry) =>
         string.Equals(entry.Role, McpTokenEntry.OperatorRole, StringComparison.Ordinal)
@@ -131,6 +131,12 @@ internal sealed class DarlingMcpTokenSet
     /// <summary>True when <paramref name="name"/> is a valid token name: the agent id rule, 1 to 64 of <c>A-Za-z0-9._:-</c>.</summary>
     internal static bool IsValidName(string? name) => InvestigationRules.IsValidAgentId(name);
 
+    /// <summary>The one <see cref="Check"/> sentence that is advice about a supported setup, not a token left unserved: the start logs it
+    /// at Warning, every other sentence at Critical.</summary>
+    internal const string LegacyBesideNamedAdvice =
+        "mcp.tokens and the legacy mcp.network token are both set. The legacy token keeps the role mcp.allowWrites and " +
+        "mcp.allowInvestigations give it; give it a name and a role in mcp.tokens and remove it from mcp.network instead.";
+
     /// <summary>
     /// What is wrong with <c>mcp.tokens</c>, one sentence per problem, never a token value (#6542). <paramref name="resolve"/> reads
     /// an entry's token and the reason it could not be read. <paramref name="legacyToken"/> is the resolved legacy token, empty when
@@ -150,8 +156,7 @@ internal sealed class DarlingMcpTokenSet
 
         if (legacyToken.Length > 0)
         {
-            problems.Add("mcp.tokens and the legacy mcp.network token are both set. The legacy token keeps the role mcp.allowWrites and " +
-                "mcp.allowInvestigations give it; give it a name and a role in mcp.tokens and remove it from mcp.network instead.");
+            problems.Add(LegacyBesideNamedAdvice);
         }
 
         var candidates = new List<Entry>();
@@ -250,16 +255,25 @@ internal sealed class DarlingMcpTokenSet
 
     /// <summary>
     /// The token set a start serves: the legacy token with its policy from the settings, as today, and every named token
-    /// <see cref="Check"/> passes. Each problem is logged once at Critical (the token it names is not served). Never logs a value.
+    /// <see cref="Check"/> passes. Each problem is logged once, at Critical when the token it names is not served and at Warning for
+    /// <see cref="LegacyBesideNamedAdvice"/>, which names no unserved token. Never logs a value.
     /// </summary>
     internal static DarlingMcpTokenSet Resolve(McpConfig mcp, string legacyToken, DarlingMcpWritePolicy.Effective legacyPolicy, ILogger? logger)
     {
         var problems = Check(mcp, legacyToken, ResolveEntry, out var usable);
         foreach (var problem in problems)
         {
-            logger?.LogCritical("MCP named tokens: {Problem}", problem);
+            if (string.Equals(problem, LegacyBesideNamedAdvice, StringComparison.Ordinal))
+            {
+                logger?.LogWarning("MCP named tokens: {Problem}", problem);
+            }
+            else
+            {
+                logger?.LogCritical("MCP named tokens: {Problem}", problem);
+            }
         }
 
-        return new DarlingMcpTokenSet(legacyToken, legacyPolicy, usable, mcp.AllowServerAdmin);
+        /* An operator token gets the server admin tools only when writes AND server admin are both on: the rule Resolve applies to the legacy token. */
+        return new DarlingMcpTokenSet(legacyToken, legacyPolicy, usable, mcp.AllowWrites && mcp.AllowServerAdmin);
     }
 }

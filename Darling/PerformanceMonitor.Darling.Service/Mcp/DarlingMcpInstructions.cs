@@ -54,22 +54,47 @@ internal static class DarlingMcpInstructions
         DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served)
         => Compose(peers, ToolCensus(catalog, served), served.Contains(MuteTool));
 
-    private static string Compose(DarlingPeerDirectory.Snapshot peers, string census, bool muteServed = true)
+    /// <summary>
+    /// #6542: the instructions for a request that presented a NAMED token, rendered over the tools that token's role is served
+    /// (<paramref name="served"/>) and its policy. The census and the write-policy paragraph name the role, not the
+    /// <c>mcp.allowWrites</c> and <c>mcp.allowInvestigations</c> switches, which do not govern a named token, and the Workflow
+    /// line drops the mute step for a role that is not served it. The legacy token keeps the three-argument overload.
+    /// </summary>
+    internal static string BuildForNamedToken(
+        DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served,
+        DarlingMcpWritePolicy.Effective policy)
+        => Compose(peers, ToolCensus(catalog, served, policy), served.Contains(MuteTool), policy);
+
+    private static string Compose(
+        DarlingPeerDirectory.Snapshot peers, string census, bool muteServed = true, DarlingMcpWritePolicy.Effective? named = null)
     {
         var section = DarlingPeerDirectory.InstructionsSection(peers);
         // The fast path returns the fixed text when the served census equals the catalog census, the mute tool is
         // served, and there are no peers. The census is compared by value: ToolCensus builds a new string on each call.
-        if (section.Length == 0 && census == CatalogCensus && muteServed)
+        if (named is null && section.Length == 0 && census == CatalogCensus && muteServed)
             return Text;
 
         /* #5789 correction: the Workflow line names the mute write as its last step. With the writes off that tool
            is not served, so the step is dropped rather than pointing a client at a tool tools/list lacks. */
         var tail = muteServed ? BodyTail : BodyTail.Replace(WorkflowMuteStep, "", StringComparison.Ordinal);
-        var preamble = section.Length == 0 ? Preamble : Preamble + "\n\n" + section;
+        /* A named token's preamble swaps the settings paragraph for its role's, and says nothing of purge_now unless the role is served it. */
+        var basePreamble = Preamble;
+        if (named is { } role)
+        {
+            basePreamble = basePreamble.Replace(
+                DarlingMcpWritePolicy.InstructionsLine, DarlingMcpWritePolicy.NamedInstructionsLine(role), StringComparison.Ordinal);
+            if (!role.Writes)
+                basePreamble = basePreamble.Replace(PurgeSentence, "", StringComparison.Ordinal);
+        }
+
+        var preamble = section.Length == 0 ? basePreamble : basePreamble + "\n\n" + section;
         return preamble + "\n\n" + BodyHead + "\n\n" + census + "\n\n" + tail;
     }
 
     private const string MuteTool = "mute_analysis_finding";
+
+    /// <summary>The preamble sentence that names <c>purge_now</c>, a write an agent token is never served (#6542).</summary>
+    private const string PurgeSentence = " With writes on, purge_now deletes history older than the retention given.";
 
     /// <summary>The Workflow line's last step, which names a write tool; <see cref="Compose"/> drops it when that
     /// tool is not served. <c>RenderedInstructions_NameOnlyServedTools</c> fails if this stops matching the line.</summary>
@@ -82,6 +107,13 @@ internal static class DarlingMcpInstructions
     /// writes off, the server-tag and onboarding tools (all writes) are gone, while the query-tag read stays.
     /// </summary>
     internal static string ToolCensus(IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served)
+        => ToolCensus(catalog, served, null);
+
+    /// <summary><see cref="ToolCensus(IReadOnlyCollection{string}, IReadOnlyCollection{string})"/> for a named token's role (#6542) when
+    /// <paramref name="named"/> is set: the sentence that says what is not served names the role, not the settings that govern
+    /// the legacy token. Null leaves the legacy census byte-identical.</summary>
+    internal static string ToolCensus(
+        IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served, DarlingMcpWritePolicy.Effective? named)
     {
         var count = served.Count;
         var total = catalog.Count;
@@ -101,7 +133,20 @@ internal static class DarlingMcpInstructions
         var investigationsServed = served.Any(DarlingMcpWritePolicy.IsInvestigation);
         var investigationCount = catalog.Count(DarlingMcpWritePolicy.IsInvestigation);
         var off = new List<string>();
-        if (!writesServed)
+        if (named is { } role)
+        {
+            if (role.Investigations)
+                off.Add("this token has the agent role: the write tools beyond the actions an agent may take with an `agent_action` are " +
+                    "served only to an operator token");
+            else
+            {
+                off.Add("this token has the operator role: the investigation tools are served only to an agent token");
+                if (!adminServed)
+                    off.Add($"the {adminCount} tools that add, edit and remove monitored servers, or switch agent actions, need " +
+                        $"both `{DarlingMcpWritePolicy.WritesSetting}` and `{DarlingMcpWritePolicy.ServerAdminSetting}` on");
+            }
+        }
+        else if (!writesServed)
             off.Add($"the write tools are off, so the {writeCount + adminCount - agentActionServed} that change monitoring configuration are not served " +
                     $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount - agentActionServed}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
                     $"{adminCount} more)" + (agentActionServed > 0
@@ -110,7 +155,7 @@ internal static class DarlingMcpInstructions
         else if (!adminServed)
             off.Add($"`{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so the {adminCount} tools that add, edit and remove " +
                     "monitored servers, or switch agent actions, are not served");
-        if (!investigationsServed && investigationCount > 0)
+        if (named is null && !investigationsServed && investigationCount > 0)
             off.Add(writesServed
                 ? $"the {investigationCount} investigation tools stay off while `{DarlingMcpWritePolicy.WritesSetting}` is on (one token " +
                   "cannot tell an agent from a person)"
