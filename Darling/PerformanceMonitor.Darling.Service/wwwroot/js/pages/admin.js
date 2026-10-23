@@ -523,7 +523,7 @@ export function validateEdit(original, values, password, externalId) {
         ? "Switching to ServicePrincipal authentication needs the client secret as password."
         : "Switching to SQL authentication needs the password.";
     }
-    return "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+    return "Changing the host, port or any other connection setting of this server needs its password sent with the change, because a saved password is only ever sent to the server it was saved for. Send the password together with the new settings.";
   }
   if (!Number.isFinite(next.monthly_cost_usd)) return "Monthly cost must be a number, zero or more.";
   return null;

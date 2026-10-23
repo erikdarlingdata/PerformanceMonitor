@@ -121,6 +121,28 @@ public static class ViewerTimeHelper
         naiveUtc.HasValue ? FormatForDisplay(naiveUtc.Value, format) : "";
 
     /// <summary>
+    /// <paramref name="naiveUtc"/> as TEXT for a row that belongs to the whole fleet and no one server (#6457): a
+    /// notification route, a threshold override, a known pattern's last edit, a service host's start. Such a row has
+    /// no server clock, so "Server" mode has nothing to apply: applying the active server's offset to it showed a
+    /// route saved at 10:07 UTC as 03:07. Local mode reads this machine's zone and every other mode reads UTC, and
+    /// the zone's label ("UTC", or this machine's standard or daylight zone name) always follows the time, so a
+    /// reader never has to guess which convention a fleet-wide grid used. The invariant culture, so the text is the
+    /// same on every machine. <see cref="FormatForDisplay(DateTime, string)"/> stays the renderer for a row that
+    /// belongs to one server.
+    /// </summary>
+    public static string FormatFleetWide(DateTime naiveUtc, string format) =>
+        FormatFleetWide(naiveUtc, format, CurrentDisplayMode);
+
+    /// <summary><see cref="FormatFleetWide(DateTime, string)"/> for an explicit display mode.</summary>
+    public static string FormatFleetWide(DateTime naiveUtc, string format, TimeDisplayMode mode)
+    {
+        var utc = DateTime.SpecifyKind(naiveUtc, DateTimeKind.Utc);
+        var shownMode = mode == TimeDisplayMode.LocalTime ? TimeDisplayMode.LocalTime : TimeDisplayMode.UTC;
+        var shown = ConvertToDisplay(utc, shownMode, ServerClock.Utc);
+        return shown.ToString(format, System.Globalization.CultureInfo.InvariantCulture) + " " + GetTimezoneLabel(shownMode, ServerClock.Utc, utc);
+    }
+
+    /// <summary>
     /// Pure (static-free) naive-UTC → display conversion for an explicit mode + fixed offset: the same as
     /// the <see cref="ServerClock"/> overload with a clock that never changes offset.
     /// </summary>
