@@ -1417,8 +1417,10 @@ public sealed class McpConfig
     public bool AllowWrites { get; set; }
 
     /// <summary>
-    /// Default OFF. Additionally offers <c>add_servers</c> and <c>remove_server</c>, which change the servers
-    /// this service connects to as its own account. Has no effect unless <see cref="AllowWrites"/> is on.
+    /// Default OFF. Additionally offers <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c> and
+    /// <c>set_server_action</c>. The first three change the servers this service connects to as its own
+    /// account; <c>set_server_action</c> turns one server's switch for an agent action (<c>force_plan</c>,
+    /// <c>evict_plan</c>, <c>kill_session</c>) on or off. Has no effect unless <see cref="AllowWrites"/> is on.
     /// </summary>
     [JsonPropertyName("allowServerAdmin")]
     public bool AllowServerAdmin { get; set; }
@@ -1528,8 +1530,23 @@ public sealed class McpTokenEntry
 
     /// <summary>The token, preferring <see cref="EncryptedToken"/> over <see cref="Token"/>; null when neither is set. Throws when an
     /// encrypted token cannot be read.</summary>
-    public string? ResolveToken() =>
-        new McpNetworkConfig { EncryptedToken = EncryptedToken, Token = Token }.ResolveToken(out _);
+    public string? ResolveToken()
+    {
+        /* #6542: the error names this entry's own setting, not mcp.network.token, so an operator fixes the right line. */
+        var setting = $"mcp.tokens[{Name}]";
+        if (!string.IsNullOrWhiteSpace(EncryptedToken))
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                throw new PlatformNotSupportedException(
+                    setting + ".encryptedToken requires Windows (DPAPI); use the plaintext \"token\" on other platforms.");
+            }
+
+            return DarlingSecrets.Unprotect(EncryptedToken);
+        }
+
+        return string.IsNullOrWhiteSpace(Token) ? null : DarlingSecretSource.Resolve(Token, setting + ".token");
+    }
 }
 
 /// <summary>
