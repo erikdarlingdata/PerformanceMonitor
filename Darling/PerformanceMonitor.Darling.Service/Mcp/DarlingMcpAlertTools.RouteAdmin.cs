@@ -43,7 +43,7 @@ public sealed partial class DarlingMcpAlertTools
     private const string MatchHelp = "a family (performance, self-monitor, reports, agent-jobs, external), 'Analysis: <category>', an exact metric name, or * (scoped routes only)";
 
     [McpServerTool(Name = "create_notification_route"), Description(
-        "Creates a notification route, optionally with its own destinations (Slack, Teams, generic webhook, PagerDuty, email). With none, each channel goes where it went before (the next matching route, else Settings). Changes shared alert configuration; the service delivers on it at its next sweep. Returns created (the route with its recipient list in full, and for each destination set whether it is saved: the host for Teams and Slack, never a URL or key) with the undo call, or invalid. Only a named operator token sets the agent fields (levels 0 to 2)." +
+        "Creates a notification route, optionally with its own destinations (Slack, Teams, generic webhook, PagerDuty, email). With none, each channel goes where it went before (the next matching route, else Settings). Changes shared alert configuration; the service delivers on it at its next sweep. Returns created (the route with its recipient list in full, and for each destination set whether it is saved: the host for Teams and Slack, never a URL or key) with the undo call, or invalid. Only a named operator token sets the agent fields (levels 0 to 3)." +
         "<<GUIDE>>" +
         "Creates a route that decides WHICH alerts it covers and, when you pass them, where they go. " + DestinationsHelp + " " +
         "With no destination field the route is stored with every destination empty, so it has none of its own and each channel goes where it went before: to the next less specific matching route that sets that channel, else to the Settings > Notifications channels. " +
@@ -66,7 +66,7 @@ public sealed partial class DarlingMcpAlertTools
         [Description("The route's own generic webhook URL (absolute http or https). Sealed for this route; never shown back. Omit for none.")] string? generic_webhook_url = null,
         [Description("The route's own PagerDuty Events API v2 routing key. Sealed for this route; never shown back. Omit for none.")] string? pagerduty_routing_key = null,
         [Description("The route's own email recipients, comma separated plain addresses. Omit for none.")] string? email_recipients = null,
-        [Description("Operator token only: the agent level, 0 (Off), 1 (Investigate) or 2 (Act). Level 3 is set in the Viewer. Omit to keep.")] int? agent_level = null,
+        [Description("Operator token only: the agent level, 0 (Off), 1 (Investigate), 2 (Act) or 3 (Act on servers). Omit to keep.")] int? agent_level = null,
         [Description("Operator token only: requests per hour, 1 to 60. Omit to keep.")] int? agent_max_per_hour = null,
         [Description("Operator token only: requests per day, 1 to 500. Omit to keep.")] int? agent_max_per_day = null,
         [Description("Operator token only: lease minutes, 5 to 120. Omit to keep.")] int? agent_lease_minutes = null,
@@ -106,7 +106,7 @@ public sealed partial class DarlingMcpAlertTools
                     FallbackRouteId = fallback_route_id,
                     TeamsUrl = DestinationStandIn,
                 };
-                if (AgentFieldRefusal(agent, draft, null, operatorTokenName, "create_notification_route") is { } agentRefusal)
+                if (AgentFieldRefusal(agent, draft, operatorTokenName, "create_notification_route") is { } agentRefusal)
                 {
                     return agentRefusal;
                 }
@@ -180,7 +180,7 @@ public sealed partial class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "update_notification_route"), Description(
-        "Edits a notification route by route_id: only the fields you pass change: its match and scope, enabled flag, resolution override, fallback and own destinations (Slack, Teams, generic webhook, PagerDuty, email). Changes shared alert configuration the service delivers on. Returns updated (the route with its recipient list in full, and each destination changed as saved or none, with the host for Teams and Slack and never a URL or key), previous and the undo call, or unchanged, invalid, not_found or refused (an agent route, or a match or scope change on a route with an agent setting). Only a named operator token sets the agent fields (levels 0 to 2)." +
+        "Edits a notification route by route_id: only the fields you pass change: its match and scope, enabled flag, resolution override, fallback and own destinations (Slack, Teams, generic webhook, PagerDuty, email). Changes shared alert configuration the service delivers on. Returns updated (the route with its recipient list in full, and each destination changed as saved or none, with the host for Teams and Slack and never a URL or key), previous and the undo call, or unchanged, invalid, not_found or refused (an agent route, or a match or scope change on a route with an agent setting). Only a named operator token sets the agent fields (levels 0 to 3)." +
         "<<GUIDE>>" +
         "Edits what a route matches and applies to, and where it sends. " + DestinationsHelp + " " +
         "A route that is an agent route keeps everything in the Viewer, and a route with an agent setting (Off included) keeps its match and scope there: changing metric_match, scope_server_id, scope_tag_id or fleet_wide on it answers refused. " +
@@ -211,7 +211,7 @@ public sealed partial class DarlingMcpAlertTools
         [Description("The route's own generic webhook URL (absolute http or https). Sealed for this route; never shown back. Omit to keep; - removes it.")] string? generic_webhook_url = null,
         [Description("The route's own PagerDuty Events API v2 routing key. Sealed for this route; never shown back. Omit to keep; - removes it.")] string? pagerduty_routing_key = null,
         [Description("The route's own email recipients, comma separated plain addresses. Omit to keep; - removes them.")] string? email_recipients = null,
-        [Description("Operator token only: the agent level, 0 (Off), 1 (Investigate) or 2 (Act). Level 3 is set in the Viewer. Omit to keep.")] int? agent_level = null,
+        [Description("Operator token only: the agent level, 0 (Off), 1 (Investigate), 2 (Act) or 3 (Act on servers). Omit to keep.")] int? agent_level = null,
         [Description("Operator token only: requests per hour, 1 to 60. Omit to keep.")] int? agent_max_per_hour = null,
         [Description("Operator token only: requests per day, 1 to 500. Omit to keep.")] int? agent_max_per_day = null,
         [Description("Operator token only: lease minutes, 5 to 120. Omit to keep.")] int? agent_lease_minutes = null,
@@ -350,7 +350,7 @@ public sealed partial class DarlingMcpAlertTools
                     AgentExpiryMinutes = existing.AgentExpiryMinutes,
                     TeamsUrl = DestinationStandIn,
                 };
-                if (AgentFieldRefusal(agent, draft, existing.AgentLevel, operatorTokenName, "update_notification_route") is { } agentFieldRefusal)
+                if (AgentFieldRefusal(agent, draft, operatorTokenName, "update_notification_route") is { } agentFieldRefusal)
                 {
                     return agentFieldRefusal;
                 }
@@ -475,36 +475,15 @@ public sealed partial class DarlingMcpAlertTools
         Outcome("refused", $"{tool} sets a route's agent fields only for a named operator token (mcp.tokens, role operator). Set them in the Viewer's Settings window or on the web dashboard.");
 
     /// <summary>
-    /// The highest agent level an operator token sets over MCP, and the highest level a route may be at for MCP to change its agent fields
-    /// (#6542 part 2). PENDING A DECISION: 2 keeps level 3 (Act on servers, which includes a session kill with no undo) person-only in both
-    /// directions. Allowing level 3 is this one line, plus the matching line in config.set_notification_route_agent
-    /// (DarlingManagedRoles.BuildNotificationRouteFunctionsSql and tools/provision-roles.sql). A level 3 server action still needs the
-    /// person-only per-server switch (config.config_server_actions, ServerActionGate) whatever the route says.
-    /// </summary>
-    internal const int MaxMcpAgentLevel = NotificationRoute.AgentLevelAct;
-
-    /// <summary>The one ceiling check: a requested level, or the route's current level, above <see cref="MaxMcpAgentLevel"/>.</summary>
-    internal static bool AboveMcpCeiling(int? level) => level > MaxMcpAgentLevel;
-
-    /// <summary>The one ceiling refusal sentence.</summary>
-    internal static string CeilingRefusal(string tool) => Outcome("refused",
-        $"{tool} sets and changes agent levels up to {MaxMcpAgentLevel} over MCP. A higher level is set and changed by a person in the Viewer, and a route at a higher level keeps its agent fields there, lowering included.");
-
-    /// <summary>
-    /// The check an operator token's agent fields get before anything is written (#6542 part 2): a named operator token only, never level 3
-    /// and never on a route at level 3, then <see cref="NotificationRouteWriter.Validate"/> (the Viewer's save rules) over the route as it would be.
+    /// The check an operator token's agent fields get before anything is written (#6542 part 2): a named operator token only (MCP is full
+    /// admin, so it sets levels 0 to 3 and changes a route at any level), then <see cref="NotificationRouteWriter.Validate"/> (the Viewer's save rules) over the route as it would be.
     /// Null when the write may go on. The agent function checks the same again under the row's lock.
     /// </summary>
-    internal static string? AgentFieldRefusal(RouteAgentRequest agent, NotificationRouteDraft draft, int? currentLevel, string? operatorTokenName, string tool)
+    internal static string? AgentFieldRefusal(RouteAgentRequest agent, NotificationRouteDraft draft, string? operatorTokenName, string tool)
     {
         if (operatorTokenName is null)
         {
             return AgentFieldsNeedOperator(tool);
-        }
-
-        if (AboveMcpCeiling(currentLevel) || AboveMcpCeiling(agent.Level))
-        {
-            return CeilingRefusal(tool);
         }
 
         draft.AgentLevel = agent.Level ?? draft.AgentLevel;

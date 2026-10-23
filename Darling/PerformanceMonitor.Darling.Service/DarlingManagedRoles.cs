@@ -2759,8 +2759,8 @@ END
 $fn$;
 REVOKE ALL ON FUNCTION {config}.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) FROM PUBLIC;
 -- #6542: a named operator token sets a route's agent level, its four limits and its fallback over MCP through this function, and
--- the change is journaled as route_agent_changed under the token's name (operator:<name>), in the same transaction. Level 3 (Act on
--- servers) is person-only both ways: it is never set here, and a route at level 3 is never changed here, lowering included.
+-- the change is journaled as route_agent_changed under the token's name (operator:<name>), in the same transaction. Levels 0 to 3 are
+-- set here (MCP is full admin). A level 3 server action still needs the person-only per-server switch (config_server_actions).
 CREATE OR REPLACE FUNCTION {config}.set_notification_route_agent(
    p_route_id integer,
    p_actor text,
@@ -2807,11 +2807,6 @@ BEGIN
    v_lease := CASE WHEN 'agent_lease_minutes' = ANY (p_columns) THEN p_agent_lease_minutes ELSE v_row.agent_lease_minutes END;
    v_expiry := CASE WHEN 'agent_expiry_minutes' = ANY (p_columns) THEN p_agent_expiry_minutes ELSE v_row.agent_expiry_minutes END;
    v_fallback := CASE WHEN 'fallback_route_id' = ANY (p_columns) THEN p_fallback_route_id ELSE v_row.fallback_route_id END;
-   -- The MCP ceiling (#6542 part 2, pending a decision): the one line that holds levels above 2 person-only, both ways. It mirrors
-   -- DarlingMcpAlertTools.MaxMcpAgentLevel.
-   IF v_row.agent_level > 2 OR v_level > 2 THEN
-      RAISE EXCEPTION 'Agent levels above 2 are set and changed by a person in the Viewer, not over MCP, lowering included.' USING ERRCODE = 'DL403';
-   END IF;
    IF v_level IS NOT NULL AND v_level NOT IN (0, 1, 2, 3) THEN
       RAISE EXCEPTION 'The agent level is Off (0), Investigate (1), Act (2) or Act on servers (3).' USING ERRCODE = 'DL400';
    END IF;
