@@ -331,7 +331,7 @@ public sealed class DarlingMcpCustomAlertTools
             // #3305: resolve any open incident (write the recovery row) BEFORE the delete's FK cascade drops the
             // state that says which (rule, server) pairs were firing. No logger on the MCP surface — the recovery
             // row still writes; only the (optional) service-log line is skipped.
-            var before = await new CustomAlertRuleStore(postgres).GetAsync(rule_id);
+            var before = await new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds).GetAsync(rule_id);
             if (before is not CustomAlertRuleResult.Ok beforeOk || beforeOk.Rule is null)
             {
                 return Outcome("not_found", $"No custom alert rule with id {rule_id}.");
