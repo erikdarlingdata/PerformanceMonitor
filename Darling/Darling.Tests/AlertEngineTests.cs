@@ -14,6 +14,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -5392,17 +5394,22 @@ public sealed class AlertEngineTests
            happen to open the editor mid-restore. Both sites interpolate the shared constant instead, and
            BOTH statements use it: the seed to refuse those states, the heal to un-write them (#2189). A copy
            that widened only one of the two would be the subtler half of the same bug. */
-        var viewer = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.DatabaseStates.cs"));
-        var service = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingAlertReadAdapter.cs"));
+        /* Asserted on the statements as built, not on the C# that builds them: the shared store the editor and the
+           MCP tools run (DatabaseStateExpectedStore) and the service's adapter each hold a seed and a heal. */
+        var seeds = new[] { DatabaseStateExpectedStore.SeedSql, DarlingAlertReadAdapter.SeedDatabaseStateExpectedSql };
+        var heals = new[] { DatabaseStateExpectedStore.HealToOnlineSql, DarlingAlertReadAdapter.HealDatabaseStateBaselineToOnlineSql };
 
-        foreach (var source in new[] { viewer, service })
+        foreach (var seed in seeds)
         {
-            Assert.Contains("NOT IN ({DatabaseStateTokens.NeverBaselinedSqlList})", source, StringComparison.Ordinal);
-            Assert.Contains("expected_state IN ({DatabaseStateTokens.NeverBaselinedSqlList})", source, StringComparison.Ordinal);
-            Assert.DoesNotContain($"NOT IN ('{DatabaseStateTokens.Suspect}'", source, StringComparison.Ordinal);
+            Assert.Contains($"NOT IN ({DatabaseStateTokens.NeverBaselinedSqlList})", seed, StringComparison.Ordinal);
+        }
+
+        foreach (var heal in heals)
+        {
+            Assert.Contains($"expected_state IN ({DatabaseStateTokens.NeverBaselinedSqlList})", heal, StringComparison.Ordinal);
 
             /* The heal must never be reachable for a state somebody DECLARED, in either copy. */
-            Assert.Contains("is_user_override = false", source, StringComparison.Ordinal);
+            Assert.Contains("is_user_override = false", heal, StringComparison.Ordinal);
         }
     }
 
