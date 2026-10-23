@@ -90,6 +90,8 @@ FROM config.investigation_notes WHERE note_id = {written}", ct));
 
             await viewer.SaveInvestigationProfileAsync(null, null, "fleet: OLTP, business hours 08-18", "tester", null, ct);
             await viewer.SaveInvestigationProfileAsync(7, null, "srv-7: reporting replica", "tester", null, ct);
+            /* #6400: a tag profile needs the tag to exist. */
+            await ExecAsync(owner, "INSERT INTO config.server_tags (id, name) OVERRIDING SYSTEM VALUE VALUES (3, 'dev')", ct);
             await viewer.SaveInvestigationProfileAsync(null, 3, "tag 3: dev servers", "tester", null, ct);
             var staleFleet = await ShownAsync(null, null);
 

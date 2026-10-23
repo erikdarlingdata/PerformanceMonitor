@@ -126,7 +126,7 @@ public sealed class DarlingMcpInvestigationFeedbackTools
             var hasServer = !string.IsNullOrWhiteSpace(server_name);
             if (InvestigationProfiles.Validate(hasServer ? 0 : null, tag_id, profile_text) is { } profileRefusal)
             {
-                return McpHelpers.Refusal(hasServer && tag_id.HasValue ? "tag_id" : "profile_text", profileRefusal + " Nothing was changed.");
+                return McpHelpers.Refusal(tag_id is { } tag && (hasServer || tag <= 0) ? "tag_id" : "profile_text", profileRefusal + " Nothing was changed.");
             }
 
             var actor = DarlingMcpInvestigationAdminTools.Actor();
@@ -165,7 +165,7 @@ public sealed class DarlingMcpInvestigationFeedbackTools
             }
             catch (ArgumentException ex)
             {
-                return McpHelpers.Refusal("profile_text", ex.Message.Split('\n')[0].Replace(" (Parameter 'profileText')", "", StringComparison.Ordinal) + " Nothing was changed.");
+                return McpHelpers.Refusal(ex.Message.StartsWith("Tag ", StringComparison.Ordinal) ? "tag_id" : "profile_text", ex.Message.Split('\n')[0].Replace(" (Parameter 'profileText')", "", StringComparison.Ordinal) + " Nothing was changed.");
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation)
             {

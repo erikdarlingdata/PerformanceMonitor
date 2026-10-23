@@ -225,6 +225,29 @@ public sealed class InvestigationFeedbackMcpLiveTests
             Assert.Equal("0", await ScalarAsync(ownerSource, "SELECT count(*) FROM config.agent_environment_profiles WHERE scope_server_id IS NULL AND scope_tag_id IS NULL", ct));
             Assert.Equal("profile_removed", await ScalarAsync(ownerSource, "SELECT event FROM config.investigation_journal WHERE event LIKE 'profile_%' ORDER BY journal_id DESC LIMIT 1", ct));
 
+            /* #6400: tag 0, a negative tag and a tag that names no tag are invalid and write nothing (the profile table has no foreign key to
+               the tags); a fleet save afterwards still works, and an existing tag saves. The mcp role reads the tag with its config SELECT. */
+            var tagId = (await ScalarAsync(ownerSource, "INSERT INTO config.server_tags (name) VALUES ('oltp-6400') RETURNING id", ct))!;
+            var noTag = (await ScalarAsync(ownerSource, "SELECT max(id) + 1 FROM config.server_tags", ct))!;
+            var tagJournalBefore = await ScalarAsync(ownerSource, "SELECT count(*) FROM config.investigation_journal", ct);
+            var profilesAtStart = int.Parse((await ScalarAsync(ownerSource, "SELECT count(*) FROM config.agent_environment_profiles", ct))!, CultureInfo.InvariantCulture);
+            foreach (var badTag in new[] { "0", "-1", noTag })
+            {
+                var invalid = Parse(await DarlingMcpInvestigationFeedbackTools.SaveEnvironmentProfile(
+                    mcp, "for no tag", tag_id: int.Parse(badTag, CultureInfo.InvariantCulture), cancellationToken: ct));
+                Assert.Equal("invalid", (string)invalid["status"]!);
+                Assert.Contains(badTag, (string)invalid["message"]!, StringComparison.Ordinal);
+                Assert.Contains("Nothing was changed", (string)invalid["message"]!, StringComparison.Ordinal);
+            }
+
+            Assert.Equal(profilesAtStart.ToString(CultureInfo.InvariantCulture), await ScalarAsync(ownerSource, "SELECT count(*) FROM config.agent_environment_profiles", ct));
+            Assert.Equal(tagJournalBefore, await ScalarAsync(ownerSource, "SELECT count(*) FROM config.investigation_journal", ct));
+            Assert.Equal("saved", (string)Parse(await DarlingMcpInvestigationFeedbackTools.SaveEnvironmentProfile(mcp, "Fleet after the refusals.", cancellationToken: ct))["status"]!);
+            Assert.Equal("saved", (string)Parse(await DarlingMcpInvestigationFeedbackTools.SaveEnvironmentProfile(
+                mcp, "OLTP tag.", tag_id: int.Parse(tagId, CultureInfo.InvariantCulture), cancellationToken: ct))["status"]!);
+            Assert.Equal((profilesAtStart + 2).ToString(CultureInfo.InvariantCulture), await ScalarAsync(ownerSource, "SELECT count(*) FROM config.agent_environment_profiles", ct));
+            await ExecAsync(ownerSource, "DELETE FROM config.agent_environment_profiles WHERE scope_server_id IS NULL", ct);
+
             /* The role holds the columns these statements set, and no statement outside them. */
             await using var check = await mcp.OpenConnectionAsync(ct);
             foreach (var (sql, expected) in new[]

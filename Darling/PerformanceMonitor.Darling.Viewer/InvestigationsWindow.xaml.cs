@@ -540,6 +540,11 @@ public partial class InvestigationsWindow : Window
             await LoadProfilesAsync();
             ShowStatus(ex.Message);
         }
+        catch (ArgumentException ex)
+        {
+            /* The store's refusal sentence (#6400: a tag that no longer exists), without the parameter name the exception adds. */
+            ShowStatus(ex.Message.Split('\n')[0].Replace(" (Parameter 'profileText')", "", StringComparison.Ordinal));
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             ShowStatus("Could not save the profile: " + ex.Message);
