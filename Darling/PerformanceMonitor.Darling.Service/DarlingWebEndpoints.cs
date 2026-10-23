@@ -713,6 +713,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapAdminServers(app, postgres);
         MapQueryTags(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapCollectorRuns(app, new PostgresSnapshotNowStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct, NameClash.Refuse); return (r.ServerId, err); });
+        MapActiveQueriesLive(app, new PostgresActiveQueriesLiveStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct, NameClash.Refuse); return (r.ServerId, err); }, managedStore);
         MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
         MapInvestigationFeedback(app, postgres, logger, managedStore);
@@ -3908,6 +3909,161 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             if (state is null)
             {
                 return ErrorResult("No such collector run.", StatusCodes.Status404NotFound);
+            }
+
+            context.Response.Headers.CacheControl = "no-store";
+            var node = new JsonObject
+            {
+                ["status"] = state.Status,
+                ["finished"] = state.Status is "succeeded" or "failed",
+                ["result_status"] = state.ResultStatus,
+            };
+            if (state.ResultJson is not null)
+            {
+                try
+                {
+                    node["result"] = JsonNode.Parse(state.ResultJson);
+                }
+                catch (JsonException)
+                {
+                    /* The service wrote it; if it is not JSON the page shows the status alone. */
+                }
+            }
+
+            return JsonNodeResult(node);
+        });
+    }
+
+    /// <summary>The most request-body bytes the live Active Queries route reads (a server name).</summary>
+    internal const int MaxActiveQueriesLiveBodyBytes = 4 * 1024;
+
+    /// <summary>
+    /// The live Active Queries routes (#6386), built like the run-collectors-now routes. <c>POST /api/active-queries/live</c> (body: the
+    /// server name) queues the same argument-less <c>fetch_active_queries</c> command the Viewer's Current Active Queries queues, through
+    /// <c>config.request_active_queries_live</c> (the viewer role has no INSERT on the command queue). It needs the edit seat (403
+    /// otherwise): 202 queued, 409 when a read for the server is queued or going, 429 (with Retry-After) within 10 seconds of the last,
+    /// 404 for an unknown server, 403 when the web's store login cannot execute the function (a store provisioned before this release).
+    /// <c>GET /api/active-queries/live/{commandId}</c> returns the command's state and the service's <c>result_json</c> (the running
+    /// requests, one object per request, PascalCase as the service serializes them). <c>GET /api/active-queries/live/available</c>
+    /// says whether this seat and store login can queue one, so the page draws the control or the note.
+    /// </summary>
+    internal static void MapActiveQueriesLive(
+        WebApplication app, IActiveQueriesLiveStore store, ILogger logger,
+        Func<string, CancellationToken, Task<(int ServerId, string? Error)>> resolveServer, bool managedStore, TimeProvider? clock = null)
+    {
+        app.MapGet("/api/active-queries/live/available", async (HttpContext context) =>
+        {
+            var seat = DarlingWebSeat.FromContext(context);
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                var storeCan = seat.CanEdit && await store.CanQueueAsync(context.RequestAborted);
+                context.Response.Headers.CacheControl = "no-store";
+                return JsonNodeResult(new JsonObject { ["can_queue"] = storeCan, ["can_edit"] = seat.CanEdit, ["managed_store"] = managedStore });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ServerErrorResult($"live active queries availability failed ({ex.GetType().Name})", "/api/active-queries/live/available", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+        });
+
+        app.MapPost("/api/active-queries/live", async (HttpContext context) =>
+        {
+            var seat = DarlingWebSeat.FromContext(context);
+            if (!seat.CanEdit)
+            {
+                return ErrorResult("This account has read-only access.", StatusCodes.Status403Forbidden);
+            }
+
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            string body;
+            try
+            {
+                body = await ReadBoundedBodyAsync(context, MaxActiveQueriesLiveBodyBytes);
+            }
+            catch (InvalidDataException)
+            {
+                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+            }
+
+            string? serverName;
+            try
+            {
+                serverName = (JsonNode.Parse(body) as JsonObject)?["server"]?.GetValue<string>();
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
+            {
+                return ErrorResult("The body must be a JSON object with a \"server\" name.", StatusCodes.Status400BadRequest);
+            }
+
+            if (string.IsNullOrWhiteSpace(serverName))
+            {
+                return ErrorResult("The body must name the server.", StatusCodes.Status400BadRequest);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            int id;
+            SnapshotRequestOutcome outcome;
+            try
+            {
+                var (resolvedId, resolveError) = await resolveServer(serverName, context.RequestAborted);
+                if (resolveError is not null)
+                {
+                    return CollectorRunResolveFailure(resolveError, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+                }
+
+                id = resolvedId;
+                outcome = await ActiveQueriesLiveRequests.RequestAsync(store, id, seat.EditorPrincipal ?? "web", context.RequestAborted);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ServerErrorResult($"live active queries request failed ({ex.GetType().Name})", "/api/active-queries/live", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+
+            if (!outcome.Accepted)
+            {
+                var refusal = new JsonObject { ["error"] = outcome.Text, ["code"] = outcome.Code };
+                if (outcome.NextAllowedUtc is { } next)
+                {
+                    refusal["next_allowed_utc"] = next.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+                    var wait = (int)Math.Ceiling(Math.Max(1, (next - (clock ?? TimeProvider.System).GetUtcNow().UtcDateTime).TotalSeconds));
+                    context.Response.Headers["Retry-After"] = wait.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                }
+
+                return JsonNodeResult(refusal, outcome.Code switch
+                {
+                    SnapshotRequestOutcome.InFlightCode => StatusCodes.Status409Conflict,
+                    SnapshotRequestOutcome.RateLimitedCode => StatusCodes.Status429TooManyRequests,
+                    SnapshotRequestOutcome.UnknownServerCode => StatusCodes.Status404NotFound,
+                    ActiveQueriesLiveRequests.StoreRefusedCode => StatusCodes.Status403Forbidden,
+                    _ => StatusCodes.Status400BadRequest,
+                });
+            }
+
+            logger.LogInformation("Web: {Principal} queued a live active-queries read for server {ServerId}.", seat.EditorPrincipal, id);
+            return JsonNodeResult(new JsonObject { ["status"] = "queued", ["command_id"] = outcome.CommandId }, StatusCodes.Status202Accepted);
+        });
+
+        app.MapGet("/api/active-queries/live/{commandId:long}", async (HttpContext context, long commandId) =>
+        {
+            SnapshotCommandState? state;
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                state = await store.ReadStateAsync(commandId, context.RequestAborted);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ServerErrorResult($"live active queries read failed ({ex.GetType().Name})", "/api/active-queries/live/{commandId}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+
+            if (state is null)
+            {
+                return ErrorResult("No such live read.", StatusCodes.Status404NotFound);
             }
 
             context.Response.Headers.CacheControl = "no-store";
