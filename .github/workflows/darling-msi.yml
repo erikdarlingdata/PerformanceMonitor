@@ -13,6 +13,8 @@ name: Darling MSI
 #   M5  an uninstall keeps the store and darling.json
 #   M6  an uninstall with PURGEDATA=1 removes the store
 #   M7  an install a script step refuses (a profile folder) fails in the custom action and rolls back clean
+#   M8  an install into a folder ordinary users can modify is stopped by the folder check before install-darling.ps1
+#       runs, and rolls back clean (M4 also repairs as an administrator, which runs the check and both phases)
 # M2+M3 and M4+M5+M6 share a job each, because each continues from the state the one before left.
 #
 # Only logs are uploaded, never the MSI: nothing here publishes anything. The release job does not build or sign the
@@ -54,7 +56,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ windows-2022, windows-2025 ]
-        leg: [ M1, M2-M3, M4-M6, M7 ]
+        leg: [ M1, M2-M3, M4-M6, M7, M8 ]
     steps:
       # The commit under test, not a branch name that can move while the run is queued.
       - uses: actions/checkout@v7

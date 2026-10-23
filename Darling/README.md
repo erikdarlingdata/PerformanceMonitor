@@ -260,9 +260,9 @@ These properties are available:
 
 | Property | Effect |
 |---|---|
-| `INSTALLFOLDER` | The install folder. The default is `C:\Program Files\PerformanceMonitorDarling`. |
+| `INSTALLFOLDER` | The install folder. The default is `C:\Program Files\PerformanceMonitorDarling`. Setup stops and rolls back if any account other than SYSTEM, Administrators and TrustedInstaller can change files in the folder. A folder made directly under `C:\` is one of these, because it gets Modify for Authenticated Users from the drive. The MSI log (`msiexec /l*v`) names the accounts. Choose a folder under Program Files, or remove those permissions and run setup again. |
 | `OPERATORACCOUNT` | A `DOMAIN\user` account to add to the `PerformanceMonitor Darling Operators` group. |
-| `WEBDASHBOARD` | If you set `1`, the `darling.json` that setup writes has `web.enabled` on. If `darling.json` already exists, setup ignores this property. |
+| `WEBDASHBOARD` | If you set `1`, the `darling.json` that setup writes has `web.enabled` on. The dashboard listens on this machine only. Anyone signed in to this machine can open it without a password. If `darling.json` already exists, setup ignores this property. |
 | `PURGEDATA` | If you set `1` on uninstall, the uninstall also deletes the store. |
 
 The MSI and the scripts must not manage the same install. If `install-darling.ps1` already installed the service on this machine, the MSI stops and changes nothing. To switch, run `uninstall-darling.ps1` from the script install's folder, which keeps `darling.json` and the store. Then run the MSI again with the same `INSTALLFOLDER`. To stay on the scripts, keep using `upgrade-darling.ps1`. In the other direction, `install-darling.ps1` and `upgrade-darling.ps1` refuse to run over an MSI install.

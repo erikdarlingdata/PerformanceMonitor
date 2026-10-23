@@ -26,9 +26,12 @@
         end (M5). An install and an uninstall with PURGEDATA=1 removes the store (M6).
     M7  An install the script refuses (a folder under a user profile) fails in the PreStart custom action and rolls
         back clean: no service, no marker, no files, no group, no firewall rules, no store.
+    M8  An install into a folder BUILTIN\Users can modify is stopped by the folder check before install-darling.ps1
+        runs (1603, the check's message in the log, PreStart never executed) and rolls back clean. M4 also repairs
+        as an administrator, which runs the check and both script phases again.
 #>
 param(
-    [Parameter(Mandatory)][ValidateSet('M1', 'M2-M3', 'M4-M6', 'M7')][string]$Leg,
+    [Parameter(Mandatory)][ValidateSet('M1', 'M2-M3', 'M4-M6', 'M7', 'M8')][string]$Leg,
     [Parameter(Mandatory)][string]$Workspace,
     [Parameter(Mandatory)][string]$Payload,
     [Parameter(Mandatory)][string]$Msi,
@@ -274,6 +277,7 @@ if ($Leg -eq 'M1') {
     $marker = Get-Marker
     if (-not $marker -or $marker.InstalledBy -ne 'msi') { Fail-Leg 'the MSI install did not write HKLM\SOFTWARE\PerformanceMonitor Darling InstalledBy=msi' }
     if (-not (Select-String -LiteralPath $log -SimpleMatch -Pattern 'PreStart done' -Quiet)) { Fail-Leg 'the MSI log does not carry the PreStart script output (WixQuietExec logging)' }
+    if (-not (Select-String -LiteralPath $log -SimpleMatch -Pattern 'Install folder check passed' -Quiet)) { Fail-Leg 'the MSI log does not show the install folder check passing before PreStart' }
     $msiSnap = Get-Snapshot
     Save-Snapshot $msiSnap 'snapshot-msi.txt'
 
@@ -373,7 +377,22 @@ if ($Leg -eq 'M4-M6') {
     if ((Get-FileSha $altConfig) -ne $cfgSha) { Fail-Leg 'M4: darling.json changed across the upgrade' }
     if ((Get-Item -LiteralPath $pgVersion).CreationTimeUtc -ne $storeBorn) { Fail-Leg 'M4: the store was re-created across the upgrade' }
     if (Test-LogHas 'm4-upgrade' 'Windows Installer removes it') { Fail-Leg 'M4: the uninstall script ran during the upgrade (it must not)' }
+    if (-not (Test-LogHas 'm4-upgrade' 'Install folder check passed')) { Show-MsiLogErrors 'm4-upgrade'; Fail-Leg 'M4: the install folder check did not run (or did not pass) on the upgrade' }
     Write-Host "M4: PASS (upgraded $oldVersion to $newVersion)"
+
+    # A repair an administrator starts runs the folder check and both script phases again (the condition's
+    # MsiTrueAdminUser arm); a repair a standard user starts runs neither, which this runner, signed in as an
+    # administrator, cannot show.
+    Say 'M4: a repair (msiexec /fa) by an administrator runs the folder check and both script phases'
+    $code = Invoke-Msi '/fa' $MsiNew @() 'm4-repair'
+    Assert-MsiOk $code 'M4: msiexec /fa' 'm4-repair'
+    Wait-StoreUp 'M4 repair'
+    if (-not (Test-LogHas 'm4-repair' 'MsiTrueAdminUser = 1')) { Show-MsiLogErrors 'm4-repair'; Fail-Leg 'M4: the repair log does not show MsiTrueAdminUser = 1 for an administrator' }
+    foreach ($ran in 'Install folder check passed', 'PreStart done') {
+        if (-not (Test-LogHas 'm4-repair' $ran)) { Show-MsiLogErrors 'm4-repair'; Fail-Leg "M4: the administrator's repair did not log '$ran'" }
+    }
+    if ((Get-FileSha $altConfig) -ne $cfgSha) { Fail-Leg 'M4: darling.json changed across the repair' }
+    Write-Host 'M4: PASS (repair)'
 
     Say 'M5: an uninstall keeps the store and darling.json'
     $code = Invoke-Msi '/x' $MsiNew @() 'm5-uninstall'
@@ -426,6 +445,32 @@ if ($Leg -eq 'M7') {
     $grp = try { (New-Object System.Security.Principal.NTAccount($groupName)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { $null }
     if ($grp) { Fail-Leg "M7: the operator group '$groupName' was created ($grp)" }
     Write-Host 'M7: PASS'
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+if ($Leg -eq 'M8') {
+    # The folder is made here and BUILTIN\Users given Modify on it explicitly, so the leg does not depend on what the
+    # runner's C:\ grants. The folder check must stop the install before install-darling.ps1 runs from it.
+    $writable = 'C:\DarlingWritableTest'
+    Remove-Tree $writable
+    New-Item -ItemType Directory -Force -Path $writable | Out-Null
+    & icacls.exe $writable /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail-Leg "M8: icacls could not grant BUILTIN\Users Modify on $writable" }
+    Say "M8: an install into $writable (BUILTIN\Users can modify it) is stopped by the folder check and rolls back clean"
+    $code = Invoke-Msi '/i' $Msi @("INSTALLFOLDER=`"$writable\`"") 'm8-install'
+    if ($code -ne 1603) { Show-MsiLogErrors 'm8-install'; Fail-Leg "M8: msiexec /i into a writable folder exited with $code, expected 1603" }
+    if (-not (Test-LogHas 'm8-install' 'Setup stopped before running install-darling.ps1')) { Show-MsiLogErrors 'm8-install'; Fail-Leg 'M8: the MSI log does not carry the folder check''s message' }
+    if (-not (Test-LogHas 'm8-install' 'BUILTIN\Users')) { Show-MsiLogErrors 'm8-install'; Fail-Leg 'M8: the folder check''s message does not name BUILTIN\Users' }
+    # The deferred PreStart is scheduled when the script is written; it must never have been executed.
+    if (Test-LogHas 'm8-install' 'CustomActionSchedule(Action=DarlingPreStart') { Show-MsiLogErrors 'm8-install'; Fail-Leg 'M8: DarlingPreStart started (install-darling.ps1 ran from the writable folder)' }
+    if (Test-LogHas 'm8-install' 'PreStart done') { Fail-Leg 'M8: install-darling.ps1 ran its PreStart phase' }
+    if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { Fail-Leg 'M8: the service record was left behind' }
+    if ($null -ne (Get-Marker)) { Fail-Leg 'M8: the marker was left behind' }
+    if ($null -ne (Get-ArpVersion)) { Fail-Leg 'M8: an Add/Remove Programs record was left behind' }
+    $left = @(Get-ChildItem -LiteralPath $writable -Recurse -Force -File -ErrorAction SilentlyContinue)
+    if ($left.Count -gt 0) { Fail-Leg "M8: $($left.Count) file(s) were left in $writable (first: $($left[0].FullName))" }
+    if (Test-Path -LiteralPath $storeFolder) { Fail-Leg "M8: $storeFolder was created" }
+    Write-Host 'M8: PASS'
 }
 
 Write-Host "RESULT ${Leg}: PASS"
