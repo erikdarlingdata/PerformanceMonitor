@@ -129,36 +129,26 @@ big = {"classes": {"darling": classes([f"B{i}" for i in range(100)]), "lite": l_
 SERVICE = "Darling/PerformanceMonitor.Darling.Service/X.cs"
 
 
-def run(files, event="pull_request", base="dev", head="feature/x", draft=False, labels=("ci-next",), cat=catalog):
+def run(files, event="pull_request", base="dev", head="feature/x", draft=False, labels=(), cat=catalog):
     return cp.plan(event, base, head, draft, list(labels), files, rules, cat)
 
 
-# --- the gate --------------------------------------------------------------------------------------------------
-check("gate: no label", run(["README.md"], labels=())["outcome"], "skip-gate")
-check("gate: no label, run is false", run(["README.md"], labels=())["run"], "false")
-check("gate: no label, no tests planned", run(["Darling/X.cs"], labels=())["legs"], "0")
-check("gate: the PR's own branch passes", run(["README.md"], labels=(), head="fix/6656-ci-rebuild")["outcome"], "run")
-check("gate: label passes", run(["README.md"])["outcome"], "run")
-check("gate: an unrelated label does not", run(["README.md"], labels=("bug",))["outcome"], "skip-gate")
+# --- the gate -------------------------------------------------------------------------------------------------
+check("gate: a PR without labels runs", run(["README.md"], labels=())["outcome"], "run")
+check("gate: an unrelated label runs", run(["README.md"], labels=("bug",))["outcome"], "run")
+check("gate: no label, tests planned", run([SERVICE], labels=())["legs"], "2")
 check("gate: draft", run(["Darling/X.cs"], draft=True)["outcome"], "skip-draft")
 check("gate: draft is not run", run(["Darling/X.cs"], draft=True)["run"], "false")
-check("gate: train label", run(["Darling/X.cs"], labels=("ci-next", "merge-train"))["outcome"], "train-blocked")
-check("gate: train label is not run", run(["Darling/X.cs"], labels=("ci-next", "merge-train"))["run"], "false")
-check("gate: train label beats draft", run(["Darling/X.cs"], draft=True, labels=("ci-next", "merge-train"))["outcome"],
+check("gate: draft without labels still skips", run(["README.md"], labels=(), draft=True)["outcome"], "skip-draft")
+check("gate: train label", run(["Darling/X.cs"], labels=("merge-train",))["outcome"], "train-blocked")
+check("gate: train label is not run", run(["Darling/X.cs"], labels=("merge-train",))["run"], "false")
+check("gate: train label beats draft", run(["Darling/X.cs"], draft=True, labels=("merge-train",))["outcome"],
       "train-blocked")
 check("gate: train branch runs a draft", run(["Darling/X.cs"], draft=True, head="train/2026-10-23")["outcome"], "run")
 check("gate: train branch runs despite the train label",
-      run(["Darling/X.cs"], head="train/a", labels=("ci-next", "merge-train"))["outcome"], "run")
-check("gate: a train branch without the ci-next label is still gated",
-      run(["Darling/X.cs"], head="train/a", labels=())["outcome"], "skip-gate")
+      run(["Darling/X.cs"], head="train/a", labels=("merge-train",))["outcome"], "run")
 check("gate: a dev push ignores the label", run(["README.md"], event="push", labels=())["outcome"], "run")
 check("gate: a push ignores draft", run(["README.md"], event="push", draft=True)["outcome"], "run")
-
-saved = cp.GATE_LABEL
-cp.GATE_LABEL = None  # PR 2: no label gate
-check("gate removed: unlabelled PR runs", run(["README.md"], labels=())["outcome"], "run")
-check("gate removed: draft still skips", run(["README.md"], labels=(), draft=True)["outcome"], "skip-draft")
-cp.GATE_LABEL = saved
 
 # --- the areas -------------------------------------------------------------------------------------------------
 r = run(["README.md", "docs/a.png"])
@@ -178,7 +168,7 @@ r = run(["Lite/Services/X.cs"])
 check("lite: areas", r["areas"], "lite")
 check("lite: scopes", (r["darling_scope"], r["lite_scope"]), ("reads-lite", "full"))
 check("lite: minutes (Guard + reads-lite Darling = 2, Lite 30)", r["test_minutes"], "32.0")
-check("lite: legs", r["legs"], "3")
+check("lite: legs (32 minutes / 8.5)", r["legs"], "4")
 
 r = run(["Lite/Controls/X.xaml", "README.md"])
 check("lite xaml with docs: scopes", (r["darling_scope"], r["lite_scope"]), ("reads-lite", "full"))
@@ -218,13 +208,21 @@ check("a list under the cap: not widened", run(["README.md"] * (cp.FILES_API_CAP
 # --- the leg count ---------------------------------------------------------------------------------------------
 check("legs: 0 minutes", cp.leg_count(0), 0)
 check("legs: 1 second", cp.leg_count(0.02), 1)
-check("legs: exactly 12", cp.leg_count(12.0), 1)
-check("legs: just over 12", cp.leg_count(12.1), 2)
-check("legs: 94 minutes", cp.leg_count(94), 8)
-check("legs: 122 minutes", cp.leg_count(122), 10)
-check("legs: capped at 10", cp.leg_count(500), 10)
+check("legs: exactly one leg of minutes", cp.leg_count(cp.MINUTES_PER_LEG), 1)
+check("legs: just over one leg of minutes", cp.leg_count(cp.MINUTES_PER_LEG + 0.1), 2)
+check("legs: 131 weighted minutes, a full run, is 16", cp.leg_count(131), 16)
+check("legs: capped at the PR maximum", cp.leg_count(500), cp.MAX_LEGS)
+check("legs: the PR maximum is 16", cp.MAX_LEGS, 16)
+check("legs: a push is a fixed 4, however small", cp.leg_count(0.02, "push"), 4)
+check("legs: a push is a fixed 4, however big", cp.leg_count(500, "push"), 4)
+check("legs: a push with no tests is 0", cp.leg_count(0, "push"), 0)
 r = run(["Darling/X.cs"], cat=big)
-check("big suite: capped legs", (r["legs"], r["legs_json"]), ("10", json.dumps(list(range(1, 11)), separators=(",", ":"))))
+check("big suite: capped legs", (r["legs"], r["legs_json"]), ("16", json.dumps(list(range(1, 17)), separators=(",", ":"))))
+full = {"classes": {"darling": classes([f"F{i}" for i in range(131)]), "lite": l_cls},
+        "darling_weights": {f"F{i}": 60 for i in range(131)}, "lite_weights": {"L1": 0, "L2": 0, "L3": 0}}
+check("full all-areas PR run: 16 legs", run(["tools/odd.txt"], cat=full)["legs"], "16")
+check("same change as a dev push: 4 legs", run(["tools/odd.txt"], event="push", cat=full)["legs"], "4")
+check("a dev push's legs_json", run(["README.md"], event="push", cat=full)["legs_json"], "[1,2,3,4]")
 
 # an unknown class weighs the mean; a missing Lite table falls back to the stand-in constants
 mean_cat = {"classes": {"darling": classes(["D1", "D2", "New"]), "lite": {}},
@@ -244,7 +242,7 @@ check("web js: changed", run([js])["check_web_js"], "true")
 check("web js: other Service file", run(["Darling/PerformanceMonitor.Darling.Service/X.cs"])["check_web_js"], "false")
 check("web js: a root-level wwwroot/js path", run(["wwwroot/js/a.js"])["check_web_js"], "true")
 check("web js: not on a skipped run", run([js], draft=True)["check_web_js"], "false")
-check("actionlint: not on a skipped run", run([".github/workflows/pr.yml"], labels=())["actionlint"], "false")
+check("actionlint: not on a skipped run", run([".github/workflows/pr.yml"], draft=True)["actionlint"], "false")
 
 # --- parsing ---------------------------------------------------------------------------------------------------
 check("labels: JSON", cp.parse_labels('["ci-next", "bug"]'), ["ci-next", "bug"])
@@ -262,7 +260,7 @@ real_rules = cs.Rules
 cs.Rules = lambda: rules  # the command line builds its own Rules; give it the stand-ins
 try:
     with contextlib.redirect_stdout(io.StringIO()):
-        code = cp.main(["--event", "pull_request", "--base", "dev", "--draft", "false", "--labels", '["ci-next"]',
+        code = cp.main(["--event", "pull_request", "--base", "dev", "--draft", "false", "--labels", '["bug"]',
                         "--files-file", files_path, "--github-output", out_path])
 finally:
     cs.Rules = real_rules
