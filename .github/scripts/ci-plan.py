@@ -287,6 +287,8 @@ def main(argv: "list[str]") -> int:
                _CS.Rules())
     lines = [f"{k}={v}" for k, v in out.items()]
     print("\n".join(lines))
+    if out["legs"] != "0":
+        print(f"legs: {out['legs']} chosen ({out['test_minutes']} weighted test minutes)")
     if args.github_output:
         with open(args.github_output, "a", encoding="utf-8", newline="\n") as fh:
             fh.write("\n".join(lines) + "\n")
