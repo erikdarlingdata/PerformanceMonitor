@@ -1768,7 +1768,7 @@
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
-                                    <DataGridTextColumn Binding="{Binding Severity}" Width="80" MinWidth="80">
+                                    <DataGridTextColumn Binding="{Binding Severity}" Width="100" MinWidth="100">
                                         <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Severity" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Severity" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding RegressionReason}" Width="110" MinWidth="110">
@@ -4045,7 +4045,7 @@
                                 <DataGridTextColumn Binding="{Binding TotalRuns, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80" MinWidth="80">
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalRuns" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Runs" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding SuccessCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80" MinWidth="80">
+                                <DataGridTextColumn Binding="{Binding SuccessCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="105" MinWidth="105">
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SuccessCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Success" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding ErrorCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80" MinWidth="80">
@@ -4054,7 +4054,7 @@
                                 <DataGridTextColumn Binding="{Binding YieldCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80" MinWidth="80">
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="YieldCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Yields" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap" ToolTip="Deliberate 1-second lock-timeout yields: the snapshot collector stepped aside instead of joining a blocking chain. A signal about lock contention on the monitored server, not a collection failure."/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding AbandonedCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90" MinWidth="90">
+                                <DataGridTextColumn Binding="{Binding AbandonedCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120" MinWidth="120">
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AbandonedCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Abandoned" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap" ToolTip="Cycles the 120-second whole-server wall-clock budget gave up on. Unlike a yield, which retries, an abandoned cycle stored nothing and advanced no watermark - it is collected data you do not have. A sustained rate above 0.5% bands the collector WARNING."/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding FailureRatePercent, StringFormat=N1}" ElementStyle="{StaticResource NumericCell}" Width="85" MinWidth="85">
