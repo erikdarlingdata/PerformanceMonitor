@@ -831,6 +831,9 @@ WHERE status = 'in_progress'
                 isAurora = probe.IsAurora,
                 isInRecovery = probe.IsInRecovery,
                 facts = DarlingServerConnector.DescribeProbeFacts(probe),
+                /* #6476: what the command line needs to register a server from a service-side test (the same two facts add_servers compares). */
+                connectedDatabase = probe.ConnectedDatabase,
+                machineIdentity = probe.MachineIdentity,
                 /* #6254: the Query Store replica's own result, beside the primary's (null on a server with none). A replica that
                    would not open leaves this a "connected" result: collection reads the primary. The dialogs show the note. */
                 queryStoreReplica = probe.QueryStoreReplica,

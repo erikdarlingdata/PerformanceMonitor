@@ -207,8 +207,13 @@ public sealed partial class DarlingMcpServerAdminTools
     /// the only way to register a server whose password cannot be encrypted. A reference to Darling's own configuration
     /// or secrets is still refused (<see cref="ValidateSecret"/>).
     /// </summary>
-    internal static Task<string> AddServersFromHostCommandLineAsync(NpgsqlDataSource postgres, string servers_json, IPasswordKeyRing? ring = null) =>
-        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, allowSecretReferences: true, ring: ring, revealConnectError: true);
+    internal static Task<string> AddServersFromHostCommandLineAsync(
+        NpgsqlDataSource postgres, string servers_json, IPasswordKeyRing? ring = null, ServerProbe? probe = null) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe ?? DefaultProbeAsync, CancellationToken.None, allowSecretReferences: true, ring: ring, revealConnectError: true);
+
+    /// <summary>The in-process connection probe, for the command line to wrap (#6476): it runs as the person at the console.</summary>
+    internal static Task<ConnectionProbeResult> ProbeAsConsoleUserAsync(MonitoredServer server, CancellationToken cancellationToken) =>
+        DefaultProbeAsync(server, cancellationToken);
 
     /// <summary>The same flow over an injected <see cref="IServerDefinitions"/>, so a test can stand in a
     /// definitions table that faults on a chosen write or swallows one without a live database.</summary>

@@ -90,6 +90,53 @@ public partial class ViewerServerTab
             _collectionHealthFilterMgr!.UpdateData, _collectionLogFilterMgr!.UpdateData, RenderCollectorDurationChart, ShowCollectionCaveats);
 
         await ShowSkippedCyclesAsync();
+        await ShowSweepPressureAsync();
+    }
+
+    /// <summary>
+    /// #6384: the Sweep Pressure and Heaviest Collectors panels. Its own read after the tab has drawn, as the skipped-slot line is, so it is
+    /// not one of the reads the tab's declared width counts and its failure costs these two panels alone (they say "could not be completed",
+    /// which is not the all-clear); a cancellation still throws.
+    /// </summary>
+    private async Task ShowSweepPressureAsync()
+    {
+        try
+        {
+            ShowSweepPressure(await _dataService.GetSweepPressureAsync(_server.ServerId));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Warn("Collection Health", $"Sweep pressure read failed: {ex.Message}");
+            ShowSweepPressure(null, SweepPressurePanel.Unreadable);
+        }
+    }
+
+    /// <summary>
+    /// Draws both panels from the report: the roll-up lines and the heaviest-collector rows, or, when there is no report (the server has no
+    /// collection log rows in the window, which the web answers as unavailable) or the read failed, the one sentence in place of the grids' rows.
+    /// </summary>
+    /// <param name="report">The report, or null.</param>
+    /// <param name="emptyText">What to say when there is no report.</param>
+    internal void ShowSweepPressure(SweepPressureReport? report, string emptyText = SweepPressurePanel.NoLogRows)
+    {
+        if (report is null)
+        {
+            SweepPressureStatsGrid.ItemsSource = null;
+            HeaviestCollectorsGrid.ItemsSource = null;
+            SweepPressureNoDataMessage.Text = emptyText;
+            SweepPressureNoDataMessage.Visibility = Visibility.Visible;
+            return;
+        }
+
+        SweepPressureStatsGrid.ItemsSource = SweepPressurePanel.StatRows(report.Pressure);
+        var rows = SweepPressurePanel.GridRows(report);
+        HeaviestCollectorsGrid.ItemsSource = rows;
+        SweepPressureNoDataMessage.Text = SweepPressurePanel.NoTimings;
+        SweepPressureNoDataMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>

@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -402,6 +403,14 @@ WHERE after.hit IS NULL
                      await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(_readSource, serverId, DatabaseFilter.All, databaseMark, cancellationToken),
                      databaseMark, naiveEnd).Where(c => c.ChangeTime > databaseMark))
         {
+            /* #6566: log_reuse_wait_desc is the engine's live reason the log cannot be truncated, a status that flips with no operator action. The analysis
+               leaves it out (ConfigChangeAttribution.DatabaseStatusColumns); a watch counted it as a configuration change and opened requests on it. */
+            if (!ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName))
+            {
+                continue;
+            }
+
+
             changes.Add(new ChangeWatchChange($"database_config:{c.DatabaseName}:{c.SettingName}:{Stamp(c.ChangeTime)}", "database_config", Utc(c.ChangeTime),
                 $"database {c.DatabaseName} {c.SettingName}: {c.ChangeDescription}", c.DatabaseName));
         }

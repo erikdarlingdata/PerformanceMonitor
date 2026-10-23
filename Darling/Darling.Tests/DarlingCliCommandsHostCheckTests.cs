@@ -274,12 +274,12 @@ public sealed class DarlingCliCommandsHostCheckTests
             var exit = await DarlingCliCommands.ValidateConfigAsync(configPath, output, error, ct);
 
             /* The registry has zero rows (a fresh, migrated-but-unseeded scratch store), so the file's one
-               server is entirely file-only: a WARNING, and zero servers actually probed — "all reachable"
-               vacuously, which is the exit-0 contract this asserts. */
+               server is entirely file-only: a WARNING, and zero servers actually probed — #6468 says so
+               plainly instead of printing "All servers reachable.", and exits 0, which is the contract this asserts. */
             Assert.Equal(0, exit);
             Assert.Contains("WARNING", output.ToString(), StringComparison.Ordinal);
             Assert.Contains("seed-only-server", output.ToString(), StringComparison.Ordinal);
-            Assert.Contains("Validating connectivity to 0 server(s)", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("No monitored servers are configured yet", output.ToString(), StringComparison.Ordinal);
         }
         finally
         {
