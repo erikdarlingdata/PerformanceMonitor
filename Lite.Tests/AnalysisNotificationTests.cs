@@ -644,6 +644,47 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
         Assert.StartsWith("Also fired in this incident:", coFired.Body);
     }
 
+    /// <summary>#6596: an anomaly finding whose own story the analysis pass labelled "recurring at this hour" reaches the sender
+    /// flagged, so no investigation request opens for it, at its unchanged severity (ruling Q3, #3653: label, not discount). The
+    /// same finding without the label is not flagged.</summary>
+    [Fact]
+    public async Task NotifyAsync_ARecurringAtThisHourStory_FlagsTheAlert_AtItsUnchangedSeverity()
+    {
+        App.AnalysisNotifySeverity = 1.5;
+        App.AnalysisNotifyCooldownMinutes = 360;
+        var (notifier, sender) = MakeCapturingNotifier();
+
+        var story = new AnalysisStory
+        {
+            RootFactKey = "ANOMALY_WRITE_LATENCY",
+            StoryPathHash = "aaaa000000000001",
+            Severity = 2.0,
+            Path = ["ANOMALY_WRITE_LATENCY"],
+            StoryText = FactAdvice.SerializeForStoryText(new AdviceBlock("Write latency", "Storage writes ran slower.", "Look at the job.")),
+        };
+        RecurrenceLabeler.Label([story], facts: null, new PriorOccurrenceRead(0, new DateTime(2026, 10, 23, 1, 30, 0),
+        [
+            new PriorOccurrence("aaaa000000000001", "ANOMALY_WRITE_LATENCY", new DateTime(2026, 10, 16, 1, 0, 0), null),
+            new PriorOccurrence("aaaa000000000001", "ANOMALY_WRITE_LATENCY", new DateTime(2026, 10, 9, 1, 0, 0), null),
+        ]));
+        Assert.True(RecurrenceLabeler.TryReadLabel(story.StoryText)?.RecurringAtThisHour);
+
+        var labelled = MakeFinding("aaaa000000000001", severity: 2.0, rootFactKey: "ANOMALY_WRITE_LATENCY", category: "anomaly");
+        labelled.StoryText = story.StoryText;
+        var plain = MakeFinding("bbbb000000000002", severity: 2.0, rootFactKey: "ANOMALY_READ_LATENCY", category: "anomaly");
+        plain.StoryText = FactAdvice.SerializeForStoryText(new AdviceBlock("Read latency", "Storage reads ran slower.", "Look."));
+
+        await notifier.NotifyAsync(new[] { labelled, plain });
+        await notifier.FlushPendingAsync();
+
+        Assert.Equal(2, sender.Sent.Count + sender.Summaries.Sum(s => s.Count));
+        var sent = sender.Sent.Concat(sender.Summaries.SelectMany(s => s)).ToList();
+        var flagged = Assert.Single(sent, a => a.StoryPathHash == "aaaa000000000001");
+        Assert.True(flagged.RecurringAtThisHour);
+        Assert.Equal(2.0, flagged.Severity);
+        Assert.False(Assert.Single(sent, a => a.StoryPathHash == "bbbb000000000002").RecurringAtThisHour);
+    }
+
     [Fact]
     public async Task NotifyAsync_LoneFinding_HasNoCoFiredItem()
     {

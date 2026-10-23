@@ -474,7 +474,9 @@ public sealed class AnalysisNotificationService : IDisposable
                     Route: route,
                     /* #5632 Phase A: the metric name keeps eight characters of the hash; an investigation request
                        records the whole one. */
-                    StoryPathHash: string.IsNullOrEmpty(lead.StoryPathHash) ? null : lead.StoryPathHash);
+                    StoryPathHash: string.IsNullOrEmpty(lead.StoryPathHash) ? null : lead.StoryPathHash,
+                    /* #6596: the lead's own story, read back off the frozen text the pass labelled, holds the request back. */
+                    RecurringAtThisHour: RecurrenceLabeler.TryReadLabel(lead.StoryText)?.RecurringAtThisHour == true);
 
                 /* #3916: the PAGE road queues. The page waits out the hold-back window with every other page
                    the fleet raises in it, and the flush decides — against the cap — whether it goes as its
