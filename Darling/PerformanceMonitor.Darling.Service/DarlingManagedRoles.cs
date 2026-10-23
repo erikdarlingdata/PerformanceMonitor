@@ -2848,18 +2848,18 @@ BEGIN
    END IF;
    -- The names and their order are the Viewer's (NotificationRouteWriter.AgentChange).
    IF p_before IS NOT NULL THEN
-      IF (p_before ->> 'metric_match') IS DISTINCT FROM btrim(v_row.metric_match) THEN v_changed := v_changed || 'metric_match'; END IF;
-      IF (p_before ->> 'scope_server_id')::integer IS DISTINCT FROM v_row.scope_server_id THEN v_changed := v_changed || 'scope_server_id'; END IF;
-      IF (p_before ->> 'scope_tag_id')::integer IS DISTINCT FROM v_row.scope_tag_id THEN v_changed := v_changed || 'scope_tag_id'; END IF;
+      IF (p_before ->> 'metric_match') IS DISTINCT FROM btrim(v_row.metric_match) THEN v_changed := array_append(v_changed, 'metric_match'); END IF;
+      IF (p_before ->> 'scope_server_id')::integer IS DISTINCT FROM v_row.scope_server_id THEN v_changed := array_append(v_changed, 'scope_server_id'); END IF;
+      IF (p_before ->> 'scope_tag_id')::integer IS DISTINCT FROM v_row.scope_tag_id THEN v_changed := array_append(v_changed, 'scope_tag_id'); END IF;
    END IF;
-   IF v_level IS DISTINCT FROM v_row.agent_level THEN v_changed := v_changed || 'agent_level'; END IF;
-   IF v_hour IS DISTINCT FROM v_row.agent_max_per_hour THEN v_changed := v_changed || 'agent_max_per_hour'; END IF;
-   IF v_day IS DISTINCT FROM v_row.agent_max_per_day THEN v_changed := v_changed || 'agent_max_per_day'; END IF;
-   IF v_lease IS DISTINCT FROM v_row.agent_lease_minutes THEN v_changed := v_changed || 'agent_lease_minutes'; END IF;
-   IF v_expiry IS DISTINCT FROM v_row.agent_expiry_minutes THEN v_changed := v_changed || 'agent_expiry_minutes'; END IF;
+   IF v_level IS DISTINCT FROM v_row.agent_level THEN v_changed := array_append(v_changed, 'agent_level'); END IF;
+   IF v_hour IS DISTINCT FROM v_row.agent_max_per_hour THEN v_changed := array_append(v_changed, 'agent_max_per_hour'); END IF;
+   IF v_day IS DISTINCT FROM v_row.agent_max_per_day THEN v_changed := array_append(v_changed, 'agent_max_per_day'); END IF;
+   IF v_lease IS DISTINCT FROM v_row.agent_lease_minutes THEN v_changed := array_append(v_changed, 'agent_lease_minutes'); END IF;
+   IF v_expiry IS DISTINCT FROM v_row.agent_expiry_minutes THEN v_changed := array_append(v_changed, 'agent_expiry_minutes'); END IF;
    IF p_before IS NOT NULL AND ((p_before ->> 'agent_level') IS NOT NULL OR v_level IS NOT NULL)
       AND (p_before ->> 'enabled')::boolean IS DISTINCT FROM v_row.enabled THEN
-      v_changed := v_changed || 'enabled';
+      v_changed := array_append(v_changed, 'enabled');
    END IF;
    UPDATE {config}.config_notification_routes
       SET agent_level = v_level::smallint,
