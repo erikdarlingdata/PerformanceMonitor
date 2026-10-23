@@ -573,6 +573,17 @@ public sealed partial class DarlingMcpServerAdminTools
                         await queryTagClear.ExecuteNonQueryAsync();
                     }
 
+                    /* #6454: the server's collector overrides and run times go too, same transaction and same reason: set-and-clear
+                       left an all-null override row behind, and a set one would come back when the server is re-added. Only this
+                       server's rows; the fleet-wide rows (server_id NULL) stay. */
+                    foreach (var scheduleSql in CollectorScheduleSql.ClearForServerSqls)
+                    {
+                        await using var scheduleClear = new NpgsqlCommand(scheduleSql, connection) { Transaction = transaction };
+                        scheduleClear.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                        scheduleClear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
+                        await scheduleClear.ExecuteNonQueryAsync();
+                    }
+
                     await transaction.CommitAsync();
                 }
             }
