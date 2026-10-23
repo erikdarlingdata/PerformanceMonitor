@@ -1781,6 +1781,12 @@ GRANT EXECUTE ON FUNCTION {config}.request_snapshot_now(integer, text, text) TO 
 --     PUBLIC by the builder. NOT a versioned migration, for the same reason as request_snapshot_now above.
 {BuildRequestActiveQueriesLiveFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.request_active_queries_live(integer, text) TO {viewer};
+-- #6389: the web's Generate now button on the Recommendations tab. The web route (viewer) queues an analyze_now command
+--     through {config}.request_analyze_now, the only way viewer writes that command row. The command type is fixed in the body
+--     and the caller supplies a server id and nothing else. Owned by the store owner, pinned search_path, no dynamic SQL; created
+--     and REVOKEd from PUBLIC by the builder. NOT a versioned migration, for the same reason as request_snapshot_now above.
+{BuildRequestAnalyzeNowFunctionSql(config)}
+GRANT EXECUTE ON FUNCTION {config}.request_analyze_now(integer, text) TO {viewer};
 -- #6231: the MCP route tools. mcp holds no INSERT on {config}.config_notification_routes and no SELECT or UPDATE on its
 --     destination columns, and gets none here: create_notification_route and update_notification_route reach the table only
 --     through these functions. create leaves every channel empty and update writes the match, scope, enabled flag, resolution
@@ -2682,6 +2688,67 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION {config}.request_active_queries_live(integer, text) FROM PUBLIC;";
+
+    /// <summary>
+    /// The SECURITY DEFINER function (#6389) the web route queues an <c>analyze_now</c> command through: a fixed command type and a
+    /// server id, nothing else (the Viewer's call passes no arguments either). One request per server at a time and not within 15
+    /// seconds of the last (the MCP analyze_now's guard), so a holder of the viewer login cannot fill the queue. Created and REVOKEd
+    /// from PUBLIC here; the caller adds the narrow GRANT EXECUTE.
+    /// </summary>
+    internal static string BuildRequestAnalyzeNowFunctionSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.request_analyze_now(
+   p_server_id integer,
+   p_requested_by text)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_id bigint;
+   v_last_status text;
+   v_last_at timestamp;
+BEGIN
+   -- The one-request-at-a-time rule below reads the newest row of its kind with a fresh snapshot per statement. A transaction that
+   -- keeps one snapshot (REPEATABLE READ and up) could miss a row another session just queued, so it is refused.
+   IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'This request must run at the READ COMMITTED isolation level.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_server_id) THEN
+      RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   -- Never blocks (provisioning rule): a request that holds the lock for this server is a concurrent request, which is the same
+   -- conflict as a pending row, so this refuses with DL409 instead of waiting.
+   IF NOT pg_try_advisory_xact_lock(6389, p_server_id) THEN
+      RAISE EXCEPTION 'An analysis run for this server is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   SELECT c.status, c.created_at INTO v_last_status, v_last_at
+   FROM {config}.config_command AS c
+   WHERE c.command_type = 'analyze_now' AND c.target_server_id = p_server_id
+   ORDER BY c.command_id DESC
+   LIMIT 1;
+   IF v_last_status IN ('pending', 'in_progress') THEN
+      RAISE EXCEPTION 'An analysis run for this server is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   IF v_last_at IS NOT NULL AND v_last_at > (now() AT TIME ZONE 'UTC') - interval '15 seconds' THEN
+      RAISE EXCEPTION 'An analysis run was requested for this server less than 15 seconds ago.'
+         USING ERRCODE = 'DL429',
+               HINT = to_char(v_last_at + interval '15 seconds', 'YYYY-MM-DD') || 'T' || to_char(v_last_at + interval '15 seconds', 'HH24:MI:SS') || 'Z';
+   END IF;
+   -- Finished rows do not pile up: the web never deletes the row it reads, so each request first removes this server's finished
+   -- analyze_now rows that finished more than an hour ago. Only terminal rows (succeeded or failed) with a completed_at are touched,
+   -- so a pending or running row and every other command type stay. The Viewer reads and deletes its own row within seconds.
+   DELETE FROM {config}.config_command
+   WHERE command_type = 'analyze_now' AND target_server_id = p_server_id
+     AND status IN ('succeeded', 'failed')
+     AND completed_at < (now() AT TIME ZONE 'UTC') - interval '1 hour';
+   INSERT INTO {config}.config_command (requested_by, command_type, target_server_id, args_json, status, created_at)
+   VALUES (left(COALESCE(p_requested_by, 'web'), 200), 'analyze_now', p_server_id, NULL, 'pending', (now() AT TIME ZONE 'UTC'))
+   RETURNING command_id INTO v_id;
+   RETURN v_id;
+END
+$fn$;
+REVOKE ALL ON FUNCTION {config}.request_analyze_now(integer, text) FROM PUBLIC;";
 
     /// <summary>
     /// The SECURITY DEFINER functions (#6231) the MCP <c>create_notification_route</c> and <c>update_notification_route</c>
