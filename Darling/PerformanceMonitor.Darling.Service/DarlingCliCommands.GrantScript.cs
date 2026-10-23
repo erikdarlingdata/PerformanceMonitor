@@ -34,7 +34,7 @@ public static partial class DarlingCliCommands
         "      Print the T-SQL that creates the monitoring login and grants what Darling needs, for a server this install monitors." + Environment.NewLine +
         "      The principal follows the server entry: its SQL login, or for Windows authentication the account the service runs as." + Environment.NewLine +
         "  --grant-script --host <host> [--auth sql|integrated|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--service-account <account>]" + Environment.NewLine +
-        "      The same for a host not yet added. Connects to nothing." + Environment.NewLine +
+        "      The same for a host not yet added. Connects to no monitored server." + Environment.NewLine +
         "  --finops adds the per-database grants the FinOps Index Analysis tab needs. --azure (implied by a *.database.windows.net host)" + Environment.NewLine +
         "  prints the Azure SQL Database form: a contained user and database-scoped grants. --service-account names the account the service" + Environment.NewLine +
         "  runs as when it is a domain account or a gMSA and this machine cannot tell. Run the output as a sysadmin; it is safe to run twice." + Environment.NewLine +
@@ -152,8 +152,8 @@ public static partial class DarlingCliCommands
         "They are not part of this script; the store governs which servers actually run.");
 
     /// <summary>
-    /// <c>--grant-script</c> (#6472): prints the login and grant script for a monitored server, or for a host not yet added. It connects to
-    /// no SQL Server and prints no password. The server list is the store's registry, with darling.json's own list when the store cannot be
+    /// <c>--grant-script</c> (#6472): prints the login and grant script for a monitored server, or for a host not yet added. It connects to no monitored SQL Server (the <c>server-name</c> form reads the store registry)
+    /// and prints no password. The server list is the store's registry, with darling.json's own list when the store cannot be
     /// reached, as <c>--validate-config</c> resolves it. Exit 0 with the script on stdout; 1 for an argument, configuration or name problem.
     /// </summary>
     public static async Task<int> GrantScriptAsync(
@@ -182,7 +182,7 @@ public static partial class DarlingCliCommands
                 return 1;
             }
 
-            var targets = await ResolveValidationTargetsAsync(config, output, error, cancellationToken, GrantScriptRegistryWording);
+            var targets = await ResolveValidationTargetsAsync(config, error, error, cancellationToken, GrantScriptRegistryWording);
             if (targets is null)
             {
                 return 1;

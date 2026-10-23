@@ -173,7 +173,11 @@ public static class MonitoringGrantScript
             || text.StartsWith(machineName + ".", StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>True for an Azure SQL Database host (<c>*.database.windows.net</c>).</summary>
+    /// <summary>
+    /// True for an Azure SQL Database host (<c>name.database.windows.net</c>). An Azure SQL Managed Instance host also ends in
+    /// <c>.database.windows.net</c> but carries a DNS zone label (<c>name.zone.database.windows.net</c>, public endpoint
+    /// <c>name.public.zone.database.windows.net</c>), and it works like on-premises, so it is not matched here.
+    /// </summary>
     public static bool IsAzureSqlDatabaseHost(string? host)
     {
         var text = (host ?? "").Trim();
@@ -188,7 +192,11 @@ public static class MonitoringGrantScript
             text = text[..cut];
         }
 
-        return text.Trim().EndsWith(".database.windows.net", StringComparison.OrdinalIgnoreCase);
+        text = text.Trim();
+        const string suffix = ".database.windows.net";
+        return text.Length > suffix.Length
+            && text.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+            && text.IndexOf('.', StringComparison.Ordinal) == text.Length - suffix.Length;
     }
 
     /// <summary>
@@ -274,10 +282,13 @@ public static class MonitoringGrantScript
         var sb = new StringBuilder();
         void Line(string text = "") => sb.Append(text).Append('\n');
 
-        Line("/* Performance Monitor Darling: the login and grants for " + (serverLabel is { Length: > 0 } label ? label : "a monitored server") + ".");
+        /* Everything variable that sits inside the header comment is made inert: a comment closer in a server name or an account
+           name must not end the comment and leave the rest as live T-SQL in a script the operator runs as a sysadmin. */
+        static string InComment(string t) => t.Replace("*/", "* /", StringComparison.Ordinal).Replace('\r', ' ').Replace('\n', ' ');
+        Line("/* Performance Monitor Darling: the login and grants for " + (serverLabel is { Length: > 0 } label ? InComment(label) : "a monitored server") + ".");
         foreach (var note in principal.Notes)
         {
-            Line("   " + note);
+            Line("   " + InComment(note));
         }
 
         Line("   Review it, then run it as a sysadmin" + (azureSqlDatabase ? " connected to the database you monitor, not master" : "") + ". It is safe to run twice. */");
@@ -307,6 +318,8 @@ public static class MonitoringGrantScript
         }
         else
         {
+            /* An Entra identity on a Managed Instance is a server login FROM EXTERNAL PROVIDER; a Windows account is FROM WINDOWS. */
+            var source = principal.Kind == GrantPrincipalKind.ExternalProvider ? "EXTERNAL PROVIDER" : "WINDOWS";
             Line("IF NOT EXISTS");
             Line("(");
             Line("    SELECT");
@@ -315,7 +328,7 @@ public static class MonitoringGrantScript
             Line("    WHERE sp.name = " + Literal(name));
             Line(")");
             Line("BEGIN");
-            Line("    CREATE LOGIN " + q + " FROM WINDOWS;");
+            Line("    CREATE LOGIN " + q + " FROM " + source + ";");
             Line("END;");
         }
 

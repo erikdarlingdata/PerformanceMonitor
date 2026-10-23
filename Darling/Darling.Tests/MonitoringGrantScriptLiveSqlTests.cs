@@ -145,14 +145,22 @@ public sealed class MonitoringGrantScriptLiveSqlTests
             await Exec(adminCs, script, ct);
 
             /* The login holds the FinOps grants in the scratch database (an effective-permission check as the login itself). */
-            await using var connection = new SqlConnection(adminCs);
+            /* All three FinOps grants, checked from inside the scratch database so each securable resolves (an object name in another
+               database answers NULL, which says nothing). A NULL fails with its position, not as a cast error. */
+            var scratchCs = new SqlConnectionStringBuilder(adminCs) { InitialCatalog = database }.ConnectionString;
+            await using var connection = new SqlConnection(scratchCs);
             await connection.OpenAsync(ct);
             await using var check = new SqlCommand(
-                $"EXECUTE AS LOGIN = N'{login}'; SELECT HAS_PERMS_BY_NAME(N'{database}', N'DATABASE', N'VIEW DEFINITION'), " +
-                $"HAS_PERMS_BY_NAME(N'{database}.sys.sql_expression_dependencies', N'OBJECT', N'SELECT'); REVERT;", connection);
+                $"EXECUTE AS LOGIN = N'{login}'; SELECT HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'VIEW DEFINITION'), " +
+                "HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'VIEW DATABASE STATE'), " +
+                "HAS_PERMS_BY_NAME(N'sys.sql_expression_dependencies', N'OBJECT', N'SELECT'); REVERT;", connection);
             await using var reader = await check.ExecuteReaderAsync(ct);
             Assert.True(await reader.ReadAsync(ct));
-            Assert.Equal(1, Convert.ToInt32(reader.GetValue(0)));
+            var names = new[] { "VIEW DEFINITION", "VIEW DATABASE STATE", "SELECT on sys.sql_expression_dependencies" };
+            for (var i = 0; i < names.Length; i++)
+            {
+                Assert.True(!reader.IsDBNull(i) && Convert.ToInt32(reader.GetValue(i)) == 1, $"The FinOps script left {names[i]} ungranted in the scratch database (answer: {(reader.IsDBNull(i) ? "NULL" : reader.GetValue(i))}).");
+            }
         }
         finally
         {

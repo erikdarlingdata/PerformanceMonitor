@@ -197,10 +197,12 @@ public sealed class MonitoringGrantScriptTests
     }
 
     [Theory]
-    [InlineData("db.contoso.database.windows.net", true)]
-    [InlineData("tcp:db.contoso.database.windows.net,1433", true)]
+    [InlineData("contoso.database.windows.net", true)]
+    [InlineData("tcp:contoso.database.windows.net,1433", true)]
     [InlineData("sql01", false)]
     [InlineData("database.windows.net.example.com", false)]
+    [InlineData("mi01.abc123def.database.windows.net", false)]             /* a Managed Instance works like on-premises */
+    [InlineData("mi01.public.abc123def.database.windows.net,3342", false)] /* its public endpoint */
     public void AzureSqlDatabaseHost_IsRecognised(string host, bool expected) =>
         Assert.Equal(expected, MonitoringGrantScript.IsAzureSqlDatabaseHost(host));
 
@@ -326,12 +328,72 @@ public sealed class MonitoringGrantScriptTests
         var output = new StringWriter();
 
         var code = await DarlingCliCommands.GrantScriptAsync(
-            new[] { "--host", "db.contoso.database.windows.net", "--auth", "managedidentity" },
+            new[] { "--host", "contoso.database.windows.net", "--auth", "managedidentity" },
             output, new StringWriter(), TestContext.Current.CancellationToken, readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP");
 
         Assert.Equal(0, code);
         Assert.Contains("FROM EXTERNAL PROVIDER", output.ToString());
         Assert.DoesNotContain("USE [master]", output.ToString());
+    }
+
+    [Fact]
+    public async Task Verb_ForAManagedInstanceHost_PrintsTheServerLoginForm_WithAnExternalProviderLogin()
+    {
+        var output = new StringWriter();
+
+        var code = await DarlingCliCommands.GrantScriptAsync(
+            new[] { "--host", "mi01.abc123def.database.windows.net", "--auth", "managedidentity" },
+            output, new StringWriter(), TestContext.Current.CancellationToken, readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP");
+
+        Assert.Equal(0, code);
+        Assert.Contains("USE [master]", output.ToString());
+        Assert.Contains("CREATE LOGIN [your-managed-identity-name] FROM EXTERNAL PROVIDER;", output.ToString());
+        Assert.Contains("VIEW SERVER STATE", output.ToString());
+    }
+
+    [Fact]
+    public void Build_ACommentCloserInANameOrNote_CannotEndTheHeaderComment()
+    {
+        var principal = new GrantPrincipal(
+            GrantPrincipalKind.SqlLogin, "pm", new[] { "Principal: svc */ ALTER SERVER ROLE sysadmin ADD MEMBER [x]; /*" });
+
+        var script = MonitoringGrantScript.Build(principal, finOps: false, azureSqlDatabase: false, serverLabel: "sql01 */ DROP LOGIN [a]; /*\nnext");
+
+        // The first comment closer in the script is the header's own, after its last sentence; nothing the caller supplied ended it earlier.
+        var firstCloser = script.IndexOf("*/", StringComparison.Ordinal);
+        Assert.True(script.IndexOf("It is safe to run twice.", StringComparison.Ordinal) < firstCloser);
+        Assert.DoesNotContain("*/ ALTER", script);
+        Assert.DoesNotContain("*/ DROP", script);
+    }
+
+    [Fact]
+    public async Task Verb_ForARegisteredServer_KeepsTheStoreNotesOffTheScriptStream()
+    {
+        var root = Directory.CreateTempSubdirectory("grant-script-");
+        try
+        {
+            /* A store nobody listens on: the registry read fails, the verb says so on the error stream, and uses the file's own list. */
+            var path = Path.Combine(root.FullName, "darling.json");
+            File.WriteAllText(path,
+                "{ \"postgres\": { \"connectionString\": \"Host=127.0.0.1;Port=1;Username=x;Database=x;Timeout=2\" }, "
+                + "\"servers\": [ { \"name\": \"SQL2022\", \"host\": \"SQL2022\", \"auth\": \"sql\", \"username\": \"pm_monitor\" } ] }");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var code = await DarlingCliCommands.GrantScriptAsync(
+                new[] { "SQL2022", "--config", path }, output, error, TestContext.Current.CancellationToken,
+                readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP");
+
+            Assert.Equal(0, code);
+            Assert.StartsWith("/* Performance Monitor Darling", output.ToString());
+            Assert.DoesNotContain("NOTE:", output.ToString());
+            Assert.Contains("NOTE: the store's registry is not reachable", error.ToString());
+            Assert.Contains("CREATE LOGIN [pm_monitor] WITH PASSWORD", output.ToString());
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
     }
 
     [Fact]

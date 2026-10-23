@@ -736,7 +736,7 @@ FROM pg_catalog.pg_control_system() AS s";
     /// path + credentials) and the <c>--test-connection</c>/<c>--validate-config</c> CLI verb, so both
     /// classify a server identically. <see cref="OperationCanceledException"/> propagates (shutdown).
     /// </summary>
-    public static async Task<ConnectionProbeResult> ProbeAsync(MonitoredServer config, ILogger? logger, CancellationToken cancellationToken)
+    public static async Task<ConnectionProbeResult> ProbeAsync(MonitoredServer config, ILogger? logger, CancellationToken cancellationToken, bool runsAsConsoleUser = false)
     {
         if (config is null)
         {
@@ -758,7 +758,11 @@ FROM pg_catalog.pg_control_system() AS s";
             replicaHost ??= ignoredReplica;
 
             /* #6472: the base grants the connecting login lacks, each with the statement that adds it. A warning only: the connection worked. */
-            var missingGrants = isPostgres
+            /* The CLI runs this in its own process: with Windows authentication the connecting login is the console user, not the account
+               the service collects as, so a grant check would name the wrong principal. It says nothing then; the service's own test
+               (test_connect) checks the right one. */
+            var checksTheWrongPrincipal = runsAsConsoleUser && !config.UsesSqlAuth && !config.UsesEntra;
+            var missingGrants = isPostgres || checksTheWrongPrincipal
                 ? null
                 : await ProbeMissingGrantsAsync(runtime.ConnectionString, runtime.Target.IsAzureSqlDb, logger, cancellationToken);
 

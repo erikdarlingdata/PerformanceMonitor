@@ -1142,7 +1142,15 @@ public partial class AddServerDialog : Window
         string? username = null;
         if (UseProfileRadio.IsChecked == true && ProfileComboBox.SelectedItem is ViewerCredentialProfile profile)
         {
+            /* MapAuth is null for the interactive Entra modes, which an unattended service cannot use; ChoosePrincipal would read the null
+               as Windows authentication and print a machine-account script for them. */
             auth = ServerStoreCredential.MapAuth(profile.AuthType);
+            if (auth is null)
+            {
+                StatusText.Text = ServerStoreCredential.UnsupportedAuthMessage;
+                return;
+            }
+
             username = profile.Username;
         }
         else if (SqlAuthRadio.IsChecked == true)
@@ -1158,9 +1166,15 @@ public partial class AddServerDialog : Window
         {
             auth = ServerStoreCredential.ManagedIdentity;
         }
-        else
+        else if (WindowsAuthRadio.IsChecked == true)
         {
             auth = ServerStoreCredential.Integrated;
+        }
+        else
+        {
+            /* Microsoft Entra MFA, or nothing chosen: not an identity the service can connect with, so no script rather than a guessed principal. */
+            StatusText.Text = ServerStoreCredential.UnsupportedAuthMessage;
+            return;
         }
 
         var principal = MonitoringGrantScript.ChoosePrincipal(new GrantPrincipalInputs(
