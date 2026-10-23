@@ -239,6 +239,93 @@ public sealed class ServerEditLiveTests : IDisposable
     }
 
     [Fact]
+    public async Task GetServerSettings_ShowsTheFieldsEditServerChanges_BeforeAndAfterAnEdit_AndNeverASecret()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 5171, "alpha-71", "alpha-71.example.test", "sql", "monitor", "sealed-password-blob", ct);
+
+            /* #6402: the read, through the mcp role's own data source (the role the tool runs as). */
+            var before = Parse(await DarlingMcpCollectionStateTools.GetServerSettings(rig.Mcp, "alpha-71", ct));
+            Assert.Equal("ok", before["status"]!.GetValue<string>());
+            var settingsBefore = before["settings"]!.AsObject();
+            Assert.Equal(5171, settingsBefore["server_id"]!.GetValue<int>());
+            Assert.Equal("alpha-71.example.test", settingsBefore["host"]!.GetValue<string>());
+            Assert.Equal("SQL", settingsBefore["auth"]!.GetValue<string>());
+            Assert.Equal("monitor", settingsBefore["username"]!.GetValue<string>());
+            Assert.Equal(7m, settingsBefore["monthly_cost_usd"]!.GetValue<decimal>());
+            Assert.DoesNotContain("sealed-password-blob", before.ToJsonString(), StringComparison.Ordinal);
+            Assert.False(settingsBefore.ContainsKey("password"));
+            Assert.False(settingsBefore.ContainsKey("encrypted_password"));
+
+            var edited = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-71",
+                "{\"display_name\":\"Billing\",\"monthly_cost_usd\":250.5,\"expected_modified_at\":\"" + settingsBefore["modified_at"]!.GetValue<string>() + "\"}",
+                Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", edited["status"]!.GetValue<string>());
+
+            var after = Parse(await DarlingMcpCollectionStateTools.GetServerSettings(rig.Mcp, "Billing", ct))["settings"]!.AsObject();
+            Assert.Equal("Billing", after["display_name"]!.GetValue<string>());
+            Assert.Equal(250.5m, after["monthly_cost_usd"]!.GetValue<decimal>());
+            Assert.False(after["trust_server_certificate"]!.GetValue<bool>());
+            Assert.NotEqual(settingsBefore["modified_at"]!.GetValue<string>(), after["modified_at"]!.GetValue<string>());
+
+            /* The same cost shows in get_collection_state. */
+            var state = Parse(await DarlingMcpCollectionStateTools.GetCollectionState(rig.Mcp, ct));
+            var listed = state["servers"]!.AsArray().Single(x => x!["server_id"]!.GetValue<int>() == 5171)!;
+            Assert.Equal(250.5m, listed["monthly_cost_usd"]!.GetValue<decimal>());
+
+            var missing = Parse(await DarlingMcpCollectionStateTools.GetServerSettings(rig.Mcp, "no-such-server", ct));
+            Assert.Equal("refused", missing["status"]!.GetValue<string>());
+            Assert.Equal("not_found", missing["reason"]!.GetValue<string>());
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
+    public async Task ListServers_ShowsTheMonthlyCostOnTheDefinition_AndZeroWhereNoneIsSet()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            /* #6402: list_servers lists only an enabled definition that has a registry row. */
+            await SeedServerAsync(rig.Owner, 5181, "alpha-81", "alpha-81.example.test", "integrated", null, null, ct);
+            await SeedServerAsync(rig.Owner, 5182, "alpha-82", "alpha-82.example.test", "integrated", null, null, ct);
+            await ExecAsync(rig.Owner, "UPDATE config_monitored_servers SET is_enabled = TRUE, monthly_cost_usd = CASE server_id WHEN 5181 THEN 99.5 ELSE 0 END WHERE server_id IN (5181, 5182)", ct);
+            foreach (var (id, name) in new[] { (5181, "alpha-81"), (5182, "alpha-82") })
+            {
+                await DarlingObservability.UpsertServerAsync(rig.Owner, new ServerRuntime
+                {
+                    Config = new MonitoredServer { Name = name, Host = name + ".example.test" },
+                    ConnectionString = "Server=" + name,
+                    Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+                    StorageName = name,
+                    ServerId = id,
+                    EngineEdition = 3,
+                }, null, ct);
+            }
+
+            var list = Parse(await DarlingMcpDataTools.ListServers(rig.Mcp, ct));
+            var costs = list["servers"]!.AsArray().ToDictionary(x => x!["server_name"]!.GetValue<string>(), x => x!["monthly_cost_usd"]!.GetValue<decimal>());
+            Assert.Equal(99.5m, costs["alpha-81"]);
+            Assert.Equal(0m, costs["alpha-82"]);
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
     public async Task TheEditServerTool_PassesItsPolicyToTheScreen_SoWindowsAuthOverUnverifiedTlsIsRefused_AndNothingIsWritten()
     {
         var ct = TestContext.Current.CancellationToken;
