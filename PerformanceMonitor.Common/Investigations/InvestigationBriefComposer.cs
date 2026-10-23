@@ -38,6 +38,15 @@ public sealed class InvestigationBriefComposer
     /// <summary>What a cut string ends with.</summary>
     public const string CutMarker = " ...(cut)";
 
+    /// <summary>#6565: how far back a reported request counts as the same root cause (same server, family and root fact) for the brief to name it.</summary>
+    public const int SameRootCauseHours = 24;
+
+    /// <summary>#6565: the rule the brief adds when an earlier report is marked <c>same_root_cause</c>.</summary>
+    internal static readonly string SameRootCauseRule =
+        "An earlier report below is marked same_root_cause: the same server, family and root fact (a regressed query, for one) was reported in the last " +
+        SameRootCauseHours.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+        " hours; its analysis story may carry a different hash. Read its verdict first. If your finding is the same cause, give its request_id as family_of in your report.";
+
     /// <summary>The investigation's time budget for the agent, in minutes.</summary>
     public const int BudgetMinutes = 30;
 
@@ -250,6 +259,10 @@ public sealed class InvestigationBriefComposer
            says so, so an empty Query Store read is not taken for "nothing changed". Absent otherwise, so no other brief moves a byte. */
         if (!string.IsNullOrWhiteSpace(sources.QueryStoreNotCollected))
             ((JsonArray)root["read_rules"]!).Add("Query Store reads for this server will be empty. " + sources.QueryStoreNotCollected);
+        /* #6565: a reported request with the same root fact under another story hash is named in the earlier reports; this rule says why it is
+           marked. Absent when none is, so no other brief moves a byte. */
+        if (!sources.Practice && sources.EarlierReports.Any(r => r.SameRootCause))
+            ((JsonArray)root["read_rules"]!).Add(SameRootCauseRule);
         /* #5999: the registry's names for the server, read when the brief is composed. display_name is always present on Darling;
            instance_name is absent once the server has left the registry. Lite names both from its server list (#6011). Not host_name: that key is a masked client host (see InvestigationToolCore.RequestPayload). */
         if (request.DisplayName is { } displayName)
@@ -855,6 +868,8 @@ public sealed class InvestigationBriefComposer
             ["root_cause_found"] = report.RootCauseFound,
             ["summary"] = null,
         }, masker, cut, ("root_cause", report.RootCause), ("summary", report.Summary));
+        if (report.SameRootCause)
+            node["same_root_cause"] = true;
         node["labels"] = new JsonArray(InvestigationRules.EarlierReportLabels.Select(l => (JsonNode?)JsonValue.Create(l)).ToArray());
         return node;
     }
