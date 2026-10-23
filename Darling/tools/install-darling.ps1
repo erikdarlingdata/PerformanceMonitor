@@ -930,6 +930,25 @@ Do NOT try to repair this folder's permissions in place.
 "@
 }
 
+# The one-line PowerShell command that extracts the zip this folder came from straight into Program Files (#6469), for the
+# refusal of a folder the service cannot use. The zip is the one beside the extract folder with the folder's name, which is
+# how Explorer's "Extract All" names its folder; with none there, a placeholder says what to put.
+function Get-DarlingExtractCommand([string]$extractedFolder) {
+    $destination = Join-Path $env:ProgramFiles 'PerformanceMonitorDarling'
+    $zipPath = '<path to the Darling zip you downloaded>'
+    try {
+        $trimmed = $extractedFolder.TrimEnd('\')
+        $parent = Split-Path -Parent $trimmed
+        $leaf = Split-Path -Leaf $trimmed
+        if ($parent -and $leaf) {
+            $candidate = Join-Path $parent ($leaf + '.zip')
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $zipPath = $candidate }
+        }
+    }
+    catch { $null = $_ }
+    return "Expand-Archive -LiteralPath '" + $zipPath.Replace("'", "''") + "' -DestinationPath '" + $destination.Replace("'", "''") + "'"
+}
+
 # The refusal's advice when the service is NOT registered, or runs from some other folder, so this folder is not
 # an install to keep (#5627): a fresh folder. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingFreshFolderAdvice([string]$folder) {
@@ -1582,9 +1601,59 @@ function Invoke-InstallTreeLock([string]$account, [switch]$StopOnOpen) {
 }
 
 # -- 1. Environment checks ------------------------------------------------------------------------
+# Can this session answer a question? Not when PowerShell was started -NonInteractive (any abbreviation of it),
+# when its input is redirected, or when the process is not interactive: a Read-Host there throws or hangs, so
+# those runs keep the plain stop below (#6469). The three facts are parameters so a test can stand in for them.
+function Test-DarlingInteractiveSession(
+    [string[]]$commandLine = [Environment]::GetCommandLineArgs(),
+    [bool]$userInteractive = [Environment]::UserInteractive,
+    [bool]$inputRedirected = [Console]::IsInputRedirected) {
+    if (-not $userInteractive -or $inputRedirected) { return $false }
+    foreach ($argument in $commandLine) {
+        if ($argument -match '^[-/]non') { return $false }
+    }
+    return $true
+}
+
+# What to do about elevation: carry on, offer to restart elevated, or stop with the message (#6469).
+function Get-DarlingElevationAction([bool]$isAdministrator, [bool]$interactive) {
+    if ($isAdministrator) { return 'Continue' }
+    if ($interactive) { return 'Offer' }
+    return 'Stop'
+}
+
+# The arguments for the elevated restart: this script, with the execution policy bypassed for that one process
+# (never Set-ExecutionPolicy), and every switch the person passed. -NoExit keeps the new window open so its output
+# can be read once the script ends.
+function Get-DarlingElevatedArguments([string]$scriptPath, [hashtable]$boundParameters) {
+    $list = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', ('"' + $scriptPath + '"'))
+    foreach ($name in @($boundParameters.Keys | Sort-Object)) {
+        $value = $boundParameters[$name]
+        if ($value -is [System.Management.Automation.SwitchParameter] -and $value.IsPresent) { $list += "-$name" }
+    }
+    return $list
+}
+
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Fail 'Run this script from an ELEVATED PowerShell (service creation and Event Log registration require it).'
+$elevationAction = Get-DarlingElevationAction ($identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) (Test-DarlingInteractiveSession)
+if ($elevationAction -eq 'Stop') {
+    Fail 'Run this script from an ELEVATED PowerShell (service creation and Event Log registration require it). To skip that step, double-click Install-Darling.cmd beside this script instead: it asks Windows for administrator rights and runs this script for you.'
+}
+if ($elevationAction -eq 'Offer') {
+    Write-Host 'This installer needs administrator rights (service creation and Event Log registration), and this PowerShell is not elevated.' -ForegroundColor Yellow
+    $answer = Read-Host 'Restart it elevated now? Windows will ask you to approve. [Y/n]'
+    if ($answer -match '^[Nn]') {
+        Fail 'Not restarted. Run this script from an ELEVATED PowerShell, or double-click Install-Darling.cmd beside it.'
+    }
+    try {
+        $powerShellExe = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        Start-Process -FilePath $powerShellExe -Verb RunAs -ArgumentList (Get-DarlingElevatedArguments $PSCommandPath $PSBoundParameters)
+    }
+    catch {
+        Fail "Could not restart elevated: $($_.Exception.Message) Run this script from an ELEVATED PowerShell, or double-click Install-Darling.cmd beside it."
+    }
+    Write-Host 'The installer is running in the elevated window that just opened. Carry on there; this window has nothing more to do.' -ForegroundColor Green
+    exit 0
 }
 
 if (-not (Test-Path -LiteralPath $serviceExe)) {
@@ -1735,6 +1804,7 @@ at all. Either way the service installs cleanly and then cannot read its own pro
 "@
     }
 
+    $extractCommand = Get-DarlingExtractCommand $root
     $fix = @"
 Extract the zip again, from an elevated session, into a machine-scoped local folder that only
 administrators can write, and run this script from there:
@@ -1744,6 +1814,12 @@ administrators can write, and run this script from there:
 That is the documented location. A folder created there inherits read + execute for BUILTIN\Users,
 which the service's virtual account is a member of, and ordinary users can't write to it (#4043).
 Copy your darling.json across if you have one.
+
+To extract the zip straight into place, paste this into an ELEVATED PowerShell:
+
+  $extractCommand
+
+Then run install-darling.ps1 (or double-click Install-Darling.cmd) from that folder.
 "@
 
     if (-not $existing) {
