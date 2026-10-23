@@ -45,7 +45,7 @@ public sealed record RemediationResult(
     /// <summary>A module recompile's resolved object name (<c>OBJECT_NAME</c> of the resolved id), not the input text. Null for every other action, and when the name did not resolve.</summary>
     public string? ObjectName { get; init; }
 
-    /// <summary>A plan guide create's count of cached batches whose text equals a SQL guide's batch (#6569). Null for every other action, for an OBJECT guide, and when the login cannot read the plan cache.</summary>
+    /// <summary>A plan guide create's count of cached batches, compiled in the guide's own database, whose text equals a SQL guide's batch (#6569). Null for every other action, for an OBJECT guide, and when the login cannot read the plan cache.</summary>
     public long? CachedMatches { get; init; }
 
     /// <summary>A plan guide drop's read of the guide it named (#6569, slice 2b): the whole definition as <c>sys.plan_guides</c> holds it, which the journal keeps so an Undo can re-create the guide. Null for every other result, and when the guide was not found.</summary>

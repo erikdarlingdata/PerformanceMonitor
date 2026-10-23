@@ -136,7 +136,7 @@ WHERE NOT EXISTS (
 RETURNING journal_id";
 
     private const string PlanCalledSql = @"
-SELECT c.detail::text, c.request_id, c.server_id, c.event_time, r.server_name
+SELECT c.detail::text, c.request_id, c.server_id, c.event_time, r.server_name, c.actor, r.server_id, r.autonomy_level
 FROM config.investigation_journal AS c
 LEFT JOIN config.investigation_requests AS r ON r.request_id = c.request_id
 WHERE c.journal_id = $1 AND c.event = 'action_called'";
@@ -187,6 +187,9 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         int? serverId;
         DateTime calledAt;
         string? serverName;
+        string? calledActor;
+        int? requestServerId;
+        int? requestLevel;
         await using (var command = Command(connection, transaction, PlanCalledSql, P(calledId)))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
@@ -197,6 +200,9 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
             serverId = reader.IsDBNull(2) ? null : reader.GetInt32(2);
             calledAt = Utc(reader.GetDateTime(3));
             serverName = reader.IsDBNull(4) ? null : reader.GetString(4);
+            calledActor = reader.IsDBNull(5) ? null : reader.GetString(5);
+            requestServerId = reader.IsDBNull(6) ? null : reader.GetInt32(6);
+            requestLevel = reader.IsDBNull(7) ? null : Convert.ToInt32(reader.GetValue(7), CultureInfo.InvariantCulture);
         }
 
         if (Now() - calledAt > Window)
@@ -225,6 +231,10 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
             var guideName = Text(target?["id"]);
             if (requestId is not Guid guideRequest || serverId is not int guideServer || string.IsNullOrWhiteSpace(database) || string.IsNullOrWhiteSpace(guideName) || guide is null)
                 return (null, AgentUndoResult.Refused("not_undoable", "This change's guide or database was not recorded, so it cannot be undone from here."));
+            /* #6569 round 2: the Undo acts only on a row the create and drop tools wrote. They record an agent actor ("agent:" + the agent id) under a request of the same server that was
+               Level 3 when the call was made, so a journal row without those is not one of theirs. */
+            if (calledActor is null || !calledActor.StartsWith("agent:", StringComparison.Ordinal) || requestServerId != guideServer || requestLevel is not >= 3)
+                return (null, AgentUndoResult.Refused("not_undoable", "This row was not written by a plan guide create or drop made by an agent under a Level 3 request on this server, so it cannot be undone from here."));
             var guideFacts = guide.DeepClone().AsObject();
             guideFacts["name"] = guideName;
             return (new PlanChangeFacts(calledId, guideRequest, guideServer, serverName ?? ("server " + guideServer.ToString(CultureInfo.InvariantCulture)), kind, database, 0, 0, null, null,

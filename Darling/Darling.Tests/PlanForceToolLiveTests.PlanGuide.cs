@@ -163,7 +163,7 @@ public sealed partial class PlanForceToolLiveTests
             var json = Parse(await CreateGuideAsync(c, guide, dryRun: false, type: "SQL", statement: statement));
             Assert.Equal("done", (string?)json["status"]);
             Assert.Equal(0, (long)json["matches"]!);
-            Assert.Contains("No cached batch matches this guide", (string?)json["message"] ?? "", StringComparison.Ordinal);
+            Assert.Contains("No cached batch in this database matches this guide", (string?)json["message"] ?? "", StringComparison.Ordinal);
             Assert.Equal("SQL", await GuideColumnAsync(c, guide, "scope_type_desc"));
         });
     }

@@ -190,6 +190,8 @@ public sealed partial class DarlingMcpPlanForceTools
     {
         var facts = session.Facts;
         var guideName = facts.GuideName!;
+        if (GuideUndoNameRefusal(guideName) is { } badName)
+            return badName;
         string? Text(string key) => facts.Guide is System.Text.Json.Nodes.JsonObject g && g[key] is System.Text.Json.Nodes.JsonValue v && v.TryGetValue(out string? s) ? s : null;
         var expected = new PlanGuideDefinition(guideName, Text("type") ?? "", Text("statement") ?? "", Text("module_or_batch"), Text("params"), Text("hints") ?? "");
         var stateNode = facts.Guide?.DeepClone();
@@ -202,6 +204,8 @@ public sealed partial class DarlingMcpPlanForceTools
         var row = await ReadServerRowAsync(owner, facts.ServerId, ct);
         if (row is null)
             return PlanUndoAnswer.Refused("server_row_missing", $"{facts.ServerName} has no row in the monitored-server settings.");
+        if (await GuideUndoServerRefusalAsync(session, owner, row, ct) is { } serverRefusal)
+            return serverRefusal;
         var executor = new SqlServerRemediationExecutor(facts.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
 
         var statement = PlanGuideStatement.Drop(facts.Database, guideName);
@@ -245,6 +249,40 @@ public sealed partial class DarlingMcpPlanForceTools
     }
 
     internal const string DropPlanGuideToolName = "drop_plan_guide";
+
+    /// <summary>The guide name a plan guide Undo acts on must pass the check a create and a drop make on it (1 to 128 characters, no control character, not a leading #), so the server never cuts it to fit its <c>NVarChar(128)</c> parameter (#6569).</summary>
+    private static PlanUndoAnswer? GuideUndoNameRefusal(string guideName) =>
+        string.Equals(PlanGuideDefinition.TryName(guideName), guideName, StringComparison.Ordinal) ? null
+            : PlanUndoAnswer.Refused("not_undoable", "The plan guide name journaled with this change is not a valid plan guide name (1 to 128 characters, no control characters, not starting with #), so it cannot be undone from here. Nothing was run.");
+
+    /// <summary>
+    /// What both plan guide Undos check once the server's row is read, as the create and drop tools do before they act (#6569): the database must not be in the server's excluded list, and the
+    /// engine must be SQL Server (not PostgreSQL, not an Azure SQL Database or Managed Instance). A refusal is recorded on the session the way the other Undo refusals are. Null when the server passes.
+    /// </summary>
+    private static async Task<PlanUndoAnswer?> GuideUndoServerRefusalAsync(AgentChangeUndo.PlanUndoSession session, NpgsqlDataSource owner, ServerRow row, CancellationToken ct)
+    {
+        var facts = session.Facts;
+        if (IsExcludedDatabase(row.ExcludedDatabases, facts.Database))
+        {
+            await session.RecordRefusalAsync(AzureDatabaseExcluded, ct);
+            return PlanUndoAnswer.Refused(AzureDatabaseExcluded, ExcludedDatabaseRefusal(facts.Database).Message);
+        }
+
+        var (engineEdition, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(owner, facts.ServerId, ct);
+        if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
+        {
+            await session.RecordRefusalAsync(PostgresTarget, ct);
+            return PlanUndoAnswer.Refused(PostgresTarget, $"{facts.ServerName} is a PostgreSQL target. A plan guide is SQL Server only, so this change cannot be undone from here. Nothing was run.");
+        }
+
+        if (engineEdition is AzureSqlDatabaseEdition or AzureManagedInstanceEdition)
+        {
+            await session.RecordRefusalAsync(EngineNotSupported, ct);
+            return PlanUndoAnswer.Refused(EngineNotSupported, $"{facts.ServerName} is an Azure SQL target. Darling creates and drops plan guides on SQL Server only, so this change cannot be undone from here. Nothing was run.");
+        }
+
+        return null;
+    }
 
     /// <summary>The definition a drop reads, in the shape the journal keeps and the Undo re-creates from (#6569, slice 2b): the create's own definition fields plus <c>is_disabled</c>.</summary>
     private static object GuideImage(PlanGuideDefinition guide, bool disabled) =>
@@ -400,13 +438,13 @@ public sealed partial class DarlingMcpPlanForceTools
         var guideName = facts.GuideName!;
         string? Text(string key) => facts.Guide is System.Text.Json.Nodes.JsonObject g && g[key] is System.Text.Json.Nodes.JsonValue v && v.TryGetValue(out string? s) ? s : null;
         var disabled = facts.Guide is System.Text.Json.Nodes.JsonObject d && d["is_disabled"] is System.Text.Json.Nodes.JsonValue dv && dv.TryGetValue(out bool b) && b;
-        var type = Text("type");
-        var statementText = Text("statement");
-        var hints = Text("hints");
         var stateNode = facts.Guide?.DeepClone();
-        if (type is not ("OBJECT" or "SQL") || string.IsNullOrWhiteSpace(statementText) || string.IsNullOrWhiteSpace(hints))
-            return PlanUndoAnswer.Refused("not_undoable", "The definition journaled with this drop is incomplete, so the guide cannot be re-created from it.");
-        var definition = new PlanGuideDefinition(guideName, type, statementText, Text("module_or_batch"), Text("params"), hints);
+        if (GuideUndoNameRefusal(guideName) is { } badName)
+            return badName;
+        /* The journaled definition goes through the same shape checks the create tool applies: hints start with OPTION (, an OBJECT guide's module still normalizes to [schema].[name], no TEMPLATE, the length caps. */
+        var (definition, _, badMessage) = PlanGuideDefinition.TryCreate(guideName, Text("statement"), Text("type"), Text("module_or_batch"), Text("params"), Text("hints"));
+        if (definition is null)
+            return PlanUndoAnswer.Refused("not_undoable", "The definition journaled with this drop does not pass the checks a create makes (" + badMessage!.Replace(" Nothing was run.", "", StringComparison.Ordinal) + "), so the guide cannot be re-created from it.");
 
         var decision = await session.AuthorizeAsync(guideName, owner, ct);
         if (decision.Refusal is { } gateRefusal)
@@ -416,6 +454,8 @@ public sealed partial class DarlingMcpPlanForceTools
         var row = await ReadServerRowAsync(owner, facts.ServerId, ct);
         if (row is null)
             return PlanUndoAnswer.Refused("server_row_missing", $"{facts.ServerName} has no row in the monitored-server settings.");
+        if (await GuideUndoServerRefusalAsync(session, owner, row, ct) is { } serverRefusal)
+            return serverRefusal;
         var executor = new SqlServerRemediationExecutor(facts.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
 
         var statement = PlanGuideStatement.Create(facts.Database, definition, disabled);
@@ -463,8 +503,8 @@ public sealed partial class DarlingMcpPlanForceTools
     [McpServerTool(Name = "create_plan_guide"), Description(
         "Agent arm, SQL Server only (Azure SQL is refused): creates ONE plan guide with sys.sp_create_plan_guide, so a statement runs with the OPTION (...) hints you give it (OPTIMIZE FOR, RECOMPILE, MAXDOP, USE PLAN) without a change to the application. Dry run by default: returns the exact statement and what the guide matches, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's create_plan_guide switch and remediation login (with ALTER on the module for an OBJECT guide, ALTER on the database for a SQL guide); ships off. " +
         "<<GUIDE>>" +
-        "type is OBJECT (module_or_batch is the two-part schema.name of a procedure, function or trigger, and statement must appear exactly in its definition) or SQL (module_or_batch is the batch text, or empty when statement is the batch; params is the parameter list for a parameterized batch). TEMPLATE is refused. hints is required and is the OPTION (...) clause. Every value goes to the server as a parameter, never as batch text. " +
-        "Before it creates, the guide is matched and reported: an OBJECT guide's module must resolve and hold the statement, a SQL guide reports how many cached batches equal its text (zero is allowed: the guide then matches nothing cached right now). A name already used in the database is refused. After it creates, the guide is validated with sys.fn_validate_plan_guide in the same batch: an invalid guide is dropped again and the call is journaled failed with the server's message. " +
+        "type is OBJECT (module_or_batch is the two-part schema.name of a procedure, function or trigger, and statement must appear exactly in its definition) or SQL (module_or_batch is the batch text, or empty when statement is the batch; params is the parameter list for a parameterized batch). TEMPLATE is refused. hints is required and is the OPTION (...) clause. Table hints that change isolation or locking (NOLOCK, READUNCOMMITTED, READPAST, TABLOCKX, XLOCK and the like) change which rows the query returns or how it blocks other sessions: use them only when the person asked for them, or after comparing the query's results and run time with and without the hint, and state what you compared in your report. Every value goes to the server as a parameter, never as batch text. " +
+        "Before it creates, the guide is matched and reported: an OBJECT guide's module must resolve and hold the statement, a SQL guide reports how many cached batches compiled in its database equal its text (zero is allowed: the guide then matches nothing cached right now). A name already used in the database is refused. After it creates, the guide is validated with sys.fn_validate_plan_guide in the same batch: an invalid guide is dropped again and the call is journaled failed with the server's message. " +
         "This tool blocks only a call that cannot do anything: bad_guide_name, bad_guide_type, bad_guide_argument, bad_module_name, bad_database, engine_not_supported, guide_exists, module_not_found, not_a_module, statement_not_in_module, guide_permission_denied, guide_invalid. " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind plan_guide_create) with the whole definition, and a person can undo it there: the undo drops the guide by name. Answers status dry_run, done, refused (reason) or failed, with statement, before, matches and journal_id.")]
     public static Task<string> CreatePlanGuide(

@@ -112,6 +112,21 @@ public sealed class PlanGuideTests
     }
 
     [Fact]
+    public void TheRefusalForAnObjectGuideOnATrigger_NamesTheTriggersTable_AndOneOnAProcedureNamesTheProcedure()
+    {
+        var onTrigger = new PlanGuideDefinition("g", "OBJECT", Statement, "[dbo].[trg]", null, "OPTION (RECOMPILE)");
+        var trigger = SqlServerRemediationExecutor.CreatePlanGuideRefusal("create_plan_guide", true, onTrigger, "d", false, true, "TR", true, true, false, "stmt", "[dbo].[orders]");
+        Assert.Equal(RemediationResult.Reasons.GuidePermissionDenied, trigger?.Reason);
+        Assert.Contains("ALTER on the table [dbo].[orders]", trigger!.Message, StringComparison.Ordinal);
+        Assert.Contains("[dbo].[trg]", trigger.Message, StringComparison.Ordinal);
+
+        var onProcedure = new PlanGuideDefinition("g", "OBJECT", Statement, "[dbo].[p]", null, "OPTION (RECOMPILE)");
+        var procedure = SqlServerRemediationExecutor.CreatePlanGuideRefusal("create_plan_guide", true, onProcedure, "d", false, true, "P", true, true, false, "stmt");
+        Assert.Contains("ALTER on [dbo].[p]", procedure!.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("table", procedure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheCreateRefusals_AreInTheOrderTheFactsAreGathered()
     {
         var obj = new PlanGuideDefinition("g", "OBJECT", Statement, "[dbo].[p]", null, "OPTION (RECOMPILE)");
@@ -141,9 +156,9 @@ public sealed class PlanGuideTests
         var obj = new PlanGuideDefinition("g", "OBJECT", Statement, "[dbo].[p]", null, "OPTION (RECOMPILE)");
         var sql = new PlanGuideDefinition("g", "SQL", Statement, null, null, "OPTION (RECOMPILE)");
         Assert.Contains("found in the module's definition", SqlServerRemediationExecutor.MatchWords(obj, null), StringComparison.Ordinal);
-        Assert.Contains("No cached batch matches", SqlServerRemediationExecutor.MatchWords(sql, 0), StringComparison.Ordinal);
-        Assert.Equal("1 cached batch equal this guide's text right now.", SqlServerRemediationExecutor.MatchWords(sql, 1));
-        Assert.Equal("4 cached batches equal this guide's text right now.", SqlServerRemediationExecutor.MatchWords(sql, 4));
+        Assert.Contains("No cached batch in this database matches", SqlServerRemediationExecutor.MatchWords(sql, 0), StringComparison.Ordinal);
+        Assert.Equal("1 cached batch in this database equal this guide's text right now.", SqlServerRemediationExecutor.MatchWords(sql, 1));
+        Assert.Equal("4 cached batches in this database equal this guide's text right now.", SqlServerRemediationExecutor.MatchWords(sql, 4));
         Assert.Contains("could not count", SqlServerRemediationExecutor.MatchWords(sql, null), StringComparison.Ordinal);
     }
 

@@ -99,13 +99,13 @@ public sealed partial class SqlServerRemediationExecutor
 
     /// <summary>
     /// The one batch of a plan guide create (#6569), run in the request's database. It reads what decides the create (whether the name is taken, whether an OBJECT guide's
-    /// module resolves and holds the statement, the grants, how many cached batches equal a SQL guide's batch) and, only when <c>@run</c> is 1 and nothing refuses, runs
+    /// module resolves and holds the statement, the grants, how many cached batches compiled in this database equal a SQL guide's batch: a SQL guide applies only to batches compiled in its own database) and, only when <c>@run</c> is 1 and nothing refuses, runs
     /// <c>sys.sp_create_plan_guide</c>, then asks <c>sys.fn_validate_plan_guide</c> about the new guide and drops it in the same batch when that returns a row. Every value is a
     /// typed parameter; none joins the batch text. The grant that decides is the one Microsoft documents for <c>sp_create_plan_guide</c>: <c>ALTER</c> on the module for an
     /// OBJECT guide, <c>ALTER</c> on the database for a SQL guide; the other is not required. <c>@disable</c> is 1 only for an Undo that re-creates a guide that was disabled: it disables the guide after it validated. The cached-plan count needs <c>VIEW SERVER STATE</c>, so it sits in a TRY block: a login without it gets null, not an error.
     /// </summary>
     internal static readonly string CreatePlanGuideBatchSql = @"
-DECLARE @exists bit = 0, @id integer = NULL, @otype varchar(2) = NULL, @module nvarchar(600) = NULL, @in_module bit = 0, @target nvarchar(max) = NULL,
+DECLARE @exists bit = 0, @id integer = NULL, @otype varchar(2) = NULL, @module nvarchar(600) = NULL, @parent nvarchar(600) = NULL, @in_module bit = 0, @target nvarchar(max) = NULL,
         @can_db bigint = 0, @can_mod bigint = 1, @cached bigint = NULL, @ran bit = 0, @dropped bit = 0, @vmsg nvarchar(2048) = NULL, @gid integer = NULL;
 IF EXISTS (SELECT 1 FROM sys.plan_guides AS pg WHERE pg.name = @name) SET @exists = 1;
 SET @can_db = CONVERT(bigint, ISNULL(HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'ALTER'), 0));
@@ -114,7 +114,9 @@ BEGIN
     SET @id = OBJECT_ID(@mob);
     IF @id IS NOT NULL
     BEGIN
-        SELECT @otype = RTRIM(o.type), @module = QUOTENAME(OBJECT_SCHEMA_NAME(o.object_id)) + N'.' + QUOTENAME(o.name)
+        SELECT @otype = RTRIM(o.type), @module = QUOTENAME(OBJECT_SCHEMA_NAME(o.object_id)) + N'.' + QUOTENAME(o.name),
+               @parent = CASE WHEN o.type = 'TR' AND o.parent_object_id <> 0
+                              THEN QUOTENAME(OBJECT_SCHEMA_NAME(o.parent_object_id)) + N'.' + QUOTENAME(OBJECT_NAME(o.parent_object_id)) END
         FROM sys.objects AS o
         WHERE o.object_id = @id;
         SET @can_mod = CONVERT(bigint, ISNULL(HAS_PERMS_BY_NAME(@module, N'OBJECT', N'ALTER'), 0));
@@ -129,7 +131,7 @@ BEGIN
         SELECT @cached = COUNT_BIG(*)
         FROM sys.dm_exec_cached_plans AS cp
         CROSS APPLY sys.dm_exec_sql_text(cp.plan_handle) AS st
-        WHERE st.text COLLATE Latin1_General_BIN2 = ISNULL(@mob, @stmt) COLLATE Latin1_General_BIN2;
+        WHERE st.dbid = DB_ID() AND st.text COLLATE Latin1_General_BIN2 = ISNULL(@mob, @stmt) COLLATE Latin1_General_BIN2;
     END TRY
     BEGIN CATCH
         SET @cached = NULL;
@@ -154,7 +156,7 @@ BEGIN
 END;
 SELECT name_taken = CONVERT(bigint, @exists), module_found = CASE WHEN @id IS NULL THEN CONVERT(bigint, 0) ELSE CONVERT(bigint, 1) END, module_type = @otype,
        statement_in_module = CONVERT(bigint, @in_module), can_db = @can_db, can_module = @can_mod, cached_matches = @cached,
-       ran = CONVERT(bigint, @ran), dropped = CONVERT(bigint, @dropped), validation = @vmsg;";
+       ran = CONVERT(bigint, @ran), dropped = CONVERT(bigint, @dropped), validation = @vmsg, parent_table = @parent;";
 
     /// <summary>
     /// The one batch of a plan guide drop (#6569), run in the request's database: it reads the guide by name (its scope, its statement and hints), the grants, and, when the
@@ -165,7 +167,7 @@ SELECT name_taken = CONVERT(bigint, @exists), module_found = CASE WHEN @id IS NU
     /// hints, scope batch, parameters, <c>is_disabled</c>), which the drop action journals; <c>@refuse_template</c> is 1 for the drop action, which never drops a TEMPLATE guide.
     /// </summary>
     internal static readonly string DropPlanGuideBatchSql = @"
-DECLARE @found bit = 0, @scope integer = NULL, @scope_obj integer = NULL, @stmt_db nvarchar(max) = NULL, @hints_db nvarchar(max) = NULL, @module nvarchar(600) = NULL,
+DECLARE @found bit = 0, @scope integer = NULL, @scope_obj integer = NULL, @stmt_db nvarchar(max) = NULL, @hints_db nvarchar(max) = NULL, @module nvarchar(600) = NULL, @parent nvarchar(600) = NULL,
         @batch_db nvarchar(max) = NULL, @params_db nvarchar(max) = NULL, @disabled bit = 0,
         @same bit = 1, @can_db bigint = 0, @can_mod bigint = 1, @ran bit = 0;
 SELECT @found = 1, @scope = pg.scope_type, @scope_obj = pg.scope_object_id, @stmt_db = pg.query_text, @hints_db = pg.hints,
@@ -180,6 +182,9 @@ BEGIN
         SET @module = QUOTENAME(OBJECT_SCHEMA_NAME(@scope_obj)) + N'.' + QUOTENAME(OBJECT_NAME(@scope_obj));
         SET @can_mod = CONVERT(bigint, ISNULL(HAS_PERMS_BY_NAME(@module, N'OBJECT', N'ALTER'), 0));
         SET @can_db = 1;
+        SELECT @parent = QUOTENAME(OBJECT_SCHEMA_NAME(o.parent_object_id)) + N'.' + QUOTENAME(OBJECT_NAME(o.parent_object_id))
+        FROM sys.objects AS o
+        WHERE o.object_id = @scope_obj AND o.type = 'TR' AND o.parent_object_id <> 0;
     END;
     IF @expect_stmt IS NOT NULL AND (@stmt_db COLLATE Latin1_General_BIN2 <> @expect_stmt COLLATE Latin1_General_BIN2 OR @hints_db COLLATE Latin1_General_BIN2 <> @expect_hints COLLATE Latin1_General_BIN2) SET @same = 0;
 END;
@@ -189,7 +194,7 @@ BEGIN
     SET @ran = 1;
 END;
 SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = @can_db, can_module = @can_mod, ran = CONVERT(bigint, @ran),
-       scope_type = @scope, module = @module, query_text = @stmt_db, hints = @hints_db, scope_batch = @batch_db, params = @params_db, is_disabled = CONVERT(bigint, @disabled);";
+       scope_type = @scope, module = @module, query_text = @stmt_db, hints = @hints_db, scope_batch = @batch_db, params = @params_db, is_disabled = CONVERT(bigint, @disabled), parent_table = @parent;";
 
     /// <summary>
     /// Creates ONE plan guide with <c>sys.sp_create_plan_guide</c> in the permit's database (#6569, slice 2a), after the checks the batch gathers, and validates it before it
@@ -214,7 +219,7 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
         return await RunAsync(name, dryRun, database, async (connection, secret) =>
         {
             bool taken, found, inModule, ran, dropped;
-            string? type, validation;
+            string? type, validation, parentTable;
             bool grantedDb, grantedModule;
             long? cached;
             await using var batch = Command(connection, CreatePlanGuideBatchSql);
@@ -241,6 +246,7 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
                 ran = Flag(reader, 7);
                 dropped = Flag(reader, 8);
                 validation = reader.IsDBNull(9) ? null : reader.GetString(9);
+                parentTable = reader.IsDBNull(10) ? null : reader.GetString(10);
             }
             catch (Exception ex) when (!dryRun && (ex is OperationCanceledException || IsOutcomeUnknown(ex, connection.State == ConnectionState.Open, ct.IsCancellationRequested)))
             {
@@ -249,7 +255,7 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
                     $"The create of plan guide {guide.Name} in {database} was sent, but its reply was lost ({detail}). The guide may exist: read sys.plan_guides before you try again.");
             }
 
-            if (CreatePlanGuideRefusal(name, dryRun, guide, database, taken, found, type, inModule, grantedDb, grantedModule, statement) is { } refusal)
+            if (CreatePlanGuideRefusal(name, dryRun, guide, database, taken, found, type, inModule, grantedDb, grantedModule, statement, parentTable) is { } refusal)
                 return refusal;
 
             var matches = guide.Type == "SQL" ? cached : null;
@@ -272,15 +278,18 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
     internal static string MatchWords(PlanGuideDefinition guide, long? matches) =>
         guide.Type == "OBJECT" ? "The statement was found in the module's definition."
         : matches is null ? "Darling could not count the cached batches that match (the login cannot read the plan cache)."
-        : matches == 0 ? "No cached batch matches this guide right now, so it applies to nothing cached yet; it applies when a batch equal to its text next compiles."
-        : string.Create(CultureInfo.InvariantCulture, $"{matches} cached batch{(matches == 1 ? "" : "es")} equal this guide's text right now.");
+        : matches == 0 ? "No cached batch in this database matches this guide right now, so it applies to nothing cached yet; it applies when a batch equal to its text next compiles in this database."
+        : string.Create(CultureInfo.InvariantCulture, $"{matches} cached batch{(matches == 1 ? "" : "es")} in this database equal this guide's text right now.");
+
+    /// <summary>ALTER cannot be granted on a DML trigger: the permission a guide on one needs is ALTER on the trigger's table, so a refusal names the table (#6569). Null when the module is not a trigger.</summary>
+    internal static string? TriggerTableWords(string? parentTable) => string.IsNullOrEmpty(parentTable) ? null : "the table " + parentTable;
 
     /// <summary>
     /// The only refusals of a plan guide create, in the order the batch gathered their facts: the name is taken, an OBJECT guide's module does not resolve, is not a procedure,
     /// function or trigger, does not hold the statement, or the login lacks <c>ALTER</c>. Null when none applies. Pure, so a test needs no server.
     /// </summary>
     internal static RemediationResult? CreatePlanGuideRefusal(string name, bool dryRun, PlanGuideDefinition guide, string database, bool taken, bool moduleFound, string? moduleType,
-        bool statementInModule, bool grantedDb, bool grantedModule, string statement)
+        bool statementInModule, bool grantedDb, bool grantedModule, string statement, string? parentTable = null)
     {
         if (taken)
             return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.GuideExists,
@@ -301,7 +310,9 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
         if (guide.Type == "OBJECT" ? !grantedModule : !grantedDb)
             return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.GuidePermissionDenied,
                 (guide.Type == "OBJECT"
-                    ? $"The remediation login does not hold ALTER on {guide.ModuleOrBatch}, which sp_create_plan_guide needs for an OBJECT guide."
+                    ? TriggerTableWords(parentTable) is { } tableWords
+                        ? $"The remediation login does not hold ALTER on {tableWords}, which sp_create_plan_guide needs for an OBJECT guide on the DML trigger {guide.ModuleOrBatch}."
+                        : $"The remediation login does not hold ALTER on {guide.ModuleOrBatch}, which sp_create_plan_guide needs for an OBJECT guide."
                     : $"The remediation login does not hold ALTER on the database {database}, which sp_create_plan_guide needs for a SQL guide.") + " Nothing was run.") with { Statement = statement };
         return null;
     }
@@ -330,7 +341,7 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
         {
             bool found, same, grantedDb, grantedModule, ran, disabled;
             long scope;
-            string? module, queryText, hintsText, scopeBatch, declared;
+            string? module, queryText, hintsText, scopeBatch, declared, parentTable;
             await using var batch = Command(connection, DropPlanGuideBatchSql);
             batch.Parameters.Add(new SqlParameter("@name", SqlDbType.NVarChar, 128) { Value = guideName });
             batch.Parameters.Add(new SqlParameter("@expect_stmt", SqlDbType.NVarChar, -1) { Value = (object?)expected?.Statement ?? DBNull.Value });
@@ -354,6 +365,7 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
                 scopeBatch = reader.IsDBNull(9) ? null : reader.GetString(9);
                 declared = reader.IsDBNull(10) ? null : reader.GetString(10);
                 disabled = Flag(reader, 11);
+                parentTable = reader.IsDBNull(12) ? null : reader.GetString(12);
             }
             catch (Exception ex) when (!dryRun && (ex is OperationCanceledException || IsOutcomeUnknown(ex, connection.State == ConnectionState.Open, ct.IsCancellationRequested)))
             {
@@ -384,7 +396,9 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
                     $"Plan guide {guideName} in {database} no longer holds the statement and hints it was created with, so it was changed or replaced since. Nothing was changed.") with { Statement = statement };
             if (!grantedModule)
                 return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.GuidePermissionDenied,
-                    $"The remediation login does not hold ALTER on the object plan guide {guideName} is on, which sp_control_plan_guide needs to drop an OBJECT guide. Nothing was changed.") with { Statement = statement };
+                    (TriggerTableWords(parentTable) is { } tableWords
+                        ? $"The remediation login does not hold ALTER on {tableWords}, which sp_control_plan_guide needs to drop an OBJECT guide on the DML trigger {module}."
+                        : $"The remediation login does not hold ALTER on the object plan guide {guideName} is on, which sp_control_plan_guide needs to drop an OBJECT guide.") + " Nothing was changed.") with { Statement = statement };
             if (!grantedDb)
                 return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.GuidePermissionDenied,
                     $"The remediation login does not hold ALTER on the database {database}, which sp_control_plan_guide needs to drop a SQL guide. Nothing was changed.") with { Statement = statement };
