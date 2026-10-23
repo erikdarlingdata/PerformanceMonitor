@@ -129,8 +129,8 @@ big = {"classes": {"darling": classes([f"B{i}" for i in range(100)]), "lite": l_
 SERVICE = "Darling/PerformanceMonitor.Darling.Service/X.cs"
 
 
-def run(files, event="pull_request", base="dev", head="feature/x", draft=False, labels=(), cat=catalog):
-    return cp.plan(event, base, head, draft, list(labels), files, rules, cat)
+def run(files, event="pull_request", base="dev", head="feature/x", draft=False, labels=(), cat=catalog, busy=None):
+    return cp.plan(event, base, head, draft, list(labels), files, rules, cat, busy=busy)
 
 
 # --- the gate -------------------------------------------------------------------------------------------------
@@ -154,7 +154,6 @@ check("gate: a push ignores draft", run(["README.md"], event="push", draft=True)
 r = run(["README.md", "docs/a.png"])
 check("docs-only: areas", r["areas"], "docs-only")
 check("docs-only: no build", r["build"], "false")
-check("docs-only: neither build job", (r["build_darling"], r["build_lite"]), ("false", "false"))
 check("docs-only: no legs", r["legs"], "0")
 check("docs-only: scopes", (r["darling_scope"], r["lite_scope"]), ("none", "none"))
 
@@ -162,7 +161,6 @@ r = run([SERVICE])
 check("darling: areas", r["areas"], "darling")
 check("darling: scopes", (r["darling_scope"], r["lite_scope"]), ("full", "reads"))
 check("darling: build", r["build"], "true")
-check("darling: only the Darling build job", (r["build_darling"], r["build_lite"]), ("true", "false"))
 check("darling: minutes (4 darling + the 10 min Lite reads class)", r["test_minutes"], "14.0")
 check("darling: legs", (r["legs"], r["legs_json"]), ("2", "[1,2]"))
 
@@ -171,14 +169,12 @@ check("lite: areas", r["areas"], "lite")
 check("lite: scopes", (r["darling_scope"], r["lite_scope"]), ("reads-lite", "full"))
 check("lite: minutes (Guard + reads-lite Darling = 2, Lite 30)", r["test_minutes"], "32.0")
 check("lite: legs (32 minutes / 8.5)", r["legs"], "4")
-check("lite: both build jobs (Darling.Tests runs its Guard classes)", (r["build_darling"], r["build_lite"]), ("true", "true"))
 
 r = run(["Lite/Controls/X.xaml", "README.md"])
 check("lite xaml with docs: scopes", (r["darling_scope"], r["lite_scope"]), ("reads-lite", "full"))
 
 r = run(["Darling/X.cs", "Lite/X.cs"])
 check("darling + lite: all", r["areas"], "all")
-check("darling + lite: both build jobs", (r["build_darling"], r["build_lite"]), ("true", "true"))
 check("darling + lite: minutes", r["test_minutes"], "34.0")
 
 r = run(["PerformanceMonitor.Common/X.cs"])
@@ -190,7 +186,6 @@ check("root build file: all", r["areas"], "all")
 r = run(["deprecated/Installer/X.cs"])
 check("deprecated only: no area", r["areas"], "none")
 check("deprecated only: builds, no legs", (r["build"], r["legs"]), ("true", "0"))
-check("deprecated only: both build jobs (a compile check)", (r["build_darling"], r["build_lite"]), ("true", "true"))
 check("deprecated only: installer tests", r["deprecated_tests"], "true")
 check("deprecated file in an all-area change", run(["deprecated/Installer/X.cs", "Darling/X.cs"])["deprecated_tests"],
       "true")
@@ -221,6 +216,14 @@ check("legs: the PR maximum is 16", cp.MAX_LEGS, 16)
 check("legs: a push is a fixed 4, however small", cp.leg_count(0.02, "push"), 4)
 check("legs: a push is a fixed 4, however big", cp.leg_count(500, "push"), 4)
 check("legs: a push with no tests is 0", cp.leg_count(0, "push"), 0)
+
+# --- the leg count cut to the free runners ----------------------------------------------------------------------
+check("busy: nothing else running keeps 16", cp.cap_legs(16, 0), 16)
+check("busy: 10 other jobs leave 8", cp.cap_legs(16, 10), 8)
+check("busy: 30 other jobs hit the floor of 6", cp.cap_legs(16, 30), 6)
+check("busy: count unavailable keeps the weight-based 16", cp.cap_legs(16, None), 16)
+check("busy: a small run keeps its legs even when the pool is full", cp.cap_legs(3, 30), 3)
+check("busy: no tests stays 0", cp.cap_legs(0, 5), 0)
 r = run(["Darling/X.cs"], cat=big)
 check("big suite: capped legs", (r["legs"], r["legs_json"]), ("16", json.dumps(list(range(1, 17)), separators=(",", ":"))))
 full = {"classes": {"darling": classes([f"F{i}" for i in range(131)]), "lite": l_cls},
@@ -228,6 +231,10 @@ full = {"classes": {"darling": classes([f"F{i}" for i in range(131)]), "lite": l
 check("full all-areas PR run: 16 legs", run(["tools/odd.txt"], cat=full)["legs"], "16")
 check("same change as a dev push: 4 legs", run(["tools/odd.txt"], event="push", cat=full)["legs"], "4")
 check("a dev push's legs_json", run(["README.md"], event="push", cat=full)["legs_json"], "[1,2,3,4]")
+check("busy: a PR plan at 10 busy gets 8 legs", run(["tools/odd.txt"], cat=full, busy=10)["legs"], "8")
+check("busy: a PR plan with an unknown count gets 16", run(["tools/odd.txt"], cat=full, busy=None)["legs"], "16")
+check("busy: the weight-based count is still reported", run(["tools/odd.txt"], cat=full, busy=10)["legs_by_weight"], "16")
+check("busy: a dev push stays 4 however busy", run(["tools/odd.txt"], event="push", cat=full, busy=30)["legs"], "4")
 
 # an unknown class weighs the mean; a missing Lite table falls back to the stand-in constants
 mean_cat = {"classes": {"darling": classes(["D1", "D2", "New"]), "lite": {}},

@@ -1,7 +1,7 @@
 name: PR CI
 
-# #6656: the pull request and dev-push CI. One plan job decides the work from the changed files, two build jobs build
-# the two test projects in parallel, N test legs run weighted slices of the classes from that build, and one verdict job turns the
+# #6656: the pull request and dev-push CI. One plan job decides the work from the changed files, one build job builds
+# both test projects once, N test legs run weighted slices of the classes from that build, and one verdict job turns the
 # result into the commit status `CI result`. `CI result` is a commit status and not a job: a skipped required job counts
 # as passing, so a draft's skipped run could leave a green on a SHA nobody tested. The status stays pending until the
 # verdict sets it, so a run that is cancelled or dies early never passes.
@@ -18,6 +18,7 @@ on:
     branches: [dev, main]
 
 permissions:
+  actions: read
   contents: read
   statuses: write
   issues: write
@@ -43,8 +44,6 @@ jobs:
       areas: ${{ steps.plan.outputs.areas }}
       darling_scope: ${{ steps.plan.outputs.darling_scope }}
       build: ${{ steps.plan.outputs.build }}
-      build_darling: ${{ steps.plan.outputs.build_darling }}
-      build_lite: ${{ steps.plan.outputs.build_lite }}
       legs: ${{ steps.plan.outputs.legs }}
       legs_json: ${{ steps.plan.outputs.legs_json }}
     steps:
@@ -82,8 +81,39 @@ jobs:
           fi
           echo "$(wc -l < changed.txt) changed file(s)"
 
+          # The jobs queued or in progress in this repo's other runs, so a pull request asks for the runners that are free
+          # and not for 16 that will wait (run 40016922106: legs queued 37-459 s). Every workflow shares the pool. A failed
+          # call leaves busy empty and the plan keeps its weight-based leg count. Dev pushes stay at 4 legs and skip this.
+          busy=""
+          if [ "${EVENT_NAME}" = "pull_request" ] && [ "${IS_DRAFT}" != "true" ]; then
+            busy_total=0
+            busy_ok=1
+            for state in in_progress queued; do
+              if ! run_ids=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs?status=${state}&per_page=100" \
+                  --jq ".workflow_runs[] | select(.id != ${GITHUB_RUN_ID}) | .id"); then
+                busy_ok=0
+                break
+              fi
+              while read -r run_id; do
+                [ -n "${run_id}" ] || continue
+                if ! n=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
+                    --jq '[.jobs[] | select(.status == "queued" or .status == "in_progress")] | length' | awk '{s += $1} END {print s + 0}'); then
+                  busy_ok=0
+                  break 2
+                fi
+                busy_total=$((busy_total + n))
+              done <<< "${run_ids}"
+            done
+            if [ "${busy_ok}" = "1" ]; then
+              busy="${busy_total}"
+            else
+              echo "::notice title=Busy-runner count unavailable::The Actions API call failed, so the leg count is the weight-based one."
+            fi
+          fi
+          echo "busy jobs in other runs: ${busy:-unknown}"
+
           python -I .github/scripts/ci-plan.py --event "${EVENT_NAME}" --base "${BASE_REF}" --head-ref "${HEAD_REF}" \
-            --draft "${IS_DRAFT}" --labels "${LABELS}" --files-file changed.txt --github-output "${GITHUB_OUTPUT}"
+            --draft "${IS_DRAFT}" --labels "${LABELS}" --files-file changed.txt --busy "${busy}" --github-output "${GITHUB_OUTPUT}"
 
       # Pending from the moment the plan says the run goes. A fork's read-only token cannot write it (the verdict job
       # says so in one notice), and a draft sets nothing.
@@ -117,10 +147,10 @@ jobs:
         shell: bash
         run: bash .github/scripts/check-web-js.sh
 
-  build-darling:
-    name: Build Darling.Tests
+  build:
+    name: Build the test projects
     needs: plan
-    if: ${{ needs.plan.outputs.run == 'true' && needs.plan.outputs.build_darling == 'true' }}
+    if: ${{ needs.plan.outputs.run == 'true' && needs.plan.outputs.build == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -134,100 +164,23 @@ jobs:
           cache-dependency-path: '**/packages.lock.json'
 
       # Locked mode and `set -euo pipefail`: a multi-line run block under the default shell reports only its last
-      # command's exit code, so a failed restore could go unseen (LockedModeRestoreCoverageTests enforces both).
-      - name: Restore Darling.Tests
+      # command's exit code, so the first restore could fail unseen (LockedModeRestoreCoverageTests enforces both).
+      - name: Restore the test projects
         shell: bash
         run: |
           set -euo pipefail
 
           dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
+          dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
 
-      - name: Build Darling.Tests
+      - name: Build the Darling test project
         shell: bash
         run: |
           set -euo pipefail
 
           dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
 
-      # Where this build was made and from what, for the legs' check. No dot-prefix (upload-artifact skips hidden files).
-      # One file a build job, so a leg that fetches both artifacts keeps both.
-      - name: Record where this build was made
-        shell: pwsh
-        env:
-          PRODUCER_WORKSPACE: ${{ github.workspace }}
-          PRODUCER_SHA: ${{ github.sha }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Set-Content -Path guard-build-origin-darling.txt -Value @("workspace=$env:PRODUCER_WORKSPACE", "sha=$env:PRODUCER_SHA") -Encoding utf8NoBOM
-
-      # The legs run on windows-latest (win-x64), which loads only runtimes/win, runtimes/unix and runtimes/win-x64. The
-      # other platforms' native libraries (osx, linux, arm, x86: DuckDB, Skia, MSAL, HarfBuzz) were 822 of the 1,054 MB
-      # of the first artifact and what 16 legs spent minutes downloading at once (#6656). Nothing reads them: the tests
-      # that name runtimes/ plant their own tree. PDBs stay, for stack traces with line numbers.
-      - name: Leave other platforms' native libraries out of the artifact
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $keep = @('win', 'win-x64', 'unix')
-          $roots = @('Darling/Darling.Tests/bin/Release', 'Darling/PerformanceMonitor.Darling.Service/bin/Release')
-          $removed = 0
-          foreach ($root in $roots) {
-            foreach ($runtimes in @(Get-ChildItem -Path $root -Directory -Recurse -Filter runtimes)) {
-              foreach ($rid in @(Get-ChildItem -Path $runtimes.FullName -Directory)) {
-                if ($keep -notcontains $rid.Name) {
-                  Remove-Item -Recurse -Force $rid.FullName
-                  $removed++
-                }
-              }
-            }
-          }
-          Write-Host "Removed $removed runtime folder(s) for other platforms."
-
-      # One day of retention: only this run's legs read it.
-      - name: Upload the built Darling.Tests
-        uses: actions/upload-artifact@v6
-        with:
-          name: ci-test-build-darling
-          path: |
-            guard-build-origin-darling.txt
-            Darling/Darling.Tests/bin/Release
-            Darling/PerformanceMonitor.Darling.Service/bin/Release
-            Darling/Darling.Tests/obj/project.assets.json
-            Darling/Darling.Tests/obj/project.nuget.cache
-            Darling/Darling.Tests/obj/*.nuget.g.props
-            Darling/Darling.Tests/obj/*.nuget.g.targets
-            Darling/Darling.Tests/obj/*.nuget.dgspec.json
-          retention-days: 1
-          compression-level: 1
-          overwrite: true
-          if-no-files-found: error
-
-  build-lite:
-    name: Build Lite.Tests
-    needs: plan
-    if: ${{ needs.plan.outputs.run == 'true' && needs.plan.outputs.build_lite == 'true' }}
-    runs-on: windows-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup .NET 10.0
-        uses: actions/setup-dotnet@v6
-        with:
-          global-json-file: global.json
-          cache: true
-          cache-dependency-path: '**/packages.lock.json'
-
-      # Locked mode and `set -euo pipefail`: a multi-line run block under the default shell reports only its last
-      # command's exit code, so a failed restore could go unseen (LockedModeRestoreCoverageTests enforces both).
-      - name: Restore Lite.Tests
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
-
-      - name: Build Lite.Tests
+      - name: Build the Lite test project
         shell: bash
         run: |
           set -euo pipefail
@@ -235,7 +188,6 @@ jobs:
           dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
 
       # Where this build was made and from what, for the legs' check. No dot-prefix (upload-artifact skips hidden files).
-      # One file a build job, so a leg that fetches both artifacts keeps both.
       - name: Record where this build was made
         shell: pwsh
         env:
@@ -243,7 +195,7 @@ jobs:
           PRODUCER_SHA: ${{ github.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
-          Set-Content -Path guard-build-origin-lite.txt -Value @("workspace=$env:PRODUCER_WORKSPACE", "sha=$env:PRODUCER_SHA") -Encoding utf8NoBOM
+          Set-Content -Path guard-build-origin.txt -Value @("workspace=$env:PRODUCER_WORKSPACE", "sha=$env:PRODUCER_SHA") -Encoding utf8NoBOM
 
       # The legs run on windows-latest (win-x64), which loads only runtimes/win, runtimes/unix and runtimes/win-x64. The
       # other platforms' native libraries (osx, linux, arm, x86: DuckDB, Skia, MSAL, HarfBuzz) were 822 of the 1,054 MB
@@ -254,7 +206,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $keep = @('win', 'win-x64', 'unix')
-          $roots = @('Lite.Tests/bin/Release')
+          $roots = @('Darling/Darling.Tests/bin/Release', 'Darling/PerformanceMonitor.Darling.Service/bin/Release', 'Lite.Tests/bin/Release')
           $removed = 0
           foreach ($root in $roots) {
             foreach ($runtimes in @(Get-ChildItem -Path $root -Directory -Recurse -Filter runtimes)) {
@@ -268,13 +220,20 @@ jobs:
           }
           Write-Host "Removed $removed runtime folder(s) for other platforms."
 
-      # One day of retention: only this run's legs read it.
-      - name: Upload the built Lite.Tests
+      # The same file lists the Guard build uploaded for the two projects. One day of retention: only this run's legs read it.
+      - name: Upload the built test projects
         uses: actions/upload-artifact@v6
         with:
-          name: ci-test-build-lite
+          name: ci-test-build
           path: |
-            guard-build-origin-lite.txt
+            guard-build-origin.txt
+            Darling/Darling.Tests/bin/Release
+            Darling/PerformanceMonitor.Darling.Service/bin/Release
+            Darling/Darling.Tests/obj/project.assets.json
+            Darling/Darling.Tests/obj/project.nuget.cache
+            Darling/Darling.Tests/obj/*.nuget.g.props
+            Darling/Darling.Tests/obj/*.nuget.g.targets
+            Darling/Darling.Tests/obj/*.nuget.dgspec.json
             Lite.Tests/bin/Release
             Lite/bin/**/PerformanceMonitorLite.runtimeconfig.json
             Lite.Tests/obj/project.assets.json
@@ -289,10 +248,8 @@ jobs:
 
   test:
     name: Test leg ${{ matrix.leg }}/${{ needs.plan.outputs.legs }}
-    needs: [plan, build-darling, build-lite]
-    # A skipped build-lite is fine when the plan asked for no Lite build (areas darling); a build that failed is not.
-    # !cancelled() because a job that needs a skipped job is skipped otherwise.
-    if: ${{ !cancelled() && needs.plan.outputs.run == 'true' && needs.plan.outputs.legs != '0' && needs.build-darling.result == 'success' && (needs.build-lite.result == 'success' || (needs.plan.outputs.build_lite != 'true' && needs.build-lite.result == 'skipped')) }}
+    needs: [plan, build]
+    if: ${{ needs.plan.outputs.run == 'true' && needs.plan.outputs.legs != '0' }}
     runs-on: windows-latest
     # The test step has 25 minutes; the rest is setup, the artifact fetch and the uploads.
     timeout-minutes: 40
@@ -303,18 +260,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Fetch the Darling.Tests build
+      - name: Fetch the build
         uses: actions/download-artifact@v6
         with:
-          name: ci-test-build-darling
-          path: .
-
-      # Only a leg that runs Lite.Tests classes (areas all or lite) needs the Lite build.
-      - name: Fetch the Lite.Tests build
-        if: needs.plan.outputs.build_lite == 'true'
-        uses: actions/download-artifact@v6
-        with:
-          name: ci-test-build-lite
+          name: ci-test-build
           path: .
 
       # A fetched build that is not for THIS workspace and commit is an error: the tests find the repo root through
@@ -324,30 +273,21 @@ jobs:
         env:
           THIS_WORKSPACE: ${{ github.workspace }}
           THIS_SHA: ${{ github.sha }}
-          WITH_LITE: ${{ needs.plan.outputs.build_lite }}
+          REQUIRED_FILES: Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll;Darling/Darling.Tests/obj/project.assets.json;Lite.Tests/bin/Release/net10.0-windows/Lite.Tests.dll;Lite.Tests/obj/project.assets.json
         run: |
           $ErrorActionPreference = 'Stop'
-          # One origin file and one file list for each build this leg fetched.
-          $builds = @(
-            @{ Name = 'Darling.Tests'; Origin = 'guard-build-origin-darling.txt'; Files = @('Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll', 'Darling/Darling.Tests/obj/project.assets.json') }
-          )
-          if ($env:WITH_LITE -eq 'true') {
-            $builds += @{ Name = 'Lite.Tests'; Origin = 'guard-build-origin-lite.txt'; Files = @('Lite.Tests/bin/Release/net10.0-windows/Lite.Tests.dll', 'Lite.Tests/obj/project.assets.json') }
+          $origin = @{}
+          if (Test-Path guard-build-origin.txt) {
+            foreach ($line in Get-Content guard-build-origin.txt) { if ($line -match '^(\w+)=(.*)$') { $origin[$Matches[1]] = $Matches[2] } }
           }
-          foreach ($build in $builds) {
-            $origin = @{}
-            if (Test-Path $build.Origin) {
-              foreach ($line in Get-Content $build.Origin) { if ($line -match '^(\w+)=(.*)$') { $origin[$Matches[1]] = $Matches[2] } }
-            }
-            if ($origin['workspace'] -ne $env:THIS_WORKSPACE -or $origin['sha'] -ne $env:THIS_SHA) {
-              Write-Host "::error title=Build is for another workspace or commit::The fetched $($build.Name) build says workspace '$($origin['workspace'])' at '$($origin['sha'])'; this leg is at '$env:THIS_WORKSPACE' at '$env:THIS_SHA'."
+          if ($origin['workspace'] -ne $env:THIS_WORKSPACE -or $origin['sha'] -ne $env:THIS_SHA) {
+            Write-Host "::error title=Build is for another workspace or commit::The fetched build says workspace '$($origin['workspace'])' at '$($origin['sha'])'; this leg is at '$env:THIS_WORKSPACE' at '$env:THIS_SHA'."
+            exit 1
+          }
+          foreach ($file in ($env:REQUIRED_FILES -split ';')) {
+            if (-not (Test-Path $file)) {
+              Write-Host "::error title=Build is incomplete::The fetched build has no $file."
               exit 1
-            }
-            foreach ($file in $build.Files) {
-              if (-not (Test-Path $file)) {
-                Write-Host "::error title=Build is incomplete::The fetched $($build.Name) build has no $file."
-                exit 1
-              }
             }
           }
 
@@ -422,7 +362,7 @@ jobs:
   # Named "CI verdict", never "CI result": `CI result` is the commit status this job sets.
   verdict:
     name: CI verdict
-    needs: [plan, build-darling, build-lite, test]
+    needs: [plan, build, test]
     # Nothing to say for a draft, which sets no status: skip the runner too.
     if: ${{ always() && (needs.plan.result != 'success' || needs.plan.outputs.run == 'true' || needs.plan.outputs.outcome == 'train-blocked') }}
     runs-on: ubuntu-latest
@@ -437,11 +377,9 @@ jobs:
           IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
           PLAN_RESULT: ${{ needs.plan.result }}
           PLAN_OUTCOME: ${{ needs.plan.outputs.outcome }}
-          PLAN_BUILD_DARLING: ${{ needs.plan.outputs.build_darling }}
-          PLAN_BUILD_LITE: ${{ needs.plan.outputs.build_lite }}
+          PLAN_BUILD: ${{ needs.plan.outputs.build }}
           PLAN_LEGS: ${{ needs.plan.outputs.legs }}
-          BUILD_DARLING_RESULT: ${{ needs.build-darling.result }}
-          BUILD_LITE_RESULT: ${{ needs.build-lite.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
           TEST_RESULT: ${{ needs.test.result }}
           TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -458,11 +396,9 @@ jobs:
             desc="This pull request carries the merge-train label; only an admin override merges it."
             echo "::error title=CI result failed::This pull request carries the merge-train label, so its train run covers it. It can be merged only by an admin override after a merge train covered it."
           else
-            want_darling=skipped; [ "${PLAN_BUILD_DARLING}" = "true" ] && want_darling=success
-            want_lite=skipped;    [ "${PLAN_BUILD_LITE}" = "true" ] && want_lite=success
+            want_build=skipped; [ "${PLAN_BUILD}" = "true" ] && want_build=success
             want_test=skipped;  [ "${PLAN_LEGS}" != "0" ] && want_test=success
-            [ "${BUILD_DARLING_RESULT}" = "${want_darling}" ] || { state=failure; failed="${failed} build-darling (${BUILD_DARLING_RESULT})"; }
-            [ "${BUILD_LITE_RESULT}" = "${want_lite}" ]       || { state=failure; failed="${failed} build-lite (${BUILD_LITE_RESULT})"; }
+            [ "${BUILD_RESULT}" = "${want_build}" ] || { state=failure; failed="${failed} build (${BUILD_RESULT})"; }
             [ "${TEST_RESULT}" = "${want_test}" ]   || { state=failure; failed="${failed} test (${TEST_RESULT})"; }
           fi
           if [ "${state}" = "failure" ] && [ "${PLAN_OUTCOME}" != "train-blocked" ]; then
