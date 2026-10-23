@@ -8,7 +8,7 @@
 
 using System.Collections.Generic;
 
-namespace PerformanceMonitor.Darling.Service;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>One starter custom-alert-rule template (#3285, plan Component 7 / #3282 Q2): a curated
 /// {metric + predicate + hysteresis} an operator can browse (<c>list_custom_alert_templates</c>) and create a

@@ -8,7 +8,7 @@
 
 using System;
 
-namespace PerformanceMonitor.Darling.Service;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// Rewrites a measure's aggregate expression to read a continuous aggregate's PRE-aggregated columns instead of the
