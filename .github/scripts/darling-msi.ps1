@@ -97,9 +97,12 @@ function Remove-Tree([string]$path) {
     if (Test-Path -LiteralPath $path) { Fail-Leg "could not remove $path" }
 }
 
+# The security descriptor's primary-group field is the group of whoever created the object: the script install runs as the
+# runner's administrator (primary group None) and the MSI's actions run as SYSTEM. Nothing authorizes through it, so it is
+# masked; the owner and every DACL entry are compared.
 function Get-Sddl([string]$path) {
     if (-not (Test-Path -LiteralPath $path)) { return "(missing: $path)" }
-    return (Get-Acl -LiteralPath $path).Sddl
+    return ((Get-Acl -LiteralPath $path).Sddl -replace 'G:.*?(?=D:)', 'G:(not compared)')
 }
 
 # Everything the leg compares, as named sections of text lines.
@@ -121,7 +124,7 @@ function Get-Snapshot {
     $shell = New-Object -ComObject WScript.Shell
     $links = foreach ($folder in 'CommonDesktopDirectory', 'CommonPrograms') {
         $lnk = Join-Path ([Environment]::GetFolderPath($folder)) 'Darling Viewer.lnk'
-        if (Test-Path -LiteralPath $lnk) { $l = $shell.CreateShortcut($lnk); "$folder|$($l.TargetPath)|$($l.WorkingDirectory)|$($l.Description)" } else { "$folder|(missing)" }
+        if (Test-Path -LiteralPath $lnk) { $l = $shell.CreateShortcut($lnk); "$folder|$($l.TargetPath)|$($l.WorkingDirectory.TrimEnd('\'))|$($l.Description)" } else { "$folder|(missing)" }
     }
     $snap['shortcuts'] = @($links)
     return $snap

@@ -121,12 +121,20 @@
     <SetProperty Id="DarlingUninstall" Sequence="execute" Before="DarlingUninstall" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"
                  Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]uninstall-darling.ps1&quot; -MsiUninstall[DARLING_ARG_PURGE]" />
 
+    <!-- Windows Installer registers the service's ImagePath WITHOUT quotes when the ServiceInstall row has no arguments, and
+         the install path has a space ("C:\Program Files\..."): an unquoted service path is a privilege-escalation finding
+         (Windows tries C:\Program.exe first), and the record install-darling.ps1 makes is quoted. The service takes no start
+         argument (an unknown one is an error), so the path is quoted here, right after the record exists. -->
+    <SetProperty Id="DarlingQuoteServicePath" Sequence="execute" Before="DarlingQuoteServicePath" Condition="NOT (REMOVE~=&quot;ALL&quot;)"
+                 Value="&quot;[System64Folder]sc.exe&quot; config &quot;PerformanceMonitor Darling&quot; binPath= &quot;\&quot;[#DarlingServiceExe]\&quot;&quot;" />
+    <CustomAction Id="DarlingQuoteServicePath" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_X64" Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="DarlingPreStart" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_X64" Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="DarlingPostStart" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_X64" Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="DarlingUninstall" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_X64" Execute="deferred" Impersonate="no" Return="check" />
 
     <InstallExecuteSequence>
-      <Custom Action="DarlingPreStart" After="InstallServices" Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+      <Custom Action="DarlingQuoteServicePath" After="InstallServices" Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+      <Custom Action="DarlingPreStart" After="DarlingQuoteServicePath" Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom Action="DarlingPostStart" After="StartServices" Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom Action="DarlingUninstall" Before="StopServices" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
