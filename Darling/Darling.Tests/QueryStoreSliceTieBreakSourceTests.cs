@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -53,7 +54,7 @@ public sealed class QueryStoreSliceTieBreakSourceTests
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.QueryTrends.cs"), 1),
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.ItemTimeline.cs"), 1),
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingDataReader.cs"), 1),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Compose", "ComposeCompiler.cs"), 1),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposeCompiler.cs"), 1),
         /* 7, not 1, since #2827: the plan-regression dedup is one logical site but expresses its ordering
            once per projected column, as GROUP BY + ordered array_agg rather than a single window. Each of
            those orderings is independently breakable — that is the whole reason the count is declared here
@@ -141,13 +142,13 @@ public sealed class QueryStoreSliceTieBreakSourceTests
     public void ComposeCompiler_DedupePartitionByLiteral_EqualsTheRestrictionKey()
     {
         /* The dedupe spells its PARTITION BY list as a literal (this guard's regex has to see it); the
-           restriction joins on PerformanceMonitor.Darling.Service.ComposeCompiler.s_queryStorePartitionKey.
+           restriction joins on PerformanceMonitor.Darling.Storage.ComposeCompiler.s_queryStorePartitionKey.
            A drift between the two would make the restriction keep the wrong partitions. */
-        var source = File.ReadAllText(SourcePath(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Compose", "ComposeCompiler.cs")));
+        var source = File.ReadAllText(SourcePath(Path.Combine("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposeCompiler.cs")));
         var m = Regex.Match(source, @"ROW_NUMBER\(\) OVER \(PARTITION BY ""\s*\+\s*\$""(?<cols>[^""]+?)\s*""\s*\+\s*\$""ORDER BY");
         Assert.True(m.Success, "the Query Store dedupe's literal PARTITION BY list was not found in ComposeCompiler.cs");
         Assert.Equal(
-            string.Join(", ", PerformanceMonitor.Darling.Service.ComposeCompiler.s_queryStorePartitionKey),
+            string.Join(", ", PerformanceMonitor.Darling.Storage.ComposeCompiler.s_queryStorePartitionKey),
             m.Groups["cols"].Value);
     }
 

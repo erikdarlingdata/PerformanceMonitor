@@ -3560,8 +3560,8 @@ LIMIT 1";
         if (customAlertViewerSource is not null)
         {
             _customAlertEvaluator = new CustomAlertEvaluator(
-                new CustomAlertRuleStore(postgres),
-                new CustomAlertStateStore(postgres),
+                new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds),
+                new CustomAlertStateStore(postgres, McpCommandDeadlines.ReadSeconds),
                 customAlertViewerSource,
                 deliverer,
                 muteRuleService.IsAlertMuted,

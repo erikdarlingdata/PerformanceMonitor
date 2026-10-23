@@ -126,7 +126,7 @@ public sealed class CollectorCadenceSkippedSlotsTests
         Assert.DoesNotContain("DateTime.UtcNow - deniedAt <", runner, StringComparison.Ordinal);
         Assert.Contains("!CollectorCadence.IntervalElapsed(deniedAt, DateTime.UtcNow, AzureMasterRecheckInterval)", runner, StringComparison.Ordinal);
 
-        var compose = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Compose", "ComposeStoreAvailability.cs");
+        var compose = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposeStoreAvailability.cs");
         Assert.DoesNotContain("DateTime.UtcNow - entry.ProbedAtUtc <", compose, StringComparison.Ordinal);
         Assert.Contains("!CollectorCadence.IntervalElapsed(entry.ProbedAtUtc, DateTime.UtcNow, ReprobeInterval)", compose, StringComparison.Ordinal);
     }
