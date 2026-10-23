@@ -109,8 +109,11 @@ ORDER BY rp.submitted_at DESC
 LIMIT $4";
 
     /* #6565, Darling's twin: the reports of other requests on the same server and family, reported in the last SameRootCauseHours hours,
-       whose analysis story has the same root fact (key and database) as this request's story. The story hash changes with every run of a
-       story; the root fact (for example the regressed query's hash and database) stays. $1 server, $2 family, $3 this request, $4 limit,
+       whose analysis story has the same root fact (key and database) as this request's story. The story hash is a pure hash of the
+       story's path, so one chain gives one hash; what differs between two requests is the 30-minute join window, and a later request on
+       the same fault opens its own request. The root fact (for example the regressed query's hash and database) is what the reports
+       share. The root is the newest finding for this request's hash at or before the request's open time, so a later analysis run
+       cannot re-point the match when the brief composes at claim time. $1 server, $2 family, $3 this request, $4 limit,
        $5 this request's story hash (null: no rows), $6 reported since. The key and database do not name a plan regression's query
        (PLAN_REGRESSION is server-wide), so a row also carries this finding's and the candidate's newest remediation_action_json and
        the reader compares their force targets (InvestigationRootFactMatch). $4 is therefore a candidate cap, not the count a brief names. */
@@ -119,6 +122,7 @@ WITH root AS (
     SELECT f.root_fact_key, f.database_name, f.remediation_action_json
     FROM analysis_findings AS f
     WHERE f.server_id = $1 AND f.story_path_hash = $5
+      AND f.analysis_time <= (SELECT r0.opened_at FROM investigation_requests AS r0 WHERE r0.request_id = $3)
     ORDER BY f.analysis_time DESC
     LIMIT 1
 )

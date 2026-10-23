@@ -24,9 +24,10 @@ public static class InvestigationRootFactMatch
     public const string PlanRegressionRootFactKey = "PLAN_REGRESSION";
 
     /// <summary>
-    /// True when the finding behind a candidate earlier report is the same root cause as the request's finding. Every key but
-    /// <see cref="PlanRegressionRootFactKey"/> already carries its identity (for example <c>BAD_ACTOR_&lt;hash&gt;</c>), so it matches on the
-    /// key and database the SQL checked. A plan regression matches only when both findings share a force-plan target: the same database
+    /// True when the finding behind a candidate earlier report is the same root cause as the request's finding. The SQL has already matched
+    /// the root fact key and database. For every key but <see cref="PlanRegressionRootFactKey"/> that is the whole test by design (the
+    /// key is not always a per-subject identity: some keys name a kind of fact, so the same key in the same database counts as the same
+    /// root cause), and this returns true without reading the actions. A plan regression matches only when both findings share a force-plan target: the same database
     /// and the same Query Store query id. A finding with no force targets (or an unreadable action) matches nothing.
     /// </summary>
     public static bool IsSameRootCause(string? rootFactKey, string? requestRemediationJson, string? candidateRemediationJson)

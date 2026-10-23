@@ -103,7 +103,7 @@ VALUES ($1, $2, $3, $4, 'Blocking', $5, $6, $7, $8, $9, $10)",
 
     /// <summary>
     /// #6565, the twin of Darling's: the brief of a request names the report of another request on the same server and family that was
-    /// reported in the last 24 hours and whose story has the same root fact (key and database), under another story hash, first and
+    /// reported in the last 24 hours and whose story has the same root fact (key and database), under another story hash (the hash is a pure hash of the story's path), first and
     /// marked same_root_cause. Another root query, another database and a report 25 hours old are not marked.
     /// </summary>
     [Fact]
@@ -151,6 +151,52 @@ VALUES (99, $1, $2, $3, 'Sales', 0.8, 0.6, 'queries', 'path-hashB0002', 'hashB00
         var brief = InvestigationBriefComposer.Compose(sources, LiteInvestigationBriefTools.Tools, McpDataDetail.Full, Now);
         Assert.Contains("\"same_root_cause\":true", brief, StringComparison.Ordinal);
         Assert.Contains("is marked same_root_cause", brief, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #6582: the root fact is the newest finding for the request's story hash at or before the request opened. The brief composes at claim
+    /// time, so a later analysis run of the same story (another database, another root) must not re-point the match: the earlier report
+    /// on the root the request opened with stays marked, and a report on the later run's root is not.
+    /// </summary>
+    [Fact]
+    public async Task TheRootFact_IsAnchoredToTheRequestsOpenTime_ALaterRunDoesNotRepointIt()
+    {
+        var findingId = 300L;
+        async Task FindingAsync(string hash, string rootKey, DateTime at) =>
+            await ExecAsync(@"
+INSERT INTO analysis_findings
+    (finding_id, analysis_time, server_id, server_name, database_name, severity, confidence, category, story_path, story_path_hash, story_text, root_fact_key, fact_count)
+VALUES ($1, $2, $3, $4, 'Sales', 0.8, 0.6, 'queries', $5, $6, 'story', $7, 2)",
+                findingId++, Micros(at), ServerId, ServerName, "path-" + hash, hash, rootKey);
+
+        async Task<Guid> ReportedAsync(string hash, string rootKey, DateTime at)
+        {
+            var id = Guid.NewGuid();
+            await InsertRequestAsync(id, at, state: "reported", storyPathHash: hash);
+            await FindingAsync(hash, rootKey, at);
+            await ExecAsync(@"
+INSERT INTO investigation_reports
+    (report_id, request_id, report_format, agent_id, claim_id, submitted_at, verdict, root_cause, root_cause_found, summary,
+     evidence, server_id, metric_name)
+VALUES ($1, $2, 1, 'agent-a', $3, $4, 'real', 'a regressed plan', true, NULL, '[{""tool"":""get_query_store_top""}]', $5, 'Blocking')",
+                findingId++, id, Guid.NewGuid(), Micros(at), ServerId);
+            return id;
+        }
+
+        var onTheOpeningRoot = await ReportedAsync("hashA0001", "BAD_ACTOR_q1", Now.AddMinutes(-45));
+        var onTheLaterRoot = await ReportedAsync("hashC0003", "BAD_ACTOR_q9", Now.AddMinutes(-40));
+
+        var second = Guid.NewGuid();
+        await InsertRequestAsync(second, Now, storyPathHash: "hashB0002");
+        await FindingAsync("hashB0002", "BAD_ACTOR_q1", Now.AddMinutes(-1));
+        await FindingAsync("hashB0002", "BAD_ACTOR_q9", Now.AddMinutes(10));
+
+        var sources = await new DuckDbInvestigationBriefSourceReader(_initializer, () => Now.AddMinutes(20))
+            .ReadAsync(second, TestContext.Current.CancellationToken);
+
+        var marked = Assert.Single(sources!.EarlierReports, r => r.SameRootCause);
+        Assert.Equal(onTheOpeningRoot, marked.RequestId);
+        Assert.Contains(sources.EarlierReports, r => r.RequestId == onTheLaterRoot && !r.SameRootCause);
     }
 
     /// <summary>

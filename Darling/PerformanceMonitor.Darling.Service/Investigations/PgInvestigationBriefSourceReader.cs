@@ -111,9 +111,12 @@ ORDER BY rp.submitted_at DESC
 LIMIT $4";
 
     /* #6565: the reports of other requests on the same server and family, reported in the last SameRootCauseHours hours, whose analysis
-       story has the same root fact (key and database) as this request's story. The story hash is not the key: it changes with every run
-       of a story, while the root fact (for example the regressed query's hash and database) stays. Computed here, when the brief is
-       composed, from analysis_findings: a request stores only its story hash. $1 server, $2 family, $3 this request, $4 limit,
+       story has the same root fact (key and database) as this request's story. The story hash is a pure hash of the
+       story's path, so one chain gives one hash; what differs between two requests is the 30-minute join window (FindJoinSql), and a
+       later request on the same fault opens its own request. The root fact (for example the regressed query's hash and database) is what
+       the reports share. Computed here, when the brief is composed, from analysis_findings: a request stores only its story hash. The
+       root is the newest finding for this request's hash at or before the request's open time: the brief composes at claim time, up
+       to the lease after open, and a later analysis run (another database_name, another offender list) must not re-point the match. $1 server, $2 family, $3 this request, $4 limit,
        $5 now (the live-practice filter), $6 this request's story hash (null: no rows), $7 reported since. Same practice exclusions as
        EarlierReportsSql. The key and database do not name a plan regression's query (PLAN_REGRESSION is server-wide), so a row also
        carries this finding's and the candidate's newest remediation_action_json and the reader compares their force targets
@@ -123,6 +126,7 @@ WITH root AS (
     SELECT f.root_fact_key, f.database_name, f.remediation_action_json
     FROM analysis_findings AS f
     WHERE f.server_id = $1 AND f.story_path_hash = $6
+      AND f.analysis_time <= (SELECT r0.opened_at AT TIME ZONE 'UTC' FROM config.investigation_requests AS r0 WHERE r0.request_id = $3)
     ORDER BY f.analysis_time DESC
     LIMIT 1
 )
