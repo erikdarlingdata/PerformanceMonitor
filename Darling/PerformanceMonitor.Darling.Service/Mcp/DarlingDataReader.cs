@@ -4822,6 +4822,9 @@ FROM config.config_collector_schedules";
     /// is taken only when the XE source has no row for the CHOSEN databases (<c>NOT EXISTS (SELECT 1 FROM bpr)</c> over the
     /// filtered <c>bpr</c>), exactly as the desktop's blocking reads and <c>get_blocking_trend</c> choose, so the tools answer
     /// from one source for one filter and the two sources are never mixed. The unfiltered series is exactly what it was.</para>
+    /// <para>Both arms leave out a parallel query waiting on itself (<see cref="BlockingWaits.NotSelfWaitSql"/>, #6645, #6705),
+    /// as <c>get_blocking_trend</c> does, so the count and the severity reconcile; the DMV fallback is taken when the FILTERED XE
+    /// arm is empty.</para>
     /// </summary>
     public static readonly string BlockingDurationStatsSql = $$"""
         WITH bpr AS (
@@ -4836,6 +4839,7 @@ FROM config.config_collector_schedules";
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
             {{DatabaseFilter.All.Clause("database_name", 5)}}
+            AND   {{BlockingWaits.NotSelfWaitSql}}
             GROUP BY DATE_TRUNC('minute', event_time)
         ),
         dmv AS (
@@ -4850,6 +4854,7 @@ FROM config.config_collector_schedules";
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
             {{DatabaseFilter.All.Clause("database_name", 5)}}
+            AND   {{BlockingWaits.NotSelfWaitSql}}
             GROUP BY DATE_TRUNC('minute', event_time)
         )
         SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms, source FROM bpr

@@ -150,8 +150,8 @@ public sealed class StoreConnectionStringAppendPinTests
         Assert.Equal(DarlingStoreConnection.StoreSearchPath, DarlingManagedPostgres.SearchPath);
         Assert.Equal(DarlingStoreConnection.StoreSearchPath, ViewerSettings.ManagedSearchPath);
         Assert.Equal(
-            PgSchemaGenerator.SearchPath.Replace(" ", "", StringComparison.Ordinal),
-            DarlingStoreConnection.StoreSearchPath);
+            DarlingStoreConnection.StoreSearchPath,
+            PgSchemaGenerator.SearchPath.Replace(" ", "", StringComparison.Ordinal));
 
         var appended = new NpgsqlConnectionStringBuilder(DarlingStoreConnection.EnsureStoreSearchPath("Host=store;Database=darling"));
         Assert.Equal(ViewerSettings.ManagedSearchPath, appended.SearchPath);

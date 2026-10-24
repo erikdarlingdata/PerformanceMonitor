@@ -724,7 +724,7 @@ WITH clean AS (
 )," + RobustTierScaffold,
 
             // #6645: the baseline counts the same reports the current window does (BlockingWaits.NotSelfWaitSql), so the 3x ratio
-            // compares like with like. The Darling twin reads a stored aggregate that still counts them.
+            // compares like with like. The Darling twin's stored aggregate leaves them out too (#6705).
             // Event-based — mean = events per covered hour for this bucket, sample_count = covered days.
             // No restart exclusion needed (event counts, not cumulative). See EventBaselineSql (#4731).
             MetricNames.Blocking => OnEventTime(EventBaselineSql("blocked_process_report", "v_collection_log",
@@ -787,7 +787,7 @@ clean AS (
 WITH per_minute AS (
     SELECT DATE_TRUNC('minute', event_time) AS minute_bucket,
            COUNT(*)::DOUBLE PRECISION AS event_count
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3") + @" AS ev
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql) + @" AS ev
     GROUP BY minute_bucket
 ),
 clean AS (

@@ -151,6 +151,57 @@ public sealed class BlockingStatsReaderTests : IClassFixture<SharedDuckDbFixture
         Assert.Equal(1000, bucket.TotalDurationMs);
     }
 
+    // ── #6645 / #6705: a self-wait (same non-zero blocked and blocking spid) is not blocking, on both arms ──
+
+    [Fact]
+    public async Task BlockingSeries_LeaveSelfWaitsOut_OnTheXeArm()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        /* One minute: a parallel query waiting on itself (spid 77 blocking 77), a real block and a (0, 0) report. A (0, 0) report
+           is a system spid pair the predicate keeps; the self-wait goes, with its 9000 ms. */
+        await SeedBlockedProcessReportAsync(MinuteA.AddSeconds(5), "DB1", 9000, blockedSpid: 77, blockingSpid: 77);
+        await SeedBlockedProcessReportAsync(MinuteA.AddSeconds(15), "DB1", 1000);
+        await SeedBlockedProcessReportAsync(MinuteA.AddSeconds(25), "DB1", 3000, blockedSpid: 0, blockingSpid: 0);
+
+        var trend = Assert.Single(await service.GetBlockingTrendAsync(ServerId));
+        Assert.Equal(2, trend.Count);
+
+        var duration = Assert.Single(await service.GetBlockingDurationStatsAsync(ServerId));
+        Assert.Equal(2, duration.EventCount);
+        Assert.Equal(4000, duration.TotalDurationMs);
+        Assert.Equal(3000, duration.MaxDurationMs);
+
+        Assert.Equal(2, (await service.GetBlockingSlicerDataAsync(ServerId, 24)).Sum(b => b.SessionCount));
+        Assert.True(await service.HasBlockedProcessReportsInWindowAsync(ServerId, MinuteA.AddMinutes(-1), MinuteA.AddMinutes(1)));
+    }
+
+    [Fact]
+    public async Task BlockingSeries_OnlySelfWaitReportsInXe_DrawTheDmvArm_AndDmvSelfWaitsGo()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        /* The XE arm holds only a self-wait, so once the predicate filters it the arm is empty and the DMV arm is drawn. The DMV
+           arm leaves its own self-wait out. */
+        await SeedBlockedProcessReportAsync(MinuteA.AddSeconds(5), "DB1", 9000, blockedSpid: 77, blockingSpid: 77);
+        await SeedDmvBlockingSnapshotAsync(MinuteB.AddSeconds(5), "DB1", 2000);
+        await SeedDmvBlockingSnapshotAsync(MinuteB.AddSeconds(10), "DB1", 8000, blockedSpid: 88, blockingSpid: 88);
+
+        var trend = Assert.Single(await service.GetBlockingTrendAsync(ServerId));
+        Assert.Equal(MinuteB, trend.Time);
+        Assert.Equal("DMV snapshot", trend.Source);
+        Assert.Equal(1, trend.Count);
+
+        var duration = Assert.Single(await service.GetBlockingDurationStatsAsync(ServerId));
+        Assert.Equal(MinuteB, duration.Time);
+        Assert.Equal("DMV snapshot", duration.Source);
+        Assert.Equal(2000, duration.TotalDurationMs);
+
+        var slicer = await service.GetBlockingSlicerDataAsync(ServerId, 24);
+        Assert.Equal(1, slicer.Sum(b => b.SessionCount));
+        Assert.False(await service.HasBlockedProcessReportsInWindowAsync(ServerId, MinuteA.AddMinutes(-1), MinuteB.AddMinutes(1)));
+    }
+
     // ── Deadlock severity aggregate: victim_count + total / max / avg wait, reconciling with the count ──
 
     [Fact]
@@ -217,7 +268,7 @@ public sealed class BlockingStatsReaderTests : IClassFixture<SharedDuckDbFixture
 
     // ── Seeding helpers (raw INSERT via the shared initializer's connection) ──
 
-    private async Task SeedBlockedProcessReportAsync(DateTime eventTime, string databaseName, long waitTimeMs)
+    private async Task SeedBlockedProcessReportAsync(DateTime eventTime, string databaseName, long waitTimeMs, int blockedSpid = 55, int blockingSpid = 66)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -234,9 +285,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
         cmd.Parameters.Add(new DuckDBParameter { Value = "TestSrv" });
         cmd.Parameters.Add(new DuckDBParameter { Value = eventTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = databaseName });
-        cmd.Parameters.Add(new DuckDBParameter { Value = 55 });
+        cmd.Parameters.Add(new DuckDBParameter { Value = blockedSpid });
         cmd.Parameters.Add(new DuckDBParameter { Value = eventTime });
-        cmd.Parameters.Add(new DuckDBParameter { Value = 66 });
+        cmd.Parameters.Add(new DuckDBParameter { Value = blockingSpid });
         cmd.Parameters.Add(new DuckDBParameter { Value = eventTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = waitTimeMs });
         cmd.Parameters.Add(new DuckDBParameter { Value = "X" });
@@ -245,7 +296,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task SeedDmvBlockingSnapshotAsync(DateTime eventTime, string databaseName, long waitTimeMs)
+    private async Task SeedDmvBlockingSnapshotAsync(DateTime eventTime, string databaseName, long waitTimeMs, int blockedSpid = 55, int blockingSpid = 66)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -261,8 +312,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         cmd.Parameters.Add(new DuckDBParameter { Value = "TestSrv" });
         cmd.Parameters.Add(new DuckDBParameter { Value = eventTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = databaseName });
-        cmd.Parameters.Add(new DuckDBParameter { Value = 55 });
-        cmd.Parameters.Add(new DuckDBParameter { Value = 66 });
+        cmd.Parameters.Add(new DuckDBParameter { Value = blockedSpid });
+        cmd.Parameters.Add(new DuckDBParameter { Value = blockingSpid });
         cmd.Parameters.Add(new DuckDBParameter { Value = waitTimeMs });
         cmd.Parameters.Add(new DuckDBParameter { Value = "X" });
         cmd.Parameters.Add(new DuckDBParameter { Value = 1 });

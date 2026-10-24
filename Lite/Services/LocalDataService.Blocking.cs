@@ -1001,7 +1001,7 @@ WITH bpr AS (
         COUNT(DISTINCT blocking_spid) AS distinct_blockers,
         COUNT(DISTINCT blocked_spid) AS distinct_blocked,
         COUNT(DISTINCT database_name) AS distinct_databases
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause) + @" AS ev
     GROUP BY date_trunc('hour', event_time)
 ),
 dmv AS (
@@ -1013,7 +1013,7 @@ dmv AS (
         COUNT(DISTINCT blocked_spid) AS distinct_blocked,
         COUNT(DISTINCT database_name) AS distinct_databases
     FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3" + dbClause + @"
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause + @"
     GROUP BY date_trunc('hour', collection_time)
 )
 SELECT bucket, event_count, total_wait_sec, distinct_blockers, distinct_blocked, distinct_databases FROM bpr
@@ -1090,7 +1090,8 @@ ORDER BY bucket";
     /// <summary>
     /// #5098: whether the XE blocked process reports have a row in the window, with the SAME predicate (and database filter) as the
     /// <c>bpr</c> arm of <see cref="GetBlockingTrendAsync"/> and <see cref="GetBlockingDurationStatsAsync"/>. When true those reads drew
-    /// the XE rows alone (the DMV arm is skipped), so the note must name the XE start, not a DMV-covered one.
+    /// the XE rows alone (the DMV arm is skipped), so the note must name the XE start, not a DMV-covered one. #6705: the predicate
+    /// leaves out self-waits (<see cref="BlockingWaits.NotSelfWaitSql"/>), as those reads do on both arms.
     /// </summary>
     public async Task<bool> HasBlockedProcessReportsInWindowAsync(int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null)
     {
@@ -1098,7 +1099,7 @@ ORDER BY bucket";
         using var command = connection.CreateCommand();
 
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
-        command.CommandText = "SELECT 1 FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + " AS ev LIMIT 1";
+        command.CommandText = "SELECT 1 FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause) + " AS ev LIMIT 1";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });
@@ -1110,8 +1111,9 @@ ORDER BY bucket";
     }
 
     /// <summary>
-    /// #5098: the earliest XE blocked process report in the window, with the SAME predicate and database filter as
-    /// <see cref="HasBlockedProcessReportsInWindowAsync"/>. Null when there is none. Opens its own connection.
+    /// #5098: the earliest XE blocked process report in the window, with the same database filter as
+    /// <see cref="HasBlockedProcessReportsInWindowAsync"/>. It names when the XE session started capturing, so a self-wait report
+    /// counts here (#6705). Null when there is none. Opens its own connection.
     /// </summary>
     public async Task<DateTime?> GetEarliestBlockedProcessReportInWindowAsync(int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null)
     {
@@ -1212,13 +1214,13 @@ SELECT
         command.CommandText = @"
 WITH bpr AS (
     SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'blocked-process-report' AS source
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause) + @" AS ev
     GROUP BY DATE_TRUNC('minute', event_time)
 ),
 dmv AS (
     SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'DMV snapshot' AS source
     FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause + @"
+    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause + @"
     GROUP BY DATE_TRUNC('minute', event_time)
 )
 SELECT bucket, incident_count, source FROM bpr
