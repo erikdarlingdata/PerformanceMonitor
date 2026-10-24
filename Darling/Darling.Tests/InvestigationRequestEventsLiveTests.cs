@@ -195,7 +195,7 @@ public sealed class InvestigationRequestEventsLiveTests
     {
         await RunAsync(async (store, connection, ct) =>
         {
-            var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
+            var history = new PgAlertHistoryStore(_dataSource!, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
             var id = (await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct)).RequestId!.Value;
             var alertAt = T0.AddDays(-10);
             await using (var age = new NpgsqlCommand(
