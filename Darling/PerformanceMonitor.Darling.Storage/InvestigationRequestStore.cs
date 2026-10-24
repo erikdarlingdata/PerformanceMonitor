@@ -368,20 +368,27 @@ LIMIT $2";
        non-ASCII character, so no one encoding of a metric name is the stored one. The candidate rows come back and C# parses
        each context_json (System.Text.Json reads every escaping); one a text column holds but jsonb refuses (a NUL
        escape) is no problem there. The prefilter is the member's key, which no encoder escapes. A metric with no candidate
-       comes back once with a NULL context, so a request with an uncleared metric is seen as unresolved. */
+       comes back once with a NULL context, so a request with an uncleared metric is seen as unresolved.
+       The bound on h.alert_time is the oldest last alert among the candidates, so the join stops reading the whole 90-day
+       log (about 60 ms a minute on a store with 30,000 alert rows). It drops no candidate: every resolution row a candidate
+       can use is after that candidate's last alert, so after the oldest one. The bound is NOT the clock minus a fixed window:
+       a follow-up opens now but copies its source's alert rows with their original times, so its last alert can be weeks old
+       (follow_up_at may be 30 days out), and a fixed window would hide a clear older than it and lose the resolved event. */
     internal const string ResolveCandidatesSql = @"
+WITH m AS (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS last_alert
+           FROM config.investigation_request_alerts AS a
+           WHERE a.request_id IN (SELECT r.request_id
+                                  FROM config.investigation_requests AS r
+                                  WHERE r.state IN ('open', 'claimed', 'reported')
+                                    AND r.practice_of IS NULL
+                                    AND r.opened_at > $1 - interval '2 days')
+           GROUP BY a.request_id, a.server_id, a.metric_name)
 SELECT m.request_id, m.metric_name, h.context_json
-FROM (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS last_alert
-      FROM config.investigation_request_alerts AS a
-      WHERE a.request_id IN (SELECT r.request_id
-                             FROM config.investigation_requests AS r
-                             WHERE r.state IN ('open', 'claimed', 'reported')
-                               AND r.practice_of IS NULL
-                               AND r.opened_at > $1 - interval '2 days')
-      GROUP BY a.request_id, a.server_id, a.metric_name) AS m
+FROM m
 LEFT JOIN config.config_alert_log AS h
        ON h.server_id = m.server_id
       AND h.alert_time > m.last_alert
+      AND h.alert_time > (SELECT min(last_alert) FROM m)
       AND strpos(h.context_json, 'Resolves') > 0";
 
     /* Journals resolved once per request (once key resolved:<request_id>). The state is checked again: the candidates were
