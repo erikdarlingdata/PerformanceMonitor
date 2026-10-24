@@ -226,10 +226,10 @@ HAVING sum(delta_execution_count) > 0";
     public static bool CpuMoved(double baseline, double after) => after - baseline >= CpuRisePoints;
 
     /// <summary>The duration test: the after-window's average is at least <see cref="DurationFactor"/> times the baseline's.</summary>
+    public static bool DurationMoved(double baselineAvgUs, double afterAvgUs) => baselineAvgUs > 0 && afterAvgUs >= baselineAvgUs * DurationFactor;
+
     /// <summary>#6581: a change that names one Query Store query (a forced or unforced plan, a Query Store hint set, changed or cleared). A watch of only these measures those queries.</summary>
     internal static bool IsQueryScopedKind(string kind) => kind is "plan_force" or "query_store_hint";
-
-    public static bool DurationMoved(double baselineAvgUs, double afterAvgUs) => baselineAvgUs > 0 && afterAvgUs >= baselineAvgUs * DurationFactor;
 
     /// <summary>One plan's runtime in a window (#6555): executions and total elapsed microseconds.</summary>
     internal readonly record struct PlanRuntime(long Executions, double ElapsedUs);
