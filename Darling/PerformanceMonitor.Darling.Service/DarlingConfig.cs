@@ -842,10 +842,11 @@ public sealed class AlertsConfig
     public int RunnableQueueCriticalPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultCriticalPerScheduler;
 
     /// <summary>The Client Timeouts alert (#5640) switch: client attentions (a client cancelled or timed out a query) per
-    /// minute, from the attention collector. OFF by default: the bars are a guess until checked against captured data.
-    /// Persisted as the store column <c>client_timeouts_enabled</c> (V179).</summary>
+    /// minute, from the attention collector. ON by default since #5736 (V216): the bars are relative to each server's own normal rate, and a
+    /// 7-day replay of them over a 42-server production store would have paged twice, both at Warning. Persisted as the store column
+    /// <c>client_timeouts_enabled</c> (V179, default moved to TRUE by V216).</summary>
     [JsonPropertyName("clientTimeoutsEnabled")]
-    public bool ClientTimeoutsEnabled { get; set; }
+    public bool ClientTimeoutsEnabled { get; set; } = true;
 
     /// <summary>Client Timeouts Warning FLOOR (#5640, #5736), attentions per minute over the covered span. Shipped 10. The bar is the higher of this and
     /// the Warning multiple times the server's own baseline. Read through

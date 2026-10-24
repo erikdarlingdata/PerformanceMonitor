@@ -2,8 +2,9 @@
 -- Darling/tools/attention-rate-measure.sql: same buckets, same columns, same rule. The two are hand-written copies of one
 -- definition; change one and change the other in the same commit (nothing fails if only one moves, and the bars are set from both).
 --
--- Why: the Client Timeouts alert (#5640) ships OFF with provisional bars of 10 (Warning) and 60 (Critical) attentions
--- per minute, a guess. After a week of capture on a field store, run this to see the measured normal rate. The bar-setting
+-- Why: the Client Timeouts alert (#5640) first shipped OFF with provisional bars of 10 (Warning) and 60 (Critical) attentions
+-- per minute, a guess. #5736 used this script on a week of field capture, made each bar the higher of its floor and a
+-- multiple of the server's own baseline, and turned the alert on. Run it to see a store's measured normal rate. The bar-setting
 -- rule is: take each server's p99.9 of the per-minute rate, then read the fleet spread of those p99.9 values (the fleet
 -- row: min, median, max) and set the defaults from that.
 --
