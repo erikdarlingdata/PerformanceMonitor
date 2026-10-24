@@ -268,8 +268,10 @@ jobs:
       # them means no ~340MB download here. Every leg that runs any Darling class needs the runtime: a 'full' scope runs
       # all of them, and 'reads-lite' (a Lite-only change) still runs the Stage=Guard and Lite-reads classes, some of which
       # are live PostgreSQL classes (#6656).
+      # A Lite-only change whose plan has darling_scope 'none' and areas 'lite' runs the same Stage=Guard and Lite-reads
+      # classes under -Areas lite, so it needs the runtime and PostgreSQL too (#6656, #6684).
       - name: Cache Darling pg-runtime.zip
-        if: needs.plan.outputs.darling_scope != 'none'
+        if: (needs.plan.outputs.darling_scope != 'none' || needs.plan.outputs.areas == 'lite')
         id: cache-pg-runtime
         uses: actions/cache@v6
         with:
@@ -277,12 +279,12 @@ jobs:
           key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
 
       - name: Build Darling pg-runtime.zip (cache miss only)
-        if: needs.plan.outputs.darling_scope != 'none' && steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        if: (needs.plan.outputs.darling_scope != 'none' || needs.plan.outputs.areas == 'lite') && steps.cache-pg-runtime.outputs.cache-hit != 'true'
         shell: pwsh
         run: ./Darling/tools/fetch-pg-runtime.ps1
 
       - name: Extract pg-runtime
-        if: needs.plan.outputs.darling_scope != 'none'
+        if: (needs.plan.outputs.darling_scope != 'none' || needs.plan.outputs.areas == 'lite')
         shell: pwsh
         run: |
           $zip  = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime.zip"
@@ -293,7 +295,7 @@ jobs:
           if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
 
       - name: Start PostgreSQL
-        if: needs.plan.outputs.darling_scope != 'none'
+        if: (needs.plan.outputs.darling_scope != 'none' || needs.plan.outputs.areas == 'lite')
         shell: pwsh
         run: ./.github/scripts/start-test-pg.ps1 -Mode Start
 
@@ -311,7 +313,7 @@ jobs:
         run: ./.github/scripts/run-ci-leg.ps1 -Leg $env:LEG -LegCount $env:LEG_COUNT -Areas $env:AREAS -NoTreeGuards
 
       - name: Stop PostgreSQL
-        if: always() && needs.plan.outputs.darling_scope != 'none'
+        if: always() && (needs.plan.outputs.darling_scope != 'none' || needs.plan.outputs.areas == 'lite')
         shell: pwsh
         run: ./.github/scripts/start-test-pg.ps1 -Mode Stop
 
