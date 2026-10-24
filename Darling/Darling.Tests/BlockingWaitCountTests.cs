@@ -109,7 +109,7 @@ public sealed class BlockingWaitCountTests
         Assert.Equal(100, Assert.Single(counted).BlockingSpid);
         Assert.Empty(AlertContextBuilders.BlockingWaitRows(OneWait(59, 59, T0, 6), Array.Empty<string>()));
 
-        /* A report that named no session (stored with NULL spids, read as 0) is still a blocking event. */
+        /* A report that named no session (the collector stores 0, never NULL) is still a blocking event. */
         Assert.Single(AlertContextBuilders.BlockingWaitRows(OneWait(0, 0, T0, 1), Array.Empty<string>()));
     }
 
@@ -304,6 +304,10 @@ public sealed class BlockingWaitCountTests
         rows.AddRange(OneWait(102, 100, T0.AddMinutes(30), 6));
         rows.AddRange(OneWait(103, 100, T0, 4));
         rows.AddRange(OneWait(102, 101, T0.AddMinutes(1), 7));
+        /* #6645 round 1: a report that named no session is stored as (0, 0) and is a wait in the C# rule, so the SQL
+           must keep it; a parallel query's equal non-zero spids are dropped by both. */
+        rows.AddRange(OneWait(0, 0, T0.AddMinutes(40), 3));
+        rows.AddRange(OneWait(59, 59, T0.AddMinutes(50), 4));
 
         var sql = "WITH " + BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.Postgres, "waits", ValuesSource(rows, 1), new[] { "server_id" })
@@ -317,7 +321,7 @@ public sealed class BlockingWaitCountTests
 
         var expected = Collapse(rows);
         Assert.Equal(expected.Count, Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture));
-        Assert.Equal(6, expected.Count);
+        Assert.Equal(7, expected.Count);
         Assert.Equal(expected.Max(w => w.WaitTimeMs), Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture));
     }
 

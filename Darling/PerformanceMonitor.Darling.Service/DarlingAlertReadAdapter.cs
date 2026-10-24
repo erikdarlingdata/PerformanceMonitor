@@ -586,11 +586,11 @@ LIMIT 200";
     /// a column of this same aggregate instead, which is one round trip rather than two anyway.
     /// </para>
     /// </summary>
-    public const string CurrentBlockingWaitSql = @"
+    public const string CurrentBlockingWaitSql = $@"
 SELECT
     collection_time,
-    CAST(COALESCE(SUM(wait_time_ms) FILTER (WHERE NOT COALESCE(blocked_spid = blocking_spid, FALSE)), 0) AS bigint) AS total_wait_ms,
-    CAST(COUNT(DISTINCT blocked_spid) FILTER (WHERE NOT COALESCE(blocked_spid = blocking_spid, FALSE)) AS integer) AS blocked_sessions
+    CAST(COALESCE(SUM(wait_time_ms) FILTER (WHERE {BlockingWaits.NotSelfWaitSql}), 0) AS bigint) AS total_wait_ms,
+    CAST(COUNT(DISTINCT blocked_spid) FILTER (WHERE {BlockingWaits.NotSelfWaitSql}) AS integer) AS blocked_sessions
 FROM dmv_blocking_snapshots
 WHERE server_id = $1
 AND   collection_time = (

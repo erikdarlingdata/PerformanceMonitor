@@ -802,9 +802,9 @@ LIMIT 6";
             cmd.CommandText = (@"
 SELECT
     COALESCE(NULLIF(
-        (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3 AND NOT COALESCE(blocked_spid = blocking_spid, FALSE){SCOPE}") + @" AS ev), 0),
+        (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + "{SCOPE}") + @" AS ev), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 AND NOT COALESCE(blocked_spid = blocking_spid, FALSE){SCOPE})) AS current_blocking,
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + @"{SCOPE})) AS current_blocking,
     (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3) AS current_deadlocks")
                 .Replace("{SCOPE}", rowScope);
 
