@@ -909,7 +909,7 @@ public partial class ServerTab : UserControl
         }
 
         _blockingTrendHover?.Clear();
-        EmptyState.Show(BlockingTrendChart, data.Count == 0, "No blocking in the selected time window.", clearOfBaseline: true);
+        EmptyState.Show(BlockingTrendChart, data.Count == 0, "No lock wait lasted long enough to count as an incident. Shorter lock waits show only in the lock wait chart above.", clearOfBaseline: true);
         if (data.Count == 0)
         {
             /* No blocking events — show a flat line at zero so the chart looks active */
