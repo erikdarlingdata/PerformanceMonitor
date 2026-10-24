@@ -15,12 +15,12 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 
-namespace PerformanceMonitor.Darling.Service;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// Typed CRUD over <c>config.custom_views</c> (#1563) — the web dashboard's user-authored view/notebook
 /// definitions. Built from the web host's least-privilege VIEWER-role pool exactly like
-/// <c>DarlingAnalysisService</c> is built from it (<c>new CustomViewStore(postgres)</c>); the viewer role
+/// <c>DarlingAnalysisService</c> is built from it (<c>new CustomViewStore(postgres, McpCommandDeadlines.ReadSeconds)</c>); the viewer role
 /// carries the single narrow <c>INSERT/UPDATE/DELETE ON config.custom_views</c> grant (see
 /// <see cref="DarlingManagedRoles"/>). Same store discipline as <c>ViewerDataService.Commands</c>: public-const
 /// SQL, bound <c>$N</c> parameters, <c>definition</c> bound as <c>jsonb</c>. Bare table name — the viewer pool's
@@ -38,10 +38,14 @@ namespace PerformanceMonitor.Darling.Service;
 public sealed class CustomViewStore
 {
     private readonly NpgsqlDataSource _dataSource;
+    private readonly int _commandTimeoutSeconds;
 
-    public CustomViewStore(NpgsqlDataSource dataSource)
+    /// <summary><paramref name="commandTimeoutSeconds"/> is the deadline of every statement this store runs (the service passes its own).
+    /// There is no default, so every caller names one.</summary>
+    public CustomViewStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds)
     {
         _dataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
+        _commandTimeoutSeconds = commandTimeoutSeconds;
     }
 
     /// <summary>The bare-array list read: the (potentially large) <c>definition</c> BODY is never selected — only
@@ -246,7 +250,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
     {
         var results = new List<CustomViewSummary>();
         await using var command = _dataSource.CreateCommand(ListSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = allPersonal });                              // $1
         AddNullableText(command, callerOwnerKey);                                                                   // $2
         AddNullableText(command, folder);                                                                             // $3
@@ -275,7 +279,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
     public async Task<CustomViewResult> GetAsync(long id, string? callerOwnerKey = null, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(GetSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
         AddNullableText(command, callerOwnerKey);                                                                   // $2
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -315,7 +319,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
         }
 
         await using var command = _dataSource.CreateCommand(InsertSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });                                 // $1
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Jsonb, Value = definitionJson }); // $2
         AddNullableText(command, description);                                                                      // $3
@@ -364,7 +368,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
         }
 
         await using var command = _dataSource.CreateCommand(UpdateSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });                                     // $1
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });                                 // $2
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Jsonb, Value = definitionJson }); // $3
@@ -400,7 +404,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
     public async Task<CustomViewResult> DeleteAsync(long id, string? actorKey, bool anyPersonal = false, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(DeleteSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });                                     // $1
         AddNullableText(command, actorKey);                                                                         // $2
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = anyPersonal });                            // $3
@@ -419,7 +423,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
         long id, string? actorKey, bool wantPersonal, CancellationToken cancellationToken)
     {
         await using var command = _dataSource.CreateCommand(VersionProbeSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))

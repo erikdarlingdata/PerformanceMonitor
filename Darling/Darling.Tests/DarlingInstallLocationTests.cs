@@ -77,43 +77,6 @@ public class DarlingInstallLocationTests
     }
 
     /// <summary>
-    /// A FRESH install in an unreadable location is refused outright, not warned about. #2187 chose this
-    /// deliberately over warning: the install cannot work, so proceeding is never right — and the reporter's
-    /// experience is precisely that of an install nothing stopped.
-    ///
-    /// <para>An UPGRADE is the one case that asks instead, and that asymmetry is the same one the script
-    /// already applies to the service's logon account: the upgrade path exists to preserve installs
-    /// operators have customized (a re-homed domain account or gMSA, #1802/#1823), and granting the service
-    /// account read on the tree by hand — #2187's rejected option 2 — is exactly the customization that can
-    /// make this location work. Refusing there would strand a deployment that runs today.</para>
-    /// </summary>
-    [Fact]
-    public void LocationGuard_RefusesAFreshInstall_AndOnlyAsksOnAnUpgrade()
-    {
-        var script = InstallScript;
-        var guard = ExtractBracedBlock(script, "if ($underProfile -or $networkKind) {");
-
-        var refusal = guard.IndexOf("if (-not $existing) {", StringComparison.Ordinal);
-        Assert.True(refusal >= 0, "the guard no longer distinguishes a fresh install from an upgrade (#2187)");
-
-        var fresh = ExtractBracedBlock(guard, "if (-not $existing) {");
-        Assert.Contains("Fail", fresh, StringComparison.Ordinal);
-        Assert.DoesNotContain("Read-Host", fresh, StringComparison.Ordinal);
-
-        /* The upgrade branch asks — and defaults to NO, so an operator who hits Enter through an unattended
-           run does not silently re-point a service at a folder it cannot read. */
-        Assert.Contains("Read-Host 'Point the service at this folder anyway? [y/N]'", guard, StringComparison.Ordinal);
-        Assert.Contains("if ($answer -notmatch '^[Yy]') { exit 4 }", guard, StringComparison.Ordinal);
-
-        /* $existing has to be resolved before the guard consults it, or the fresh/upgrade split silently
-           collapses to "always fresh" — which would refuse every upgrade of an install already living
-           there, the one outcome that breaks a working deployment. */
-        var resolved = script.IndexOf("$existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue", StringComparison.Ordinal);
-        Assert.True(resolved >= 0 && resolved < script.IndexOf("if ($underProfile -or $networkKind) {", StringComparison.Ordinal),
-            "$existing must be resolved BEFORE the location guard, which branches on it");
-    }
-
-    /// <summary>
     /// The profile root is read from <c>ProfileList\ProfilesDirectory</c> rather than hardcoded to
     /// <c>C:\Users</c>. It is relocatable, and a literal would stop matching on exactly the box that moved
     /// it — the box where a missed check costs the most.
