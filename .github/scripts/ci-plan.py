@@ -12,7 +12,7 @@ changed file list. Outputs, as `key=value` lines (stdout, and $GITHUB_OUTPUT whe
   lite_scope       full | reads | none        (reads: the Lite classes that read a Darling file)
   build            true when the shared test build is needed (any run that is not docs-only)
   test_minutes     estimated test time of the selected classes, in minutes
-  legs             a pull request: N = ceil(test_minutes / MINUTES_PER_LEG), at most MAX_LEGS; a dev push: the same, with at least DEV_PUSH_MIN_LEGS;
+  legs             a pull request: N = ceil(test_minutes / MINUTES_PER_LEG), at most MAX_LEGS; a dev push: the same, at least DEV_PUSH_MIN_LEGS and at most DEV_PUSH_MAX_LEGS;
                    0 when nothing runs
   legs_json        [1, 2, ..., N], for the test job's matrix
   actionlint       true when a workflow file changed
@@ -52,13 +52,16 @@ TRAIN_BRANCH_PREFIX = "train/"
 # Legs. A pull request is cut for a short wait: MINUTES_PER_LEG test minutes a leg, so a full all-areas run (about 131
 # weighted minutes, from run 40001582504's per-class times) is 16 legs. A leg also pays about 1.3 minutes that are not tests,
 # measured on that run's 9 legs (checkout, build download, .NET and PostgreSQL start: 52 to 103 s, mean 70 s, plus about 7 s
-# of post steps), so a leg is about 8.5 + 1.3 = 9.8 minutes. A dev push waits for nobody and the free plan runs about 20
-# jobs at once across the repo, so a push is cut by the same estimate but never below DEV_PUSH_MIN_LEGS legs.
+# of post steps), so a leg is about 8.5 + 1.3 = 9.8 minutes. A dev push uses the same estimate, at least DEV_PUSH_MIN_LEGS
+# legs (4 timed out) and at most DEV_PUSH_MAX_LEGS (the free plan runs about 20 jobs at once across the repo, so a
+# push must leave runners for open PRs). A full push is 8 legs: about 131 / 8 + 1.3 = 17.7 minutes a leg, under the
+# 25-minute step timeout, and 12 runners stay free for PRs.
 # A fixed 4 legs put a push's Darling.Tests alone at 1266 to 1452 s a leg, and every dev push run (40034434899,
 # 40031691584, 40020225933, 40015830041) timed out the 25-minute test step (#6656).
 MINUTES_PER_LEG = 8.5
 MAX_LEGS = 16
 DEV_PUSH_MIN_LEGS = 6
+DEV_PUSH_MAX_LEGS = 8
 # The GitHub pull request files API returns at most 3000 files; a list that long may have been cut short.
 FILES_API_CAP = 3000
 
@@ -211,7 +214,7 @@ def leg_count(test_minutes: float, event: str = "pull_request") -> int:
     if test_minutes <= 0:
         return 0
     n = min(MAX_LEGS, max(1, math.ceil(test_minutes / MINUTES_PER_LEG)))
-    return n if event == "pull_request" else max(DEV_PUSH_MIN_LEGS, n)
+    return n if event == "pull_request" else min(DEV_PUSH_MAX_LEGS, max(DEV_PUSH_MIN_LEGS, n))
 
 
 # ---------------------------------------------------------------------------------------------------------
