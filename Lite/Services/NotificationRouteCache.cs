@@ -190,19 +190,28 @@ internal sealed class NotificationRouteCacheCore
     {
         do
         {
-            /* Current reloads when stale and logs a failed load itself, so nothing here can throw past a loader's catch. */
-            _ = Current;
+            /* Current reloads when stale and logs a failed load itself, so nothing here can throw past a loader's catch. The flag
+               stays set while an Invalidate during a load still needs one more: clearing it between loads let a reader see the
+               reload as finished with that load still to come. */
+            do
+            {
+                _ = Current;
+            }
+            while (MoreToLoad());
+
             Volatile.Write(ref _backgroundRunning, 0);
 
-            /* Look again after clearing the flag: an Invalidate that landed during the load saw the flag set and started
-               nothing, so this pass loads once more (or that Invalidate won the race and started its own loop). Stop while the
-               30 second retry window is open, or a broken store would spin. */
+            /* Look again after clearing the flag: an Invalidate that landed between the last look and the clear saw the flag set
+               and started nothing, so this loop goes on (or that Invalidate won the race and started its own loop). */
         }
-        while (Volatile.Read(ref _loader) is not null
-               && Volatile.Read(ref _loadedVersion) != Volatile.Read(ref _version)
-               && DateTime.UtcNow.Ticks >= Volatile.Read(ref _retryAfterTicks)
-               && Interlocked.CompareExchange(ref _backgroundRunning, 1, 0) == 0);
+        while (MoreToLoad() && Interlocked.CompareExchange(ref _backgroundRunning, 1, 0) == 0);
     }
+
+    /* Stale with a loader set, and not inside the 30 second retry window, or a broken store would spin. */
+    private bool MoreToLoad() =>
+        Volatile.Read(ref _loader) is not null
+        && Volatile.Read(ref _loadedVersion) != Volatile.Read(ref _version)
+        && DateTime.UtcNow.Ticks >= Volatile.Read(ref _retryAfterTicks);
 
     /// <summary>Whether a background reload is running; tests wait for it to finish.</summary>
     internal bool BackgroundReloadRunning => Volatile.Read(ref _backgroundRunning) != 0;
