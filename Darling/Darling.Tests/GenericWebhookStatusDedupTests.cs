@@ -107,6 +107,45 @@ public sealed class GenericWebhookStatusDedupTests
         Assert.Equal("resolved", Body(endpoint, 1).GetProperty("status").GetString());
     }
 
+    /// <summary>
+    /// The #3313 filter narrows the post. The alert carries incidents A and B, and A is still inside its own cooldown window,
+    /// so the post renders only B and keys on B (the key anchors on the first incident the post shows). The resolution must
+    /// close B too, from memory and after a restart, where the history row still holds both incidents.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ANarrowedFire_AndItsResolution_RenderTheKeyThePostRendered(bool restart)
+    {
+        const string inWindow = "db42:deadlock-in-window";
+        const string fresh = "db42:deadlock-fresh";
+        using var endpoint = new CapturingWebhookEndpoint();
+        var config = ConfigFor(endpoint);
+        /* The cooldown's restart seed is how an incident gets into its window without waiting through one. It runs on the
+           real clock, so the seed is a minute before now. */
+        var store = new HistoryBackedStore { SeededDedupKey = inWindow, SeededSentUtc = DateTime.UtcNow.AddMinutes(-1) };
+        var context = new AlertContext();
+        AlertIncidentRenderer.Apply(context, new[]
+        {
+            new AlertIncident(inWindow, new[] { "dbo.Orders" }),
+            new AlertIncident(fresh, new[] { "dbo.Shipments" }),
+        });
+
+        var first = Build(config, store);
+        await first.DeliverAsync(Fire(context), TestContext.Current.CancellationToken);
+        store.Now = FiredAt.AddMinutes(1);
+        var closer = restart ? Build(config, store) : first;
+        await closer.DeliverResolutionAsync(CpuResolution(), cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, endpoint.Bodies.Count);
+        var fire = Body(endpoint, 0);
+        var clear = Body(endpoint, 1);
+        Assert.Equal("firing", fire.GetProperty("status").GetString());
+        Assert.Equal(fresh, fire.GetProperty("key").GetString());
+        Assert.Equal("resolved", clear.GetProperty("status").GetString());
+        Assert.Equal(fire.GetProperty("key").GetString(), clear.GetProperty("key").GetString());
+    }
+
     /// <summary>With PagerDuty auto-resolve on, the generic <c>{{dedup_key}}</c> still ignores the flag (#5469), on the fire and on
     /// the resolution alike, so the two stay equal while PagerDuty's own key is free to differ.</summary>
     [Fact]
@@ -144,6 +183,15 @@ public sealed class GenericWebhookStatusDedupTests
 
         public DateTime Now { get; set; } = FiredAt;
 
+        /// <summary>One incident key the cooldown's restart seed reports as sent at <see cref="SeededSentUtc"/>.</summary>
+        public string? SeededDedupKey { get; init; }
+
+        public DateTime SeededSentUtc { get; init; }
+
+        private Task<DateTime?> Seed(string? dedupKey) =>
+            Task.FromResult<DateTime?>(
+                SeededDedupKey is not null && string.Equals(dedupKey, SeededDedupKey, StringComparison.Ordinal) ? SeededSentUtc : null);
+
         public Task RecordAlertAsync(AlertHistoryRecord record)
         {
             _rows.Add((Now, record));
@@ -166,13 +214,13 @@ public sealed class GenericWebhookStatusDedupTests
         }
 
         public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
-            Task.FromResult<DateTime?>(null);
+            Seed(dedupKey);
 
         public Task<DateTime?> GetLastWebhookSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
-            Task.FromResult<DateTime?>(null);
+            Seed(dedupKey);
 
         public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
-            Task.FromResult<DateTime?>(null);
+            Seed(dedupKey);
 
         public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
     }

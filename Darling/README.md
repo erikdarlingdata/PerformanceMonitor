@@ -968,7 +968,15 @@ The generic webhook posts the JSON in `genericBodyTemplate` to `genericUrl`, wit
 }
 ```
 
-Use that as `genericBodyTemplate`. incident.io's alert event takes `title`, `status` (`firing` or `resolved`), `deduplication_key`, `description`, `source_url` and `metadata`, and has no priority field. To set a priority, add a Priority expression on `$.metadata.severity` in the alert source.
+Use that as `genericBodyTemplate`. incident.io's alert event takes `title`, `status` (`firing` or `resolved`), `deduplication_key`, `description`, `source_url` and `metadata`, and has no priority field. To set a priority, see the next paragraph.
+
+**Set the alert's priority from `{{severity}}`.** `{{severity}}` is one of Darling's own words: `CRITICAL`, `WARNING`, `INFO` or `ALERT`. incident.io maps it to a priority. On the alert source, set Priority to a dynamic value and add a Query expression on Payload. Give it a step that extracts fields from JSON:
+
+```
+$.metadata.severity == "CRITICAL" ? "<URGENT_PRIORITY_ID>" : "<OTHER_PRIORITY_ID>"
+```
+
+Parse the result into Alert Priority. Use each priority's ID or slug, not its display name, because a display name parses to nothing. The editor's preview shows the priority each value resolves to.
 
 What to know about incident.io:
 
