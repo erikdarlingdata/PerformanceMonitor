@@ -3,7 +3,7 @@
 Audience: operators.
 
 End to end, with a **proof point at every step** — what to look at, and what it should say. The
-[README's PostgreSQL Targets section](../Darling/README.md#postgresql-targets) is the reference for *what*
+[PostgreSQL Targets page](darling/postgresql-targets.md) is the reference for *what*
 each collector does; this is the ordered procedure for getting one collecting and knowing that it is.
 
 > **Status.** This started as the procedure derived from the code, written before the service had ever
@@ -26,10 +26,10 @@ each collector does; this is the ordered procedure for getting one collecting an
 
 | | | Check |
 |---|---|---|
-| A target | Aurora PostgreSQL, or self-managed PostgreSQL 10 or later. An older version stores NULL for a column it lacks, and `pg_io_stats` needs 16 (see [Oldest PostgreSQL version per collector](../Darling/README.md#oldest-postgresql-version-per-collector)) | `SELECT version();` |
+| A target | Aurora PostgreSQL, or self-managed PostgreSQL 10 or later. An older version stores NULL for a column it lacks, and `pg_io_stats` needs 16 (see [Oldest PostgreSQL version per collector](darling/postgresql-targets.md#oldest-postgresql-version-per-collector)) | `SELECT version();` |
 | A login on it | `pg_monitor`, password auth | step 1 |
 | A store | Managed (bundled) or your own PostgreSQL | README [The Store](../Darling/README.md#the-store) |
-| The service | A current release, installed as the README describes ([Install as a Windows Service](../Darling/README.md#install-as-a-windows-service)) | `PerformanceMonitor.Darling.Service.exe --version` |
+| The service | A current release, installed as [Install as a Windows Service](darling/install.md#install-as-a-windows-service) describes | `PerformanceMonitor.Darling.Service.exe --version` |
 | Network | The service host must reach the target's port 5432 | `nc -z <host> 5432` |
 
 On Aurora, "the target" is one **instance**, not the cluster. A writer and a reader are two entries with

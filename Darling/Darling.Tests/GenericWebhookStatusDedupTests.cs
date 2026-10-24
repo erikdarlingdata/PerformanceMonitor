@@ -177,7 +177,7 @@ public sealed class GenericWebhookStatusDedupTests
 
     /// <summary>A history that outlives the deliverer, as the store does across a restart: it keeps every row and answers
     /// <see cref="IDeliveredFireReader"/> the way the store's query does.</summary>
-    private sealed class HistoryBackedStore : IAlertHistoryStore, IDeliveredFireReader
+    internal sealed class HistoryBackedStore : IAlertHistoryStore, IDeliveredFireReader
     {
         private readonly List<(DateTime At, AlertHistoryRecord Record)> _rows = new();
 
