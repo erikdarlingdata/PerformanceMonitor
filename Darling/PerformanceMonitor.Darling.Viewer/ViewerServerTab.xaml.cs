@@ -129,6 +129,11 @@ public partial class ViewerServerTab : UserControl
             }
         }
         InitializeComponent();
+        // #6652: the stacked-chart tabs scroll at small sizes; the wheel over a chart stays that chart's zoom.
+        PerformanceMonitor.Ui.ChartLayout.KeepWheelOnPlot(
+            QueryDurationTrendChart, ProcDurationTrendChart, QueryStoreDurationTrendChart, ExecutionCountTrendChart,
+            FileIoReadChart, FileIoWriteChart, TempDbChart, TempDbSizeChart, TempDbFileIoChart,
+            LockWaitTrendChart, BlockingTrendChart, DeadlockTrendChart);
         /* #5565: every filtered grid below this tab keeps its column filters across a restart under this server. */
         ColumnFilterScope.SetServer(this, _server.ServerName);
 
