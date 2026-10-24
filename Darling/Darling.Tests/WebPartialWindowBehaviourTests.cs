@@ -193,7 +193,10 @@ public sealed class WebPartialWindowBehaviourTests
             {
                 (sources[0], new[] { new CollectionHistoryAudit.FlaggedRange(18, 21, 0, 40, 0, 0) }),
             },
-            sources.Skip(1).ToList());
+            sources.Skip(1).ToList())
+            // #6700: Render now says "in 1 source". An alert row stored before that fix still holds "in 1 source(s)", and
+            // that row is what the web rewrite is for, so the body here is the old row's text.
+            .Replace("in 1 source, where usual", "in 1 source(s), where usual", StringComparison.Ordinal);
         Assert.DoesNotContain('\n', rendered);
         Assert.Contains("in 1 source(s), where usual", rendered);
 
