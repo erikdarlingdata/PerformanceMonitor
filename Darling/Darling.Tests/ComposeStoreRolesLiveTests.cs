@@ -1536,8 +1536,8 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), 60, 
                 await seed.ExecuteNonQueryAsync(ct);
             }
 
-            var rules = new CustomAlertRuleStore(ownerSource);
-            var state = new CustomAlertStateStore(ownerSource);
+            var rules = new CustomAlertRuleStore(ownerSource, StorageCommandDeadlines.McpReadSeconds);
+            var state = new CustomAlertStateStore(ownerSource, StorageCommandDeadlines.McpReadSeconds);
             var created = Assert.IsType<CustomAlertRuleResult.Ok>(
                 await rules.CreateAsync(ruleName, null, definition, true, "test", ct));
             var ruleId = created.Rule!.Id;

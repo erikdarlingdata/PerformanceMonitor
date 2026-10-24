@@ -9,6 +9,7 @@
 using System;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using Xunit;
 

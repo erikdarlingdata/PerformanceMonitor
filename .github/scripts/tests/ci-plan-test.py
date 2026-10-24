@@ -216,6 +216,7 @@ check("legs: the PR maximum is 16", cp.MAX_LEGS, 16)
 check("legs: a push is a fixed 4, however small", cp.leg_count(0.02, "push"), 4)
 check("legs: a push is a fixed 4, however big", cp.leg_count(500, "push"), 4)
 check("legs: a push with no tests is 0", cp.leg_count(0, "push"), 0)
+
 r = run(["Darling/X.cs"], cat=big)
 check("big suite: capped legs", (r["legs"], r["legs_json"]), ("16", json.dumps(list(range(1, 17)), separators=(",", ":"))))
 full = {"classes": {"darling": classes([f"F{i}" for i in range(131)]), "lite": l_cls},

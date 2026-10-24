@@ -94,8 +94,8 @@ public sealed class WebRouteStatementCensusTests
     {
         (new Regex(@"^UnsupportedMediaTypeResult\s*\(\s*\)$", RegexOptions.Compiled), "a fixed 415 sentence"),
         (new Regex(@"^ErrorResult\s*\(", RegexOptions.Compiled), "the route's own request-validation message"),
-        (new Regex(@"^AgentChangeRefusedResult\s*\(\s*managedStore\s*\)$", RegexOptions.Compiled), "#5917: a fixed 403 sentence (the store refused an undo or the switch for privilege)"),
-        (new Regex(@"^NoteDecisionRefusedResult\s*\(\s*managedStore\s*\)$", RegexOptions.Compiled), "#5903: a fixed 403 sentence (the store refused a note decision for privilege)"),
+        (new Regex(@"^AgentChangeRefusedResult\s*\(\s*managedStore\s*(?:,\s*adminWritesOff\s*)?\)$", RegexOptions.Compiled), "#5917: a fixed 403 sentence (the store refused an undo or the switch for privilege)"),
+        (new Regex(@"^NoteDecisionRefusedResult\s*\(\s*managedStore\s*(?:,\s*adminWritesOff\s*)?\)$", RegexOptions.Compiled), "#5903: a fixed 403 sentence (the store refused a note decision for privilege)"),
         (new Regex(@"^SignInRequiredResult\s*\(\s*\)$", RegexOptions.Compiled), "#6265: a fixed 403 sentence (a person-made investigation change needs a signed-in admin)"),
         (new Regex(@"^PersonActorRefusedResult\s*\(\s*\)$", RegexOptions.Compiled), "#6265: a fixed 400 sentence (the signed-in name cannot be recorded; it never carries the name)"),
         (new Regex(@"^(?:Alert)?NotFoundResult\s*\(\s*\)$", RegexOptions.Compiled), "a fixed 404 sentence"),
