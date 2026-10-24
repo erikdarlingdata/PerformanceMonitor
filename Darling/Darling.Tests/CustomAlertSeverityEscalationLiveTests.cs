@@ -132,8 +132,8 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
             "\"scope\":{\"mode\":\"servers\",\"servers\":[\"" + storage + "\"]}}";
 
         var deliverer = new CapturingDeliverer();
-        var rules = new CustomAlertRuleStore(dataSource);
-        var state = new CustomAlertStateStore(dataSource);
+        var rules = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
+        var state = new CustomAlertStateStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
         var bodySucceeded = false;
         try
         {
@@ -149,7 +149,7 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
             // each sweep re-reads the rule.
             var evaluator = new CustomAlertEvaluator(
                 rules, state, dataSource, deliverer, isAlertMuted: null, alertsEnabled: static () => true,
-                new PgAlertHistoryStore(dataSource), defaultIntervalSeconds: 0,
+                new PgAlertHistoryStore(dataSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds), defaultIntervalSeconds: 0,
                 cacheTtl: TimeSpan.Zero, NullLogger.Instance);
 
             // Sweep 1: a Warning-band value (30) fires the incident at Warning.

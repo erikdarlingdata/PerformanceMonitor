@@ -225,7 +225,7 @@ public sealed class DarlingEventBaselineCoveredDaysTests
         foreach (var (metric, eventTable, aggregate, liteEvents) in new[]
         {
             ("Blocking", "blocked_process_reports", TimescaleSupport.BlockedProcessBaselineView,
-                "StoredEventCopies.BlockedProcessReports(\"server_id = $1 AND event_time >= $2 AND event_time < $3\") + \" AS ev\""),
+                "StoredEventCopies.BlockedProcessReports(\"server_id = $1 AND event_time >= $2 AND event_time < $3 AND \" + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql) + \" AS ev\""),
             ("Deadlock", "deadlocks", TimescaleSupport.DeadlockBaselineView, "v_deadlocks"),
         })
         {

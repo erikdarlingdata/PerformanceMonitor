@@ -27,25 +27,14 @@ public sealed partial class ViewerPasswordSealer
     {
         ArgumentNullException.ThrowIfNull(plaintext);
 
-        if (!ViewerSmtpSeal.IsValidText(plaintext))
-        {
-            throw new ViewerPasswordRefusedException(PasswordCharactersText);
-        }
-
-        var invalidField = ViewerSmtpSeal.FirstInvalidBoundField(host, username);
-        if (invalidField is not null)
-        {
-            throw new ViewerPasswordRefusedException(FieldCharactersText(invalidField));
-        }
-
+        /* #6392: the rules and the seal are SmtpPasswordSealing, the one copy the MCP channels tool shares. */
         try
         {
-            return PasswordSeal.Seal(plaintext, key, PasswordBinding.ForSmtp(host, port, useSsl, username));
+            return SmtpPasswordSealing.Seal(plaintext, host, port, useSsl, username, (text, binding) => PasswordSeal.Seal(text, key, binding));
         }
-        catch (Exception ex) when (ex is PasswordSealException or ArgumentException)
+        catch (NotificationRouteRefusedException ex)
         {
-            throw new ViewerPasswordRefusedException(
-                Encoding.UTF8.GetByteCount(plaintext) > PasswordSeal.MaxPlaintextBytes ? PasswordTooLongText : PasswordCharactersText);
+            throw new ViewerPasswordRefusedException(ex.Message);
         }
     }
 }
@@ -66,10 +55,8 @@ public enum ViewerSmtpPasswordAction
 /// <summary>The decisions around the sealed SMTP password in the Settings window (#5366), kept apart from the window so they can be tested.</summary>
 public static class ViewerSmtpSeal
 {
-    private static readonly UTF8Encoding s_strictUtf8 = new(false, true);
-
     /// <summary>The refusal for a change to the host, port, SSL flag or user name when no password was typed.</summary>
-    public const string ReenterText = "Changing how mail is sent needs the SMTP password again.";
+    public const string ReenterText = SmtpPasswordSealing.ReenterText;
 
     /// <summary>What the status line says next to a blank password box when a password is already saved.</summary>
     public const string SavedText = "Saved. Leave blank to keep it.";
@@ -78,34 +65,10 @@ public static class ViewerSmtpSeal
     public const string SavedCannotTestText = "The saved SMTP password cannot be read here. Type the password to send a test email.";
 
     /// <summary>Whether <paramref name="text"/> can be stored (it holds no lone surrogate).</summary>
-    public static bool IsValidText(string? text)
-    {
-        if (text is null)
-        {
-            return true;
-        }
-
-        try
-        {
-            _ = s_strictUtf8.GetByteCount(text);
-            return true;
-        }
-        catch (EncoderFallbackException)
-        {
-            return false;
-        }
-    }
+    public static bool IsValidText(string? text) => SmtpPasswordSealing.IsValidText(text);
 
     /// <summary>The name of the first bound field that is not valid text, or null when both are.</summary>
-    public static string? FirstInvalidBoundField(string? host, string? username)
-    {
-        if (!IsValidText(host))
-        {
-            return "mail server";
-        }
-
-        return IsValidText(username) ? null : "SMTP user name";
-    }
+    public static string? FirstInvalidBoundField(string? host, string? username) => SmtpPasswordSealing.FirstInvalidBoundField(host, username);
 
     /// <summary>Whether the values a password is sealed for differ between the stored row and the edited one: host, port, SSL flag, user name.</summary>
     public static bool BindingChanged(NotificationRow stored, NotificationRow edited)

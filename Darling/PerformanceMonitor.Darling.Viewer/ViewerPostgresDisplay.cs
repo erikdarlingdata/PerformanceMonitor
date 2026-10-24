@@ -1815,6 +1815,82 @@ internal static class PgDisplay
         CollectionTimeUtc = row.CollectionTimeUtc,
     };
 
+    /// <summary>One change of the Configuration Changes grid (#6387): a parameter's old value beside its new one, at the
+    /// snapshot that saw it. A server-wide change names no scope; a per-database or per-role override names the one it
+    /// applies to, and says whether it was set, reset or changed.</summary>
+    internal sealed class ConfigChangeRow
+    {
+        public string ChangedAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="ChangedAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime ChangedAtUtc { get; init; }
+        public string Name { get; init; } = "";
+        public string? OldValue { get; init; }
+        public string? NewValue { get; init; }
+        public string? Unit { get; init; }
+        public string Scope { get; init; } = "";
+        public string Kind { get; init; } = "";
+        public string? Context { get; init; }
+        public string? Source { get; init; }
+        public string? ShortDescription { get; init; }
+    }
+
+    internal static ConfigChangeRow ConfigChange(DarlingPgServerConfigReader.PgConfigChangeRow row) => new()
+    {
+        ChangedAt = SnapshotTime(row.ChangedAtUtc),
+        ChangedAtUtc = row.ChangedAtUtc,
+        Name = row.Name,
+        OldValue = row.OldValue,
+        NewValue = row.NewValue,
+        Unit = row.Unit,
+        Scope = ConfigChangeScope(row),
+        Kind = row.ChangeKind,
+        Context = row.Context,
+        Source = row.Source,
+        ShortDescription = row.ShortDescription,
+    };
+
+    /// <summary>"Server" for a server-wide change; otherwise the database and/or role an override is scoped to.</summary>
+    internal static string ConfigChangeScope(DarlingPgServerConfigReader.PgConfigChangeRow row)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrEmpty(row.DatabaseName)) parts.Add("database " + row.DatabaseName);
+        if (!string.IsNullOrEmpty(row.RoleName)) parts.Add("role " + row.RoleName);
+        return parts.Count == 0 ? "Server" : string.Join(", ", parts);
+    }
+
+    /// <summary>One logging setting of the Logging Settings Audit grid (#6387): the verdict on the lines it writes, what it
+    /// unlocks, and the remedy worded for this server's hosting. A row whose file and running value disagree carries the
+    /// restart note in its own column, so its remedy is not acted on blind.</summary>
+    internal sealed class LoggingAuditRow
+    {
+        public string Setting { get; init; } = "";
+        public string Verdict { get; init; } = "";
+        public string? Value { get; init; }
+        public string? Unit { get; init; }
+        public string? Source { get; init; }
+        public string? ChangeNeeds { get; init; }
+        public string Unlocks { get; init; } = "";
+        public string Recommended { get; init; } = "";
+        public string CostNote { get; init; } = "";
+        public string Remedy { get; init; } = "";
+        public string PendingRestart { get; init; } = "";
+    }
+
+    internal static LoggingAuditRow LoggingAudit(DarlingPgLoggingAudit.Facet f) => new()
+    {
+        Setting = f.Setting,
+        Verdict = f.Verdict,
+        Value = f.Value,
+        Unit = f.Unit,
+        Source = f.Source,
+        ChangeNeeds = f.ChangeNeeds,
+        Unlocks = f.Unlocks,
+        Recommended = f.Recommended,
+        CostNote = f.CostNote,
+        Remedy = f.Remedy,
+        PendingRestart = f.PendingRestart ? (f.RestartNote ?? "yes") : string.Empty,
+    };
+
     /// <summary>One relation of the Buffer Usage grid. All rows are one collection, so the time is the same on each.</summary>
     internal sealed class BufferUsageRow
     {
