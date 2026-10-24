@@ -3,20 +3,8 @@ name: Build
 on:
   push:
     branches: [main, dev]
-  pull_request:
-    # `ready_for_review` is here because the `gate` job below skips every PR job while the PR is a
-    # draft: marking it ready is the event that starts the real run.
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [main, dev]
   release:
     types: [published]
-  # Merge-queue runs. Inert until a queue ruleset is enabled on a branch (a repo setting),
-  # but the required checks must handle the event BEFORE that click, or every queued PR
-  # stalls on checks that never report. dorny/paths-filter v4.0.1+ resolves merge_group
-  # diffs from the payload's base_sha/head_sha whenever the base input is empty — exactly
-  # what the filter steps pass for non-push events — so path classification works
-  # unchanged in a queue run.
-  merge_group:
 
 permissions:
   contents: write
@@ -287,10 +275,9 @@ jobs:
   # [Trait("Stage", "Guard")], and none of them may need a store, because this job has no PostgreSQL (and no
   # DARLING_TEST_* variable).
   #
-  # NOT a required check. The four required checks (`build`, `Darling PostgreSQL tests`, `Lite tests (result)`
-  # and the Claude review guard) keep their names; the first three read this job's result and go red when it
-  # is not success, so a guard failure is visible on each of them and nothing waits on a check that never
-  # reports. Pull requests only: a push, a merge-queue run and a release run every shard whatever the guards
+  # NOT a required check. The required checks (`build`, `Darling PostgreSQL tests` and `Lite tests (result)`)
+  # keep their names; each reads this job's result and goes red when it is not success, so a guard failure
+  # is visible on each of them and nothing waits on a check that never reports. Pull requests only: a push, a merge-queue run and a release run every shard whatever the guards
   # say (dev pushes are the safety net and the source of the Lite timings), so the shards' `if:` below read
   # this job's result only on a pull request. Skipped on release, where `build` runs the suites whole.
   #
@@ -595,7 +582,7 @@ jobs:
       # change cannot touch a workflow file.
       #
       # -shellcheck= and -pyflakes= are off on purpose. This job runs on Windows, and actionlint 1.7.12 hangs there
-      # as soon as it pipes a `run:` script to shellcheck.exe (measured on claude-review-guard.yml with shellcheck
+      # as soon as it pipes a `run:` script to shellcheck.exe (measured on a 400-line workflow file with shellcheck
       # 0.10.0 and 0.11.0: no output and no exit). The bash-script checks need an ubuntu runner, where both tools
       # are installed: the `workflow-lint` job below runs the same actionlint with shellcheck on (#5970). This step
       # keeps the YAML, expression, `needs:` and action-input checks on the Windows job; that job adds the shell checks.
@@ -1594,6 +1581,59 @@ jobs:
           Remove-Item "releases/PerformanceMonitorDarling-$version.zip" -ErrorAction SilentlyContinue
           Compress-Archive -Path 'signed/Darling/*' -DestinationPath "releases/PerformanceMonitorDarling-$version.zip" -Force
 
+      # #6480: the Darling MSI, built from the same signed tree the zip above holds (signed/Darling: the service at the
+      # root, viewer\, the three signed scripts, pg-runtime.zip), the way darling-msi.yml builds it. It goes to
+      # build/msi/, never releases/: the checksum step and the upload read only releases/, so building the package here
+      # publishes nothing. It is built on every release so a package that no longer builds fails the release at once
+      # and not on the day signing is switched on. WiX's ICE validation runs as part of the build and any error fails it.
+      #
+      # An MSI is signed as a whole, and the three steps after this one (upload for signing, SignPath, the copy into
+      # releases/) run only when the repository variable DARLING_MSI_SIGNING is 'true'. Nothing sets it yet: it waits
+      # on the SignPath artifact configuration 'DarlingMsi' (the MSI file at the root) and is then set to 'true'. With
+      # it unset nothing is submitted and no MSI ships; the signature step below fails the job if an .msi reaches
+      # releases/ without a Valid SignPath Foundation signature.
+      - name: Build Darling MSI
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          dotnet build Darling/msi/PerformanceMonitor.Darling.Msi.wixproj -c Release -m:1 -p:UseSharedCompilation=false "-p:PayloadDir=${{ github.workspace }}\signed\Darling"
+          if ($LASTEXITCODE -ne 0) { throw "MSI build failed ($LASTEXITCODE)" }
+          New-Item -ItemType Directory -Force -Path build/msi | Out-Null
+          Move-Item Darling/msi/bin/Release/*.msi build/msi
+          Get-ChildItem build/msi -Filter *.msi | ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+
+      - name: Upload Darling MSI for signing
+        if: github.event_name == 'release' && vars.DARLING_MSI_SIGNING == 'true'
+        id: upload-darling-msi
+        uses: actions/upload-artifact@v6
+        with:
+          name: DarlingMsi-unsigned
+          path: build/msi/*.msi
+
+      - name: Sign Darling MSI
+        if: github.event_name == 'release' && vars.DARLING_MSI_SIGNING == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
+          project-slug: 'PerformanceMonitor'
+          signing-policy-slug: 'release-signing'
+          artifact-configuration-slug: 'DarlingMsi'
+          github-artifact-id: '${{ steps.upload-darling-msi.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: 'signed/DarlingMsi'
+
+      # The release asset is PerformanceMonitorDarling-<version>.msi, the MSI's own file name. Exactly one signed MSI
+      # must come back; anything else fails here rather than shipping the wrong file.
+      - name: Add the signed Darling MSI to the release assets
+        if: github.event_name == 'release' && vars.DARLING_MSI_SIGNING == 'true'
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $signed = @(Get-ChildItem signed/DarlingMsi -Filter *.msi -File -ErrorAction SilentlyContinue)
+          if ($signed.Count -ne 1) { throw "Expected one signed MSI in signed/DarlingMsi, found $($signed.Count)." }
+          Copy-Item $signed[0].FullName "releases/PerformanceMonitorDarling-$version.msi" -Force
+
       # The Velopack path packs a SEPARATE self-contained build (publish/Lite-velopack,
       # publish/DarlingViewer-velopack -- the "self-contained for Velopack" steps above), and
       # these rounds sign that payload before `vpk pack` consumes it. They are what puts a
@@ -1761,8 +1801,9 @@ jobs:
         run: |
           python3 .github/scripts/postpack_signing.py apply --signed postpack/signed --manifest postpack/manifest.json
 
-      # After the write-back, so it records the bytes that ship. Its census is `releases/*.zip`,
-      # which is not recursive: it covers the two plain product archives and does not reach the
+      # After the write-back, so it records the bytes that ship. Its census is `releases/*.zip` and
+      # `releases/*.msi` (#6480; there is an MSI only when DARLING_MSI_SIGNING is 'true'), which is not
+      # recursive: it covers the two plain product archives and the MSI and does not reach the
       # Velopack assets in releases/velopack-*/, so Setup.exe and Portable.zip carry no entry
       # here. releases.<channel>.json is the integrity record for the .nupkg files, and nothing
       # publishes a checksum for the two files the step above signs.
@@ -1770,7 +1811,7 @@ jobs:
         if: github.event_name == 'release'
         shell: pwsh
         run: |
-          $checksums = Get-ChildItem releases/*.zip | ForEach-Object {
+          $checksums = Get-ChildItem releases/* -Include *.zip, *.msi -File | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
             "$hash  $($_.Name)"
           }
@@ -1856,12 +1897,31 @@ jobs:
             exit 1
           }
 
+      # #6480: the backstop for the MSI. Any releases\*.msi must be Valid and signed by the SignPath Foundation
+      # certificate, the test the scripts above get; an unsigned one, another signer or a broken signature fails the
+      # release, and no .msi passes (the MSI ships only when DARLING_MSI_SIGNING is 'true'). The check is
+      # .github/scripts/assert-msi-signatures.ps1, which darling-msi.yml also runs against an unsigned MSI and
+      # expects to fail, so the gate is exercised on a runner before a release depends on it.
+      - name: Assert any Darling MSI carries a valid Authenticode signature
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          ./.github/scripts/assert-msi-signatures.ps1 -ReleasesDir releases
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::A Darling MSI in releases/ does not carry a Valid Authenticode signature by the SignPath Foundation certificate (#6480)."
+            exit 1
+          }
+
       - name: Upload release assets
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
         run: |
-          gh release upload ${{ github.event.release.tag_name }} releases/*.zip releases/SHA256SUMS.txt --clobber
+          # The MSI is only there when DARLING_MSI_SIGNING is 'true' (#6480), so the list is built, not globbed.
+          $assets = @(Get-ChildItem releases/* -Include *.zip, *.msi -File | ForEach-Object { $_.FullName }) + @("$PWD/releases/SHA256SUMS.txt")
+          gh release upload ${{ github.event.release.tag_name }} @assets --clobber
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed ($LASTEXITCODE)" }
 
       - name: Upload Lite Velopack artifacts
         if: github.event_name == 'release'

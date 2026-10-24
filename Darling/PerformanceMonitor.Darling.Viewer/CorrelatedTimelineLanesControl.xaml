@@ -1,16 +1,19 @@
 <UserControl x:Class="PerformanceMonitor.Darling.Viewer.CorrelatedTimelineLanesControl"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:ScottPlot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF">
+             xmlns:ScottPlot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF"
+             xmlns:ui="clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui">
 
-    <Grid Margin="8">
+    <!-- #6652: five lanes keep a minimum height each; the control scrolls when they do not fit (1366x768). -->
+    <ScrollViewer Margin="8" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="750">
         <Grid.RowDefinitions>
             <!-- 5 lanes, equal height -->
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="*"/>
+            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
         </Grid.RowDefinitions>
 
         <!-- Lane 1: CPU -->
@@ -88,4 +91,5 @@
             <ScottPlot:WpfPlot Grid.Column="1" x:Name="FileIoChart"/>
         </Grid>
     </Grid>
+    </ScrollViewer>
 </UserControl>
