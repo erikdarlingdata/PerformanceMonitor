@@ -1695,7 +1695,7 @@ max_worker_processes               = 3 + timescaledb.max_background_workers + 8
 <ceiling> = <hypertables> + 3 * <continuous aggregates> + 2 + 16
 ```
 
-The ceiling is every policy job the schema can create (one compression policy per hypertable, up to three per continuous aggregate, two store-wide) plus 16 for the scheduler and slack. Count your own store's two inputs with these queries. A few small collector tables stay plain tables, such as `attention_events`, which has its own 30-day delete. The first query does not count them.
+The ceiling is every policy job the schema can create (one compression policy per hypertable, up to three per continuous aggregate, two store-wide) plus 16 for the scheduler and slack. Count your own store's two inputs with these queries. Run them after the service's first start creates the tables, and again after each upgrade, because a new build can add collector tables. A few small collector tables stay plain tables, such as `attention_events`, which has its own 30-day delete. The first query does not count them.
 
 ```sql
 SELECT count(*) AS hypertables FROM timescaledb_information.hypertables;
