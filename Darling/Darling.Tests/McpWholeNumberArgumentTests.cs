@@ -12,6 +12,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Protocol;
@@ -57,6 +58,7 @@ public sealed class McpWholeNumberArgumentTests
     private static object? InertInstanceFor(Type serviceType) =>
         serviceType == typeof(NpgsqlDataSource) ? NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=none;Database=none;Timeout=1")
         : serviceType == typeof(ILogger) ? NullLogger.Instance
+        : serviceType == typeof(IHttpContextAccessor) ? new HttpContextAccessor()
         : null;
 
     /// <param name="installGuard">False to leave the call-tool guard out, so a call meets the SDK's binder alone.</param>
