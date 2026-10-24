@@ -338,6 +338,59 @@ public partial class ViewerServerTab
         }
     }
 
+    /// <summary>#6390 S6: the inner tab an alert's Triage link opens (<see cref="AlertChainLink.TabFor"/>), or -1 for none.</summary>
+    internal static int InnerTabIndexFor(AlertServerTab tab) => tab switch
+    {
+        AlertServerTab.Overview => OverviewInnerTabIndex,
+        AlertServerTab.WaitStats => WaitStatsInnerTabIndex,
+        AlertServerTab.Queries => QueriesInnerTabIndex,
+        AlertServerTab.Cpu => CpuInnerTabIndex,
+        AlertServerTab.Memory => MemoryInnerTabIndex,
+        AlertServerTab.FileIo => FileIoInnerTabIndex,
+        AlertServerTab.TempDb => TempDbInnerTabIndex,
+        AlertServerTab.Blocking => BlockingInnerTabIndex,
+        AlertServerTab.RunningJobs => RunningJobsInnerTabIndex,
+        AlertServerTab.Configuration => ConfigurationInnerTabIndex,
+        AlertServerTab.SystemEvents => SystemEventsInnerTabIndex,
+        AlertServerTab.CollectionHealth => HealthInnerTabIndex,
+        AlertServerTab.PgOverview => PgOverviewInnerTabIndex,
+        AlertServerTab.PgActivity => PgActivityInnerTabIndex,
+        AlertServerTab.PgVacuum => PgVacuumInnerTabIndex,
+        AlertServerTab.PgWaits => PgWaitsInnerTabIndex,
+        AlertServerTab.PgReplication => PgReplicationInnerTabIndex,
+        _ => -1
+    };
+
+    /// <summary>
+    /// #6390 S6, the viewer's Triage link: show the tab an alert's metric belongs on over a window around the alert's time. The same
+    /// steps <see cref="DeepLinkToIncidentAsync"/> takes: hold the window on the toolbar, switch the inner tab under
+    /// <see cref="_suppressDrillDownAutoRefresh"/>, then load the tab that is showing over the window the toolbar holds.
+    /// </summary>
+    internal async Task DeepLinkToTabAsync(AlertServerTab tab, DateTime fromUtc, DateTime toUtc)
+    {
+        var index = InnerTabIndexFor(tab);
+        if (index < 0)
+        {
+            return;
+        }
+
+        SetToolbarWindowUtc(fromUtc, toUtc);
+        _suppressDrillDownAutoRefresh = true;
+        try
+        {
+            InnerTabs.SelectedIndex = index;
+        }
+        finally
+        {
+            _suppressDrillDownAutoRefresh = false;
+        }
+
+        await RefreshServerClockAsync();
+        ApplyServerClockToHelper();
+        RefreshRangePicker();
+        await RefreshActiveInnerTabAsync();
+    }
+
     // ── Blocking / Deadlock slicers (W1e) ──
 
     private string _blockingSlicerMetric = "Events";
@@ -550,7 +603,7 @@ public partial class ViewerServerTab
         var rangeEnd = winEndUtc;
 
         _blockingTrendHover?.Clear();
-        EmptyState.Show(BlockingTrendChart, data.Count == 0, "No blocking in the selected time window.", clearOfBaseline: true);
+        EmptyState.Show(BlockingTrendChart, data.Count == 0, "No lock wait lasted long enough to count as an incident. Shorter lock waits show only in the lock wait chart above.", clearOfBaseline: true);
         if (data.Count == 0)
         {
             /* No blocking events — show a flat line at zero so the chart looks active */

@@ -1212,7 +1212,7 @@ public partial class SettingsWindow : Window
         root["alert_runnable_queue_enabled"] = App.AlertRunnableQueueEnabled;
         root["alert_runnable_queue_warning_per_scheduler"] = App.AlertRunnableQueueWarningPerScheduler;
         root["alert_runnable_queue_critical_per_scheduler"] = App.AlertRunnableQueueCriticalPerScheduler;
-        root["alert_client_timeouts_enabled"] = App.AlertClientTimeoutsEnabled;
+        App.WriteClientTimeoutsSwitch(root);
         root["alert_client_timeouts_warning_per_minute"] = App.AlertClientTimeoutsWarningPerMinute;
         root["alert_client_timeouts_critical_per_minute"] = App.AlertClientTimeoutsCriticalPerMinute;
         root["alert_client_timeouts_warning_multiple"] = App.AlertClientTimeoutsWarningMultiple;

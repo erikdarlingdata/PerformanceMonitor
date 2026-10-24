@@ -785,7 +785,7 @@ VALUES ($1, $2, 'example-sql-live', 'wait_stats', $3, 0, 'SUCCESS', NULL, 0, 0, 
             /* The alert reaches the store through the production deliverer and history writer, so the test can read it
                back from the alert history as well as from what the recording deliverer received (#5481 round 2). */
             var alertSettings = new DarlingAlertSettings(new DarlingConfig());
-            var historyWriter = new PgAlertHistoryStore(postgres);
+            var historyWriter = new PgAlertHistoryStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
             harness.Deliverer.Inner = new DarlingAlertDeliverer(
                 alertSettings,
                 historyWriter,

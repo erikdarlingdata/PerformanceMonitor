@@ -46,7 +46,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// startup ensure failed). Then a raw-route module join ranks the whole window of procedure_stats, as it did before #5811, because
 /// the map-first CTE would fail on the missing relation. False (the default) compiles the map-first CTE.
 /// <see cref="UnregisteredServers"/> (#5525) is the part of <see cref="Servers"/> that names no <c>collect.servers</c> row, found by
-/// the runner (<see cref="ComposeServerScope.FindUnregisteredAsync"/>) before it compiles. The compiler scopes a read by
+/// the runner (<c>ComposeServerScope.FindUnregisteredAsync</c>) before it compiles. The compiler scopes a read by
 /// <c>server_id</c>, resolved from the registry by name; a name with no registry row resolves to no id, so those names alone are
 /// also matched on the row's stored <c>server_name</c>, exactly as the old scope matched them. Null or empty (the default, and
 /// every run whose names are all registered) adds nothing to the SQL or to the parameters.

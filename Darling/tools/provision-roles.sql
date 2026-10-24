@@ -22,9 +22,9 @@
 --              dismissed column of config.config_alert_log (the web Alert History dismiss, #4843), and INSERT
 --              on config.config_monitored_servers and no UPDATE on it: the web add-server route (#4843) inserts, and
 --              the web edit-server route (#5240) edits through config.edit_monitored_server, a function it may
---              execute (its credential column stays SELECT-carved), and the web Run collectors now (#5941) and Run live now
---              (#6386) buttons queue their command rows through config.request_snapshot_now and
---              config.request_active_queries_live, functions it may execute (mcp may execute request_snapshot_now too). Every table is non-secret-keyed; over the web every write is gated server-side by the host's auth + seat model -- these
+--              execute (its credential column stays SELECT-carved), and the web Run collectors now (#5941), Run live now
+--              (#6386) and Generate now (#6389) buttons queue their command rows through config.request_snapshot_now,
+--              config.request_active_queries_live and config.request_analyze_now, functions it may execute (mcp may execute request_snapshot_now too). Every table is non-secret-keyed; over the web every write is gated server-side by the host's auth + seat model -- these
 --              grants are only the floor beneath that gate. All other write actions degrade gracefully. The
 --              web dashboard's identity, and a locked-down Viewer's (postgres.connectAs = "viewer").
 --   mcp     -- the MCP server's identity: viewer's reads (the same secret-column carve), plus the MCP tools'
@@ -856,6 +856,19 @@ GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;
 -- #6230: pause_collection / resume_collection queue a pause or resume command through config.request_mcp_command, so mcp holds no
 --     write on the paused column. An earlier build granted it; this revoke takes it back from an upgraded store.
 REVOKE UPDATE (paused) ON config.config_service FROM mcp;
+-- #6393: update_service_flags runs as mcp and sets exactly these five service flags (plan capture, Query Store backfill, text budget, max concurrent
+--    sweeps, fetch top N): a column list, so mcp still cannot write mcp_enabled, mcp_port, web_enabled, web_port or paused (turning MCP off from MCP
+--    would lock the admin out; those stay Viewer-only). The write fires the config_service self-bump trigger (BEFORE UPDATE, it assigns NEW.config_version and NEW.updated_at), so it needs no further grant.
+--    Skipped, with a warning, on a store the service has not upgraded to the fetch-top-N column yet (V209); re-run this script after it has.
+DO $do$
+BEGIN
+   IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_service' AND column_name = 'query_store_fetch_top_n') THEN
+      GRANT UPDATE (capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n) ON config.config_service TO mcp;
+   ELSE
+      RAISE WARNING 'config.config_service has no query_store_fetch_top_n column yet: skipped the mcp service-flag column grant. Start the service once to migrate the store, then re-run this script.';
+   END IF;
+END
+$do$;
 -- #5085: the fleet server-tag write tools run as mcp; these two single-table grants are the admin gate. Both
 --     tables are non-secret, and server_tags.id is an identity column (no sequence grant). V181 (#5750) put a
 --     statement-level reload-beacon trigger on each, so a tag write bumps config_service; the config_service column grant above covers it.
@@ -1449,6 +1462,60 @@ END
 $fn$;
 REVOKE ALL ON FUNCTION config.request_active_queries_live(integer, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION config.request_active_queries_live(integer, text) TO viewer;
+-- #6389: the web's Generate now button on the Recommendations tab. The web route (viewer) queues an analyze_now command through
+--     config.request_analyze_now, the only way viewer writes that command row. The command type is fixed in the body and the
+--     caller supplies a server id and a requested_by label (the label is not checked: the web host and a locked-down Viewer share the
+--     viewer login, and the web's log line is the record of who asked). One request per server at a time, not within 15 seconds of
+--     the last, under the same advisory lock key the MCP analyze_now takes. Same function, same text, as managed provisioning
+--     rebuilds on every start.
+CREATE OR REPLACE FUNCTION config.request_analyze_now(
+   p_server_id integer,
+   p_requested_by text)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_id bigint;
+   v_last_status text;
+   v_last_at timestamp;
+BEGIN
+   -- The one-request-at-a-time rule below reads the newest row of its kind with a fresh snapshot per statement. A transaction that
+   -- keeps one snapshot (REPEATABLE READ and up) could miss a row another session just queued, so it is refused.
+   IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'This request must run at the READ COMMITTED isolation level.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM config.config_monitored_servers WHERE server_id = p_server_id) THEN
+      RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   -- Never blocks (provisioning rule): a request that holds the lock for this server is a concurrent request, which is the same
+   -- conflict as a pending row, so this refuses with DL409 instead of waiting. The key is the one config.request_mcp_command takes
+   -- for an analyze_now on this server, so a web click and an MCP call for the same server share one guard.
+   IF NOT pg_try_advisory_xact_lock(6230, hashtext('analyze_now:' || p_server_id::text)) THEN
+      RAISE EXCEPTION 'An analysis run for this server is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   SELECT c.status, c.created_at INTO v_last_status, v_last_at
+   FROM config.config_command AS c
+   WHERE c.command_type = 'analyze_now' AND c.target_server_id = p_server_id
+   ORDER BY c.command_id DESC
+   LIMIT 1;
+   IF v_last_status IN ('pending', 'in_progress') THEN
+      RAISE EXCEPTION 'An analysis run for this server is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   IF v_last_at IS NOT NULL AND v_last_at > (now() AT TIME ZONE 'UTC') - interval '15 seconds' THEN
+      RAISE EXCEPTION 'An analysis run was requested for this server less than 15 seconds ago.'
+         USING ERRCODE = 'DL429',
+               HINT = to_char(v_last_at + interval '15 seconds', 'YYYY-MM-DD') || 'T' || to_char(v_last_at + interval '15 seconds', 'HH24:MI:SS') || 'Z';
+   END IF;
+   INSERT INTO config.config_command (requested_by, command_type, target_server_id, args_json, status, created_at)
+   VALUES (left(COALESCE(p_requested_by, 'web'), 200), 'analyze_now', p_server_id, NULL, 'pending', (now() AT TIME ZONE 'UTC'))
+   RETURNING command_id INTO v_id;
+   RETURN v_id;
+END
+$fn$;
+REVOKE ALL ON FUNCTION config.request_analyze_now(integer, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION config.request_analyze_now(integer, text) TO viewer;
 -- #6231: the MCP route tools. mcp holds no INSERT on config.config_notification_routes and no SELECT or UPDATE on its
 --     destination columns, and gets none here: create_notification_route and update_notification_route reach the table only
 --     through these functions. create leaves every channel empty and update writes the match, scope, enabled flag, resolution
@@ -2990,6 +3057,11 @@ BEGIN
    GRANT INSERT, UPDATE, DELETE ON config.config_threshold_overrides TO admin;
    GRANT INSERT, UPDATE, DELETE ON config.investigation_feedback TO admin;
    GRANT INSERT, UPDATE, DELETE ON config.config_threshold_overrides TO mcp;
+   -- #6401: set_agent_actions_enabled (the MCP twin of the web's PUT /api/agent-changes/switch) updates the service row's switch and who set it.
+   -- UPDATE only, column-level on exactly those columns, so mcp still cannot write paused, capture_plans or any other flag, and cannot create the row:
+   -- the service creates it when it copies darling.json into the store, and a switch written before then must not make the store look set up.
+   -- agent_actions_enabled arrives with V191, the version that makes the block above run.
+   GRANT UPDATE (agent_actions_enabled, updated_by) ON config.config_service TO mcp;
    -- #5918 (V191's practice_of column, so here and not in 3i): the Viewer opens a practice request (a replay of a judged case) and copies the case's alert rows.
    GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
       window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON config.investigation_requests TO admin;
@@ -3068,6 +3140,8 @@ BEGIN
    -- agent supplies (merge_id and merged_at are the table's own); a person's undo runs as admin and stamps undone_at and undone_by.
    GRANT INSERT (server_id, signature, merged_into, reason, merged_by) ON config.investigation_signature_merges TO mcp;
    GRANT UPDATE (undone_at, undone_by) ON config.investigation_signature_merges TO admin;
+   -- #6401: undo_agent_change undoes a signature merge the way the web's undo does, by stamping the row; so mcp gets the same two columns.
+   GRANT UPDATE (undone_at, undone_by) ON config.investigation_signature_merges TO mcp;
 END $do$;
 
 -- 3g. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
@@ -3203,6 +3277,7 @@ BEGIN
    'config.delete_known_pattern(bigint)',
    'config.request_snapshot_now(integer, text, text)',
    'config.request_active_queries_live(integer, text)',
+   'config.request_analyze_now(integer, text)',
    'config.create_notification_route(text, boolean, integer, integer, boolean, integer)',
    'config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer)',
    'config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb)',

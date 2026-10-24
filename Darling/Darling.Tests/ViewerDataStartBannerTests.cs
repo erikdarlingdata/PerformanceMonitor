@@ -181,7 +181,8 @@ public sealed class ViewerDataStartBannerTests : IDisposable
        toolbar's range on a load (startUtc), the slicer's selection on a drag (e.StartUtc). Both await the probe through the
        same catch as the two surfaces above, so a probe that throws costs the grid its banner and not the slicer and the
        comparison loads that follow it. The tail is what the call passes after the start: the hourly-tier suffix on Top
-       Queries and Top Procedures, the interval-table plan on a Query Store load, nothing on a Query Store slicer drag. */
+       Queries and Top Procedures, the interval-table plan on a Query Store load, nothing on a Query Store slicer drag. Top Procedures names the databases its read left out (#6651) between the banner
+       and the next call. */
     private const string HourlyTail = @",\s*HourlyBannerSuffix\(read\.Tier, read\.IoRoute, read\.HourlyEdgesNote\),\s*HourlyServedOf\(read\.Tier, read\.HourlyFirstBucket\)";
     private const string WidePlanTail = @",\s*widePlan: widePlan";
 
@@ -195,7 +196,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
 
         Assert.Equal(1, Matches(tab, $@"var floorTask = Timed\(timer, ""data start"", _dataService\.{probe}\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
         Assert.Equal(1, Matches(tab,
-            $@"UpdateTruncationBanner\({grid}TruncationBanner,\s*await DataStartOrNullAsync\(floorTask,\s*""{surface}""\),\s*startUtc{tail}\);\s*await Load{grid}SlicerAsync\(startUtc,\s*endUtc,\s*slicerTask\);\s*\}}\s*catch\s*\{{[^}}]*\}}\s*await Refresh{grid}ComparisonAsync\(startUtc,\s*endUtc,\s*timer\);"));
+            $@"UpdateTruncationBanner\({grid}TruncationBanner,\s*await DataStartOrNullAsync\(floorTask,\s*""{surface}""\),\s*startUtc{tail}\);(?:\s*await Update{grid}LeftOutBannerAsync\(read,\s*startUtc,\s*endUtc\);)?\s*await Load{grid}SlicerAsync\(startUtc,\s*endUtc,\s*slicerTask\);\s*\}}\s*catch\s*\{{[^}}]*\}}\s*await Refresh{grid}ComparisonAsync\(startUtc,\s*endUtc,\s*timer\);"));
     }
 
     [Theory]
@@ -208,7 +209,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
 
         Assert.Equal(1, Matches(tab, $@"var floorTask = _dataService\.{probe}\(_server\.ServerId,\s*e\.StartUtc,\s*e\.EndUtc\);"));
         Assert.Equal(1, Matches(tab,
-            $@"UpdateTruncationBanner\({grid}TruncationBanner,\s*await DataStartOrNullAsync\(floorTask,\s*""{surface}""\),\s*e\.StartUtc{tail}\);\s*await Refresh{grid}ComparisonAsync\(e\.StartUtc,\s*e\.EndUtc\);"));
+            $@"UpdateTruncationBanner\({grid}TruncationBanner,\s*await DataStartOrNullAsync\(floorTask,\s*""{surface}""\),\s*e\.StartUtc{tail}\);(?:\s*await Update{grid}LeftOutBannerAsync\(read,\s*e\.StartUtc,\s*e\.EndUtc\);)?\s*await Refresh{grid}ComparisonAsync\(e\.StartUtc,\s*e\.EndUtc\);"));
     }
 
     /* No read awaits its probe bare (a probe that throws would unwind the load past the slicer, or the rest of the tab),

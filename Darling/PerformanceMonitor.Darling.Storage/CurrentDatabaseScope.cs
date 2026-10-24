@@ -213,7 +213,7 @@ public static class CurrentDatabaseScope
         => filter.IsAll && dropped is { Count: > 0 } ? DatabaseFilter.Excluding(dropped) : filter;
 
     /// <summary><see cref="Narrow(DatabaseFilter, IReadOnlySet{string})"/> after reading the server's dropped set
-    /// (<see cref="ReadDroppedAsync"/>). The reader the filter goes to must apply <see cref="DatabaseFilter.ExcludeClause"/>.</summary>
+    /// (<see cref="ReadDroppedAsync"/>). The reader the filter goes to must apply <see cref="DatabaseFilter.ExcludeClause(string, int)"/>.</summary>
     public static async Task<DatabaseFilter> NarrowAsync(
         NpgsqlDataSource postgres, int serverId, DatabaseFilter filter, DateTime? nowUtc = null, DateTime? asOfUtc = null,
         DateTime? windowStartUtc = null, ILogger? logger = null, CancellationToken cancellationToken = default)

@@ -144,7 +144,7 @@ public sealed class PlanRegressionDrillDownReuseTests : IClassFixture<SharedDuck
             }
 
             using var cmd = _seedConn.CreateCommand();
-            cmd.CommandText = "UPDATE query_store_stats SET query_text = 'DELETE TOP (@batch_size) FROM sys.change_tracking_1234 WHERE commit_ts < 5' WHERE query_id = $1";
+            cmd.CommandText = "UPDATE query_store_stats SET query_text = 'DELETE TOP (@batch_size) FROM sys.[change_tracking_1228027148] WHERE commit_ts < 5' WHERE query_id = $1";
             cmd.Parameters.Add(new DuckDBParameter { Value = TwoReplicaQueryId });
             await cmd.ExecuteNonQueryAsync();
         }

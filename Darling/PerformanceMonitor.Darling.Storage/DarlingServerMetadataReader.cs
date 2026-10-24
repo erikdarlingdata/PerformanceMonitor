@@ -21,7 +21,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// (when a database name is given) the newest <c>database_config</c> row for that database, so plan-analysis
 /// rule 38 (#4530) and the Server Context card (#4597) can see the server's edition/MAXDOP/cost
 /// threshold/max memory and the plan's database name/compat level without a live connection. Darling
-/// analyzes STORED plans (<see cref="DarlingMcpPlanTools"/>, the drill-downs), where
+/// analyzes STORED plans (<c>DarlingMcpPlanTools</c>, the drill-downs), where
 /// erikdarlingdata/PerformanceStudio fetches the same values live off the target server
 /// (<c>ServerMetadataService.FetchServerMetadataAsync</c> / <c>FetchDatabaseMetadataAsync</c>) — PM has no
 /// live session at these call sites, so it reads the collected copy instead. A failure or no rows is

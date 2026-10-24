@@ -48,7 +48,7 @@ public enum CustomAlertScopeMode
 /// metric is validated by the compose <see cref="ComposeSpec.TryParsePanel"/> authority (so a rule can name
 /// nothing a chart cannot) and pinned to <see cref="PanelMode.Scalar"/>; the predicate/hysteresis/scope are
 /// validated here. <see cref="TryParse"/> is pure (no DB), so the MCP create/validate tools and the editor
-/// can call it before persisting, and the <see cref="CustomAlertEvaluator"/> calls it when it loads rules —
+/// can call it before persisting, and the <c>CustomAlertEvaluator</c> calls it when it loads rules —
 /// a rule that no longer parses (a measure drifted out of the catalog) is not evaluated.
 ///
 /// <para>The parsed <see cref="Plan"/> is captured once so the evaluator only re-COMPILES per window (the
@@ -98,7 +98,7 @@ public sealed record CustomAlertRuleDefinition(
     /// (no store). <see cref="CustomAlertScopeMode.Tag"/> cannot be decided from a name alone (its membership
     /// is the <c>config.server_tag_map</c> set the evaluator resolves at sweep time), so this returns
     /// <c>false</c> for a tag-scoped rule; the tag-aware gate is
-    /// <see cref="CustomAlertEvaluator.RuleAppliesToServer"/>, which delegates the non-tag modes back to this
+    /// <c>CustomAlertEvaluator.RuleAppliesToServer</c>, which delegates the non-tag modes back to this
     /// one authority so All/Servers is resolved in exactly one place.
     /// </summary>
     public bool AppliesTo(string storageName) =>

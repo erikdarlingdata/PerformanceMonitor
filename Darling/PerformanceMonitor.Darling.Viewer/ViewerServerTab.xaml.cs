@@ -71,9 +71,9 @@ public partial class ViewerServerTab : UserControl
     internal const int LongQueriesInnerTabIndex = 18;
 
     /* ── The PostgreSQL run (#2530) ───────────────────────────────────────────────────────────────
-       Indices 19-24 CONTINUE the same TabControl rather than living in a second one, and every index
+       Indices 19-25 CONTINUE the same TabControl rather than living in a second one, and every index
        above stays exactly where it was. That is the whole reason for the layout: for a PostgreSQL server
-       the nineteen SQL Server TabItems are collapsed and these six are shown, so the two sets never
+       the nineteen SQL Server TabItems are collapsed and these seven are shown, so the two sets never
        renumber each other and no drill-down that keys on a constant above can be broken by this feature.
 
        ViewerPostgresTabs is the registry these belong to — headers, panel-to-collector mapping and the

@@ -75,7 +75,7 @@ sits on top of `pg_stat_statements`), `pg_predicate_stats` (`pg_qualstats` — p
 `CREATE EXTENSION` per database), and `pg_wait_sampling` (the `pg_wait_sampling` module — preload-only,
 so check it with `SHOW shared_preload_libraries;`, not `pg_extension`). Skipping any of them is fine:
 the collector records a non-fatal skip naming exactly which install is missing (step 10), and the other
-24 collectors are unaffected.
+collectors are unaffected.
 
 `pg_wait_sampling` is the one whose absence is no longer a skip (#3604). Without the extension the same
 collector takes its **service-sampler arm**: it polls `pg_stat_activity` once a second for a 30-second
@@ -412,11 +412,11 @@ carries any older store to the newest version. `StorageVersion.SchemaVersion` is
 3.11.0), and step 5's proof line quotes whatever it says at your build.
 
 **Before starting, if your store is unmanaged and has TimescaleDB**, re-derive the background-worker
-settings. Every collector table becomes a hypertable — all 71 of them, 29 PostgreSQL — so the required
+settings. Nearly every collector table becomes a hypertable. The required
 numbers move whenever collectors are added, and undersizing does not error — it silently stops
 compression and retention from running. See
 [Background workers](../Darling/README.md#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont);
-for an 8 GB host the numbers are 128 and 139 for 72 hypertables (74 and 85 at 4 GB or less, 177 and 188 at 12 GB or more), and both need a server restart. Managed mode does this itself.
+this build's first start migrates the store and can add hypertables. After that start, count your hypertables and continuous aggregates with the two queries there and work its formula. For example, a store with 72 hypertables and 29 continuous aggregates gets 128 and 139 on an 8 GB host. It gets 74 and 85 at 4 GB or less, and 177 and 188 at 12 GB or more. Both settings need a server restart. Managed mode does this itself.
 
 ## 5. First start, in console mode
 
@@ -577,7 +577,7 @@ sentence the data can support if both are sampled on the same grain.
 ## 8. Read it
 
 Through MCP — a read per collector, plus the trend, detail and config-diff readers that sit on top of
-them; 35 `get_pg_*` tools in all, registered by the same service:
+them; more than 30 `get_pg_*` tools in all, registered by the same service:
 
 | Tool | Answers |
 |---|---|

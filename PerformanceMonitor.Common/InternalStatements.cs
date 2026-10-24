@@ -29,10 +29,11 @@ public static class InternalStatements
     /// constant, so it can be spliced into the SQL constants. The <c>@</c> of <c>@batch_size</c> is written <c>\W</c> (any
     /// non-word character: the same match in .NET, PostgreSQL and DuckDB) so the pattern carries no <c>@name</c> token: the
     /// PostgreSQL SQL has no named parameters (only <c>$N</c>), and the dialect guard in <c>PgFactCollectorTests</c> rejects
-    /// an <c>@</c> anywhere in that SQL.
+    /// an <c>@</c> anywhere in that SQL. SQL Server records the cleanup with a bracketed side-table name, as in <c>sys.[change_tracking_1228027148]</c>,
+    /// so the <c>[</c> is optional (<c>\[?</c>): the unbracketed form is valid T-SQL too. The test fixtures copy the bracketed form from stored text.
     /// </summary>
     public const string LowerTextPattern =
-        @"delete\s+top\s*\(\s*\Wbatch_size\s*\)\s+from\s+sys\.change_tracking_|sp_flush_commit_table|sp_cdc_cleanup_change_table";
+        @"delete\s+top\s*\(\s*\Wbatch_size\s*\)\s+from\s+sys\.\[?change_tracking_|sp_flush_commit_table|sp_cdc_cleanup_change_table";
 
     private static readonly Regex Matcher = new(LowerTextPattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 

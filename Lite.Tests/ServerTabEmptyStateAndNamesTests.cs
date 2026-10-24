@@ -70,7 +70,7 @@ public class ServerTabEmptyStateAndNamesTests
             var wrapped = new Border { Child = new Canvas { Name = "FakeChart" } };
             Grid.SetRow(wrapped, 3);
             host.Children.Add(wrapped);
-            EmptyState.Show((FrameworkElement)wrapped.Child, isEmpty: true, "No blocking in the selected time window.");
+            EmptyState.Show((FrameworkElement)wrapped.Child, isEmpty: true, "No lock wait lasted long enough to count as an incident. Shorter lock waits show only in the lock wait chart above.");
 
             return (neverEmpty, Grid.GetRow(wrapped), Grid.GetRow(EmptyTexts(host).Single()));
         });
@@ -236,13 +236,13 @@ public class ServerTabEmptyStateAndNamesTests
             var host = new Grid();
             var plain = new Border();
             host.Children.Add(plain);
-            EmptyState.Show(plain, isEmpty: true, "No blocking in the selected time window.");
+            EmptyState.Show(plain, isEmpty: true, "No lock wait lasted long enough to count as an incident. Shorter lock waits show only in the lock wait chart above.");
             var plainText = EmptyTexts(host).Single();
 
             var host2 = new Grid();
             var chart = new Border();
             host2.Children.Add(chart);
-            EmptyState.Show(chart, isEmpty: true, "No blocking in the selected time window.", clearOfBaseline: true);
+            EmptyState.Show(chart, isEmpty: true, "No lock wait lasted long enough to count as an incident. Shorter lock waits show only in the lock wait chart above.", clearOfBaseline: true);
             var clearText = EmptyTexts(host2).Single();
             return ((plainText.VerticalAlignment, plainText.Margin.Top), (clearText.VerticalAlignment, clearText.Margin.Top));
         });
@@ -255,7 +255,7 @@ public class ServerTabEmptyStateAndNamesTests
         foreach (var file in new[] { "Lite/Controls/ServerTab.Charts.cs", "Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.Blocking.cs" })
         {
             var source = RepoFile(file);
-            Assert.Contains("\"No blocking in the selected time window.\", clearOfBaseline: true)", source, StringComparison.Ordinal);
+            Assert.Contains("\"No lock wait lasted long enough to count as an incident. Shorter lock waits show only in the lock wait chart above.\", clearOfBaseline: true)", source, StringComparison.Ordinal);
             Assert.Contains("\"No deadlocks in the selected time window.\", clearOfBaseline: true)", source, StringComparison.Ordinal);
         }
     }

@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -119,5 +120,28 @@ public sealed class HeadlessSelfTestTests
         Assert.Contains(
             "StoreConnectionSelfTest.RunAsync(effectiveConnectionString)", source, StringComparison.Ordinal);
         Assert.Contains("ViewerDataService.ApplyConnectionTimeout(", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #6630 review: two transforms feed the string the probe tests, and each is reported on its own. A BYO string with an
+    /// explicit <c>Timeout</c> and no <c>Search Path</c> must be told about the search path only, never about a timeout
+    /// preference that was not applied.
+    /// </summary>
+    [Theory]
+    [InlineData("Host=db.corp;Database=darling;Timeout=30", false, true)]
+    [InlineData("Host=db.corp;Database=darling", true, true)]
+    [InlineData("Host=db.corp;Database=darling;Search Path=public", true, false)]
+    [InlineData("Host=db.corp;Database=darling;Timeout=30;Search Path=public", false, false)]
+    public void DescribeStartupTransforms_NamesOnlyTheTransformsThatChangedTheString(
+        string original, bool timeoutApplied, bool searchPathApplied)
+    {
+        var withTimeout = ViewerDataService.ApplyConnectionTimeout(original, 5);
+        var effective = DarlingStoreConnection.EnsureStoreSearchPath(withTimeout);
+
+        var notes = HeadlessSelfTest.DescribeStartupTransforms(original, withTimeout, effective, 5);
+
+        Assert.Equal(timeoutApplied, notes.Any(n => n.Contains("Connection timeout preference", StringComparison.Ordinal)));
+        Assert.Equal(searchPathApplied, notes.Any(n => n.Contains("Search Path", StringComparison.Ordinal)));
+        Assert.Equal((timeoutApplied ? 1 : 0) + (searchPathApplied ? 1 : 0), notes.Count);
     }
 }
