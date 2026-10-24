@@ -865,18 +865,13 @@ LIMIT 1";
         _ => null,
     };
 
-    private const string ContinuousAggregatesExistSql = "SELECT to_regclass('timescaledb_information.continuous_aggregates') IS NOT NULL";
-
     /// <summary>
     /// #6706: is this baseline relation an ordinary view over the raw table, rather than a continuous aggregate or absent?
     /// A continuous aggregate is itself a <c>relkind='v'</c> view, so the catalog check alone is not enough; the
-    /// <c>timescaledb_information</c> half is asked only when that view exists (a store without the extension has none).
+    /// aggregate half is <see cref="TimescaleSupport.ResolveMaterializationAsync"/> (#3684: one definition, not a copy).
     /// </summary>
     internal static string IsPlainBaselineViewSql(string view)
         => $"SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'collect' AND c.relname = '{view}' AND c.relkind = 'v')";
-
-    internal static string IsContinuousAggregateSql(string view)
-        => $"SELECT EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = '{view}')";
 
     /// <summary>
     /// #6706: on a store where the Blocking or Deadlock arm's event relation is a plain view over the raw table (no
@@ -885,8 +880,9 @@ LIMIT 1";
     /// below the 30-day window, every day between the horizon and the window start has logged runs and no events, and each
     /// would count as a measured zero. The window starts no earlier than now minus the retention in force (the fleet override
     /// or the default, <see cref="DarlingRetentionHorizons.FleetRetentionDaysSql"/>, the rule the purge applies; the purge never
-    /// removes a row newer than that). A continuous aggregate keeps 35 days whatever raw retention is, so it is left alone, as is
-    /// every other metric. At the default 30 days the floor sits within a day of the window start (the window ends at the UTC
+    /// removes a row newer than that). A continuous aggregate keeps 35 days whatever raw retention is, so it is left alone (the
+    /// aggregate check is <see cref="TimescaleSupport.ResolveMaterializationAsync"/>: null for a plain view or a store without
+    /// the extension), as is every other metric. At the default 30 days the floor sits within a day of the window start (the window ends at the UTC
     /// midnight), so a default store changes only in the hours of its oldest day that the purge may already have taken. The arm's
     /// text is unchanged: it still reads <c>$2</c>.
     /// </summary>
@@ -906,16 +902,9 @@ LIMIT 1";
             }
         }
 
-        using (var extension = new NpgsqlCommand(ContinuousAggregatesExistSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
+        if (await TimescaleSupport.ResolveMaterializationAsync(connection, view, cancellationToken) is not null)
         {
-            if (await extension.ExecuteScalarAsync(cancellationToken) is true)
-            {
-                using var aggregate = new NpgsqlCommand(IsContinuousAggregateSql(view), connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
-                if (await aggregate.ExecuteScalarAsync(cancellationToken) is true)
-                {
-                    return windowStart;
-                }
-            }
+            return windowStart;
         }
 
         long retentionDays;
