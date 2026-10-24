@@ -61,7 +61,7 @@ public sealed class DarlingMcpKnownPatternWriteTools
         try
         {
             var (input, refusal) = await Build(postgres, server_id, metric_name, time_of_day, time_zone, window_minutes, note, expires_at_utc);
-            if (input is ex.SqlState == "DL409" ? "known_patterns" : "server_id")
+            if (input is null)
             {
                 return Refused(refusal!);
             }
@@ -178,7 +178,7 @@ public sealed class DarlingMcpKnownPatternWriteTools
         }
         catch (PgKnownPatternStore.StoreRefusedException ex)
         {
-            return (default!, new StoreRefusal(ex.Message, null));
+            return (default!, new StoreRefusal(ex.Message, ex.SqlState == "DL409" ? "known_patterns" : "server_id"));
         }
         catch (ArgumentException ex)
         {
