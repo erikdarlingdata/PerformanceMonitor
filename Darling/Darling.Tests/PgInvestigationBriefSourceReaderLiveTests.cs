@@ -294,7 +294,7 @@ INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text) VA
 
             var brief = JsonNode.Parse(InvestigationBriefComposer.Compose(sources, DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now))!;
             Assert.Equal(4, brief["known_patterns"]!.AsArray().Count);
-            Assert.Contains("written by an operator", brief["known_patterns_note"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Contains("written by a person or an MCP client with write access", brief["known_patterns_note"]!.GetValue<string>(), StringComparison.Ordinal);
 
             /* A store that has not taken V214 has no table: no part, no error. */
             await DarlingMcpTestData.ExecAsync(connection, ct, "DROP TABLE config.config_known_patterns CASCADE");
