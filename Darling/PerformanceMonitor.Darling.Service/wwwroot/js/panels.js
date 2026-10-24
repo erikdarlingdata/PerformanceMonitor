@@ -53,7 +53,7 @@ import {
   localizeAlertDetail,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
-import { plainText, plainTextNamed } from "./plain-text.js";
+import { plainText, plainTextNamed, plainTextCounts } from "./plain-text.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
 import {
   VALUE_LIST_MAX_LEN,
@@ -1318,9 +1318,11 @@ function cell(row, c) {
           ? "—"
           : c.plain === "named"
             ? plainTextNamed(String(raw))
-            : c.plain
-              ? plainText(String(raw))
-              : String(raw);
+            : c.plain === "counts"
+              ? plainTextCounts(String(raw))
+              : c.plain
+                ? plainText(String(raw))
+                : String(raw);
   /* #5644 W20: a column marked `localizeText` (a message or note: collection-health notes, collector errors) shows any ISO
      instant in its sentence in local time, like the grids beside it. Opt-in: query text, statement text, details and
      identifiers are data, and a literal such as '2026-01-01T00:00:00' inside them must show as written. */

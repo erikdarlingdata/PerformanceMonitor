@@ -141,6 +141,8 @@ public static class MonitoringGrantScript
     /// <summary>Brackets a name for T-SQL: <c>]</c> doubles.</summary>
     public static string QuoteName(string name) => "[" + name.Replace("]", "]]", StringComparison.Ordinal) + "]";
 
+    private static readonly System.Buffers.SearchValues<char> s_hostCut = System.Buffers.SearchValues.Create(",\\");
+
     private static string Literal(string value) => "N'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
 
     /// <summary>
@@ -156,7 +158,7 @@ public static class MonitoringGrantScript
             text = text[4..];
         }
 
-        var cut = text.IndexOfAny(new[] { ',', '\\' });
+        var cut = text.AsSpan().IndexOfAny(s_hostCut);
         if (cut >= 0)
         {
             text = text[..cut];

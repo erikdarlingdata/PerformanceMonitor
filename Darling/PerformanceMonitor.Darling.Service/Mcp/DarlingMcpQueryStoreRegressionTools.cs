@@ -115,7 +115,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             var notice = await DarlingMcpWindowNotice.ReadAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, "query_store_stats", resolved.ServerName, baselineStart, end, cancellationToken),
                 baselineStart, end, "query_store_stats",
-                "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.",
+                QueryStoreRegressionRules.BaselineWindowTail,
                 emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)

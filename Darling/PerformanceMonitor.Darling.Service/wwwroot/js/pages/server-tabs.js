@@ -5516,7 +5516,7 @@ const COLLECTION_LOG_COLUMNS = [
   { key: "sql_store_ms", label: "Store (in SQL)", format: "ms" },
   { key: "store_duration_ms", label: "On Store", format: "ms" },
   { key: "rows_collected", label: "Rows", format: "int" },
-  { key: "error_message", label: "Error", wrap: true, localizeText: true },
+  { key: "error_message", label: "Error", wrap: true, localizeText: true, plain: "counts" },
 ];
 
 /* #5227: the collector picked on the Collectors panel, keyed by server at MODULE scope so the 60 s rebuild of the tab
