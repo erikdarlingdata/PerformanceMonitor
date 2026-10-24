@@ -262,7 +262,7 @@ public sealed class AlertResolutionSettingsRungTests
         {
             var file = new DarlingConfig
             {
-                Smtp = new SmtpConfig { SendResolutions = true },
+                Smtp = new SmtpConfig { SendResolutions = false },
                 Webhooks = new WebhooksConfig
                 {
                     GenericUrl = "https://hooks.example.com/alert",
@@ -272,9 +272,10 @@ public sealed class AlertResolutionSettingsRungTests
                     PagerDutyRoutingKey = "0123456789abcdef0123456789abcdef",
                     PagerDutyUseEuRegion = true,
                     PagerDutyProxy = "http://pd-proxy.example.com:8080",
-                    PagerDutyAutoResolve = true,
+                    // Mixed on purpose: all-true values cannot see a swap among the six boolean parameters the seed binds (#2218).
+                    PagerDutyAutoResolve = false,
                     SlackSendResolutions = true,
-                    TeamsSendResolutions = true,
+                    TeamsSendResolutions = false,
                     GenericSendResolutions = true,
                 },
             };
@@ -292,9 +293,11 @@ public sealed class AlertResolutionSettingsRungTests
             Assert.Equal("0123456789abcdef0123456789abcdef", w.PagerDutyRoutingKey);
             Assert.True(w.PagerDutyUseEuRegion);
             Assert.Equal("http://pd-proxy.example.com:8080", w.PagerDutyProxy);
-            Assert.True(w.PagerDutyAutoResolve);
-            Assert.True(w.SlackSendResolutions && w.TeamsSendResolutions && w.GenericSendResolutions);
-            Assert.True(view.Smtp.SendResolutions);
+            Assert.False(w.PagerDutyAutoResolve);
+            Assert.True(w.SlackSendResolutions);
+            Assert.False(w.TeamsSendResolutions);
+            Assert.True(w.GenericSendResolutions);
+            Assert.False(view.Smtp.SendResolutions);
 
             bodySucceeded = true;
         }
@@ -437,6 +440,54 @@ public sealed class AlertResolutionSettingsRungTests
             // The values the save did not touch are sealed.
             Assert.True(PasswordSeal.IsSealed(stored[1]));
             Assert.True(PasswordSeal.IsSealed(stored[4]));
+        });
+    }
+
+    [Fact]
+    public async Task WhileASigningKeyIsSaved_TheStartLeavesTheGenericUrlAndHeadersAsPlainText_AndTheKeyStillOpens()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the #6715 start seal (it mints its own scratch database).");
+        await WithSeededScratchStoreAsync(async (provider, dataSource, ct) =>
+        {
+            using var key = PasswordPrivateKey.Generate();
+            var ring = DarlingPasswordKey.FromPrivateKey(key);
+
+            /* Save a key bound to the generic URL's plain text, with the Viewer's own binding, sealer and write statement. The Viewer's
+               Generate action refuses a URL that is not sealed yet, so the test composes its steps itself. */
+            await using var viewer = new ViewerDataService(dataSource.ConnectionString);
+            var state = await viewer.GetSettingsSigningKeyStateAsync(ct);
+            Assert.NotNull(state);
+            Assert.Equal(SeedGeneric, state.StoredUrl);
+            var signingKey = WebhookSigning.NewKey();
+            var sealedKey = new ViewerPasswordSealer(key.PublicKey)
+                .SealWebhook(signingKey, ViewerWebhookSigningKeys.BindingFor(PasswordBinding.WebhookSettingsRow, state));
+            await using (var write = dataSource.CreateCommand(ViewerDataService.SettingsSigningKeyWriteSql))
+            {
+                write.Parameters.AddWithValue(sealedKey);
+                write.Parameters.AddWithValue(state.StoredUrl);
+                write.Parameters.AddWithValue(state.Proxy);
+                write.Parameters.AddWithValue(WebhookSigning.RotationOverlapDays);
+                Assert.Equal(1, await write.ExecuteNonQueryAsync(ct));
+            }
+
+            await provider.SealPlainWebhookSettingsAsync(ring, ct);
+
+            // The URL stays plain text, so the key keeps opening, and the headers (bound to the URL's text) stay plain text with it.
+            var stored = await ReadWebhookColumnsAsync(dataSource, ct);
+            Assert.Equal(SeedGeneric, stored[2]);
+            Assert.Equal(SeedHeaders, stored[3]);
+            // The values with no key behind them are sealed.
+            Assert.True(PasswordSeal.IsSealed(stored[0]));
+            Assert.True(PasswordSeal.IsSealed(stored[1]));
+            Assert.True(PasswordSeal.IsSealed(stored[4]));
+
+            var view = await provider.LoadViewAsync(new DarlingConfig(), ct);
+            Assert.NotNull(view);
+            var opened = DarlingWebhookSecrets.Open(view.Webhooks, view.NotificationRoutes, ring);
+            Assert.Empty(opened.Failures);
+            Assert.Equal(SeedGeneric, opened.Webhooks.GenericUrl);
+            Assert.Equal(SeedHeaders, opened.Webhooks.GenericHeaders);
+            Assert.Equal(signingKey, opened.Webhooks.GenericSigning!.Key);
         });
     }
 

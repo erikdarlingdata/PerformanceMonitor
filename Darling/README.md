@@ -918,6 +918,7 @@ Email delivery is enabled when `host` and `from` are set — there is no separat
 | `from` | `""` | |
 | `to` | `""` | Comma-separated default recipients, for alerts no notification route covers; may be blank when routes name the recipients |
 | `emailCooldownMinutes` | `15` | Email/webhook channel cooldown (clamped 1–120) |
+| `emailSendResolutions` | `false` | Also send the email when an alert resolves |
 
 ### webhooks
 
@@ -929,6 +930,17 @@ A channel is enabled by a non-empty URL.
 | `teamsProxy` | `""` | Optional proxy address |
 | `slackUrl` | `""` | Slack incoming webhook |
 | `slackProxy` | `""` | Optional proxy address |
+| `slackSendResolutions` | `false` | Also post to Slack when an alert resolves |
+| `teamsSendResolutions` | `false` | Also post to Teams when an alert resolves |
+| `genericUrl` | `""` | Generic webhook endpoint, stored sealed |
+| `genericHeaders` | `""` | JSON object of request headers, stored sealed |
+| `genericBodyTemplate` | `""` | JSON body with `{{metric}}` and `{{server}}` placeholders, or empty for the shared default |
+| `genericProxy` | `""` | Optional proxy address |
+| `genericSendResolutions` | `false` | Also post to the generic webhook when an alert resolves |
+| `pagerDutyRoutingKey` | `""` | PagerDuty Events API v2 routing key, stored sealed |
+| `pagerDutyUseEuRegion` | `false` | Use the EU PagerDuty endpoint |
+| `pagerDutyProxy` | `""` | Optional proxy address |
+| `pagerDutyAutoResolve` | `false` | Close the PagerDuty incident when the alert resolves |
 
 Webhook and heartbeat posts do not connect to a link-local address (169.254.0.0/16, fe80::/10) or to the cloud instance addresses `fd00:ec2::254`, `168.63.129.16` and `100.100.100.200`; loopback and private addresses stay allowed. The address check applies to direct connections: when a channel posts through a proxy, Darling checks the address the URL itself spells out when it is saved (a trailing dot and the IPv4-mapped, NAT64 and IPv4-compatible forms included) but cannot see what the proxy connects to, so the proxy decides what it can reach.
 
