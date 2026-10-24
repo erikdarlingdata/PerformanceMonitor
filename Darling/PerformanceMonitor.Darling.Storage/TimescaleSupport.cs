@@ -9045,24 +9045,22 @@ AND   j.hypertable_name = '{relation}'";
         => $"SELECT add_compression_policy('collect.{view}', compress_after => INTERVAL '{AggregateCompressAfterFor(view)}', schedule_interval => INTERVAL '{AggregateCompressionScheduleInterval}', if_not_exists => true, initial_start => {AggregateCompressionInitialStartSql(AggregateCompressionBandHourFor(view), AggregateCompressionBandMinute, nightOffset)})";
 
     /// <summary>
-    /// Every registered aggregate's compression state in one read: whether compression is enabled on the
-    /// materialization, its compression job if any (with the four things a converged policy is made of —
-    /// <c>compress_after</c>, cadence, fixed schedule, and the UTC hour and minute it is pinned to), how large the
-    /// materialization is, and how many of its chunks would compress on the policy's first run under EACH
-    /// tier's <c>compress_after</c> — both counted, the caller picks its tier's, because the tier is a C#
-    /// registry fact and the read should not restate it.
+    /// Every registered aggregate's compression state in one cheap read: whether compression is enabled on the
+    /// materialization, and its compression job if any (with the four things a converged policy is made of —
+    /// <c>compress_after</c>, cadence, fixed schedule, and the UTC hour and minute it is pinned to).
     ///
     /// <para>Joins the job on EITHER identity, the view or its materialization, for the reason
     /// <see cref="ContinuousAggregateRefreshStateSql"/> documents: the job catalog resolves an aggregate's
     /// jobs back to the user view (measured for compression jobs too — <c>collect</c> / <c>&lt;view&gt;</c>),
     /// but the underlying row carries the materialization, and the two schemas are disjoint so no job can
-    /// match twice. Chunks are keyed by the MATERIALIZATION, which is the only identity
-    /// <c>timescaledb_information.chunks</c> knows an aggregate by — a count keyed by the view name reads zero
-    /// forever, silently, which is the shape #3582 recorded for the store-metrics tool.</para>
+    /// match twice. The hour and minute are extracted in UTC so a session time zone cannot make a correctly
+    /// pinned job read as stale.</para>
     ///
-    /// <para>Sizes come from <c>hypertable_size</c> over the materialization — the whole relation, indexes
-    /// included, because indexes are what compression removes on a chunk — and the hour and minute are
-    /// extracted in UTC so a session time zone cannot make a correctly pinned job read as stale.</para>
+    /// <para><b>Sizes and chunk counts are NOT here (#6648).</b> They were columns of this read, so every hourly
+    /// ensure ran <c>hypertable_size</c> and two correlated counts over <c>timescaledb_information.chunks</c> for
+    /// every one of the registered aggregates, and that read grows with the chunk count — to feed a staging
+    /// decision that only an aggregate with no policy yet ever makes. <see cref="AggregateCompressionSizeSql"/>
+    /// reads them, for those aggregates only; a converged store makes no second read at all.</para>
     /// </summary>
     public static string AggregateCompressionStateSql =>
         $@"
@@ -9074,24 +9072,7 @@ SELECT
     EXTRACT(EPOCH FROM j.schedule_interval)::bigint AS schedule_interval_seconds,
     j.fixed_schedule,
     CASE WHEN j.initial_start IS NULL THEN NULL ELSE EXTRACT(HOUR FROM j.initial_start AT TIME ZONE 'UTC')::int END AS phase_hour,
-    CASE WHEN j.initial_start IS NULL THEN NULL ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int END AS phase_minute,
-    hypertable_size(format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass) AS materialization_bytes,
-    (
-        SELECT count(*)
-        FROM timescaledb_information.chunks AS c
-        WHERE c.hypertable_schema = ca.materialization_hypertable_schema
-        AND   c.hypertable_name = ca.materialization_hypertable_name
-        AND   NOT c.is_compressed
-        AND   c.range_end < now() - INTERVAL '{HourlyAggregateCompressAfter}'
-    ) AS eligible_under_hourly_rule,
-    (
-        SELECT count(*)
-        FROM timescaledb_information.chunks AS c
-        WHERE c.hypertable_schema = ca.materialization_hypertable_schema
-        AND   c.hypertable_name = ca.materialization_hypertable_name
-        AND   NOT c.is_compressed
-        AND   c.range_end < now() - INTERVAL '{DailyAggregateCompressAfter}'
-    ) AS eligible_under_daily_rule
+    CASE WHEN j.initial_start IS NULL THEN NULL ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int END AS phase_minute
 FROM timescaledb_information.continuous_aggregates AS ca
 LEFT JOIN timescaledb_information.jobs AS j
   ON  (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')
@@ -9100,6 +9081,87 @@ LEFT JOIN timescaledb_information.jobs AS j
      OR (j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name)
       )
 WHERE ca.view_schema = 'collect'";
+
+    /// <summary>
+    /// How large each named materialization is, and how many of its chunks would compress on a policy's first
+    /// run under EACH tier's <c>compress_after</c> — both counted, the caller picks its tier's, because the tier
+    /// is a C# registry fact and the read should not restate it (#6648; the columns
+    /// <see cref="AggregateCompressionStateSql"/> used to carry for all registered aggregates every hour).
+    /// <c>$1</c> is the view names (<c>text[]</c>): only the aggregates still without a policy, the ones
+    /// <see cref="StageAggregateCompressionNights"/> orders. Columns: view, bytes, eligible under the hourly rule,
+    /// eligible under the daily rule.
+    ///
+    /// <para>One grouped pass over <c>timescaledb_information.chunks</c>, restricted to the named
+    /// materializations, rather than two correlated counts per aggregate. Chunks are keyed by the
+    /// MATERIALIZATION, which is the only identity that view knows an aggregate by — a count keyed by the view
+    /// name reads zero forever, silently, which is the shape #3582 recorded for the store-metrics tool. Sizes
+    /// come from <c>hypertable_size</c> over the materialization — the whole relation, indexes included, because
+    /// indexes are what compression removes on a chunk.</para>
+    /// </summary>
+    public static string AggregateCompressionSizeSql =>
+        $@"
+WITH wanted AS (
+    SELECT ca.view_name, ca.materialization_hypertable_schema AS schema_name, ca.materialization_hypertable_name AS table_name
+    FROM timescaledb_information.continuous_aggregates AS ca
+    WHERE ca.view_schema = 'collect'
+    AND   ca.view_name = ANY($1::text[])
+),
+eligible AS (
+    SELECT
+        c.hypertable_schema,
+        c.hypertable_name,
+        count(*) FILTER (WHERE NOT c.is_compressed AND c.range_end < now() - INTERVAL '{HourlyAggregateCompressAfter}') AS eligible_under_hourly_rule,
+        count(*) FILTER (WHERE NOT c.is_compressed AND c.range_end < now() - INTERVAL '{DailyAggregateCompressAfter}') AS eligible_under_daily_rule
+    FROM timescaledb_information.chunks AS c
+    WHERE EXISTS (SELECT 1 FROM wanted AS w WHERE w.schema_name = c.hypertable_schema AND w.table_name = c.hypertable_name)
+    GROUP BY c.hypertable_schema, c.hypertable_name
+)
+SELECT
+    w.view_name,
+    hypertable_size(format('%I.%I', w.schema_name, w.table_name)::regclass) AS materialization_bytes,
+    COALESCE(e.eligible_under_hourly_rule, 0) AS eligible_under_hourly_rule,
+    COALESCE(e.eligible_under_daily_rule, 0) AS eligible_under_daily_rule
+FROM wanted AS w
+LEFT JOIN eligible AS e
+  ON  e.hypertable_schema = w.schema_name
+  AND e.hypertable_name = w.table_name";
+
+    /// <summary>
+    /// Applies the size rows of <see cref="AggregateCompressionSizeSql"/> to the aggregates about to be staged (#6648).
+    /// The tier picks the chunk count: an hourly target takes <c>EligibleHourly</c>, a daily or baseline one
+    /// <c>EligibleDaily</c>. A view the rows do not name is returned as unread and is NOT in the sized list: its
+    /// 0 bytes and 0 eligible chunks mean "not read", and staging them would read as "nothing eligible, night zero is
+    /// harmless" and put a full backlog on night zero, the thing #3581 staged against. That is what a failed read does
+    /// too; the caller adds no policy for an unread view this pass and the next ensure sizes it. A converged store
+    /// never gets here: only an aggregate with no policy yet is in <paramref name="needingPolicy"/>.
+    /// </summary>
+    internal static (List<AggregateCompressionState> Sized, List<string> Unread) ApplyAggregateCompressionSizes(
+        IReadOnlyList<AggregateCompressionState> needingPolicy,
+        IReadOnlyDictionary<string, (long Bytes, long EligibleHourly, long EligibleDaily)> sizes)
+    {
+        ArgumentNullException.ThrowIfNull(needingPolicy);
+        ArgumentNullException.ThrowIfNull(sizes);
+
+        var sized = new List<AggregateCompressionState>(needingPolicy.Count);
+        var unread = new List<string>();
+        foreach (var state in needingPolicy)
+        {
+            if (sizes.TryGetValue(state.View, out var size))
+            {
+                sized.Add(state with
+                {
+                    MaterializationBytes = size.Bytes,
+                    EligibleChunksNow = AggregateCompressionTargetFor(state.View).Hourly ? size.EligibleHourly : size.EligibleDaily,
+                });
+            }
+            else
+            {
+                unread.Add(state.View);
+            }
+        }
+
+        return (sized, unread);
+    }
 
     /// <summary>
     /// Moves one EXISTING aggregate compression policy onto the shipped <c>compress_after</c>, cadence and band
@@ -9159,7 +9221,7 @@ WHERE j.job_id = $1::integer";
     /// <para><b>Largest first, by measured materialization size.</b> The largest aggregate is the one whose
     /// backlog pass costs the most and saves the most disk; taking it first front-loads the saving onto the
     /// store that needs it and puts the biggest single night where the operator is watching most closely —
-    /// the first one. Size is read from the store (<see cref="AggregateCompressionStateSql"/>) rather than
+    /// the first one. Size is read from the store (<see cref="AggregateCompressionSizeSql"/>) rather than
     /// assumed from the registry, because which aggregate is largest is a property of the workload: on a store
     /// with no writable Query Store primary the Query Store family is empty and the query_stats rollups
     /// lead.</para>
@@ -9237,7 +9299,7 @@ WHERE j.job_id = $1::integer";
     /// <c>timescaledb_information.dimensions</c> carries one <c>time_interval</c> per hypertable dimension; a
     /// materialization has exactly one, its time dimension, and the join is on the materialization identity
     /// because that is the only name the dimensions view knows an aggregate by (the same rule as the chunk
-    /// counts in <see cref="AggregateCompressionStateSql"/>). Seconds rather than the interval itself so the
+    /// counts in <see cref="AggregateCompressionSizeSql"/>). Seconds rather than the interval itself so the
     /// comparison is an integer equality in C# against <see cref="MaterializationChunkIntervalSpan"/>, and a
     /// session setting cannot change how the interval renders.
     /// </summary>
@@ -9586,6 +9648,28 @@ ORDER BY i.indexname";
         => "\"" + identifier.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
 
     /// <summary>
+    /// Reads <see cref="AggregateCompressionSizeSql"/> for the named views (#6648): the materialization's bytes and the chunk
+    /// counts under each tier's rule, keyed by view. A view the store no longer has is absent from the result.
+    /// </summary>
+    internal static async Task<Dictionary<string, (long Bytes, long EligibleHourly, long EligibleDaily)>> ReadAggregateCompressionSizesAsync(
+        NpgsqlConnection connection, string[] views, CancellationToken cancellationToken)
+    {
+        var sized = new Dictionary<string, (long, long, long)>(StringComparer.Ordinal);
+        using var command = new NpgsqlCommand(AggregateCompressionSizeSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+        command.Parameters.AddWithValue(views);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            sized[reader.GetString(0)] = (
+                reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture),
+                Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture),
+                Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture));
+        }
+
+        return sized;
+    }
+
+    /// <summary>
     /// Puts every continuous aggregate this product owns on the compression ladder (#3581): enables columnar
     /// compression on each materialization, attaches a once-a-day compression policy on the daily band, stages
     /// the first runs one aggregate per night largest first, and converges any policy an earlier build left on
@@ -9683,7 +9767,6 @@ ORDER BY i.indexname";
                     continue;
                 }
 
-                var hourly = AggregateCompressionTargetFor(view).Hourly;
                 states[view] = new AggregateCompressionState(
                     View: view,
                     CompressionEnabled: !reader.IsDBNull(1) && reader.GetBoolean(1),
@@ -9693,8 +9776,9 @@ ORDER BY i.indexname";
                     FixedSchedule: !reader.IsDBNull(5) && reader.GetBoolean(5),
                     PhaseHour: reader.IsDBNull(6) ? null : reader.GetInt32(6),
                     PhaseMinute: reader.IsDBNull(7) ? null : reader.GetInt32(7),
-                    MaterializationBytes: reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8), CultureInfo.InvariantCulture),
-                    EligibleChunksNow: Convert.ToInt64(reader.GetValue(hourly ? 9 : 10), CultureInfo.InvariantCulture));
+                    /* Sized below, and only for an aggregate that is still without a policy (#6648). */
+                    MaterializationBytes: 0L,
+                    EligibleChunksNow: 0L);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -9749,6 +9833,41 @@ ORDER BY i.indexname";
                 logger?.LogWarning(
                     "Compression could not be enabled on continuous aggregate {View} — it stays uncompressed, at its full materialized size, until the next restart retries: {Message}",
                     view, ex.Message);
+            }
+        }
+
+        /* Size and eligible chunks for the aggregates that are about to be staged, and only those (#6648): the staging is
+           the one decision that reads them. needingPolicy holds only aggregates with compression enabled and no policy,
+           so a converged store has none and makes no second read. */
+        if (needingPolicy.Count > 0)
+        {
+            try
+            {
+                var sizes = await ReadAggregateCompressionSizesAsync(connection, needingPolicy.Select(s => s.View).ToArray(), cancellationToken);
+                var (sized, unread) = ApplyAggregateCompressionSizes(needingPolicy, sizes);
+                foreach (var state in sized)
+                {
+                    states[state.View] = state;
+                }
+
+                needingPolicy = sized;
+                if (unread.Count > 0)
+                {
+                    /* Unsized is not "nothing eligible" (#3707): the aggregate left the catalog between the two reads, so
+                       it gets no policy this pass, like a failed read, and the next hourly ensure sizes it. */
+                    logger?.LogWarning(
+                        "TimescaleDB: the size read did not return {Views}, so no compression policy was added to {Count} continuous aggregate(s) this pass — the next ensure retries",
+                        string.Join(", ", unread), unread.Count);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* Staging without sizes would put every backlog on night zero, the one thing #3581 staged against, so no policy
+                   is added this pass; the next hourly ensure reads again. */
+                logger?.LogWarning(
+                    "TimescaleDB: could not read the sizes of the continuous aggregates that still need a compression policy, so none was added this pass — the next ensure retries: {Message}",
+                    ex.Message);
+                needingPolicy.Clear();
             }
         }
 

@@ -896,7 +896,7 @@ public sealed class DarlingMcpHealthParserTools
         {
             return WitnessStatus(
                 "unavailable",
-                RingBufferTruncationNote.HealthParserMessage(eventType, c.DisplayName, hoursBack, truncation),
+                RingBufferTruncationNote.HealthParserMessage(eventType, c.DisplayName, hoursBack, truncation, c.RawEventCount, noneQualifiedBecause),
                 sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: c.RawEventCount);
         }
 
