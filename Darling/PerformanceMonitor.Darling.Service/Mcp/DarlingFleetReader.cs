@@ -355,7 +355,10 @@ AND   {SqlServerCollectedTargetSql}";
        band's count tiers (5 / 20 per hour) were measured in blocked-process REPORTS per server-hour, so the band
        reads those; the tile, the alert value and the MCP counts stay waits. Each source is read once (the
        *_reports CTE, shared by the report count and the waits chain), so the window and the floor are still
-       applied once per source. */
+       applied once per source.
+
+       #6705: both reads leave a parallel query waiting on itself out (BlockingWaits.NotSelfWaitSql), so the report count
+       the band reads agrees with the waits count, which WaitsCteSql already filters. */
     public static readonly string FleetBlockingSql = @"
 WITH xe_reports AS (
     SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
@@ -363,6 +366,7 @@ WITH xe_reports AS (
     WHERE event_time >= $1
     AND   event_time <= $2
     AND   collection_time >= $3
+    AND   " + BlockingWaits.NotSelfWaitSql + @"
 ),
 dmv_reports AS (
     SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
@@ -370,6 +374,7 @@ dmv_reports AS (
     WHERE event_time >= $1
     AND   event_time <= $2
     AND   collection_time >= $3
+    AND   " + BlockingWaits.NotSelfWaitSql + @"
 )," + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "xe_waits",
         "SELECT * FROM xe_reports", new[] { "server_id" }) + "," + BlockingWaits.WaitsCteSql(

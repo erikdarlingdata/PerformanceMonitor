@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -73,6 +74,25 @@ public partial class LocalDataService
             AppLogger.Warn("CurrentDatabases", $"The newest database_states snapshot for server {serverId} failed, so no dropped database is left out of the read that asked: {ex.Message}");
             return null;
         }
+    }
+
+    /// <summary>
+    /// #6651 (#5633 item 4): the databases a desktop grid's all-databases ranking over [<paramref name="startUtc"/>, <paramref name="endUtc"/>]
+    /// leaves out, the way get_top_procedures_by_cpu does: the ones the server DROPPED. Null when a database is chosen (a named database is
+    /// read as asked), when nothing was dropped, or when the set is unknown (no recent snapshot). A window that ended in the past is
+    /// anchored at its end, as the MCP tool's as_of read is, so a database dropped since still ranks for a window it existed in.
+    /// </summary>
+    public async Task<IReadOnlyList<string>?> GetDatabasesLeftOutOfRankingAsync(
+        int serverId, IReadOnlyList<string>? chosenDatabases, DateTime startUtc, DateTime endUtc, DateTime? nowUtc = null)
+    {
+        if (chosenDatabases is { Count: > 0 })
+        {
+            return null;
+        }
+
+        var now = nowUtc ?? DateTime.UtcNow;
+        return DatabasesLeftOut.Distinct(
+            await GetDroppedDatabasesAsync(serverId, nowUtc: now, asOfUtc: endUtc < now ? endUtc : null, windowStartUtc: startUtc));
     }
 
     /// <summary>The longest look-back <see cref="GetDroppedDatabasesAsync"/> reaches for an earlier snapshot naming a database, the twin

@@ -57,6 +57,29 @@ public sealed class WebhookUrlGuardTests
         Assert.Single(receiver.Bodies);
     }
 
+    /* #6392: the proxied handler connects to its proxy through the same guard, so a proxy at a link-local address is refused while a proxy on
+       loopback (or a private address) still carries the request. Both redirect modes build the handler the same way. */
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AProxiedWebhookPost_RefusesALinkLocalProxy_ButAProxyOnLoopbackStillCarriesIt(bool followRedirects)
+    {
+        using (var refusedHandler = WebhookAlertService.NewProxyHandler("http://169.254.169.254:3128", followRedirects))
+        using (var refusedClient = new HttpClient(refusedHandler) { Timeout = TimeSpan.FromSeconds(10) })
+        {
+            var refused = await Assert.ThrowsAsync<HttpRequestException>(
+                () => refusedClient.PostAsync("http://hooks.example.test/hook", new StringContent("{}"), TestContext.Current.CancellationToken));
+            Assert.Contains(WebhookConnectGuard.RefusalText, refused.ToString(), StringComparison.Ordinal);
+        }
+
+        using var proxy = new CapturingWebhookEndpoint();
+        using var handler = WebhookAlertService.NewProxyHandler(proxy.Url, followRedirects);
+        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
+        using var posted = await client.PostAsync("http://hooks.example.test/hook", new StringContent("{}"), TestContext.Current.CancellationToken);
+        Assert.True(posted.IsSuccessStatusCode);
+        Assert.Single(proxy.Bodies);
+    }
+
     [Theory]
     [InlineData("https://hooks.example.com/services/T0/B0/xyz", null)]
     [InlineData("http://127.0.0.1:8080/hook", null)]

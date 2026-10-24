@@ -232,15 +232,16 @@ public sealed class CollectionStateToolsLiveTests
     }
 
     [Fact]
-    public async Task McpRole_CanSetNoServiceFlag_ThePausedFlagIncluded()
+    public async Task McpRole_CannotSetTheViewerOnlyServiceFlags_ThePausedFlagIncluded()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await OpenAsync(ct);
         var ok = false;
         try
         {
+            /* #6393 gave mcp UPDATE on five flags (capture_plans among them) for update_service_flags; mcp_enabled stays Viewer-only. */
             var denied = await Assert.ThrowsAsync<PostgresException>(() =>
-                ExecAsync(rig.Mcp, "UPDATE config.config_service SET capture_plans = NOT capture_plans WHERE id = 1", ct));
+                ExecAsync(rig.Mcp, "UPDATE config.config_service SET mcp_enabled = NOT mcp_enabled WHERE id = 1", ct));
             Assert.Equal("42501", denied.SqlState);
             var pausedDenied = await Assert.ThrowsAsync<PostgresException>(() =>
                 ExecAsync(rig.Mcp, "UPDATE config.config_service SET paused = TRUE WHERE id = 1", ct));

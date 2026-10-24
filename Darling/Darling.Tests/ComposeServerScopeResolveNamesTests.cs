@@ -27,10 +27,10 @@ namespace Darling.Tests;
 /* #1776 own-store: the live test seeds its own scratch database (ScratchPostgres), so it shares no rows with another class. */
 public sealed class ComposeServerScopeResolveNamesTests
 {
-    private static readonly IReadOnlyList<DarlingServerResolver.RegisteredServer> Servers = new[]
+    private static readonly IReadOnlyList<RegisteredServer> Servers = new[]
     {
-        new DarlingServerResolver.RegisteredServer(1, "sql2022-host", "Prod Orders"),
-        new DarlingServerResolver.RegisteredServer(2, "sql2025-host", "Prod Billing"),
+        new RegisteredServer(1, "sql2022-host", "Prod Orders"),
+        new RegisteredServer(2, "sql2025-host", "Prod Billing"),
     };
 
     [Fact]
@@ -74,7 +74,7 @@ public sealed class ComposeServerScopeResolveNamesTests
     [Fact]
     public void RemovedServerName_ThatIsAPrefixOfAnEnabledServer_StaysAsWritten()
     {
-        var enabled = new[] { new DarlingServerResolver.RegisteredServer(7, "SQL01-DR", null) };
+        var enabled = new[] { new RegisteredServer(7, "SQL01-DR", null) };
         var (scope, refusal) = ComposeServerScope.ResolveNames(new[] { "SQL01" }, enabled);
         Assert.Null(refusal);
         Assert.Equal(new[] { "SQL01" }, scope);
@@ -85,8 +85,8 @@ public sealed class ComposeServerScopeResolveNamesTests
     {
         var shared = new[]
         {
-            new DarlingServerResolver.RegisteredServer(1, "sql-a", "Prod"),
-            new DarlingServerResolver.RegisteredServer(2, "sql-b", "prod"),
+            new RegisteredServer(1, "sql-a", "Prod"),
+            new RegisteredServer(2, "sql-b", "prod"),
         };
         var (_, refusal) = ComposeServerScope.ResolveNames(new[] { "Prod" }, shared);
         Assert.NotNull(refusal);
@@ -102,7 +102,7 @@ public sealed class ComposeServerScopeResolveNamesTests
     {
         var (scope, refusal) = ComposeServerScope.ResolveNames(new[] { "NO-SUCH-SERVER" }, Servers);
         Assert.Null(refusal);
-        var message = DarlingWebEndpoints.UnknownServerMessage(scope, new[] { "NO-SUCH-SERVER" }, new System.Text.Json.Nodes.JsonArray());
+        var message = ComposePanelRunner.UnknownServerMessage(scope, new[] { "NO-SUCH-SERVER" }, new System.Text.Json.Nodes.JsonArray());
         Assert.NotNull(message);
         Assert.Contains("'NO-SUCH-SERVER'", message, StringComparison.Ordinal);
     }
@@ -136,8 +136,8 @@ public sealed class ComposeServerScopeResolveNamesTests
     {
         var all = new[]
         {
-            new DarlingServerResolver.RegisteredServer(1, "SQL01", "Old box"),
-            new DarlingServerResolver.RegisteredServer(2, "NEWBOX", "SQL01"),
+            new RegisteredServer(1, "SQL01", "Old box"),
+            new RegisteredServer(2, "NEWBOX", "SQL01"),
         };
         var (scope, refusal) = ComposeServerScope.ResolveNames(new[] { name }, all);
         Assert.Null(refusal);
@@ -145,8 +145,8 @@ public sealed class ComposeServerScopeResolveNamesTests
 
         var otherCase = new[]
         {
-            new DarlingServerResolver.RegisteredServer(1, "sql01", "Old box"),
-            new DarlingServerResolver.RegisteredServer(2, "NEWBOX", "SQL01"),
+            new RegisteredServer(1, "sql01", "Old box"),
+            new RegisteredServer(2, "NEWBOX", "SQL01"),
         };
         var (caseScope, caseRefusal) = ComposeServerScope.ResolveNames(new[] { name }, otherCase);
         Assert.Null(caseRefusal);

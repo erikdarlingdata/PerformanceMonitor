@@ -539,7 +539,7 @@ public partial class FinOpsTab : UserControl
         /* Contextual explanation — one sentence describing WHY this classification */
         ClassificationExplanation.Text = data.ProvisioningStatus switch
         {
-            "RIGHT_SIZED" => ServerHardwareScope.RightSizedExplanation(data.AvgCpuPct, data.P95CpuPct, bpPct, azureSqlDb),
+            "RIGHT_SIZED" => ServerHardwareScope.RightSizedExplanation(data.AvgCpuPct, data.P95CpuPct, data.MaxCpuPct, data.GrantUtilizationPct, bpPct, azureSqlDb),
             "OVER_PROVISIONED" => ServerHardwareScope.OverProvisionedExplanation(data.AvgCpuPct, data.MaxCpuPct, bpPct, azureSqlDb),
             /* The reason comes from the same place as the verdict. This branch used to read
                "P95CpuPct > 85 ? CPU : memory ratio is {x} (threshold: 0.95)", so a server flagged for grant

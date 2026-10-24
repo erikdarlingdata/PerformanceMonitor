@@ -26,7 +26,7 @@ namespace Lite.Tests;
 
 /// <summary>
 /// Lite's Client Timeouts settings surfaces (#5640), the twin of <c>RunnableQueueSettingsSurfaceTests</c>: the Settings
-/// window's save rules, the three settings-file keys the window writes and <c>App</c> loads, the sample file (alert OFF by
+/// window's save rules, the three settings-file keys the window writes and <c>App</c> loads, the sample file (alert ON by
 /// default), the engine settings the statics project onto, and the MCP <c>get_alert_settings</c> group. Shares the
 /// "app-alert-statics" collection because two tests read and write the App statics.
 /// </summary>
@@ -103,7 +103,7 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
     /* ---------------- the settings file ---------------- */
 
     [Fact]
-    public void TheWindowWritesTheThreeKeysAppLoads_AndTheSampleFileCarriesThemAtTheEvaluatorsDefaults_WithTheAlertOff()
+    public void TheWindowWritesTheThreeKeysAppLoads_AndTheSampleFileCarriesThemAtTheEvaluatorsDefaults_WithTheAlertOn()
     {
         var window = File.ReadAllText(FindRepoFile(Path.Combine("Lite", "Windows", "SettingsWindow.xaml.cs")));
         var app = File.ReadAllText(FindRepoFile(Path.Combine("Lite", "App.xaml.cs")));
@@ -111,20 +111,30 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
 
         foreach (var key in Keys)
         {
-            Assert.Contains($"root[\"{key}\"]", window, StringComparison.Ordinal);
+            if (key == "alert_client_timeouts_enabled")
+            {
+                /* #5736: the switch is written beside its marker, by App.WriteClientTimeoutsSwitch, and
+                   ClientTimeoutsOnByDefaultSettingsTests round-trips that write through the loader. */
+                Assert.Contains($"root[\"{key}\"]", app, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains($"root[\"{key}\"]", window, StringComparison.Ordinal);
+            }
+
             Assert.Contains($"\"{key}\"", app, StringComparison.Ordinal);
             Assert.Contains($"\"{key}\"", sample, StringComparison.Ordinal);
         }
 
-        Assert.Matches(new Regex(@"""alert_client_timeouts_enabled"":\s*false"), sample);
+        Assert.Matches(new Regex(@"""alert_client_timeouts_enabled"":\s*true"), sample);
         Assert.Matches(
             new Regex($@"""alert_client_timeouts_warning_per_minute"":\s*{AttentionEvaluator.DefaultWarningPerMinute}\b"), sample);
         Assert.Matches(
             new Regex($@"""alert_client_timeouts_critical_per_minute"":\s*{AttentionEvaluator.DefaultCriticalPerMinute}\b"), sample);
 
-        /* The load takes the whole-number bars from 1 up, and the switch ships off (no initializer on the static). */
+        /* The load takes the whole-number bars from 1 up, and the switch ships on since #5736. */
         Assert.Contains("AlertClientTimeoutsWarningPerMinute = v.WholeNumber(AlertClientTimeoutsWarningPerMinute, 1, int.MaxValue)", app, StringComparison.Ordinal);
-        Assert.Contains("public static bool AlertClientTimeoutsEnabled { get; set; }", app, StringComparison.Ordinal);
+        Assert.Contains("public static bool AlertClientTimeoutsEnabled { get; set; } = true;", app, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -239,7 +249,7 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
         Assert.Contains("client_timeouts.enabled", description, StringComparison.Ordinal);
         Assert.Contains("client_timeouts.warning_per_minute", description, StringComparison.Ordinal);
         Assert.Contains("client_timeouts.critical_per_minute", description, StringComparison.Ordinal);
-        Assert.Contains("OFF by default", description, StringComparison.Ordinal);
+        Assert.Contains("ON by default", description, StringComparison.Ordinal);
     }
 
     private static string FindRepoFile(string relativePath)

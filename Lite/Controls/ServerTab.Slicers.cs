@@ -232,11 +232,12 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var procStats = await Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetTopProceduresByCpuAsync(_serverId, 0, 50, e.StartUtc, e.EndUtc, ServerClock, SelectedDatabaseFilter, tags: tags)));
+            var (procStats, procLeftOut) = await ReadTopProceduresAsync(0, e.StartUtc, e.EndUtc);
             _procStatsFilterMgr!.UpdateData(procStats);
             /* #4284: UTC comparison and banner bounds -- see the twin comment in OnQueryStatsSlicerChanged above. */
             await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);
             await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, e.StartUtc, e.EndUtc);
+            await UpdateProcStatsLeftOutBannerAsync(procStats.Count, procLeftOut, e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
         {
