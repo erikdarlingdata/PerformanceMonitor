@@ -586,6 +586,17 @@ public partial class AlertsHistoryTab : UserControl
         window.ShowDialog();
     }
 
+    private void AlertRules_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService == null)
+        {
+            return;
+        }
+
+        var window = new AlertRulesWindow(_dataService) { Owner = Window.GetWindow(this) };
+        window.ShowDialog();
+    }
+
     private void KnownPatterns_Click(object sender, RoutedEventArgs e)
     {
         if (_dataService == null)
