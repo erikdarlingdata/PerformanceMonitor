@@ -89,6 +89,15 @@ public sealed class QueryStoreHistoryBehaviourTests
     }
 
     [Fact]
+    public void TheForcedColumn_ReadsARemovedForceAsNoRemoved_AndSpacesEveryUnderscoreInAStateName()
+    {
+        var rows = Run("forcedLabels").GetProperty("rowTexts").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal(2, rows.Length);
+        Assert.Contains("No (removed)", rows[0]);
+        Assert.Contains("unknown plan not collected", rows[1]);
+    }
+
+    [Fact]
     public void AnOpenPanel_SurvivesARebuild_WithoutASecondRead()
     {
         var r = Run("rebuild");
