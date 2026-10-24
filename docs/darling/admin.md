@@ -28,7 +28,7 @@ Run the command line verbs on the service host, from the folder that holds `Perf
 3. Read the verb's output. It tests the connection and prints one line per server. A server that cannot be reached is not added. Re-running a batch that is already added is not an error.
 4. Wait for the service's next pass over the server list. Then check the server's **Collection Health** tab in the Viewer.
 
-A Windows-authentication server is tested by the running service, as the account the service runs under, not as you.
+A Windows-authentication server is tested by the running service, as the account the service runs under, when the verb can reach the service. If it cannot, the verb tests the server as you and says so.
 
 ## Remove a server
 
