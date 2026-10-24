@@ -1522,7 +1522,7 @@ GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {mcp};
 --    ROLE (the trigger function is SECURITY INVOKER). So mcp ALSO needs UPDATE on JUST the two beacon columns of
 --    config_service, or every update_alert_settings write would fail 42501 in production -- and the superuser-run
 --    gated-live tests would never catch it (they connect as the owner). A COLUMN-level grant lets mcp bump the
---    reload beacon but NOT flip paused / capture_plans / mcp_enabled / mcp_port. The targets exist here because
+--    reload beacon but NOT flip paused / mcp_enabled / mcp_port (the five flags update_service_flags writes, capture_plans among them, are a separate column grant below). The targets exist here because
 --    provisioning runs AFTER migration; a recreated table re-grants on the next start (self-heal).
 --    EVERY mcp-writable beacon-triggered table rests on that one grant, not the alert-settings path alone:
 --    config_mute_rules carries trg_bump_mute_rules (V117 / #3315) and config_monitored_servers carries
