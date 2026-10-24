@@ -2211,13 +2211,36 @@ public partial class MainWindow : Window
     private Action? FullChainOpenerFor(ViewerAlertRow row)
     {
         var view = AlertChainLink.ViewFor(row.MetricName);
-        if (view == AlertChainView.None)
+        var server = FindManagedServerById(row.ServerId);
+        if (server is null)
         {
             return null;
         }
 
-        var server = FindManagedServerById(row.ServerId);
-        if (server is null || server.IsPostgres)
+        /* #6390 S6: every other metric with a server tab (and a PostgreSQL server's Blocking Detected, which has no Blocked Process
+           Reports grid) opens that tab over the same window: the viewer's Triage. */
+        var tab = view == AlertChainView.None || server.IsPostgres ? AlertChainLink.TabFor(row.MetricName, server.IsPostgres) : AlertServerTab.None;
+        if (tab != AlertServerTab.None)
+        {
+            var (tabFrom, tabTo) = AlertChainLink.WindowUtc(row.AlertTime);
+            return async () =>
+            {
+                try
+                {
+                    var serverTab = OpenServerTab(server);
+                    if (serverTab is not null)
+                    {
+                        await serverTab.DeepLinkToTabAsync(tab, tabFrom, tabTo);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    OnServerTabStatusChanged($"Opening the {tab} tab failed: {ex.Message}");
+                }
+            };
+        }
+
+        if (view == AlertChainView.None || server.IsPostgres)
         {
             return null;
         }

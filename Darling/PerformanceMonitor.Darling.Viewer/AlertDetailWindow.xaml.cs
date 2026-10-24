@@ -45,7 +45,7 @@ public partial class AlertDetailWindow : Window
         Closing += OnClosingStoreSize;
 
         /* #5847: the link to the full chain, only for an alert whose view holds more than the shortened fields. */
-        var linkText = AlertChainLink.LinkText(AlertChainLink.ViewFor(item.MetricName));
+        var linkText = AlertChainLink.LinkText(AlertChainLink.ViewFor(item.MetricName)) ?? AlertChainLink.TabLinkText(item.MetricName);
         if (openFullChain is not null && linkText is not null)
         {
             _openFullChain = openFullChain;

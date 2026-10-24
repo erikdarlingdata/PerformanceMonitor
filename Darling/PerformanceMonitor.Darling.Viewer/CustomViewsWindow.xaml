@@ -39,7 +39,9 @@
             <Button x:Name="MoveButton" Content="_Move to folder..." Width="130" Height="28" Margin="0,0,8,0" Click="Move_Click"/>
             <Button x:Name="DeleteButton" Content="_Delete" Width="80" Height="28" Margin="0,0,8,0" Click="Delete_Click"/>
             <Button x:Name="ImportButton" Content="_Import JSON..." Width="120" Height="28" Margin="0,0,8,0" Click="Import_Click"/>
-            <Button x:Name="ExportButton" Content="E_xport JSON..." Width="120" Height="28" Click="Export_Click"/>
+            <Button x:Name="ExportButton" Content="E_xport JSON..." Width="120" Height="28" Margin="0,0,8,0" Click="Export_Click"/>
+            <Button x:Name="RunButton" Content="Ru_n view..." Width="110" Height="28" Click="Run_Click"
+                    ToolTip="Run the saved version of the selected view: its composed panels, as the web dashboard shows them."/>
         </StackPanel>
 
         <Grid Grid.Row="3">

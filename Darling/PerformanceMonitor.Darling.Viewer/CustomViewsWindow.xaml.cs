@@ -57,6 +57,15 @@ public partial class CustomViewsWindow : Window
         };
     }
 
+    /// <summary>#6390 S6: opens the saved version of the selected view in the run window.</summary>
+    private void Run_Click(object sender, RoutedEventArgs e)
+    {
+        if (_loaded is { } view)
+        {
+            new CustomViewRunWindow(_dataService, view) { Owner = this }.Show();
+        }
+    }
+
     private bool EditorActive => _loaded is not null || _pending is not null;
 
     private bool CanSaveHere => _supported && ((_pending is not null && _access.CanInsert) || (_loaded is not null && _access.CanUpdate));
@@ -68,6 +77,8 @@ public partial class CustomViewsWindow : Window
         ImportButton.IsEnabled = _supported && _access.CanInsert;
         RenameButton.IsEnabled = _supported && stored && _access.CanUpdate;
         MoveButton.IsEnabled = _supported && stored && _access.CanUpdate;
+        /* Run reads only (the saved version), so it needs no write privilege. */
+        RunButton.IsEnabled = _supported && stored;
         DeleteButton.IsEnabled = _supported && stored && _access.CanDelete;
         ExportButton.IsEnabled = stored;
         DefinitionBox.IsEnabled = EditorActive;

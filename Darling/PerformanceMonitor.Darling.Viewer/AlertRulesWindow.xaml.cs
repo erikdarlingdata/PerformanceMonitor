@@ -22,7 +22,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <summary>One line of the rule list: the store's summary joined with the rule's scope and how many servers it is firing on.</summary>
 public sealed record AlertRuleRow(
     long Id, int Version, string Name, bool Enabled, string Status, string ScopeText, string ExpiryText, string StateText,
-    string LastFiredText, string UpdatedBy)
+    string LastFiredText, string UpdatedBy, DateTime? ExpiresAtUtc = null)
 {
     public string Summary => $"{Name} ({Status})";
 
@@ -37,7 +37,7 @@ public sealed record AlertRuleRow(
             rule.ExpiresAtUtc is { } at ? at.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) : "Never",
             state,
             rule.LastFired is { } fired ? fired.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) : "Never",
-            rule.UpdatedBy ?? "");
+            rule.UpdatedBy ?? "", rule.ExpiresAtUtc);
     }
 }
 

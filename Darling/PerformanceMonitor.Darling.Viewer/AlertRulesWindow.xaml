@@ -40,7 +40,7 @@
                     <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="200"/>
                     <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="70" SortMemberPath="Status"/>
                     <DataGridTextColumn Header="Scope" Binding="{Binding ScopeText}" Width="*"/>
-                    <DataGridTextColumn Header="Expires (UTC)" Binding="{Binding ExpiryText}" Width="140"/>
+                    <DataGridTextColumn Header="Expires (UTC)" Binding="{Binding ExpiryText}" SortMemberPath="ExpiresAtUtc" Width="140"/>
                     <DataGridTextColumn Header="State" Binding="{Binding StateText}" Width="130"/>
                     <DataGridTextColumn Header="Last fired (UTC)" Binding="{Binding LastFiredText}" Width="140"/>
                     <DataGridTextColumn Header="Updated by" Binding="{Binding UpdatedBy}" Width="110"/>

@@ -216,7 +216,8 @@ public sealed class AlertDetailWindowTests
     [InlineData("Blocking Detected", true, true)]
     [InlineData("Deadlocks Detected", true, true)]
     [InlineData("Blocking Detected", false, false)]
-    [InlineData("High CPU", true, false)]
+    [InlineData("High CPU", true, true)]
+    [InlineData("Custom Alert Rules Unhealthy", true, false)]
     public void FullChainLink_ShowsOnlyForAViewTheOpenerCanReach(string metric, bool hasOpener, bool shown)
     {
         StaTestThread.Run(() =>
