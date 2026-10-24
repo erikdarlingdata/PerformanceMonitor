@@ -15,6 +15,7 @@
 
 import { el, mount, apiGet, apiGetFleet, apiWrite, readTool } from "../util.js";
 import { getSession, peekSession } from "../views-api.js";
+import { plainTextCounts } from "../plain-text.js";
 
 const POLL_MS = 2000;
 const GIVE_UP_MS = 15 * 60 * 1000;
@@ -158,7 +159,7 @@ function resultTable(rows) {
       el("td", {}, [run.collection_time ? new Date(run.collection_time).toLocaleString() : ""]),
       el("td", {}, [String(run.status || "")]),
       el("td", {}, [run.rows_collected == null ? "" : String(run.rows_collected)]),
-      el("td", {}, [run.error_message ? String(run.error_message) : ""]),
+      el("td", {}, [run.error_message ? plainTextCounts(String(run.error_message)) : ""]),
     ])
   );
   return el("table", { class: "data-table" }, [el("thead", {}, [head]), el("tbody", {}, body)]);

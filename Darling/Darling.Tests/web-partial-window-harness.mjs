@@ -1,6 +1,6 @@
 /* #5644 W12: runs the web dashboard's real windowFloorStrip, cappedReadNote, partialWindowSubtitle and markPartialSubtitle (wwwroot/js/util.js)
    on a small fake DOM and prints what each drew as one line of JSON. WebPartialWindowBehaviourTests starts it as
-       node web-partial-window-harness.mjs <path to the js folder>
+       node web-partial-window-harness.mjs <path to the js folder> [a collection-history audit alert body]
    Only the DOM is a stand-in; util.js is the shipped module. */
 import { pathToFileURL } from "node:url";
 
@@ -122,6 +122,8 @@ const alertBody = [
   "",
   "Newest blocked process sample: 23:12:45 UTC, 5m 20s old",
 ].join("\n");
+/* the collection-history audit's body: the test passes CollectionHistoryAudit.Render's own output (one line of ". "-joined clauses) as argv[3] */
+const auditBody = process.argv[3] ?? "";
 const sample = { source: "blocked process", instant_utc: "2026-10-12T23:12:45.0000000Z", age_seconds: 320 };
 out.h2 = {
   spaceZ: localizeIsoText("until 2026-10-11 12:48:52Z"),
@@ -139,6 +141,9 @@ out.h2 = {
   stripUtc: noticeStrip("until 2026-10-11 12:48:52Z").textContent,
   here: { inc: here("2026-10-12T23:13:00Z"), fail: here("2026-10-12T07:00:00Z"), end: here("2026-10-12T08:00:00Z"), samp: here("2026-10-12T23:12:45Z") },
   bodyRaw: alertBody,
+  auditBody: localizeAlertDetail(auditBody, null),
+  /* a later clause that a full plainText pass would rewrite: the audit's match must stop at the end of its own sentence */
+  auditBodyWithProbe: localizeAlertDetail(auditBody + " Probe: 29 database(s) were left out (see databases_left_out).", null),
 };
 
 console.log(JSON.stringify(out));

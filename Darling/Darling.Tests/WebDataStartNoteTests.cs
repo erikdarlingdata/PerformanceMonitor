@@ -397,7 +397,7 @@ public sealed class WebDataStartNoteTests
 
         var note = DarlingMcpWindowNotice.Build(
             Utc(2026, 1, 3), Utc(2026, 1, 1), table,
-            baselineTail ? "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end." : null).TruncationNote!;
+            baselineTail ? PerformanceMonitor.Common.QueryStoreRegressionRules.BaselineWindowTail : null).TruncationNote!;
         Assert.DoesNotMatch(@"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}", note);
         Assert.Contains("this server's raw " + table + " retains", note, StringComparison.Ordinal);
         Assert.Equal(baselineTail, note.EndsWith("baseline_end.", StringComparison.Ordinal));
