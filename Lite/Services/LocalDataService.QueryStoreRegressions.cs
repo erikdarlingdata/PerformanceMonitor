@@ -116,7 +116,8 @@ public partial class LocalDataService
     /// and take at most <c>maxRows / FailureShareDivisor</c> slots (more only when the cost rows leave room).
     /// </summary>
     public async Task<List<QueryStoreRegressionRow>> GetQueryStoreRegressionsAsync(
-        int serverId, int hoursBack = 24, int maxRows = 50, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+        int serverId, int hoursBack = 24, int maxRows = 50, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null,
+        IReadOnlyList<string>? excludedDatabases = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -126,6 +127,8 @@ public partial class LocalDataService
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var baselineParamIndex = 4 + dbValues.Count;
         var limitIndex = baselineParamIndex + 1;
+        /* #6654: the databases the server dropped, left out of the candidates before the rank and the cap (the exclusion binds after the limit). */
+        var excludeClause = BuildDbExcludeClause(excludedDatabases, "f.database_name", limitIndex + 1, out var excludeValues);
 
         /* The per-hour rates divide by each window's own length: the baseline is [baseline start, window start), the recent
            window [window start, window end]. Both are numbers computed here, written as invariant literals. */
@@ -312,7 +315,7 @@ qualified AS (
                  ELSE 2 END) AS failure_rank,
         (f.recent_dur_ms - f.base_dur_ms) * f.recent_execs AS additional_duration_ms
     FROM flagged AS f
-    WHERE f.is_cost OR f.is_timeouts OR f.is_errors
+    WHERE (f.is_cost OR f.is_timeouts OR f.is_errors)" + excludeClause + @"
 ),
 ranked AS (
     SELECT
@@ -403,6 +406,8 @@ LIMIT " + limit;
             command.Parameters.Add(new DuckDBParameter { Value = db });
         command.Parameters.Add(new DuckDBParameter { Value = baselineStartTime });
         command.Parameters.Add(new DuckDBParameter { Value = maxRows });
+        foreach (var excluded in excludeValues)
+            command.Parameters.Add(new DuckDBParameter { Value = excluded });
 
         var rows = new List<QueryStoreRegressionRow>();
         var textKeys = new List<(long? Id, DateTime? Time)>();

@@ -1913,6 +1913,8 @@ It decrypts the `network.role` credential and prints a paste-ready connection st
 
 ## Troubleshooting
 
+For a table of what you see, the likely cause and the fix, start with [docs/troubleshooting.md](../docs/troubleshooting.md#darling).
+
 **"Cannot load configuration"** (critical, service idles) — no `darling.json` was found at the resolved path. The message names the path it tried; copy `darling.sample.json` there or point `DARLING_CONFIG` at your file. A file another process is holding open is retried for two minutes first, logged as `"Cannot load configuration yet ... attempt N of 25"` at warning; a missing, malformed or unreadable file is never retried, so this line arrives immediately for it.
 
 **"Configuration problem: ..."** (critical, service idles) — validation failed. The messages are literal and per-field, e.g. `postgres.connectionString is required.`, `servers must contain at least one entry.`, `server 'X': host is required.`, `server 'X': sql auth requires username.`, `server 'X': sql auth requires encryptedPassword (preferred; see --encrypt-password) or password.`, `server 'X': auth must be 'integrated' or 'sql'`. Fix the file and restart the service.

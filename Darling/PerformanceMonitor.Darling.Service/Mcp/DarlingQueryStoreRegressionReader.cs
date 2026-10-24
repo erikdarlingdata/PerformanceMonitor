@@ -107,14 +107,14 @@ internal static class DarlingQueryStoreRegressionReader
     /// <see cref="QueryStoreRegressionBaseline.WideArmsSql"/>), the aggregates (<see cref="QueryStoreRegressionBaseline.AggregatesSql"/>)
     /// and <see cref="QueryStoreRegressionBaseline.SuffixSql"/>, bound to this read's parameters: $1 server_id, $2 window start, $3 window
     /// end, $4 database filter (text[] or NULL), $5 row cap, $6 baseline start, $7 the baseline's days read from the daily
-    /// totals (date[]), $8 and $9 the live half's <c>first_execution_time</c> bounds. <paramref name="useDailyTotals"/> false
+    /// totals (date[]), $8 and $9 the live half's <c>first_execution_time</c> bounds, $10 the databases left out (#6654, text[] or NULL). <paramref name="useDailyTotals"/> false
     /// names no daily table (no run day was found, or the store has none).
     /// </summary>
     internal static string BuildSql(bool wide, bool useDailyTotals) =>
         QueryStoreRegressionBaseline.Bind(
             (wide ? QueryStoreRegressionBaseline.WideArmsSql : QueryStoreRegressionBaseline.RawArmsSql)
             + "\n" + QueryStoreRegressionBaseline.AggregatesSql(useDailyTotals) + "\n" + QueryStoreRegressionBaseline.SuffixSql,
-            "$6", "$7", "$8", "$9", "$5");
+            "$6", "$7", "$8", "$9", "$5", "$10");
 
     /// <summary>
     /// The viewer's regression read over raw <c>query_store_stats</c>, with the baseline's closed days from the daily totals
@@ -329,9 +329,10 @@ internal static class DarlingQueryStoreRegressionReader
     /// <summary>Re-arms <see cref="LogTableFault"/>'s once-per-process Warning. Tests only.</summary>
     internal static void ResetTableFaultWarningForTests() => Interlocked.Exchange(ref s_tableFaultWarned, 0);
 
-    /// <summary>The nine parameters both forms of the read take, in their order: $1 server_id, $2 window start, $3 window
+    /// <summary>The ten parameters both forms of the read take, in their order: $1 server_id, $2 window start, $3 window
     /// end, $4 database filter, $5 row cap, $6 baseline start, $7 the baseline days read from the daily totals (#5506), $8 the
-    /// end of the live half's low <c>first_execution_time</c> range, $9 the start of its high range.</summary>
+    /// end of the live half's low <c>first_execution_time</c> range, $9 the start of its high range, $10 the databases left out
+    /// (<see cref="DatabaseFilter.ExcludeParameter"/>, #6654).</summary>
     private static void AddParameters(
         NpgsqlCommand command, int serverId, DateTime startUtc, DateTime endUtc, DatabaseFilter databases, int limit, DateTime baselineStartUtc,
         QueryStoreRegressionBaseline.Plan plan)
@@ -343,6 +344,7 @@ internal static class DarlingQueryStoreRegressionReader
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RunDays });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.LowEnd, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.HighStart, DateTimeKind.Unspecified) });
+        command.Parameters.Add(databases.ExcludeParameter());
     }
 
     private static double? NullableDouble(NpgsqlDataReader reader, int ordinal) =>
