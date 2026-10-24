@@ -2286,6 +2286,37 @@ CREATE TRIGGER trg_bump_known_patterns
     FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
 
     /// <summary>
+    /// V215: six indexes on the investigation ("agent") tables. A restored store copy loaded with one synthetic year of requests at a
+    /// production store's measured rate (73,000 requests) timed every hot read of these tables. Most stayed under 1 ms. These did not, and
+    /// each index below took its read to well under 10 ms: the follow-up module read (<c>ProcedureStatsModuleDates.WatchedSql</c>, about
+    /// 60,000 calls a day) 127 ms to 5.5 ms with the first two, the due follow-ups read 35 ms to 0.7 ms with the third and second,
+    /// <c>PendingFollowUpsSql</c> 25 ms to 5 ms with the second, the MCP request list and the reports 30-day read 25-53 ms to under
+    /// 0.3 ms with the fourth, the brief's earlier-report and prior-links lookups and the live-practice hider 12-24 ms to under 0.25 ms
+    /// with the fifth, and the retention delete of requests (the <c>fk_investigation_reports_family</c> check scanned every report per
+    /// deleted request) 310 ms for 8 rows to 0.5 ms with the sixth.
+    ///
+    /// <para>Each partial predicate is implied by the WHERE clause of the read it serves, so the planner can use it: an equality on
+    /// <c>follow_up_of</c>, <c>practice_of</c> or <c>family_of</c> implies NOT NULL, and the follow-up reads state
+    /// <c>state = 'reported'</c> and the NOT NULL columns themselves. Plain <c>CREATE INDEX IF NOT EXISTS</c>, not CONCURRENTLY: the tables
+    /// hold hundreds of rows on a production store today, so each build is instant and takes no noticeable lock. The shipped V184 text
+    /// (<c>InvestigationTables.CreateSql</c>) is not edited, and a fresh store runs every rung, so it gets these too. Additive: an older build
+    /// never reads the indexes, and no GRANT is needed for an index.</para>
+    /// </summary>
+    private const string V215Sql = @"
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_reported_condition
+    ON config.investigation_requests (server_id) WHERE state = 'reported' AND follow_up_condition IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_follow_up_of
+    ON config.investigation_requests (follow_up_of) WHERE follow_up_of IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_follow_up_at
+    ON config.investigation_requests (follow_up_at) WHERE state = 'reported' AND follow_up_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_opened_at
+    ON config.investigation_requests (opened_at);
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_practice_of
+    ON config.investigation_requests (practice_of) WHERE practice_of IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_investigation_reports_family_of
+    ON config.investigation_reports (family_of) WHERE family_of IS NOT NULL;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2674,6 +2705,7 @@ $rung$;";
         new Migration(212, "server-machine-identity", V212Sql),
         new Migration(213, "query-store-replica", V213Sql),
         new Migration(214, "known-patterns", V214Sql),
+        new Migration(215, "agent-table-indexes", V215Sql),
     };
 
     /// <summary>

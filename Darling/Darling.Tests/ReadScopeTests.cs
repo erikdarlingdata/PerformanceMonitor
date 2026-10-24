@@ -218,7 +218,7 @@ public sealed class ReadScopeTests
         var end = new DateTime(2026, 9, 15, 0, 0, 0, DateTimeKind.Utc);
 
         using var scope = ReadScope.Open(new CapturingTestLogger());
-        var resolution = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(
+        var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(
             postgres, null, end.AddDays(-3), end, null, TestContext.Current.CancellationToken);
 
         Assert.False(resolution.Eligible);
@@ -233,7 +233,7 @@ public sealed class ReadScopeTests
         var candidate = new ComposeHourlyEdgesCandidate("query_store_stats", "query_store_stats_hourly", hour, hour.AddHours(1));
 
         using var scope = ReadScope.Open(new CapturingTestLogger());
-        await Assert.ThrowsAnyAsync<Exception>(() => DarlingWebEndpoints.ResolveHourlyEdgesVerdictAsync(
+        await Assert.ThrowsAnyAsync<Exception>(() => ComposePanelRunner.ResolveHourlyEdgesVerdictAsync(
             connection, candidate, null, 30, TestContext.Current.CancellationToken));
 
         Assert.Equal(ReadFallback.GateFailed, scope.Fallback);
@@ -248,11 +248,11 @@ public sealed class ReadScopeTests
         var candidate = new ComposeHourlyEdgesCandidate("query_store_stats", "query_store_stats_hourly", hour, hour.AddHours(1));
 
         using var scope = ReadScope.Open(logger);
-        var fault = await Assert.ThrowsAnyAsync<Exception>(() => DarlingWebEndpoints.ResolveHourlyEdgesVerdictAsync(
+        var fault = await Assert.ThrowsAnyAsync<Exception>(() => ComposePanelRunner.ResolveHourlyEdgesVerdictAsync(
             connection, candidate, null, 30, TestContext.Current.CancellationToken));
         Assert.Equal(2, logger.CountAtLevel(LogLevel.Warning));
 
-        DarlingWebEndpoints.NoteHourlyEdgesSnapshotStartFault(fault);
+        ComposePanelRunner.NoteHourlyEdgesSnapshotStartFault(fault);
 
         Assert.Equal(2, logger.CountAtLevel(LogLevel.Warning));
         Assert.Equal(ReadFallback.GateFailed, scope.Fallback);

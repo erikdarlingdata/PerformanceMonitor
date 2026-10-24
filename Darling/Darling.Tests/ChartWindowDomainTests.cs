@@ -53,11 +53,8 @@ public sealed class ChartWindowDomainTests
     private static string ComposeJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "compose.js"));
 
-    private static string EndpointsCs => ReadRepoFileLf(Path.Combine(
-        "Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"));
-
     private static string ComposeSpecCs => ReadRepoFileLf(Path.Combine(
-        "Darling", "PerformanceMonitor.Darling.Service", "Compose", "ComposeSpec.cs"));
+        "Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposeSpec.cs"));
 
     /// <summary>
     /// The renderer honours an optional window as its x-domain, keeps the data extent SEPARATE (so a sparse
@@ -169,9 +166,7 @@ public sealed class ChartWindowDomainTests
 
         /* The live-panel default window is kept in lockstep with the run endpoint's DefaultComposeHours, so a
            live composed panel's drawn axis matches the server's default window. */
-        Assert.Contains("const DEFAULT_COMPOSE_HOURS = 24;", compose, StringComparison.Ordinal);
-        /* Internal since #5506: the composed-panel window band test reads it. */
-        Assert.Contains("internal const int DefaultComposeHours = 24;", EndpointsCs, StringComparison.Ordinal);
+        Assert.Contains($"const DEFAULT_COMPOSE_HOURS = {PerformanceMonitor.Darling.Storage.ComposePanelRunner.DefaultComposeHours};", compose, StringComparison.Ordinal);
 
         /* The relative-window ceiling is clamped to the SAME MaxWindowHours the run endpoint applies (Math.Clamp),
            so a stored/imported range.hours beyond it draws an axis matching the clamped window the server serves,

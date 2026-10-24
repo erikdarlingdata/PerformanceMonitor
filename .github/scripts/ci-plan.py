@@ -4,15 +4,16 @@
 Inputs: the event (pull_request or push), the base branch, the head branch, the draft flag, the labels and the
 changed file list. Outputs, as `key=value` lines (stdout, and $GITHUB_OUTPUT when --github-output is given):
 
-  run              true when the run does any work; false for a draft, an un-gated PR or a merge-train PR
-  outcome          run | skip-gate | skip-draft | train-blocked  (train-blocked: the verdict job must fail, see below)
+  run              true when the run does any work; false for a draft or a merge-train PR
+  outcome          run | skip-draft | train-blocked  (train-blocked: the verdict job must fail, see below)
   why              one plain sentence for the job log
   areas            docs-only | darling | lite | all | none
   darling_scope    full | reads-lite | none   (reads-lite: the Stage=Guard classes plus the classes that read a Lite file)
   lite_scope       full | reads | none        (reads: the Lite classes that read a Darling file)
   build            true when the shared test build is needed (any run that is not docs-only)
   test_minutes     estimated test time of the selected classes, in minutes
-  legs             N = ceil(test_minutes / 12), at most 10; 0 when nothing runs
+  legs             a pull request: N = ceil(test_minutes / MINUTES_PER_LEG), at most MAX_LEGS; a dev push: the same, at least DEV_PUSH_MIN_LEGS and at most DEV_PUSH_MAX_LEGS;
+                   0 when nothing runs
   legs_json        [1, 2, ..., N], for the test job's matrix
   actionlint       true when a workflow file changed
   check_web_js     true when a dashboard JavaScript file changed
@@ -23,8 +24,7 @@ area filters from the same files dorny/paths-filter reads, and the Lite-reads cl
 scan_classes (Reads=Lite and Reads=Darling traits, derived from the test sources).
 
 Rules, in order:
-  1. A pull request without the GATE_LABEL label, from a branch other than GATE_BRANCH, does not run (PR 1 of #6656
-     only; PR 2 sets GATE_LABEL to None). Any event that is not a pull request always runs.
+  1. Any event that is not a pull request always runs. (PR 1 of #6656 gated pull requests on a label; PR 2 removed it.)
   2. A `train/` branch runs, draft or not (a merge-train pull request exists only to run CI).
   3. A `merge-train` label does not run; the verdict job turns that into a failed `CI result` (today's rule: only an
      admin merges it, after the train covered it).
@@ -47,13 +47,21 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
 
-# PR 1 of #6656: only pull requests that carry this label, or come from this branch, run. PR 2 sets GATE_LABEL to None.
-GATE_LABEL = "ci-next"
-GATE_BRANCH = "fix/6656-ci-rebuild"
 TRAIN_LABEL = "merge-train"
 TRAIN_BRANCH_PREFIX = "train/"
-MINUTES_PER_LEG = 12
-MAX_LEGS = 10
+# Legs. A pull request is cut for a short wait: MINUTES_PER_LEG test minutes a leg, so a full all-areas run (about 131
+# weighted minutes, from run 40001582504's per-class times) is 16 legs. A leg also pays about 1.3 minutes that are not tests,
+# measured on that run's 9 legs (checkout, build download, .NET and PostgreSQL start: 52 to 103 s, mean 70 s, plus about 7 s
+# of post steps), so a leg is about 8.5 + 1.3 = 9.8 minutes. A dev push uses the same estimate, at least DEV_PUSH_MIN_LEGS
+# legs (4 timed out) and at most DEV_PUSH_MAX_LEGS (the free plan runs about 20 jobs at once across the repo, so a
+# push must leave runners for open PRs). A full push is 8 legs: about 131 / 8 + 1.3 = 17.7 minutes a leg, under the
+# 25-minute step timeout, and 12 runners stay free for PRs.
+# A fixed 4 legs put a push's Darling.Tests alone at 1266 to 1452 s a leg, and every dev push run (40034434899,
+# 40031691584, 40020225933, 40015830041) timed out the 25-minute test step (#6656).
+MINUTES_PER_LEG = 8.5
+MAX_LEGS = 16
+DEV_PUSH_MIN_LEGS = 6
+DEV_PUSH_MAX_LEGS = 8
 # The GitHub pull request files API returns at most 3000 files; a list that long may have been cut short.
 FILES_API_CAP = 3000
 
@@ -79,11 +87,9 @@ def _load_ci_select():
 # The gate: does this run do any work?
 # ---------------------------------------------------------------------------------------------------------
 def gate(event: str, head_ref: str, draft: bool, labels: "list[str]") -> "tuple[str, str]":
-    """(outcome, why). outcome is run, skip-gate, skip-draft or train-blocked."""
+    """(outcome, why). outcome is run, skip-draft or train-blocked."""
     if event != "pull_request":
         return "run", f"a {event} event always runs."
-    if GATE_LABEL and GATE_LABEL not in labels and head_ref != GATE_BRANCH:
-        return "skip-gate", f"the pull request has no '{GATE_LABEL}' label, so only the old Build workflow covers it."
     if head_ref.startswith(TRAIN_BRANCH_PREFIX):
         return "run", "a merge-train pull request exists to run CI."
     if TRAIN_LABEL in labels:
@@ -204,10 +210,11 @@ def estimate(catalog: dict, darling_scope: str, lite_scope: str) -> "tuple[float
             suite_minutes(lt, catalog["lite_weights"], fallback))
 
 
-def leg_count(test_minutes: float) -> int:
+def leg_count(test_minutes: float, event: str = "pull_request") -> int:
     if test_minutes <= 0:
         return 0
-    return min(MAX_LEGS, max(1, math.ceil(test_minutes / MINUTES_PER_LEG)))
+    n = min(MAX_LEGS, max(1, math.ceil(test_minutes / MINUTES_PER_LEG)))
+    return n if event == "pull_request" else min(DEV_PUSH_MAX_LEGS, max(DEV_PUSH_MIN_LEGS, n))
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -234,7 +241,7 @@ def plan(event: str, base: str, head_ref: str, draft: bool, labels: "list[str]",
     if out["build"] == "true":
         d_min, l_min = estimate(catalog if catalog is not None else load_catalog(), c["darling_scope"], c["lite_scope"])
         total = d_min + l_min
-        n = leg_count(total)
+        n = leg_count(total, event)
         out["test_minutes"] = f"{total:.1f}"
         out["legs"] = str(n)
         out["legs_json"] = json.dumps(list(range(1, n + 1)), separators=(",", ":"))
@@ -284,6 +291,8 @@ def main(argv: "list[str]") -> int:
                _CS.Rules())
     lines = [f"{k}={v}" for k, v in out.items()]
     print("\n".join(lines))
+    if out["legs"] != "0":
+        print(f"legs: {out['legs']} chosen ({out['test_minutes']} weighted test minutes)")
     if args.github_output:
         with open(args.github_output, "a", encoding="utf-8", newline="\n") as fh:
             fh.write("\n".join(lines) + "\n")

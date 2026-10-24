@@ -312,7 +312,7 @@ FROM generate_series(@from, @to, INTERVAL '5 minutes') AS t",
     }
 
     /// <summary>
-    /// The composed panels' fleet gate (<see cref="DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync"/>) over a server whose
+    /// The composed panels' fleet gate (<see cref="ComposePanelRunner.ResolveQueryStoreWideEligibleAsync"/>) over a server whose
     /// window holds legacy rows: it does not ask for clause 6, so the server stays on the interval table and is not sent raw.
     /// </summary>
     [Fact]
@@ -324,7 +324,7 @@ FROM generate_series(@from, @to, INTERVAL '5 minutes') AS t",
         /* The literal end must not fall before the server's applied_through (#6479): the seed stamps it from the clock at write
            time, which on a slow runner is past rig.End, and the gate answers that with "not eligible", not an error. */
         var queryEnd = await QueryEndAsync(rig, ct);
-        var got = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(rig.Postgres, null, rig.End.AddDays(-6), queryEnd, queryEnd, ct);
+        var got = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(rig.Postgres, null, rig.End.AddDays(-6), queryEnd, queryEnd, ct);
         Assert.True(got.Eligible);
         Assert.Null(got.RawServerIds);
     }

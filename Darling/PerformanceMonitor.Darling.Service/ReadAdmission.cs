@@ -15,6 +15,7 @@ using System.Threading.RateLimiting;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -532,9 +533,6 @@ AND   outcome = ANY($2)";
         };
     }
 }
-
-/// <summary>Why a read was refused: the sentence the caller sees, the seconds to wait, and the counts it names.</summary>
-internal sealed record ReadAdmissionRefusal(string Sentence, int RetryAfterSeconds, int Running, int Queued);
 
 /// <summary>The answer of <see cref="ReadAdmission.AdmitAsync"/>. Dispose it when the read ends; that frees the slot.</summary>
 internal sealed class ReadAdmissionTicket : IDisposable

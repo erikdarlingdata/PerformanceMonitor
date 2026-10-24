@@ -217,7 +217,8 @@ public sealed class LockedModeRestoreCoverageTests
     /// workflow runs, directly or through a <c>ProjectReference</c> — bar the ones whose contents follow the
     /// SDK rather than this repository's own choices.
     ///
-    /// <para>Scoped to <c>build.yml</c> deliberately: that is the workflow whose checks gate a merge.
+    /// <para>Scoped to <c>build.yml</c> deliberately: that is the release workflow, and its one restore step
+    /// is the only place every project is restored (pr.yml restores the two test projects).
     /// <c>nightly.yml</c> restores what it publishes and is a backstop, so requiring whole-tree coverage
     /// there would assert something that workflow is not for.</para>
     /// </summary>
