@@ -385,6 +385,7 @@
     },
     "UptimeWarning": true,
     "DedupeOnlyApplied": true,
+    "ShowUptimeCaveat": false,
     "Notes": [
       "Reverse Duplicate and Equal Except For Filter indexes are listed as REVIEW rows only and are never disabled for you. An index with the same columns in a different order, or with a different filter, can serve different queries or rows, so check each one by hand.",
       "Not covered: sp_IndexCleanup also reports a Same Keys Different Order review case. The Reverse Duplicate review rows above cover most of it."
@@ -950,6 +951,7 @@
       },
       "UptimeWarning": false,
       "DedupeOnlyApplied": false,
+      "ShowUptimeCaveat": false,
       "Notes": [
         "Reverse Duplicate and Equal Except For Filter indexes are listed as REVIEW rows only and are never disabled for you. An index with the same columns in a different order, or with a different filter, can serve different queries or rows, so check each one by hand.",
         "Not covered: sp_IndexCleanup also reports a Same Keys Different Order review case. The Reverse Duplicate review rows above cover most of it."
