@@ -148,9 +148,9 @@ public sealed class InvestigationDispatcher
     /// </summary>
     /// <returns>What the store did, or null when nothing was asked of it (muted, no family, no agent route) or it failed.</returns>
     public Task<InvestigationOpenOutcome?> DispatchAsync(
-        AlertHistoryRecord record, AlertContext? context, string? storyPathHash = null, CancellationToken cancellationToken = default,
-        bool recurringAtThisHour = false) =>
-        _core.DispatchAsync(record, context, storyPathHash, cancellationToken, recurringAtThisHour);
+        AlertHistoryRecord record, AlertContext? context, string? storyPathHash = null, bool recurringAtThisHour = false,
+        CancellationToken cancellationToken = default) =>
+        _core.DispatchAsync(record, context, storyPathHash, recurringAtThisHour, cancellationToken);
 
     /// <summary>The shared core, for the change watch's pass (#6234).</summary>
     internal InvestigationDispatchCore Core => _core;
@@ -176,11 +176,11 @@ public sealed class InvestigationDispatcher
     /// </summary>
     public Task<string?> OpenForWebhookAsync(
         string serverId, string serverName, string metricName, bool muted, DateTime alertTimeUtc, AlertContext? context,
-        string? storyPathHash = null, InvestigationAlertFacts? facts = null, CancellationToken cancellationToken = default,
-        bool recurringAtThisHour = false)
+        string? storyPathHash = null, InvestigationAlertFacts? facts = null, bool recurringAtThisHour = false,
+        CancellationToken cancellationToken = default)
     {
         return _core.OpenForWebhookAsync(
             serverId, serverName, metricName, muted, alertTimeUtc, context, storyPathHash, facts,
-            _readRequest, _dataDetail, cancellationToken, recurringAtThisHour);
+            _readRequest, _dataDetail, recurringAtThisHour, cancellationToken);
     }
 }

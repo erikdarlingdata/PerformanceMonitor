@@ -16,6 +16,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 

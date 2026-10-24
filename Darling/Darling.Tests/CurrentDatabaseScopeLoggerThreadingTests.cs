@@ -24,8 +24,8 @@ namespace Darling.Tests;
 /// failure at Warning, but only when the caller hands it a logger. These pins hold the two FinOps tools that were left passing none
 /// (get_finops index_analysis and get_finops_recommendations) to the same shape as get_wait_stats (<c>ILogger? logger = null</c> just
 /// before the cancellation token), and hold that no non-test caller of a logger-taking <c>CurrentDatabaseScope</c> method leaves the
-/// logger off, so a new caller cannot reopen the gap. The Viewer reaches the same readers with no host logger; it calls only the
-/// readers, whose logger parameter is optional, never <c>CurrentDatabaseScope</c> directly.
+/// logger off, so a new caller cannot reopen the gap. The Viewer has no host logger: it reaches most of these through the readers, whose
+/// logger parameter is optional, and the one direct call (the regressions grid, #6654) passes its own ViewerStoreLogger.
 /// </summary>
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class CurrentDatabaseScopeLoggerThreadingTests

@@ -100,8 +100,8 @@ public sealed class QueryStoreWideReadGuardRawRouteTests
         await using var notOpen = new NpgsqlConnection("Host=127.0.0.1;Port=1;Username=nobody;Database=none");
         var ct = TestContext.Current.CancellationToken;
 
-        Assert.Null(await QueryStoreWideReadGuard.EstimateRawAsync(postgres, notOpen, null, "query_stats", Start, Start.AddDays(1), null, ct));
-        Assert.Null(await QueryStoreWideReadGuard.CheckRawAsync(postgres, notOpen, null, "query_stats", Start, Start.AddDays(30), null, ct));
+        Assert.Null(await QueryStoreWideReadGuard.EstimateRawAsync(postgres, notOpen, null, "query_stats", Start, Start.AddDays(1), null, StorageCommandDeadlines.McpReadSeconds, ct));
+        Assert.Null(await QueryStoreWideReadGuard.CheckRawAsync(postgres, notOpen, null, "query_stats", Start, Start.AddDays(30), null, StorageCommandDeadlines.McpReadSeconds, ct));
     }
 
     [Fact]
@@ -166,23 +166,23 @@ public sealed class QueryStoreWideReadGuardRawEstimateLiveTests
             await LogAsync(connection, 8, ServerB, "raw-est-b", "query_stats", newestA.AddDays(-1).AddHours(-1), 25, ct);
 
             var (from, to) = (S, S.AddDays(1));
-            var fleet = await QueryStoreWideReadGuard.EstimateRawAsync(postgres, null, null, "query_stats", from, to, null, ct);
+            var fleet = await QueryStoreWideReadGuard.EstimateRawAsync(postgres, null, null, "query_stats", from, to, null, StorageCommandDeadlines.McpReadSeconds, ct);
             Assert.Equal(new QueryStoreWideReadGuard.RawEstimate(1075, 100 + 200 + 300 + 400 + 50 + 25, 2), fleet);
 
-            var scoped = await QueryStoreWideReadGuard.EstimateRawAsync(postgres, null, new[] { "raw-est-b" }, "query_stats", from, to, null, ct);
+            var scoped = await QueryStoreWideReadGuard.EstimateRawAsync(postgres, null, new[] { "raw-est-b" }, "query_stats", from, to, null, StorageCommandDeadlines.McpReadSeconds, ct);
             Assert.Equal(new QueryStoreWideReadGuard.RawEstimate(75, 75, 1), scoped);
 
-            var procs = await QueryStoreWideReadGuard.EstimateRawAsync(postgres, null, null, "procedure_stats", from, to, null, ct);
+            var procs = await QueryStoreWideReadGuard.EstimateRawAsync(postgres, null, null, "procedure_stats", from, to, null, StorageCommandDeadlines.McpReadSeconds, ct);
             Assert.Equal(new QueryStoreWideReadGuard.RawEstimate(77, 77, 1), procs);
 
-            var noLog = await QueryStoreWideReadGuard.EstimateRawAsync(postgres, null, new[] { "raw-est-nolog" }, "query_stats", from, to, null, ct);
+            var noLog = await QueryStoreWideReadGuard.EstimateRawAsync(postgres, null, new[] { "raw-est-nolog" }, "query_stats", from, to, null, StorageCommandDeadlines.McpReadSeconds, ct);
             Assert.Equal(new QueryStoreWideReadGuard.RawEstimate(0, 0, 0), noLog);
             Assert.Null(QueryStoreWideReadGuard.RawRefusal(noLog, "query_stats", S, S.AddDays(30), ComposeLimits.MaxRawQueryStatsRows));
 
             /* Inside an open transaction, as in the hourly-edges snapshot: the same answer, and the transaction still runs a statement. */
             await using (var transaction = await connection.BeginTransactionAsync(ct))
             {
-                var inSnapshot = await QueryStoreWideReadGuard.EstimateRawAsync(postgres, connection, null, "query_stats", from, to, null, ct);
+                var inSnapshot = await QueryStoreWideReadGuard.EstimateRawAsync(postgres, connection, null, "query_stats", from, to, null, StorageCommandDeadlines.McpReadSeconds, ct);
                 Assert.Equal(fleet, inSnapshot);
                 await using var probe = new NpgsqlCommand("SELECT 1", connection, transaction);
                 Assert.Equal(1, await probe.ExecuteScalarAsync(ct));
@@ -230,22 +230,22 @@ public sealed class QueryStoreWideReadGuardRawEstimateLiveTests
             /* Dark since an hour before the window started, log rows still inside the collection log's retention: nothing. */
             await LogAsync(connection, 13, ServerNoLog, "raw-cover-dark", "query_stats", start.AddHours(-1), 10_000_000, ct);
 
-            var day = await QueryStoreWideReadGuard.EstimateRawAsync(postgres, null, null, "query_stats", start, end, null, ct);
+            var day = await QueryStoreWideReadGuard.EstimateRawAsync(postgres, null, null, "query_stats", start, end, null, StorageCommandDeadlines.McpReadSeconds, ct);
             Assert.Equal(new QueryStoreWideReadGuard.RawEstimate(10_000_000 + 2_000_000, 14_000_000, 2), day);
-            Assert.Null(await QueryStoreWideReadGuard.CheckRawAsync(postgres, null, null, "query_stats", start, end, null, ct));
+            Assert.Null(await QueryStoreWideReadGuard.CheckRawAsync(postgres, null, null, "query_stats", start, end, null, StorageCommandDeadlines.McpReadSeconds, ct));
 
-            var dark = await QueryStoreWideReadGuard.EstimateRawAsync(postgres, null, new[] { "raw-cover-dark" }, "query_stats", start, end, null, ct);
+            var dark = await QueryStoreWideReadGuard.EstimateRawAsync(postgres, null, new[] { "raw-cover-dark" }, "query_stats", start, end, null, StorageCommandDeadlines.McpReadSeconds, ct);
             Assert.Equal(new QueryStoreWideReadGuard.RawEstimate(0, 0, 0), dark);
 
             /* Two days: the live server's two days, the half-dark one's day and a half, and the dark one's 23 hours, about 35.6 M rows. */
-            Assert.NotNull(await QueryStoreWideReadGuard.CheckRawAsync(postgres, null, null, "query_stats", end.AddDays(-2), end, null, ct));
+            Assert.NotNull(await QueryStoreWideReadGuard.CheckRawAsync(postgres, null, null, "query_stats", end.AddDays(-2), end, null, StorageCommandDeadlines.McpReadSeconds, ct));
 
             /* A window reaching past raw retention: a server whose newest log row is older than RawRetentionInterval holds no raw
                rows at all, however far back the window reaches. */
             var retired = end.AddDays(-5);
             await LogAsync(connection, 14, ServerNoLog, "raw-cover-dark", "procedure_stats", retired, 10_000_000, ct);
             var pastRetention = await QueryStoreWideReadGuard.EstimateRawAsync(
-                postgres, null, new[] { "raw-cover-dark" }, "procedure_stats", retired.AddDays(-1), end, null, ct);
+                postgres, null, new[] { "raw-cover-dark" }, "procedure_stats", retired.AddDays(-1), end, null, StorageCommandDeadlines.McpReadSeconds, ct);
             Assert.Equal(new QueryStoreWideReadGuard.RawEstimate(0, 0, 0), pastRetention);
 
             bodySucceeded = true;
@@ -284,8 +284,8 @@ public sealed class QueryStoreWideReadGuardRawEstimateLiveTests
                 Assert.Equal(true, await terminate.ExecuteScalarAsync(ct));
             }
 
-            Assert.Null(await QueryStoreWideReadGuard.EstimateRawAsync(postgres, snapshot, null, "query_stats", S, S.AddDays(1), null, ct));
-            Assert.Null(await QueryStoreWideReadGuard.CheckRawAsync(postgres, snapshot, null, "query_stats", S, S.AddDays(30), null, ct));
+            Assert.Null(await QueryStoreWideReadGuard.EstimateRawAsync(postgres, snapshot, null, "query_stats", S, S.AddDays(1), null, StorageCommandDeadlines.McpReadSeconds, ct));
+            Assert.Null(await QueryStoreWideReadGuard.CheckRawAsync(postgres, snapshot, null, "query_stats", S, S.AddDays(30), null, StorageCommandDeadlines.McpReadSeconds, ct));
             bodySucceeded = true;
         }
         finally

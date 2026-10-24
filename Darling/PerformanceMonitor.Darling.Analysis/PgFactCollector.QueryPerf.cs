@@ -793,7 +793,9 @@ candidates AS
                       WHERE x.server_id = $1
                         AND x.database_name = compared.database_name
                         AND x.query_id = compared.query_id
-                        AND lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
+                        AND (lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"'
+                          -- #6665: or the monitor's own statement (its collector-side drop never fires on Darling)
+                          OR " + PerformanceMonitor.Darling.Storage.QueryStoreSelfStatement.SelfOfStoredText + @"))
     -- #5630: 100, not 20. The caller drops the queries whose two plans were compiled for different inputs
     -- (PlanInputComparison) and keeps the worst 20 of what is left, so the cut moved after that check.
     ORDER BY regression_factor DESC

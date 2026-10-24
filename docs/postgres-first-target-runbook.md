@@ -75,7 +75,7 @@ sits on top of `pg_stat_statements`), `pg_predicate_stats` (`pg_qualstats` — p
 `CREATE EXTENSION` per database), and `pg_wait_sampling` (the `pg_wait_sampling` module — preload-only,
 so check it with `SHOW shared_preload_libraries;`, not `pg_extension`). Skipping any of them is fine:
 the collector records a non-fatal skip naming exactly which install is missing (step 10), and the other
-24 collectors are unaffected.
+collectors are unaffected.
 
 `pg_wait_sampling` is the one whose absence is no longer a skip (#3604). Without the extension the same
 collector takes its **service-sampler arm**: it polls `pg_stat_activity` once a second for a 30-second
@@ -577,7 +577,7 @@ sentence the data can support if both are sampled on the same grain.
 ## 8. Read it
 
 Through MCP — a read per collector, plus the trend, detail and config-diff readers that sit on top of
-them; 35 `get_pg_*` tools in all, registered by the same service:
+them; more than 30 `get_pg_*` tools in all, registered by the same service:
 
 | Tool | Answers |
 |---|---|

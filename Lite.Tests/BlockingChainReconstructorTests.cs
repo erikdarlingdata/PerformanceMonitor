@@ -54,6 +54,31 @@ public class BlockingChainReconstructorTests
         Assert.Empty(result.Chains);
     }
 
+    /// <summary>
+    /// #6645: a parallel query's threads write reports with blocked spid = blocking spid (different ecid). That
+    /// is the query waiting on itself: no chain, no cycle, and a real chain beside it is unchanged.
+    /// </summary>
+    [Fact]
+    public void ParallelQuerySelfWaits_MakeNoChainAndNoCycle()
+    {
+        var self = new[]
+        {
+            Pair(59, 59, blockedEcid: 2, blockingEcid: 1), Pair(59, 59, blockedEcid: 5, blockingEcid: 1),
+            Pair(59, 59, blockedEcid: 6, blockingEcid: 1), Pair(59, 59, blockedEcid: 1, blockingEcid: 2),
+        };
+
+        var onlySelf = Run(self);
+        Assert.Empty(onlySelf.Chains);
+        Assert.False(onlySelf.CycleDetected);
+
+        var withReal = Run(self.Append(Pair(52, 51)));
+        var chain = Assert.Single(withReal.Chains);
+        Assert.Equal(51, chain.ApexSpid);
+        Assert.Equal(1, chain.Depth);
+        Assert.Equal(1, chain.VictimCount);
+        Assert.False(withReal.CycleDetected);
+    }
+
     [Fact]
     public void DepthFourLine_ReportsApexDepthAndVictims()
     {

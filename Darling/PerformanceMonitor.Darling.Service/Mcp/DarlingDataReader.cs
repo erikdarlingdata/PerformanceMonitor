@@ -2733,7 +2733,7 @@ internal static class DarlingDataReader
     /// the final <c>ORDER BY</c> and <c>LIMIT $4</c>. It reads only <c>ranked</c>'s column list, so
     /// <see cref="QueryStoreTopSuffix"/> (the raw and the interval-table reads) and <see cref="QueryStoreTopDailyTableSql"/>
     /// (the daily-summary read) share this one text and cannot drift apart below <c>ranked</c>.</summary>
-    private const string QueryStoreTopTail = """
+    private const string QueryStoreTopTail = $$"""
         page AS (
         SELECT
             p.database_name,
@@ -2801,7 +2801,11 @@ internal static class DarlingDataReader
                            )
                        ) AS query_text
             ) AS t ON TRUE
-            WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
+            /* #6665: the monitor's own statement is left out here too, before the LIMIT, by the shared read-side predicate
+               (QueryStoreSelfStatement): on Darling its row is stored, because the collector's drop tests an inline text column
+               that the separate text fetch leaves empty, and the marker is only in the text resolved above. */
+            WHERE (t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%')
+            AND   {{QueryStoreSelfStatement.NotSelfOfLateralText}}
             ORDER BY r.sort_cost DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role
             LIMIT $4
         ) AS p
@@ -4818,6 +4822,9 @@ FROM config.config_collector_schedules";
     /// is taken only when the XE source has no row for the CHOSEN databases (<c>NOT EXISTS (SELECT 1 FROM bpr)</c> over the
     /// filtered <c>bpr</c>), exactly as the desktop's blocking reads and <c>get_blocking_trend</c> choose, so the tools answer
     /// from one source for one filter and the two sources are never mixed. The unfiltered series is exactly what it was.</para>
+    /// <para>Both arms leave out a parallel query waiting on itself (<see cref="BlockingWaits.NotSelfWaitSql"/>, #6645, #6705),
+    /// as <c>get_blocking_trend</c> does, so the count and the severity reconcile; the DMV fallback is taken when the FILTERED XE
+    /// arm is empty.</para>
     /// </summary>
     public static readonly string BlockingDurationStatsSql = $$"""
         WITH bpr AS (
@@ -4832,6 +4839,7 @@ FROM config.config_collector_schedules";
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
             {{DatabaseFilter.All.Clause("database_name", 5)}}
+            AND   {{BlockingWaits.NotSelfWaitSql}}
             GROUP BY DATE_TRUNC('minute', event_time)
         ),
         dmv AS (
@@ -4846,6 +4854,7 @@ FROM config.config_collector_schedules";
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
             {{DatabaseFilter.All.Clause("database_name", 5)}}
+            AND   {{BlockingWaits.NotSelfWaitSql}}
             GROUP BY DATE_TRUNC('minute', event_time)
         )
         SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms, source FROM bpr

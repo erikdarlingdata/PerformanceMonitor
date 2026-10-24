@@ -20,6 +20,7 @@ using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Analysis;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -1627,7 +1628,7 @@ WHERE d.server_id = $1";
     /// exist. A blank name matches nothing here too: omit <c>server_name</c> to mute across all servers.</para>
     /// </summary>
     internal static MuteScope ResolveMuteScope(
-        IReadOnlyList<DarlingServerResolver.RegisteredServer> registry,
+        IReadOnlyList<RegisteredServer> registry,
         string serverName,
         string storyPathHash,
         bool forUnmute = false)

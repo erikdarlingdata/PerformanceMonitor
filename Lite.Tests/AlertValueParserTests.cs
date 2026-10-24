@@ -25,7 +25,7 @@ public sealed class AlertValueParserTests
     [Theory]
     [InlineData("87% (Total CPU)", 87)]      /* High CPU — the #1830 field case, stored 0 before */
     [InlineData("92% (SQL CPU)", 92)]        /* High CPU, SQL-only mode */
-    [InlineData("+3 more incident(s) this cycle", 3)] /* per-event overflow trailer */
+    [InlineData("+3 more incidents this cycle", 3)] /* per-event overflow trailer */
     [InlineData("92.5%", 92.5)]              /* plain percent — the old fallback's happy path */
     [InlineData("80%", 80)]
     [InlineData("1074", 1074)]               /* bare count (blocking/deadlocks) */

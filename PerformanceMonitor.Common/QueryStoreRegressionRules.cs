@@ -21,6 +21,12 @@ public static class QueryStoreRegressionRules
     /// <summary>A query qualifies for <c>cost</c> when its Regular CPU per execution is more than this percent above its baseline.</summary>
     public const int CostGatePercent = 25;
 
+    /// <summary>The closing sentence of the regressions read's <c>truncation_note</c> when the window starts at <c>baseline_start</c>
+    /// and the store holds only part of the baseline. One definition for Darling's and Lite's reads, and the text the web page's
+    /// <c>plain-text.js</c> rewrites, so a reword here breaks the web test instead of leaving a field name on the page (#6649).</summary>
+    public const string BaselineWindowTail =
+        "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.";
+
     /// <summary>A rise in timeouts or errors qualifies when the recent per-hour rate is at least this many times the baseline's.
     /// A nonzero recent rate where the baseline had none qualifies whatever the multiple.</summary>
     public const int FailureRateMultiple = 2;

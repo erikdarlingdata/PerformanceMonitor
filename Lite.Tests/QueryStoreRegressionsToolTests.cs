@@ -174,6 +174,47 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
         Assert.Equal(200, row.GetProperty("recent_exec_count").GetInt64());
     }
 
+    /// <summary>
+    /// #6654: with no database named, a regression in a database the server dropped (an earlier database_states snapshot lists it,
+    /// the newest does not) is left out before the cap and named in databases_left_out; naming the database reads it as asked.
+    /// </summary>
+    [Fact]
+    public async Task ADroppedDatabasesRegression_IsLeftOut_AndNamed_UntilTheDatabaseIsNamed()
+    {
+        var service = new LocalDataService(_duckDb);
+        var baseNow = Truncate(DateTime.UtcNow);
+        const string Gone = "GoneDb";
+
+        await SeedAsync(baseNow.AddDays(-10), 100, 1000, 1000, intervalId: 9, queryId: 99);
+        foreach (var (queryId, database) in new[] { (20L, Db), (30L, Gone) })
+        {
+            await SeedAsync(baseNow.AddHours(-40), 100, 1000, 1000, intervalId: 1, queryId: queryId, database: database);
+            await SeedAsync(baseNow.AddMinutes(-30), 100, 3000, 3000, intervalId: 2, queryId: queryId, database: database);
+        }
+
+        var connection = await SeedConnectionAsync();
+        foreach (var (age, names) in new[] { (TimeSpan.FromHours(1), new[] { Db, Gone }), (TimeSpan.FromMinutes(5), new[] { Db }) })
+        {
+            var at = DateTime.UtcNow - age;
+            var n = 1;
+            foreach (var name in names)
+            {
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = "INSERT INTO database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby) VALUES "
+                    + $"({_nextId++}, TIMESTAMP '{at:yyyy-MM-dd HH:mm:ss}', {_serverId}, '{ServerName}', '{name}', {n++}, 'ONLINE', false)";
+                await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            }
+        }
+
+        var all = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, 24));
+        Assert.Equal([20L], all.GetProperty("regressions").EnumerateArray().Select(r => r.GetProperty("query_id").GetInt64()).ToArray());
+        Assert.Equal([Gone], all.GetProperty("databases_left_out").EnumerateArray().Select(x => x.GetString()).ToArray());
+
+        var named = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, 24, Gone));
+        Assert.Equal([30L], named.GetProperty("regressions").EnumerateArray().Select(r => r.GetProperty("query_id").GetInt64()).ToArray());
+        Assert.True(named.GetProperty("databases_left_out").ValueKind == JsonValueKind.Null);
+    }
+
     [Fact]
     public async Task AnOutOfRangeCap_IsRefused_NotSilentlyClamped()
     {
@@ -201,7 +242,7 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
     }
 
     private async Task SeedAsync(
-        DateTime collectionTime, long executions, long avgDurationUs, long avgCpuUs, long intervalId, long queryId = 1)
+        DateTime collectionTime, long executions, long avgDurationUs, long avgCpuUs, long intervalId, long queryId = 1, string database = Db)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -216,7 +257,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = _serverId });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
-        cmd.Parameters.Add(new DuckDBParameter { Value = Db });
+        cmd.Parameters.Add(new DuckDBParameter { Value = database });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryId });
         cmd.Parameters.Add(new DuckDBParameter { Value = 9L });
         cmd.Parameters.Add(new DuckDBParameter { Value = "Regular" });

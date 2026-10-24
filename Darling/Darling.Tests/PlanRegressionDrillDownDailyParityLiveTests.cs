@@ -151,6 +151,14 @@ public sealed class PlanRegressionDrillDownDailyParityLiveTests
         Assert.Contains(unrestricted, r => r.GetProperty("query_id").GetInt64() == NotAnOffender);
         Assert.Equal(unrestricted.Select(r => r.GetRawText()), (await DrillDownAsync(postgres, Array.Empty<PlanRegressionOffender>())).Select(r => r.GetRawText()));
         Assert.Equal(await TableRowsAsync(connection, ct), await RowsOfAsync(unrestricted));
+
+        /* ---- #6665: the monitor's own statement, stored only in the text table, is left out of both routes ---- */
+        await ExecAsync(connection, $"UPDATE collect.query_store_text SET query_sql_text = '/* PerformanceMonitorLite */ SELECT own' WHERE server_id = {ServerId} AND database_name = '{Db}' AND query_id = 1", ct);
+        Assert.DoesNotContain(OnPairs(await DrillDownAsync(postgres, Pairs)), r => r.GetProperty("query_id").GetInt64() == 1);
+        await ExecAsync(connection, $"DELETE FROM collect.plan_regression_daily_built WHERE server_id = {ServerId}", ct);
+        var tableWithoutOwn = OnPairs(await DrillDownAsync(postgres, Pairs));
+        Assert.DoesNotContain(tableWithoutOwn, r => r.GetProperty("query_id").GetInt64() == 1);
+        Assert.Contains(tableWithoutOwn, r => r.GetProperty("query_id").GetInt64() == 2);
     }
 
     /// <summary>

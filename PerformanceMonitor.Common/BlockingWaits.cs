@@ -45,6 +45,16 @@ namespace PerformanceMonitor.Common;
 /// </summary>
 public static class BlockingWaits
 {
+    /// <summary>
+    /// #6645: the SQL predicate that is true for a row that is a real wait and false for a parallel query's thread
+    /// waiting on its own session (the same non-zero spid on both sides). The one definition every read surface
+    /// aliases, in DuckDB and PostgreSQL. It is <see cref="Collapse{T}"/>'s rule: a (0, 0) row is a report that
+    /// named no session (the collector stores 0, never NULL), which stays a blocking event, so the equal-spid test
+    /// carries <c>blocked_spid &lt;&gt; 0</c>; a NULL spid makes the test NULL, which COALESCE turns to FALSE and keeps
+    /// the row. Column names are unqualified: every use has one source relation in scope.
+    /// </summary>
+    public const string NotSelfWaitSql = "NOT COALESCE(blocked_spid = blocking_spid AND blocked_spid <> 0, FALSE)";
+
     /// <summary>How far apart (milliseconds) two reports' derived wait starts may be and still be one wait. The
     /// threshold is at least 5 s, so 2 s cannot merge two blocked-process-report waits and is far above the few
     /// milliseconds of timestamp jitter between reports of one wait. It alone is not enough for DMV snapshots: see <see cref="WaitStartJitterMs"/>.</summary>
@@ -71,7 +81,8 @@ public static class BlockingWaits
         (eventTime - DateTime.UnixEpoch).TotalMilliseconds - waitTimeMs;
 
     /// <summary>
-    /// Collapses reports to one row per wait: the report with the longest wait time (the latest one on a tie).
+    /// Collapses reports to one row per wait (a report whose blocked and blocking spid are the same, and not 0, is a
+    /// parallel query waiting on itself, #6645, and is dropped): the report with the longest wait time (the latest one on a tie).
     /// <paramref name="partition"/> keeps rows that must never merge apart (the report source, for one). A row with
     /// no event time or no wait time has no derived start and cannot be placed in a wait, so it stays a wait of
     /// its own (the SQL form does the same). The result is ordered by the
@@ -89,6 +100,15 @@ public static class BlockingWaits
         var placeable = new List<(T Row, double Start, DateTime Time, long Wait)>();
         foreach (var row in reports)
         {
+            /* #6645: a parallel query's threads report waits on their own session (same spid, different ecid).
+               That is the query waiting on itself, not blocking. Spid 0 is a report that named no session (the
+               collector stores 0, not NULL, when a report has no spid: BlockedProcessReportCollector), which is
+               still a blocking event: NotSelfWaitSql keeps (0, 0) rows too, by the same `<> 0` test. */
+            if (blockedSpid(row) == blockingSpid(row) && blockedSpid(row) != 0)
+            {
+                continue;
+            }
+
             var time = eventTime(row);
             var wait = waitTimeMs(row);
             if (time is null || wait is null)
@@ -187,6 +207,10 @@ public static class BlockingWaits
 {name}_marked AS (
     SELECT s.*, {epochMs} - s.wait_time_ms AS wait_start_ms
     FROM ({source}) AS s
+    /* #6645: a parallel query's threads write reports with blocked_spid = blocking_spid (different ecid). That is
+       the query waiting on itself, not blocking: it is no wait, no head blocker and no report. NotSelfWaitSql
+       keeps a report that names no session (spids 0/0, or NULL). */
+    WHERE {NotSelfWaitSql}
 ),
 {name}_gapped AS (
     SELECT m.*,
