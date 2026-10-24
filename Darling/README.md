@@ -941,6 +941,7 @@ The generic webhook posts the JSON in `genericBodyTemplate` to `genericUrl`, wit
 - `{{dedup_key}}` is the same for an alert and its resolution. A resolution renders the key the alert's own post rendered, so a receiver that matches on a key can close what the alert opened. The key is the first incident's own key, or `<server id>:<metric>` when the alert has no incident. A restart between the alert and its resolution does not change this.
 - `{{metric}}` on a resolution is the resolution's title, such as `CPU Resolved`, and not the alert's name. A template that needs the alert's name on a resolution can build it from `{{server}}` and `{{dedup_key}}`. The resolution's `{{detail}}` text also names the alert (`Alert: ...`).
 - `{{value}}` on a resolution is the word `resolved`, and `{{threshold}}` is empty.
+- A recovery notice that is its own alert, such as "Server Restored" or "AG Replica Reconnected", is sent as an alert and not as a resolution, so its `{{status}}` is `firing` and its key is its own.
 
 **Example: open and close an alert in incident.io.** Create an HTTP alert source in incident.io. It gives you a source config ID and a token.
 
