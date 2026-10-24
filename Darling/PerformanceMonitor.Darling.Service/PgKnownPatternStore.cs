@@ -28,11 +28,33 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Writes</b> go through the owner-rights functions <c>config.insert_known_pattern</c>, <c>update_known_pattern</c> and
 /// <c>delete_known_pattern</c> (<see cref="DarlingManagedRoles.BuildKnownPatternFunctionsSql"/>), the only write the viewer and admin roles
 /// hold on the table. Input is checked first with <see cref="KnownPatternInput.Validate"/>, so a refusal reads the same in every
-/// editor; a refused write throws <see cref="ArgumentException"/> carrying that reason. The writes are operator-only: no MCP tool calls
-/// them.</para>
+/// editor; a refused write throws <see cref="ArgumentException"/> carrying that reason. The web editor, the Viewer and the admin MCP write tools
+/// (<see cref="Mcp.DarlingMcpKnownPatternWriteTools"/>, #6398) all write through them, and <c>insert_known_pattern</c> refuses an add once
+/// <see cref="KnownPatternMatcher.MaxEntries"/> entries exist (DL409).</para>
 /// </summary>
 public sealed class PgKnownPatternStore
 {
+    /// <summary>The store function's own refusal (#6398): the sentence it raised plus the SqlState it raised it with, so a caller names the
+    /// cause (<c>DL404</c>, a server id that names no monitored server; <c>DL409</c>, the entry cap) from the code, never from the prose.
+    /// Still an <see cref="ArgumentException"/>, so every caller that already catches that keeps working. <see cref="Exception.Message"/>
+    /// is the store's sentence alone.</summary>
+    internal sealed class StoreRefusedException(string sentence, string sqlState) : ArgumentException(sentence)
+    {
+        public string SqlState { get; } = sqlState;
+    }
+
+    /// <summary>The name of the monitored server definition with this id, or null when there is none. Reads
+    /// <c>config.config_monitored_servers</c>, the table the store functions check (DL404) and both editors' server pickers list (the Viewer's
+    /// grid, the web page's <c>/api/admin/servers</c>), so a server an editor shows is a server this accepts. Not the <c>servers</c> registry:
+    /// that one has no row for a server added but not yet connected, and keeps its row for one whose definition was removed.</summary>
+    internal static async Task<string?> MonitoredServerNameAsync(NpgsqlDataSource postgres, int serverId)
+    {
+        await using var command = postgres.CreateCommand("SELECT name FROM config.config_monitored_servers WHERE server_id = $1");
+        command.CommandTimeout = CommandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        return await command.ExecuteScalarAsync() as string;
+    }
+
     private const int CommandTimeoutSeconds = 30;
 
     private const string SelectColumns =
@@ -108,6 +130,55 @@ public sealed class PgKnownPatternStore
         (_logger ?? _sharedLogger)?.LogWarning("Known pattern {Id} cannot be read and is skipped: {Reason}", id, reason);
     }
 
+    /// <summary>
+    /// The one place a known-pattern write's raw fields become a checked <see cref="KnownPatternInput"/> (#6398): the web routes (after their JSON
+    /// parse) and the MCP write tools both call it, so they refuse the same things in the same words. Returns the input, or the reason it is
+    /// refused: a time of day or expiry that does not parse, <see cref="KnownPatternInput.Validate"/>'s own text, then a server id that
+    /// <paramref name="serverLookup"/> says is not registered. The web routes and the MCP tools pass <see cref="MonitoredServerNameAsync"/>, the table the store functions check.
+    /// </summary>
+    internal static async Task<(KnownPatternInput? Input, string? Refusal)> BuildInputAsync(
+        int? serverId, string? metricName, string? timeOfDayText, string? timeZone, int? windowMinutes, string? note, string? expiresText,
+        Func<int, Task<string?>> serverLookup)
+    {
+        TimeOnly? timeOfDay = null;
+        if (!string.IsNullOrWhiteSpace(timeOfDayText))
+        {
+            if (!TimeOnly.TryParseExact(timeOfDayText.Trim(), ["HH:mm", "H:mm", "HH:mm:ss"], System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var parsedTime))
+            {
+                return (null, "time_of_day must be a time such as 02:00.");
+            }
+
+            timeOfDay = parsedTime;
+        }
+
+        DateTime? expires = null;
+        if (!string.IsNullOrWhiteSpace(expiresText))
+        {
+            if (!DateTime.TryParse(expiresText.Trim(), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var parsedExpiry))
+            {
+                return (null, "expires_at_utc must be a date and time such as 2026-12-31T00:00:00Z.");
+            }
+
+            expires = parsedExpiry;
+        }
+
+        var input = new KnownPatternInput(serverId, metricName, timeOfDay, timeZone, windowMinutes, note, expires);
+
+        /* The reason first, so a bad note reads the same here as in the Viewer; then the server, which only the store behind the registry can say. */
+        var refusal = input.Validate();
+        if (refusal is not null)
+        {
+            return (null, refusal);
+        }
+
+        if (serverId is { } id && await serverLookup(id) is null)
+        {
+            return (null, $"server_id {id} is not a registered server.");
+        }
+
+        return (input, null);
+    }
+
     /// <summary>Adds an entry and returns its id. Throws <see cref="ArgumentException"/> with the reason when the input is refused.</summary>
     public async Task<long> InsertAsync(KnownPatternInput input, string? createdBy, CancellationToken cancellationToken = default)
     {
@@ -122,9 +193,10 @@ public sealed class PgKnownPatternStore
         {
             return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
         }
-        catch (PostgresException ex) when (ex.SqlState == "DL404")
+        catch (PostgresException ex) when (ex.SqlState is "DL404" or "DL409")
         {
-            throw new ArgumentException(ex.MessageText, nameof(input));
+            /* DL409: the table already holds KnownPatternMatcher.MaxEntries entries (#6398). */
+            throw new StoreRefusedException(ex.MessageText, ex.SqlState);
         }
     }
 
@@ -146,7 +218,7 @@ public sealed class PgKnownPatternStore
         }
         catch (PostgresException ex) when (ex.SqlState == "DL404")
         {
-            throw new ArgumentException(ex.MessageText, nameof(input));
+            throw new StoreRefusedException(ex.MessageText, ex.SqlState);
         }
     }
 
@@ -165,7 +237,7 @@ public sealed class PgKnownPatternStore
         var refusal = input.Validate();
         if (refusal is not null)
         {
-            throw new ArgumentException(refusal, nameof(input));
+            throw new ArgumentException(refusal);
         }
 
         return input.Normalize();

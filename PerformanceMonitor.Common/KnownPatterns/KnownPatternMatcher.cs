@@ -32,6 +32,11 @@ public static class KnownPatternMatcher
     /// <summary>The longest note a write accepts.</summary>
     public const int MaxNoteLength = 500;
 
+    /// <summary>The most entries the table holds (#6398). <c>config.insert_known_pattern</c> refuses a create past it (DL409), so the web editor, the
+    /// Viewer and the MCP create tool share it; every read and every investigation brief loads the whole table. Edit and delete are not capped.
+    /// The two SQL copies of the function spell the same number.</summary>
+    public const int MaxEntries = 500;
+
     /// <summary>The window an entry gets when its writer names none: the same half-width the investigation brief's recurrence count uses
     /// (<c>InvestigationAlertRecurrence.WindowMinutes</c>), so "recurs at this time" means the same thing in both.</summary>
     public const int DefaultWindowMinutes = InvestigationAlertRecurrence.WindowMinutes;

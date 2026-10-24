@@ -22,11 +22,11 @@ A collector, alert, or analysis change lands once in the shared libraries and bo
 | Data lives | Locally per seat (DuckDB + Parquet) | Centrally (PostgreSQL / TimescaleDB) |
 | Execution plans | Not stored (fetched live when you view a query) | Captured and stored, TOAST-compressed (`capturePlans`, default on) |
 | Viewers | The app is the viewer | Any number of viewer seats read the central store |
-| Setup | Download and run | On Windows, extract the release zip and run `install-darling.ps1` (on Linux, see [Run on Linux](#run-on-linux-docker-compose-or-systemd)). The shipped default is the bundled store (managed mode), so you provision no database. To use your own PostgreSQL, provision it and set its connection string. |
+| Setup | Download and run | On Windows, extract the release zip and run `install-darling.ps1` (on Linux, see [Run on Linux](../docs/darling-quick-start.md#run-on-linux-docker-compose-or-systemd)). The shipped default is the bundled store (managed mode), so you provision no database. To use your own PostgreSQL, provision it and set its connection string. |
 | Best for | Quick triage, consultants, a handful of servers | Always-on team monitoring, larger estates, one shared store |
 | Configuration | Settings UI | `darling.json` seeds the first start. After that, the Viewer edits servers, alert settings and notification routes in the store. The web dashboard's Admin page edits a server in place and the agent channel of a notification route, for a sign-in that can make changes. Its Alert Settings tab is read-only. |
 
-Nothing is installed on the monitored SQL Servers by either edition beyond two lightweight Extended Events ring-buffer sessions and, when it is unset, a one-time `blocked process threshold` bootstrap (see [What the Service Does on Monitored Servers](#what-the-service-does-on-monitored-servers)).
+Nothing is installed on the monitored SQL Servers by either edition beyond two lightweight Extended Events ring-buffer sessions and, when it is unset, a one-time `blocked process threshold` bootstrap (see [What the Service Does on Monitored Servers](../docs/darling/monitored-servers.md#what-the-service-does-on-monitored-servers)).
 
 ---
 
@@ -36,560 +36,83 @@ Nothing is installed on the monitored SQL Servers by either edition beyond two l
 >
 > **Installing on Linux, or turning on the web dashboard?** Read [`docs/darling-quick-start.md`](../docs/darling-quick-start.md).
 
+The install reference that was here moved to these pages:
+
+- [Install Darling](../docs/darling/install.md#install-reference): prerequisites, `darling.json`, the pre-flight, the Windows service, the install location, the service account, building from source and the CET error.
+- [The Darling quick start](../docs/darling-quick-start.md#run-on-linux-docker-compose-or-systemd): Docker Compose and systemd on Linux.
+- [Running Darling day to day](../docs/darling/admin.md#upgrading-an-existing-install): upgrade and roll back.
+- [Darling and your monitored servers](../docs/darling/monitored-servers.md): what the service does on each server, its Extended Events sessions and the permissions it needs.
+
+The headings below keep the old links working.
+
 ### Prerequisites
 
-- **A store host sized for your estate.** The [store sizing guide](../docs/darling-store-sizing.md) gives the disk, RAM and vCPUs by server count, from the stores we measured.
-- **Windows** for the viewer (WPF) and for a Windows-service host (Windows-service lifetime, DPAPI password protection). A Linux host also runs the service: see [Run on Linux](#run-on-linux-docker-compose-or-systemd-1804). Monitored servers can be SQL Server 2016 SP2–2025 (2017 needs CU3 or later), Azure SQL Managed Instance, AWS RDS for SQL Server, or Azure SQL Database.
-- **A PostgreSQL store — bundled or your own.** In managed mode (the shipped default, see [Managed Bundled PostgreSQL](#managed-bundled-postgresql)) the service runs its own bundled PostgreSQL 18 + TimescaleDB and no database provisioning is needed. To bring your own instead, the minimum is PostgreSQL 16, and the service is developed and validated against PostgreSQL 18. The store needs a database and a login the service can create tables in. If that store has TimescaleDB, size its background workers before you rely on compression. The stock PostgreSQL defaults cannot run the policies (see [Background workers](#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont)). On SSD-backed storage, also set `random_page_cost = 1.1` (the managed store does): with the default of 4 the planner prices a BRIN index's heap reads as random I/O and can pick a sequential scan over the index for windows of 12 hours or more. The BRIN index on the per-interval Query Store table is skipped below PostgreSQL 16, because HOT updates past a BRIN index need PostgreSQL 16 or newer.
-- **TimescaleDB is optional and auto-adopted.** If the extension is installed (or pre-created by an administrator) in the store database, the service detects it at startup and automatically converts the collector tables to hypertables with compression; without it, the service runs in plain-PostgreSQL mode, which is fully supported. No configuration flag either way. The detection is also **re-run hourly for as long as it says no** (#3815), so a service that fell back because the store was restarting, failing over or momentarily unreachable at its own start returns to hypertable mode within the hour instead of at the next restart.
-- **A Windows that is current on its updates.** .NET 10 apps need them to start on a CPU with CET (a hardware protection). Without them the service and the viewer both stop at start with exit code `0x80131506`. Install all available Windows updates and restart. If you cannot do that yet, [a short-term workaround](#windows-stops-at-start-the-cet-error) exists.
-- **No .NET runtime to install on Windows.** The service and the bundled `viewer\` folder in the zip carry their own .NET runtime. They are self-contained. A stock Windows Server needs nothing installed first. Runtime updates arrive with each Darling release. The Linux tarball is different: see [Run on Linux](#run-on-linux-docker-compose-or-systemd-1804). You need the .NET 10 SDK only to build from source.
+This section moved to [Install Darling](../docs/darling/install.md#prerequisites).
 
 ### Configure darling.json
 
-The service reads one JSON file. It resolves the path in this order:
-
-1. An explicit path (when a component is handed one)
-2. The `DARLING_CONFIG` environment variable
-3. `darling.json` next to the service binary
-
-The Windows installer writes a minimal `darling.json` for you, and the service starts with no monitored servers (it logs one line saying so); add the first one in the Viewer (Add Server) or with `--add-server`. The server's login needs grants first: `--grant-script --host <host>` prints the T-SQL for them (the Add Server dialog has a Copy grant script button). To write the file yourself, copy the shipped `darling.sample.json` (it lands next to the built binary) to `darling.json` and edit; an empty `servers` list is valid. Comments and trailing commas are allowed; property names are case-insensitive.
-
-Minimal working example with the bundled store, which is the shipped default: one server, integrated auth. In managed mode the service runs its own bundled PostgreSQL, so you provision no database. See [Managed Bundled PostgreSQL](#managed-bundled-postgresql).
-
-```json
-{
-  "postgres": { "managed": true },
-  "servers": [
-    {
-      "name": "SQL2022",
-      "host": "SQL2022",
-      "auth": "integrated",
-      "excludedDatabases": []
-    }
-  ]
-}
-```
-
-To use a PostgreSQL that you already run, replace the `postgres` block with a connection string and leave `servers` as it is:
-
-```json
-{
-  "postgres": {
-    "connectionString": "Host=localhost;Port=5432;Username=darling;Database=darling"
-  }
-}
-```
-
-**Integrated auth (recommended).** The service connects to monitored servers as the Windows account the service runs under — there is no separate Windows credential to configure. Grant that account the [permissions below](#permissions-on-monitored-servers). The default install's virtual service account reaches *remote* servers as the collector machine's computer account (`DOMAIN\<machine>$`), so for integrated auth you will usually [run the service as a domain account or gMSA](#run-the-service-as-a-domain-account-or-gmsa) instead.
-
-**SQL auth.** Set `"auth": "sql"`, a `username`, and an `encryptedPassword` produced by the `--encrypt-password` verb:
-
-```
-PerformanceMonitor.Darling.Service.exe --encrypt-password
-```
-
-It prompts for the password on stdin (so the plaintext never lands in your shell history) and prints a base64 DPAPI blob. Paste that blob into the server's `"encryptedPassword"`. The blob is protected with **DPAPI LocalMachine scope**, so an administrator can encrypt it interactively and the service account can decrypt it later on the same machine — but it is machine-bound: run `--encrypt-password` **on the machine that will run the service**, and re-encrypt if you move `darling.json` to another machine. A plaintext `"password"` also works as a dev convenience, but the service logs a warning every time it is used. The same slot also takes an **`env:NAME` or `file:/path` reference** (#1804): the service reads the named environment variable or the file's (trimmed) contents at connect time, nothing secret lands in `darling.json`, and no warning is logged — the supported shape on non-Windows hosts, and compose-`secrets:`-friendly everywhere. A missing or empty reference target is a configuration error naming both the setting and the target, never a silent empty password.
-
-**Service principal.** Set `"auth": "serviceprincipal"`, the Entra application (client) id in `username`, and the client secret in `encryptedPassword`. `username` is required. Make the blob with the same `--encrypt-password` verb as for SQL auth.
-
-```json
-{
-  "name": "AZSQL1",
-  "host": "myserver.database.windows.net",
-  "auth": "serviceprincipal",
-  "username": "<application (client) id>",
-  "encryptedPassword": "<output of --encrypt-password>"
-}
-```
-
-**Managed identity.** Set `"auth": "managedidentity"`. There is no secret to store. A system-assigned identity needs no other field. A user-assigned identity puts its client id in `username`. The machine that runs the service must itself be an Azure resource with that identity. See [authentication](../docs/authentication.md).
-
-```json
-{
-  "name": "AZSQL2",
-  "host": "myserver.database.windows.net",
-  "auth": "managedidentity"
-}
-```
-
-**excludedDatabases** (per server) removes databases from collection: per-database collectors skip them and the exclusion is spliced into the collector queries — the same filter Lite applies. There is a second, separate `alerts.excludedDatabases` list that excludes databases from blocking/deadlock/long-running-query **alert evaluation** without affecting collection.
+This section moved to [Install Darling](../docs/darling/install.md#configure-darlingjson).
 
 ### Validate the Config (Pre-flight)
 
-Before installing the service, check that `darling.json` is well-formed and that every monitored server is reachable with the configured credentials:
-
-```
-PerformanceMonitor.Darling.Service.exe --test-connection
-```
-
-(`--validate-config` is an alias.) It validates the file, then connects to and probes each server, printing a `[PASS]`/`[FAIL]` line per server (SQL major version, engine edition, and whether the account has msdb access for failed-job alerts). It exits `0` only when the file is valid **and** every server is reachable, so it doubles as a deployment gate.
-
-**Which server list it probes.** Once the store is reachable, its own registry (`config_monitored_servers`) is authoritative — not `darling.json`'s `servers` array, which is only a first-bootstrap seed. A server that is in the file but was never registered, or was since removed from the registry, is not a probe failure: it prints as a `WARNING` and is skipped, because the store — not the file — governs which servers actually run. Only when the store itself cannot be reached does this fall back to validating `darling.json`'s own list, with a `NOTE` saying so.
-
-A PostgreSQL target reports what matters there instead — version, writer or reader, Aurora or not, and **how many of the PostgreSQL collectors will actually run against it**, naming the ones that will not:
-
-```
-  [PASS] aurora-writer: PostgreSQL 17 (server_version_num 170007), writer, Aurora — all 29 PostgreSQL collectors apply
-  [PASS] aurora-reader: PostgreSQL 17 (server_version_num 170007), reader (in recovery), Aurora — 25 of 29 PostgreSQL collectors apply (skipped: pg_autovacuum_stats, pg_index_bloat, pg_index_usage_stats, pg_table_bloat_stats)
-  [PASS] selfhosted:    PostgreSQL 15 (server_version_num 150012), reader (in recovery), not Aurora — 22 of 29 PostgreSQL collectors apply (skipped: pg_autovacuum_stats, pg_cpu_utilization, pg_index_bloat, pg_index_usage_stats, pg_io_stats, pg_table_bloat_stats, pg_wait_stats)
-```
-
-That count comes from the same [engine and version gate](#postgresql-targets) the collector runner uses, not a separate list, so it is the real answer rather than an estimate — and it is the answer at *pre-flight*, before an empty table has to be explained weeks later. Add an explicit config path as a second argument if `darling.json` is not next to the exe and `DARLING_CONFIG` is not set. This is the same probe the Viewer's **Test Connection** button runs through the service.
-
-One identity caveat: the verb connects as **you**, the console user — not as the service account. For `"auth": "integrated"` servers a `[PASS]` proves the server is reachable and the config is well-formed, but the grants that matter at runtime are the *service account's*: the per-server connect lines in the service log are the real proof (see [Run the service as a domain account or gMSA](#run-the-service-as-a-domain-account-or-gmsa)).
+This section moved to [Install Darling](../docs/darling/install.md#validate-the-config-pre-flight).
 
 ### Check Host/Store Sizing Settings
 
-To choose a host size before you install, see the [store sizing guide](../docs/darling-store-sizing.md).
-
-For a managed store, check that the sizing-relevant settings (`shared_buffers`, `effective_cache_size`, `maintenance_work_mem`, `work_mem`, `timescaledb.max_background_workers`, `max_worker_processes`, `max_connections`, `max_wal_size`) still match what this host's current RAM, hypertable count and free disk would derive today:
-
-```
-PerformanceMonitor.Darling.Service.exe --check-settings [--json]
-```
-
-It prints the host facts (OS, containerization, CPUs, RAM) and the store facts (versions, size, lifetime buffer hit ratio, temp bytes, and how many bytes of uncompressed TimescaleDB chunks sit against RAM). Then it prints one row per setting: its live value, where that value came from, what this host would derive for it right now, and a verdict. The four verdicts are `matches`; `stale-after-hardware-change` (a managed block set it once, but re-deriving from the CURRENT host gives a different number — the case a RAM upgrade or an added hypertable creates, and the reason this verb exists); `operator-override` (an `ALTER SYSTEM`, or a hand-edited line after the managed blocks, is what is actually in force); and `not-managed` (a bring-your-own store, where this class never wrote a block to compare against). `--json` prints the same facts as JSON for scripting. This is diagnostic only: it never writes a setting, and the service always starts regardless of what it finds.
-
-Exit codes: see [`--check-settings` in the command line reference](../docs/darling/cli.md#exit-codes).
-
-Exit codes for `--enable-collector` and `--disable-collector`: see [the command line reference](../docs/darling/cli.md#exit-codes).
-
-Every other verb, with its exit codes, platform rules and whether it needs the service running, is in the [command line reference](../docs/darling/cli.md).
+This section moved to [Install Darling](../docs/darling/install.md#check-hoststore-sizing-settings).
 
 ### Diagnostics Bundle
 
-To report a problem, write one file with the store's state, the recent service log and the collection health, and attach it to the issue:
-
-```
-PerformanceMonitor.Darling.Service.exe --diagnostics-bundle darling-bundle.json [--hours N] [--server <name>] [--log-dir <dir>] [--config <path>] [--alias-map <path>] [--include-log-text] [--force]
-```
-
-Run it elevated on the store host (a managed store's credential is protected by Windows). On Linux run `./PerformanceMonitor.Darling.Service --diagnostics-bundle darling-bundle.json`; with compose, run it with `docker compose exec` and copy the file out with `docker compose cp`. `--diag-bundle` is the short form. The file is one JSON document of at most 4 MiB. `--hours` (1 to 168, default 24) sets the window; `--server` limits the server-scoped sections to one server.
-
-Server, host, database, login and domain names and IP addresses are replaced with ordinal aliases (`server-1`, `db-2`, `ip-1`), and credentials are removed. Before anything is written the verb scans the finished file for every name and secret it knows and writes nothing if one is still there. That proves only that the names it knows are gone, so open the file and check it before you attach it. `--alias-map <path>` writes a separate file that maps the aliases back to names; it starts with a `DO NOT ATTACH` line, and the bundle never contains it.
-
-When the store cannot be reached, the registry cannot be read, so a server known only to it cannot be aliased: the service log is then written as counts only. `--include-log-text` adds the message text anyway (open the file before you attach it). `--alias-map` refuses to overwrite the bundle or an existing file without `--force`. The `store_unreachable` section holds no sentence, only an error class and a fixed reason code. For a managed store the bundle reads the store's own `postmaster.pid` when the first connect is refused: a store listening on another port than `postgres.port` is used there (a warning says so; the service reads the port only at start-up), and a store still starting is waited for (about 20 seconds). If it still cannot connect, the reason is `store_not_running` (no live store on the data directory, so start the service and read its log), `store_starting`, or `data_directory_missing` (the bundle is reading a `darling.json` whose data directory is not the service's: pass `--config` with the install folder's file); a bare `connect_failed` means the store is listening on the configured port and still refused.
-
-Exit codes: see [`--diagnostics-bundle` in the command line reference](../docs/darling/cli.md#exit-codes). If the service log is not where the verb looks, the `service_log` section says so. Pass `--log-dir`.
-
-### Run It — Console Mode
-
-The same executable serves interactive debugging and service installation; the Windows-service lifetime is a no-op when run from a console.
-
-```
-Darling\PerformanceMonitor.Darling.Service\bin\Release\net10.0\PerformanceMonitor.Darling.Service.exe
-```
-
-From a release zip, run `PerformanceMonitor.Darling.Service.exe` from the extracted folder. After a [build from source](#build-from-source), run the path above. Watch the log output: you should see the config load (`Loaded configuration from ...`), the store migrate (`Postgres store ready (schema v<N>, <M> migration(s) applied)`, which gives the store's schema version and how many migrations this start applied), the TimescaleDB detection result, and per-server connects. Per-collector run lines with row counts are at `Debug` and so are not in that output by default — add `--Logging:LogLevel:PerformanceMonitor.Darling.Service=Debug` to the command above to watch a first sweep collector by collector, or read the outcomes back from `collection_log` and the Viewer's Collection Health tab, which record every run at any level. See [Logs](#logs).
+This section moved to [Install Darling](../docs/darling/install.md#diagnostics-bundle).
 
 <a id="run-on-linux-docker-compose-or-systemd-1804"></a>
 ### Run on Linux (Docker Compose or systemd)
 
-The service is cross-platform .NET; only the **bundled zero-admin store** and DPAPI are Windows-specific. On Linux you pair the service with the official TimescaleDB image (compose, the recommended shape) or point it at PostgreSQL you already run (systemd), keeping `postgres.managed = false` either way. The Viewer stays a Windows desktop app — Linux hosts read the **web dashboard**, which the container exposes.
-
-Each shape needs a different file from the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases). `SHA256SUMS-linux.txt` on the same page lists the checksums.
-
-- **Docker Compose:** download `PerformanceMonitorDarling-compose-<version>.tar.gz`. Extract it, then `cd` into the folder it makes.
-- **Docker Compose, release 3.10.0 or earlier:** these releases have no compose file of their own. Download the release's "Source code" archive instead. It extracts to a `PerformanceMonitor-<version>` folder, and the same files are in its `Darling/compose/` folder. Those releases have no `setup.sh`, so make the secret files by hand from the list in [`compose/secrets/README.md`](compose/secrets/README.md).
-- **systemd:** download `PerformanceMonitorDarling-linux-x64-<version>.tar.gz`.
-
-**Compose (the whole stack as one deployment).** The files are in the compose archive, or in [`Darling/compose/`](compose/) of a source checkout:
-
-```bash
-tar -xzf PerformanceMonitorDarling-compose-<version>.tar.gz
-cd PerformanceMonitorDarling-compose-<version>   # from a source checkout or a "Source code" archive: cd Darling/compose
-./setup.sh                                 # makes secrets/ and darling.json
-#   edit darling.json: servers, alerting
-docker compose up -d
-```
-
-`setup.sh` makes the secret files that a default install needs, and it never changes a file that exists. It writes a random store password and the matching store connection string, the web token, and the MCP token. It copies `darling.sample.json` to `darling.json`. It asks for the monitoring login's SQL password with hidden input. To skip the question, set `DARLING_SQL_PASSWORD` and add `--no-prompt`. With `--no-prompt` and no variable, it tells you to make `secrets/sql_password.txt` yourself. It never prints a secret.
-
-The script ends with the dashboard address. To read the web token, run `cat secrets/web_token.txt`. If the script does not start, because the archive lost its execute bit, run `sh setup.sh`.
-
-MCP is off in the sample, so compose does not mount `mcp_token`. To turn MCP on, uncomment `mcp_token` in the two places in `docker-compose.yml`, and set `mcp.enabled` to `true` in `darling.json`. To make the secret files by hand instead of with `setup.sh`, follow the list in [`compose/secrets/README.md`](compose/secrets/README.md).
-
-The compose file in the compose archive names the image tag of its own release, for example `performancemonitor-darling:<version>`. It pulls the release it came from. The copy in the source tree names `:latest`, which is the newest release. To pin a release in that copy, change the `darling` service's `image:` line to that version's tag, for example `performancemonitor-darling:3.10.0`. The `:nightly` tag is the newest dev build. Use it only to test unreleased changes.
-
-Web dashboard on `http://<host>:5153` behind its token, MCP (if enabled) on `:5152` behind its bearer token. The port mappings are the exposure boundary: the container-aware bind gate honors `web.network`/`mcp.network` under `managed = false` **inside a container only**, and the tokens are still mandatory. Five rules worth knowing before they bite:
-
-- **The service provisions the store's least-privilege roles itself** ([#3914](https://github.com/erikdarlingdata/PerformanceMonitor/issues/3914)). The compose file's store is the service's own: it logs in as the store's bootstrap superuser (`POSTGRES_USER`), so at every start it creates or refreshes the `admin`, `viewer` and `mcp` roles exactly as managed mode does, and the web dashboard connects as `viewer` and MCP as `mcp`, never as the owner — so a web session or an MCP token-holder gets the secret-column carve, the narrow write grants and the composed-query `statement_timeout` backstop (15 s by default, `compose_statement_timeout_seconds`). Nothing to configure, and do not run `provision-roles.sql` against this store. The generated passwords live one owner-only file per role in the `darling-credentials` volume (`/var/lib/darling/credentials`); `docker compose exec darling cat /var/lib/darling/credentials/pg-admin-credential` shows the `admin` password if you want to point a Darling Viewer or `psql` at the store as `admin` rather than as the owner. A deployment from an older compose file gets the roles on its first start with the new image, and keeps working without the volume (the passwords are regenerated and re-applied on each container recreation); take this release's `docker-compose.yml` to keep them stable. If the store's login is not its bootstrap superuser, if the cluster also holds a database besides the store's own and `postgres` (an operator's own cluster rather than the compose store), or if a role named `admin`/`viewer`/`mcp` already exists that the service did not create, the service leaves the roles alone. On a start like that, or one whose provisioning fails or never runs, the two surfaces keep connecting as `viewer` and `mcp` with the credentials an earlier start wrote; only with none do they fall back to the owner. A startup warning says which login each surface uses and why.
-
-- **Nothing secret goes in darling.json.** Every secret slot — the whole `postgres.connectionString`, server `password`s, `smtp.password`, the tokens — takes an `env:NAME` or `file:/run/secrets/<name>` reference. The compose file mounts each secret from `secrets/`.
-- **Start with a fresh store volume per deployment.** The control plane is store-authoritative after the first seed, so a reused volume's enable toggles override darling.json — by design.
-- **File permissions are yours on Linux.** The Windows build locks config/credentials down with ACLs; here the container boundary is the isolation, and the `secrets/` directory should be `chmod 700` with `600` files (the systemd shape should do the same for `darling.json` itself).
-- **The store's preload list is the compose file's.** The store service passes `shared_preload_libraries` on its command line (TimescaleDB plus `pg_stat_statements`, for `get_store_query_stats`, #3899), and a command-line setting outranks both `postgresql.conf` and `ALTER SYSTEM`. To preload another library in the store, add it to that line in `docker-compose.yml`; an `ALTER SYSTEM` or conf edit of the list is ignored while the line is there.
-
-**A container that has stopped collecting reports unhealthy** ([#4733](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4733)). After a startup failure that stops collection for good (a rejected `darling.json`, a step that can never apply, a refused login), the `darling` container stays up on purpose and its healthcheck reports `unhealthy` in `docker compose ps`, rather than restarting it in a loop. `docker compose logs darling` says why, and so does `/api/ping` when the web dashboard is enabled. A failure the service is still retrying does not count as a stop. This needs the current `docker-compose.yml`: the healthcheck and `DARLING_STOPPED_MARKER` are set there, not in the image, so an older compose file has neither.
-
-**systemd + bring-your-own PostgreSQL.** The tarball is framework-dependent, not self-contained. The host needs the ASP.NET Core 10 runtime and the .NET 10 runtime, from <https://dotnet.microsoft.com/download/dotnet/10.0>. The container image carries both already.
-
-Download `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` from the release, extract to `/opt/darling`, point `DARLING_CONFIG` at your config (connection string to your own PostgreSQL, at or above the minimum version in [Prerequisites](#prerequisites), with TimescaleDB; the service degrades gracefully without TimescaleDB), and run `dotnet PerformanceMonitor.Darling.Service.dll` under a unit like:
-
-```ini
-[Unit]
-Description=PerformanceMonitor Darling
-After=network-online.target
-
-[Service]
-ExecStart=/usr/bin/dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll
-Environment=DARLING_CONFIG=/etc/darling/darling.json
-User=darling
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Use the same `env:`/`file:` secret references (systemd `LoadCredential=` pairs naturally with `file:`), and note `Microsoft.Data.SqlClient` needs `libgssapi-krb5-2` installed (`apt-get install libgssapi-krb5-2`) — the container image carries it already.
+This section moved to [the Darling quick start](../docs/darling-quick-start.md#run-on-linux-docker-compose-or-systemd).
 
 ### Install as a Windows Service
 
-**Scripted (recommended):** the packaged zips ship `install-darling.ps1` beside the service exe. Extract the zip to its final location (e.g. `C:\Program Files\PerformanceMonitorDarling` — see [below](#the-install-location-has-to-be-machine-scoped) for why that is preferred over a folder made directly under `C:\`), then double-click `Install-Darling.cmd` in that folder (it asks for administrator rights and runs the script with the execution policy bypassed for that one run only, leaving the machine's policy alone), or run `.\install-darling.ps1` from a PowerShell there (if it is not elevated, the script offers to restart itself elevated). It refuses a folder ordinary local users can already write to before anything else runs ([#4043](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4043)), checks the install location and refuses anywhere the service could not read itself (see [below](#the-install-location-has-to-be-machine-scoped)), checks for `darling.json` (on a first install it writes a minimal one, the bundled store and no servers, and carries on: the service starts with no monitored servers and you add the first one afterwards in the Viewer's Add Server, so nothing needs editing first; `darling.sample.json` stays beside it as the full reference; a first install is refused if `darling.json` is an unedited copy of that sample, because the copy still names its example servers), runs the `--test-connection` pre-flight, registers the Event Log source, creates the service under the virtual account (or upgrades an existing install's binPath in place, preserving config/store/credentials), locks the install folder so only SYSTEM, Administrators and the service account can change what runs from it ([#4034](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4034): a folder made directly under `C:\` otherwise lets any local user replace the service's binaries; the lock goes on before anything runs from the folder, and `upgrade-darling.ps1` applies it before laying a new build down, so an older install is closed at its next upgrade. No lock can undo a file swapped before it, which is what the #4043 check above catches instead — extract into a fresh folder and run the script straight away, and re-extract fresh if the folder has sat open on a box with other local users), starts it, and creates **Darling Viewer** shortcuts on the public Desktop and in the all-users Start Menu, so they show for every user and not only for the account that ran the installer (pin to taskbar from the Start Menu entry — Windows does not allow programmatic pinning). `uninstall-darling.ps1` reverses it, deliberately leaving the store/config in place unless you pass `-PurgeData`.
-
-**Add the people who run the Viewer or the CLI to the operator group.** The installer creates the local group `PerformanceMonitor Darling Operators`, empty, and restricts `darling.json` to SYSTEM, Administrators, the service account and that group. `upgrade-darling.ps1` creates the group too when an older install does not have it yet. The service applies the same restriction at its next start. At the end, `install-darling.ps1` asks whether to add the account you are signed in to (default No). `upgrade-darling.ps1` adds no one. Until a person is added, they cannot run the Viewer or the CLI without elevation. See [Security & Least-Privilege Roles](#security--least-privilege-roles) for who to add, why, and the scripted options.
-
-#### Installing with the MSI
-
-A release that includes `PerformanceMonitorDarling-<version>.msi` lets you install without extracting the zip. The MSI carries the same service, viewer and scripts as the zip. It installs the `PerformanceMonitor Darling` Windows service and adds a Start menu and desktop shortcut for the viewer.
-
-To install, double-click the file and follow the wizard, or run this from an elevated prompt:
-
-```
-msiexec /i PerformanceMonitorDarling-<version>.msi /qn OPERATORACCOUNT=CONTOSO\jdoe WEBDASHBOARD=1
-```
-
-These properties are available:
-
-| Property | Effect |
-|---|---|
-| `INSTALLFOLDER` | The install folder. The default is `C:\Program Files\PerformanceMonitorDarling`. Setup stops and rolls back if any account other than SYSTEM, Administrators and TrustedInstaller can change files in the folder. A folder made directly under `C:\` is one of these, because it gets Modify for Authenticated Users from the drive. The MSI log (`msiexec /l*v`) names the accounts. Choose a folder under Program Files, or remove those permissions and run setup again. |
-| `OPERATORACCOUNT` | A `DOMAIN\user` account to add to the `PerformanceMonitor Darling Operators` group. |
-| `WEBDASHBOARD` | If you set `1`, the `darling.json` that setup writes has `web.enabled` on. The dashboard listens on this machine only. Anyone signed in to this machine can open it without a password. If `darling.json` already exists, setup ignores this property. |
-| `PURGEDATA` | If you set `1` on uninstall, the uninstall also deletes the store. |
-
-The MSI and the scripts must not manage the same install. If `install-darling.ps1` already installed the service on this machine, the MSI stops and changes nothing. To switch, run `uninstall-darling.ps1` from the script install's folder, which keeps `darling.json` and the store. Then run the MSI again with the same `INSTALLFOLDER`. To stay on the scripts, keep using `upgrade-darling.ps1`. In the other direction, `install-darling.ps1`, `upgrade-darling.ps1` and `uninstall-darling.ps1` refuse to run over an MSI install. Uninstall an MSI install from Settings, Apps.
-
-A newer MSI upgrades an MSI install in place. It reinstalls into the folder of the first install, and it keeps `darling.json` and the store. Uninstalling from Settings, Apps keeps `darling.json` and the store too, unless you set `PURGEDATA=1`.
+This section moved to [Install Darling](../docs/darling/install.md#install-as-a-windows-service).
 
 #### Upgrading an existing install
 
-`install-darling.ps1` registers a service; it does not lay a new build over an old one. That step — stop, back up, copy, start, verify — is `upgrade-darling.ps1`, shipped in the same zip.
-
-> **`upgrade-darling.ps1` does not exist in 3.5.0 or earlier.** It was added after 3.5.0 was tagged, so a build up to and including 3.5.0 does not contain it and neither does its zip. If you upgrade from one of those, use the short manual procedure in [upgrading from a build that predates the script](#upgrading-from-a-build-that-predates-the-script) once. The steps in this section describe a script that those builds do not have.
-
-In the examples below, replace `<version>` with the release number you downloaded. Extract the new zip to a **staging** folder only an administrator can write to, from an **elevated** PowerShell, and run *its* copy (#4043): the folder you run the script from is the trust root, and anyone who can write to it can replace the script itself, so a folder under `C:\Program Files\` is required, not a folder made directly under `C:\`. (Windows UAC's split token is not a security boundary here: trusting the installing admin's account also trusts that same admin's non-elevated session, since both are the same account.)
-
-```powershell
-Expand-Archive PerformanceMonitorDarling-<version>.zip -DestinationPath "C:\Program Files\PerformanceMonitorDarling-staging\<version>"
-& "C:\Program Files\PerformanceMonitorDarling-staging\<version>\upgrade-darling.ps1" -Source "C:\Program Files\PerformanceMonitorDarling-staging\<version>"
-```
-
-To verify the zip's SHA256 as part of the same run, point `-Source` at the downloaded zip itself instead of the extracted folder, with the hash from the release page — the script copies that zip into its own protected staging folder, hashes the copy, and extracts from it:
-
-```powershell
-& "C:\Program Files\PerformanceMonitorDarling-staging\<version>\upgrade-darling.ps1" -Source C:\Users\you\Downloads\PerformanceMonitorDarling-<version>.zip -Sha256 <hash-from-the-release-page>
-```
-
-It resolves the install directory from the registered service, verifies the zip's SHA256 when you point it at one (checked against `-Sha256` or a `SHA256SUMS.txt` beside it, itself only trusted from a folder that passes the same writability check), backs the install root's files up to `_rollback_manual_<stamp>`, prunes the backups past the newest `-KeepRollbacks` (3), lays the new build down, confirms `darling.json` is byte-identical, and starts the service. Re-running after a failure is safe and is the intended recovery: a backup taken in the last `-BackupWindowMinutes` (60) is reused rather than replaced, so a re-run cannot overwrite the good pre-upgrade copy with a copy of a half-upgraded tree.
-
-**It never kills a process**, and it checks for them twice. Before stopping anything it names processes running out of the install tree that a service stop will *not* close — your own `psql.exe`, a shell sitting in the folder, a Darling Viewer you left open — and refuses, costing nothing but a re-run. After the service is down it checks again with no exclusions; anything still there is usually a postmaster that outlived the stop, and that is exactly what must not be killed (the bundled PostgreSQL lives under `pg-runtime` and killing it takes the store down). Give it a few seconds and re-run.
-
-**A rollback backup holds the install root's *files*, not `viewer\`, `wwwroot\`, `runtimes\` or `pg-runtime\`** — that is what keeps one to ~120 MB instead of ~1 GB. It matters in one case: if a copy dies partway, those subdirectories can be left mixed old-and-new, and a full revert is the *previous version's zip re-extracted* followed by the backup's files over the top. The script says so at the point of failure.
-
-It **refuses to run from the install directory itself** — the copy would overwrite the script PowerShell is reading — which is why the staging folder above is not optional.
-
-**Files the new build no longer ships.** The copy is an *overlay*: it writes what the new build ships and deletes nothing else, so a dependency that went away, an assembly that changed name, or a whole `runtimes\<rid>\lib\<tfm>\` subtree stranded by a target-framework move stays in the tree forever — and those are directories .NET probes for assemblies ([#2529](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2529)). It has happened: the Lite package dropped 44 shipped files across twelve consecutive releases, 43 of them in one step. After every successful copy the script writes `darling-install-manifest.txt` into the install root recording the files that copy laid down, and the next upgrade diffs its own payload against it and **names** whatever an earlier build shipped and this one does not. Add `-RemoveStaleFiles` to delete them rather than only list them — off by default for now, so you can see the answer on your own boxes before anything acts on it.
-
-Everything it can name provably came out of one of our own zips, because the manifest is DERIVED from the payload rather than maintained by hand: `darling.json`, its `.bak-*` copies, the DPAPI credential blobs, the `_rollback_manual_*` backups and `pg-runtime\` were never in a payload, so they are never in the manifest and can never be nominated. When it cannot tell — no manifest yet, one it cannot parse, a source it cannot read — it removes nothing and says so on its own line. Deleting `darling-install-manifest.txt` is safe: the next upgrade reports that it cannot tell, removes nothing, and writes a fresh one.
-
-**Backups pile up, and nothing used to remove them.** A dogfood box was found carrying 46 of them, 5.48 GB, the oldest three weeks old, with the service naming every one on every start ([#2525](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2525)). Retention above fixes new deploys; boxes that already have a backlog clear it with the installed copy, which needs no staging folder and does not stop the service:
-
-```powershell
-& "C:\Program Files\PerformanceMonitorDarling\upgrade-darling.ps1" -ListRollbacks   # show what would go
-& "C:\Program Files\PerformanceMonitorDarling\upgrade-darling.ps1" -PruneOnly       # remove all but the newest 3
-```
-
-The service reports the set once per start with a count, a total and that command — informational while you are within retention, a warning past it. It never deletes one itself: it did not create them.
-
-**The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints a post-start checklist. About 10–15 minutes after the start, work it in the Viewer or the web page: every monitored server shows Online, Collectors shows OK with none failing, and the service log has a `Postgres store ready (schema v<N>, ...)` line from this start. N is the store version this build expects. If you connect to the store, `SELECT MAX(version) FROM darling_schema_version` returns the same N. Hold the upgrade unverified until every check passes.
+This section moved to [Running Darling day to day](../docs/darling/admin.md#upgrading-an-existing-install).
 
 ##### Rolling back to an older build
 
-A rollback restores the install files, not the store ([#5773](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5773)). The store keeps every migration the newer build applied, and the older build runs against it: migrations are additive, so it starts and collects. When it starts, the service logs one warning that names the migrations it does not know, for example: *"The store is at V183; this build knows up to V180, so V181-V183 are unknown to it."*
-
-An older build ignores what those migrations added, so it can read some newer data differently. The list below names each migration that changes what an older build reads, and what to do before you roll back past it. A migration not listed here has no known effect on what an older build reads.
-
-- **V181**: an older build reads a notification route scoped to a server or a tag ([#5750](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5750)) as fleet-wide. A route meant for one server then sends the alerts of every server. A scoped route for every metric (`*`) matches nothing, so its alerts go to the default destinations. Disable or delete every scoped route in the Notification Routes window before you roll back to a build older than V181.
-- **V182**: an older build cannot write its hourly read-latency rows ([#5506](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5506)). V182 adds the window band to the table's key, and the older build's write names the old key, so each hour's write fails with a warning in the service log and that hour's read latency is not recorded. Collection and every other read are not affected. Nothing needs to be done before you roll back; recording resumes when a build at V182 or later runs again.
-- **V200**: an older build does not know the excluded-volumes list ([#6098](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6098)), so it ignores the `excluded_volumes` column and the Volume Free Space alert evaluates every volume again. A volume you excluded then alerts once more. Nothing needs to be done before you roll back; the list is kept in the store and applies again when a build at V200 or later runs.
-- **V204**: an older build does not know the folders, personal views and owner of the custom views (the `folder`, `personal`, `created_by` and `owner_key` columns) ([#6214](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6214)). It lists every view in one flat list by name, including each person's personal views, and lets anyone change or delete any view. Two views in different folders can share a name, and the older build then shows both under the same name. Nothing needs to be done before you roll back, but a personal view becomes visible and editable to everyone: delete any you do not want shared first. The older build never reads or writes `owner_key` (the stable key that decides who owns a personal view), so it also cannot hold a view you made personal to its owner: there is no database guard against that, by choice.
-- **V205**: an older build does not know the expiry of a custom alert rule (the `expires_at_utc` column) ([#6235](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6235)). It ignores the column, so a rule that has passed its expiry is evaluated and fires again. Nothing needs to be done before you roll back, but disable or delete any rule you set an expiry on and no longer want firing; the expiry is kept in the store and applies again when a build that knows it runs.
-- **V206**: an older build reads a collector schedule's enabled flag as a plain true or false and fails on a NULL ([#6227](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6227)). The schedule tools store NULL ("inherit") on a row that sets only a frequency or a retention, and `inherit: true` stores it on purpose. Before you roll back, give every NULL the value it inherits: the fleet-wide row's value for that collector, else the collector's shipped default (off for `long_query_completions`, on for every other collector). `UPDATE config.config_collector_schedules AS s SET enabled = COALESCE((SELECT f.enabled FROM config.config_collector_schedules AS f WHERE s.server_id IS NOT NULL AND f.server_id IS NULL AND lower(f.collector_name) = lower(s.collector_name) LIMIT 1), lower(s.collector_name) <> 'long_query_completions') WHERE s.enabled IS NULL;` The statement reads the rows as they were before it ran, so a server's row takes its fleet-wide row's value even when that row is set to false. Deleting those rows works too. If you skip this step the older build cannot read the store's configuration at all: every reload fails on the NULL, so it runs on darling.json alone, servers added after the store was seeded are not collected, and the store's paused flag, alert and notification settings and the MCP and web enable flags are ignored (an endpoint switched off in the store comes back up when darling.json still turns it on). The schedule tools' write grants on the `mcp` role are not removed by an older build's role provisioning either, so revoke them: `REVOKE INSERT, UPDATE ON config.config_collector_schedules FROM mcp; REVOKE INSERT, UPDATE, DELETE ON config.config_collector_run_times FROM mcp;`
-- **V207**: an older build does not know the change watches ([#6234](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6234)). A change watch opens an investigation request marked `change_watch` (the `trigger_kind` column), and the older build's alert grouping does not check that column. While a newer and an older instance share one store, an alert on the older instance can join a change-watch request that is still open, within the usual grouping window, and its alert is then carried on that request instead of opening its own. The newer build never joins an alert to a change-watch request. Stop the newer instance before you let an older instance alert against the same store. The watch tables and the column stay in the store and apply again when a newer build runs.
-- **V208**: an older build does not know a mute rule's start time ([#6231](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6231)), so it ignores the `starts_at_utc` column and applies a quiet window or mute rule that is set ahead of its start as soon as it is stored. Before you roll back past V208, clear or end any quiet window whose start is still ahead (`get_mute_rules` shows it as `state: upcoming`), or it mutes early on the older build.
-- **V210**: an older build does not know the guard on the MCP tag writes ([#6281](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6281)). Rolling back leaves the guard's trigger and function in the store, where they keep refusing: the older build's tag tools then get a refusal naming the route when they would change which servers an agent route covers (and its remove_server answers an error, not a refusal, for a server mapped under such a route). Nothing is read differently, so nothing needs doing before rolling back; to lift the refusal, drop `trg_agent_route_tag_guard` on `config.server_tags` and `config.server_tag_map`.
-- **V212**: an older build does not know the machine identity on the server registry ([#6285](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6285)). Rolling back leaves `collect.servers.machine_identity` in place and nothing reads it differently, so nothing needs doing first. The older build does not refresh it on a connect, so a registration re-pointed while rolled back keeps its old identity until the newer build connects to it again. Registrations removed before this version, and ones that have not connected since the upgrade, have no stored identity, so only the host-name match checks them when an add or edit would register the same machine again; so do Aurora clusters and PostgreSQL logins that may not call `pg_control_system()`.
-- **V213**: an older build does not know the Query Store replica ([#6254](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6254)). Rolling back leaves `config_monitored_servers.query_store_replica` and `collect.collection_log.read_source` in place, and the older build ignores both: it reads Query Store from the monitored server itself, not from the replica, so the primary carries that load again, and it does not record which host a run read from. Before you roll back past V213, clear the replica on each server that has one (`edit_server` or the Edit Server dialog), or note that the primary is read again; nothing else needs doing first.
-- **V214**: an older build does not know the known patterns ([#6334](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6334)). Rolling back leaves `config.config_known_patterns` and its three write functions in place. The older build never reads them, so nothing needs doing first. The notes you wrote stay in the store and show beside their alerts again when you upgrade.
-- **V216**: an older build does not know that the Client Timeouts alert is on by default ([#5736](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5736)). Rolling back leaves `config_alert_settings.client_timeouts_enabled` as it is: the older build reads the same column, so the alert stays on until you switch it off in the Settings window. The older build's own default for a new store is off. Nothing needs doing first.
+This section moved to [Running Darling day to day](../docs/darling/admin.md#rolling-back-to-an-older-build).
 
 #### Upgrading from a build that predates the script
 
-This is a note for very old builds. `upgrade-darling.ps1` was added after 3.5.0, so a build from 3.5.0 or earlier needs this manual procedure once ([#2593](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2593)). It is the same sequence the script automates.
-
-Nothing that you must keep lives in the install directory. The managed store, the DPAPI credential blobs and the logs are under `C:\ProgramData\PerformanceMonitorDarling`. The only file that has to travel is `darling.json`. Renaming the install folder does not back up your data. For a data rollback point, snapshot the volume, or stop the service and copy the ProgramData folder.
-
-1. Verify the download. Run `Get-FileHash <zip> -Algorithm SHA256` and compare it with `SHA256SUMS.txt` from the same release page. If you skip this step, you cannot recover from it.
-2. Run `Stop-Service 'PerformanceMonitor Darling' -Force`. Poll until `Status` is `Stopped`. A stop request is not a stopped service.
-3. Rename the current install folder (for example, add `_old`). This is your rollback.
-4. Extract the new zip to the original folder name.
-5. Copy `darling.json` from the renamed folder into the new one. Hash it on both sides and confirm the hashes match.
-6. Run `.\install-darling.ps1` from the new folder. For an existing install, it re-points the service's binPath and keeps the config, the store and the credentials.
-7. Start the service, then verify with the post-start checklist. Reaching `Running` means the process started, not that it collects.
+This section moved to [Running Darling day to day](../docs/darling/admin.md#upgrading-from-a-build-that-predates-the-script).
 
 #### The install location has to be machine-scoped
 
-Extract to a local, machine-scoped path. **Use `C:\Program Files\PerformanceMonitorDarling`**, not a folder made directly under `C:\` (the older documented example, `C:\PerformanceMonitorDarling`, which `install-darling.ps1` now refuses unless you pass `-AcceptWritableExtraction`): `C:\Program Files` denies write to ordinary local users by default, while a fresh folder directly under `C:\` inherits `Authenticated Users: Modify` from the volume root the instant it is extracted, before `install-darling.ps1` has run a single line ([#4043](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4043)). Either way, **not** anywhere under a user profile (`C:\Users\...`, including your Desktop or Downloads), and not a UNC path or a mapped drive.
-
-The service runs as the unprivileged virtual account `NT SERVICE\PerformanceMonitor Darling`, never LocalSystem, because the bundled PostgreSQL refuses to run with administrative privileges. That account is not you, not SYSTEM, and not Administrators — and a user profile grants access to about those three and nobody else, so the service cannot read its own program files there. It installs cleanly and then fails: `initdb.exe` dies at `0xC0000135` (STATUS_DLL_NOT_FOUND) before it can report anything (#2185). A folder created under `C:\` inherits read + execute for `BUILTIN\Users` instead, which the virtual account is a member of, which is why that documented location still works for the *service* — the residual is the *write* grant the same inheritance carries for every other local user, which is what `C:\Program Files` avoids and what the next paragraph checks for. Network paths fail for a related reason: a virtual account [reaches the network as the computer account](https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/configure-windows-service-accounts-and-permissions#virtual-accounts) rather than as you, and a mapped drive letter belongs to your logon session, which a service does not share.
-
-**`install-darling.ps1` also refuses to run at all from a folder ordinary local users can already write to** ([#4043](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4043), checked before anything else, including the install-tree lock below (#4034)): the lock only stops writes from the moment it runs, so a folder that was writable by someone else *before* that — the usual case is a fresh extract directly under `C:\` — may already hold a swapped binary the lock can never undo. The refusal names the principals and points you at `C:\Program Files\...`. For a folder that already holds an install (the service is registered, or `darling.json` or `pg-runtime` is there), the refusal gives the numbered steps instead: stop the service, extract the new zip into a new, empty `C:\Program Files\PerformanceMonitorDarling`, copy `darling.json` into it first (plus any certificate or key it points at, and `darling-keys` when `postgres.managed` is `false`), run `install-darling.ps1` from the new folder (it re-points the existing service; the logon account, credentials and store are not touched), start the service and check it collects, then delete the old folder. `upgrade-darling.ps1` gives the same steps. The service's own account (`NT SERVICE\PerformanceMonitor Darling`) is never listed as a finding in that folder, whether or not the service is registered today. `-AcceptWritableExtraction` skips it for a dev loop that extracts somewhere deliberately writable; it is not for a real install.
-
-`install-darling.ps1` refuses a fresh install in any of these locations rather than leaving you a service that cannot start. A service registered by hand instead — the manual `sc create` path below, which the installer never sees — gets the same diagnosis from the service itself: on start, ahead of reading `darling.json` and long before the store bootstrap, it logs one critical line naming the path, why its own account cannot read it, and where to move it, so the cause is above the failure rather than three messages downstream of it. To move an existing install, stop the service, move the folder, and re-run `install-darling.ps1` from the new location — it updates the service's binPath in place and leaves your `darling.json`, store data, and credentials alone.
-
-**Manual:** publish (or copy the build output) to a stable path, put `darling.json` next to the exe (or set `DARLING_CONFIG` as a machine environment variable), then register it:
-
-```
-dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o "C:\Program Files\PerformanceMonitorDarling"
-```
-
-```
-sc create "PerformanceMonitor Darling" binPath= "\"C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe\"" start= auto obj= "NT SERVICE\PerformanceMonitor Darling"
-```
-
-```
-sc start "PerformanceMonitor Darling"
-```
-
-Also register the service's Windows event source once, from the same elevated shell — event-source registration requires elevation, and the virtual service account cannot do it itself (without this, Event Log diagnostics are silently dropped; the file log under `%ProgramData%\PerformanceMonitorDarling\logs` works regardless):
-
-```
-powershell -NoProfile -Command "New-EventLog -LogName Application -Source 'PerformanceMonitor Darling' -ErrorAction SilentlyContinue"
-```
-
-The `obj=` clause runs the service under a **virtual service account** (`NT SERVICE\<service name>` — password-less, per-service SID, unprivileged; the same convention SQL Server itself uses). That is the right account for SQL-auth monitoring, and with `postgres.managed = true` it is more than a preference: PostgreSQL refuses to execute with administrative privileges, so don't run the service as LocalSystem — a least-privilege account keeps the bundled store's initdb/start path on ground PostgreSQL supports. For integrated auth to monitored servers, [run the service as a domain account or gMSA](#run-the-service-as-a-domain-account-or-gmsa) instead. Note the space after `binPath=`, `start=`, and `obj=` — `sc` requires it.
-
-One managed-mode handoff gotcha: if you test-drove the service from a console first, the bundled store's data directory belongs to *your* account, and the service account may not be able to write it. Point the service at a fresh `postgres.dataDirectory` (or delete the test directory) rather than fighting ACLs.
+This section moved to [Install Darling](../docs/darling/install.md#the-install-location-has-to-be-machine-scoped).
 
 #### Run the service as a domain account or gMSA
 
-With `"auth": "integrated"`, the monitoring identity **is** the service's Log On account — nothing in `darling.json` names a Windows account, and there is no separate credential to set. The default virtual account carries only the *machine* identity onto the network (remote servers see `DOMAIN\<collector-machine>$`), so for integrated auth against remote servers you almost always want a real AD service account or, better, a gMSA. Switching is a Windows-side change plus a SQL-side grant, with one file-permission step in the middle that bites everyone who skips it:
-
-1. **Change the Log On account.** Stop the service, then **Services.msc → PerformanceMonitor Darling → Log On → This account** — that route also grants the account the *Log on as a service* right automatically. Or from an elevated prompt (with `sc config` you grant *Log on as a service* yourself, via secpol.msc or GPO):
-
-   ```
-   sc config "PerformanceMonitor Darling" obj= "DOMAIN\svc-account" password= "ThePassword"
-   ```
-
-   A gMSA works the same way with an empty password: `obj= "DOMAIN\gmsa-name$" password= ""`. Keep the account **out of the local Administrators group**: with `postgres.managed = true` the bundled PostgreSQL refuses to run with administrative privileges, exactly as it refuses LocalSystem.
-
-2. **Grant the account on every monitored server** — a Windows login holding the same [permissions below](#permissions-on-monitored-servers) (the `GRANT`s there apply to a Windows login unchanged):
-
-   ```sql
-   USE [master];
-   CREATE LOGIN [DOMAIN\svc-account] FROM WINDOWS;
-   ```
-
-3. **Re-grant the service's own files — the step people miss.** The service deliberately locks its files down to SYSTEM, Administrators, and the account it was *running as*; the new account is on none of those ACLs, and the service will fail to read its config or write its store. One-time, from an elevated prompt, before starting the service:
-
-   ```
-   icacls "C:\ProgramData\PerformanceMonitorDarling" /grant "DOMAIN\svc-account:(OI)(CI)F"
-   icacls "C:\ProgramData\PerformanceMonitorDarling\logs" /grant "DOMAIN\svc-account:(OI)(CI)F"
-   icacls "C:\Program Files\PerformanceMonitorDarling\darling.json" /grant "DOMAIN\svc-account:F"
-   ```
-
-   Adjust the last path to wherever `darling.json` sits beside the service exe. The first grant covers the store folder and, in managed mode, the data directory. The `logs` folder has its own protected ACL that does **not** inherit the folder grant, so it gets its own line. On its next start the service re-asserts the tight ACL itself — now including the new account — so this does not need repeating.
-
-   In managed-store mode there is one more grant: the store's superuser credential `pg-credential.dpapi` (beside the data directory, under `C:\ProgramData\PerformanceMonitorDarling` by default) also has a protected ACL that does **not** inherit the folder grant, so grant the new account on the file directly:
-
-   ```
-   icacls "C:\ProgramData\PerformanceMonitorDarling\pg-credential.dpapi" /grant "DOMAIN\svc-account:F"
-   ```
-
-   **No ownership step is needed when the service was running as the default virtual account** (the `NT SERVICE\PerformanceMonitor Darling` account `install-darling.ps1` creates). The service and `install-darling.ps1` trust a store item owned by SYSTEM, Administrators, TrustedInstaller, the account the service runs as, or *this service's own service SID* (`NT SERVICE\PerformanceMonitor Darling`, `S-1-5-80-…`), and everything the virtual account created is owned by that SID. Ownership is only a step when the service has already run as *another* account (a second switch, from one domain account or gMSA to the next): that account then owns the items, and the service refuses them as a possible pre-plant. Hand ownership to Administrators, which is trusted across any later account change, from an elevated prompt with the service stopped:
-
-   ```
-   icacls "C:\ProgramData\PerformanceMonitorDarling" /setowner "*S-1-5-32-544" /T /C /L
-   ```
-
-   The sibling role credentials (the admin/viewer/mcp `.dpapi` files) self-heal — a role password can be re-asserted, a superuser's cannot — so expect one-time `discarding and regenerating` warnings on the first start, not faults.
-
-4. **Start the service and verify from its log** (`%ProgramData%\PerformanceMonitorDarling\logs`): the per-server connect lines are the proof that the *service account's* grants work. `--test-connection` from your console runs as you, not the service account — see the [pre-flight note above](#validate-the-config-pre-flight).
-
-Nothing else moves: anything encrypted with `--encrypt-password` (SQL-auth server passwords, SMTP) survives the account change, because those blobs are DPAPI **machine**-scope, not account-scope — and collected data is untouched. Later `install-darling.ps1` upgrades preserve a custom Log On account and harden `darling.json` for the account the service actually runs as.
+This section moved to [Install Darling](../docs/darling/install.md#run-the-service-as-a-domain-account-or-gmsa).
 
 ### Build from source
 
-You need the .NET 10 SDK to build from source. A release zip needs no SDK.
-
-Build from the repository root:
-
-```
-dotnet build Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release
-```
-
-```
-dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release
-```
+This section moved to [Install Darling](../docs/darling/install.md#build-from-source).
 
 ### Windows stops at start: the CET error
 
-.NET 10 apps need a Windows that is current on its updates to start on a CPU with CET (a hardware protection). We saw this on Windows Server 2022 build 20348.1366. Without the updates the service and the viewer both stop at start. The exit code is `0x80131506` and stderr shows this message:
-
-```text
-Fatal error. Your Windows doesn't fully support CET. Please install all available Windows updates.
-```
-
-`install-darling.ps1` recognises that message in its pre-flight and stops with a plain message instead of asking whether to install anyway. The fix is to install all available Windows updates and restart. If you cannot do that yet, there is a short-term workaround. Run these from an elevated PowerShell before you install or start. Each turns off one protection (`UserShadowStack`, the hardware-enforced stack protection) for one Darling exe:
-
-```powershell
-Set-ProcessMitigation -Name PerformanceMonitor.Darling.Service.exe -Disable UserShadowStack
-Set-ProcessMitigation -Name PerformanceMonitor.Darling.Viewer.exe -Disable UserShadowStack
-```
-
-This weakens that program's protection, so treat it as a stopgap. To undo it once Windows is patched, remove the values the first command wrote:
-
-```powershell
-$ifeo = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options'
-foreach ($exe in 'PerformanceMonitor.Darling.Service.exe', 'PerformanceMonitor.Darling.Viewer.exe') {
-    Remove-ItemProperty -Path "$ifeo\$exe" -Name MitigationOptions, MitigationAuditOptions, EAFModules -ErrorAction SilentlyContinue
-}
-```
-
-On Windows Server 2022 build 20348.5622, `Set-ProcessMitigation -Remove -Disable UserShadowStack` did not remove the setting (it returned `C000000D`). `Set-ProcessMitigation -Reset` failed too ("Invalid input parameters"). The registry way above worked. The `Set-ProcessMitigation -Disable` command writes three values (`MitigationOptions`, `MitigationAuditOptions`, `EAFModules`) under the exe's key in `Image File Execution Options`. The undo removes only those values and leaves any other value on that key alone. Restart the program afterwards. The first command is described in Microsoft's [Set-ProcessMitigation](https://learn.microsoft.com/en-us/powershell/module/processmitigations/set-processmitigation) reference.
+This section moved to [Install Darling](../docs/darling/install.md#windows-stops-at-start-the-cet-error).
 
 ### What the Service Does on Monitored Servers
 
-On each successful connect, the service:
-
-1. **Probes the server** — one query against `sys.dm_os_sys_info` / `SERVERPROPERTY()` for version, engine edition (box / Managed Instance / Azure SQL DB), AWS RDS detection, and msdb access. It is the same detection query Lite runs, so both editions classify a server identically.
-2. **Ensures three Extended Events sessions** (created if missing, started if stopped; a ring buffer of at most 4 MB each, no files written on the server):
-   - `PerformanceMonitor_Deadlock` — `xml_deadlock_report`, server-scoped on on-prem/Managed Instance/RDS; `database_xml_deadlock_report`, database-scoped on Azure SQL Database.
-   - `PerformanceMonitor_BlockedProcess` — `blocked_process_report`, server-scoped (database-scoped on Azure SQL Database).
-   - `PerformanceMonitor_Attention` — `attention`, the event a client sends when a query times out or is cancelled (#5640). Server-scoped, or database-scoped on Azure SQL Database. It has an `event_counter` target (the exact count) and a 1 MB ring buffer (the detail of recent events: application, host, database, session and statement text).
-3. **Bootstraps the blocked-process threshold** — if `blocked process threshold (s)` is `0`, the service sets it to `5` via `sp_configure`. On AWS RDS `sp_configure` is unavailable; the attempt is tolerated and logged, and you set the threshold through an RDS Parameter Group instead (Azure SQL Database has a fixed 20-second threshold).
-4. **Runs the on-connect config snapshots once** (`server_config`, `database_config`, `database_scoped_config`, `trace_flags`, `server_properties`), then runs all scheduled collectors on the shared default cadences.
-
-Every failure in steps 2–3 is tolerated and logged: the deadlock/blocked-process collectors simply read zero rows until the sessions exist (and blocked-process reports only start arriving once the threshold is set). Monitoring queries connect with a 15-second connect budget and an application name of `PerformanceMonitorDarling`; connection encryption fails closed to `Mandatory` when the configured mode is unrecognized.
+This section moved to [Darling and your monitored servers](../docs/darling/monitored-servers.md#what-the-service-does-on-monitored-servers).
 
 ### The Extended Events Sessions the Service Creates
 
-Each Darling install has an eight-character id. The service makes it at start and keeps it in `config.config_install_id`, a store table that holds one row. The id appears in the name of each session that belongs to this install alone. Two installs that monitor one server never share such a session, so one install cannot drop or stop the other's.
-
-#### The sessions
-
-- `PerformanceMonitor_Darling_<id>_LongQueryCompletions` is this install's long-query trace. The service creates it while the opt-in `long_query_completions` collector is on. It is created with `STARTUP_STATE = OFF`, so it stays stopped after a server restart. Each check starts it again when it finds it stopped.
-- `PerformanceMonitor_Deadlock`, `PerformanceMonitor_BlockedProcess` and `PerformanceMonitor_Attention` keep their shared names, because Lite and other installs read them too. The service never drops them. It checks them at connect and then once an hour. It creates a missing one and starts a stopped one, so a deliberate stop lasts less than an hour.
-- On Azure SQL Database, a shared session can stay unusable after a start. The service then creates `PerformanceMonitor_Darling_<id>_Deadlock`, `PerformanceMonitor_Darling_<id>_BlockedProcess` or `PerformanceMonitor_Darling_<id>_Attention` in that database, with `STARTUP_STATE = OFF`, and reads that one. When the shared session works again, the service switches back and drops its own fallback.
-
-#### The old shared session
-
-Earlier versions shared one session, `PerformanceMonitor_LongQueryCompletions`, between all installs. An upgraded install drops it once for each registration and database. It then records that drop and never touches the session again. If an older install creates it again later, the service logs one Information line per start and leaves the session alone. To remove it, see [Drop the Extended Events sessions a removed server left behind](#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions).
-
-#### Removing a server
-
-Removing a server drops this install's sessions on it. These are the long-query session and its own deadlock and blocked-process fallbacks. The service makes one attempt, within 15 seconds. A failed drop is logged and never stops the removal.
-
-The service leaves a session that another registration of this install keeps. On premises, it also leaves the session when it cannot tell whether another registration of this install shares the instance. That happens when the instance name of this server is not known. The service logs the reason. The two shared sessions stay on the server. The [`--drop-xe-sessions`](#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions) section shows how to drop them.
-
-#### Registrations that share an instance
-
-On premises, a registration with the trace off leaves the long-query session in place when another registration of this install has the trace on. Both registrations must point at the same instance. The service compares the last known `@@SERVERNAME` of each one.
-
-#### Read-only intent on Azure SQL Database
-
-A session cannot be created over a read-only connection. For a registration with read-only intent, the service creates the session definition over a connection without the intent. The definition replicates to the read-only replica. The service then starts the session over the registration's own connection. A drop stops the session on the replica first, then drops it on the primary. Microsoft describes the method in [Monitor read-only replicas with Extended Events](https://learn.microsoft.com/en-us/azure/azure-sql/database/read-scale-out). On Hyperscale with several high-availability replicas, a read-only connection lands on one replica that the app cannot choose, so the stop reaches only that one. Microsoft Learn describes no way to address a single high-availability replica; it says the read-intent workload is distributed arbitrarily across them ([Connect to an HA replica](https://learn.microsoft.com/en-us/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica)).
-
-A Managed Instance registration with read-only intent needs the trace started on the primary first. The service does not do that, so the registration gets the read-only message (error 3906). A registration without the intent can land on a read-only database, such as a geo-secondary. It gets one clear message, and the service retries the create every hour.
-
-#### Azure SQL Database limits
-
-Microsoft Learn lists these caps under "Resource governance" on [Extended Events in Azure SQL](https://learn.microsoft.com/en-us/azure/azure-sql/database/xevent-db-diff-from-svr). A database holds at most 100 started sessions. An elastic pool holds at most 100 database-scoped sessions. Session memory is capped at 128 MB per database and 512 MB per pool. In a dense pool, a start can fail below 100 sessions.
-
-Each install uses one long-query session per database while the trace is on. It adds up to two fallbacks while a shared session is unusable. A failed create or start on Azure SQL Database carries a sentence that names these caps.
-
-#### Known limits
-
-- An older Darling with the trace on loses capture once for each upgraded install, until it reconnects.
-- An older Lite creates the old session again within one collection cycle.
-- Two registrations of one instance in one install drop the old session twice.
-- A Darling server that you point at a new host keeps its server id. The service never drops the old session on the new host.
-- A lost record costs one more drop. This happens when you remove a server and add it again.
-- On RDS Multi-AZ, the drop reaches the primary only. The copy on the standby stays stopped after a failover, unless an older install starts it.
-- On Hyperscale with several high-availability replicas, the stop reaches only the replica that a read-only connection lands on. A copy of the session that runs on another replica is not stopped. Microsoft Learn describes no way to address one high-availability replica: [Connect to an HA replica](https://learn.microsoft.com/en-us/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica).
-- On Azure SQL Database, two registrations of one database with different logins share one session name, as before.
-
-#### Clones
-
-A physical clone keeps the install id. A VM snapshot is a physical clone, and so is a store copied with `pg_basebackup`. The clone and the original then use the same session names on every server both monitor. To give the clone its own id, stop the service, delete the row, and start the service. The service makes a new id at start.
-
-```sql
-DELETE FROM config.config_install_id;
-```
-
-A managed major upgrade of the store keeps the id. The upgrade gives the store a new cluster identifier and a higher major version, and keeps the OIDs of the store's database and of the install id table. The row records both OIDs and the major version it last saw. When the cluster identifier changed, both OIDs still match, and the major version is higher than the row's, the service keeps the id and writes the new cluster identifier and major version on the row (one Information line in the log names both cluster identifiers). A changed cluster identifier at the same or a lower major version gets a new id, so a copy of the row into a fresh install of the same version does not share the id. A copy into an install of a higher version looks like an upgrade and keeps the id: delete the row there, as for a clone.
-
-A store moved by dump and restore, or by logical replication, is a different store. It gets a new id on its own, because a restore assigns new OIDs. The sessions of the old id stay until you drop them by hand; `--drop-xe-sessions` lists them.
+This section moved to [Darling and your monitored servers](../docs/darling/monitored-servers.md#the-extended-events-sessions-the-service-creates).
 
 ### Permissions on Monitored Servers
 
-Darling needs the **same target-server grants as Lite**, so the copy-paste block lives in one place for both: **[Permissions in docs/permissions.md](../docs/permissions.md#lite--darling-on-premises)** — `VIEW SERVER STATE`, `CONNECT ANY DATABASE`, `VIEW ANY DEFINITION`, `ALTER ANY EVENT SESSION`, and the optional `ALTER TRACE`, `ALTER SETTINGS`, and msdb job-table grants, verified live against SQL Server 2025 with a scratch login carrying exactly them ([#1823](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1823)). That block is authoritative; this section is the Darling-specific reading of it. Keeping one list instead of two is deliberate — a second copy is how the old one went stale.
-
-**The one Darling-specific line:** for `"auth": "integrated"` the grants go to the Windows account **the service runs as**, so use `CREATE LOGIN [DOMAIN\svc-account] FROM WINDOWS;` in place of the block's `CREATE LOGIN ... WITH PASSWORD`. Everything after it is unchanged. See [Run the service as a domain account or gMSA](#run-the-service-as-a-domain-account-or-gmsa) for which account that actually is — it is not the one you ran `--test-connection` as.
-
-What each grant buys you, and what breaks without it:
-
-| Grant | Why | If missing |
-|---|---|---|
-| `VIEW SERVER STATE` | All DMV collectors (wait stats, query stats, memory, CPU, file I/O, sessions, etc.) and the connect probe | Collection fails — this one is required |
-| `ALTER ANY EVENT SESSION` | Create/start the three shared XE sessions (deadlock, blocked-process and attention) | Logged; deadlock, blocked-process and client-timeout collectors read zero rows (an admin can pre-create the sessions instead) |
-| `CONNECT ANY DATABASE` | The per-database collectors (`database_scoped_config`, `query_store_health`, `index_object_stats`, `database_size_stats`, `query_store_stats`, `query_store_forced_plans`) enter each database via `EXECUTE [db].sys.sp_executesql` | Databases the login cannot enter are skipped; without the grant that is every user database |
-| `VIEW ANY DEFINITION` | Catalog-view row visibility everywhere: `sys.tables` / `sys.indexes` / `sys.objects` for the index and object collectors, `sys.dm_db_partition_stats`, and the AG catalog views (`sys.availability_groups`, `sys.availability_replicas`) | **Silently zero rows** — catalog views hide rows rather than erroring, so missing objects look exactly like empty databases, and a real AG cluster looks identical to a server with no AGs |
-| `ALTER SETTINGS` | The `sp_configure` blocked-process-threshold bootstrap | Logged; set the threshold yourself (or via RDS Parameter Group) |
-| `ALTER TRACE` | The `default_trace_events` collector — `sys.traces` / `fn_trace_gettable` accept nothing less | `PERMISSIONS` skip in collection health; the default-trace tab stays empty |
-| msdb job-table `SELECT`s + `agent_datetime` `EXECUTE` | `running_jobs` / `job_history` / `agent_status` collectors and the failed/long-running-job alerts — all direct table reads; `SQLAgentReaderRole` alone leaves every one failing with error 229 | Skipped gracefully — logged as a permissions skip, alerts return no jobs |
-| `DBCC TRACESTATUS` permission | `trace_flags` snapshot | Degrades to zero rows with a warning |
-
-The msdb grants live inside a system database SQL Server setup can rewrite — re-check them after a CU or version upgrade.
-
-**Azure SQL Database:** connect to the one database you monitor (set the server entry's `"database"`), using a contained user with `VIEW DATABASE STATE`, `VIEW DEFINITION` and `ALTER ANY DATABASE EVENT SESSION`, matching the product's existing Azure guidance. The third grant lets the monitor create its Extended Events sessions, which are database-scoped there. A contained user cannot read the tempdb DMVs: `tempdb_stats` shows `NO_PERMISSIONS`, and only a server login in `##MS_ServerStateReader##` fixes that. SQL Agent collectors are skipped automatically.
-
-Collectors that hit a permission error (SQL errors 229/297/300, plus 8189 from `sys.traces`) log a `PERMISSIONS` row in `collection_log` and retry on their next scheduled run — one denied collector never stops the rest.
-
-#### Which collectors run on which platform
-
-Every collector declares its own applicability in code (`AppliesTo(CollectorTargetInfo)`), so this is not a hand-maintained per-collector list — the SQL Server collectors fall into seven groups, and a collector outside its supported platform is **skipped before it runs**, not failed and logged every cycle.
-
-| Runs on | Collectors | Gate |
-|---|---|---|
-| Everything | wait stats, CPU utilization, memory (stats/clerks/grants), file I/O, tempdb, latches, spinlocks, plan cache, session summary, plus blocking, deadlocks, blocked-process reports, DMV blocking snapshots, perfmon, query snapshots, procedure stats, index/object stats, long-query completions, client timeouts (`attention`), database config/scoped-config/size, server properties, session stats, waiting tasks | no gate |
-| On-prem, Managed Instance, RDS — **not** Azure SQL DB | CPU scheduler stats, default trace events, memory pressure events, server config, system health events, trace flags, database states, Availability Group replica states, Availability Group database replica states | `!IsAzureSqlDb` |
-| On-prem and Managed Instance, needs msdb | job history | `!IsAzureSqlDb && HasMsdbAccess` |
-| On-prem and Managed Instance, needs msdb — **not** RDS | agent status, running jobs | `!IsAzureSqlDb && !IsAwsRds && HasMsdbAccess` |
-| SQL Server 2016+ (or any Azure flavour) | query stats, Query Store stats, Query Store health, Query Store forced plans | `SqlMajorVersion >= 13 \|\| IsAzureSqlDb \|\| IsAzureManagedInstance` |
-| SQL Server 2017+ (or any Azure flavour) | plan correction (automatic tuning recommendations) | `SqlMajorVersion >= 14 \|\| IsAzureSqlDb \|\| IsAzureManagedInstance` |
-| SQL Server 2019+ (or any Azure flavour) | persistent version store stats | `SqlMajorVersion >= 15 \|\| IsAzureSqlDb \|\| IsAzureManagedInstance` |
-
-Notes:
-
-- **Azure SQL DB** is the most restricted target: the nine `!IsAzureSqlDb` collectors above, and job history, read server-scoped DMVs or on-disk artifacts that do not exist there, and the SQL Agent collectors have no Agent to read. Nothing about that is a permission problem, so it is not reported as one.
-- **AWS RDS** blocks direct `msdb` job reads specifically; the rest of the SQL Agent surface is unaffected.
-- **`HasMsdbAccess`** is probed per server at connect and is exactly `HAS_DBACCESS('msdb')` — *any* access to msdb, not a specific role or table grant. Losing msdb access later moves those collectors from running to skipped without an error storm. A login that can enter msdb but lacks `SELECT` on the job tables passes this probe and is caught one layer down as a `PERMISSIONS` skip instead.
-- An unknown version (`SqlMajorVersion == 0`, i.e. detection has not completed yet) is treated as capable rather than skipped, so a collector is never silently dropped because a probe was slow.
-
-If a tab or column is empty and you expect data, check **Collection Health**: a collector skipped for platform reasons shows no runs at all, whereas one denied by permissions logs `PERMISSIONS` and is classified `NO_PERMISSIONS`. Those are different problems with different fixes — the first is expected on that platform, the second is a grant to add from the table above.
+This section moved to [Darling and your monitored servers](../docs/darling/monitored-servers.md#permissions-on-monitored-servers).
 
 ---
 
@@ -1211,6 +734,8 @@ The embedded **web dashboard** — a browser view of the monitoring store, serve
 
 **Collection state over MCP (#6230).** With `mcp.allowWrites` on, an MCP client can `pause_collection` and `resume_collection` (all collection), `disable_server` and `enable_server` (one server), `set_server_excluded_databases` (one server's excluded databases, the same write the Viewer's Excluded Databases editor makes) and `reload_config`. `get_collection_state` reads whether collection is paused and each server's enabled flag, excluded databases and monthly cost, and `get_server_settings` (#6402) reads the fields `edit_server` changes for one server (never a password or external ID). Pause and resume queue the same `pause` and `resume` commands the Viewer queues, through `config.request_mcp_command`: the answer gives the command id and the read that shows the result (`get_command_result`, then `get_collection_state`), and the row is stamped `mcp`. The other writes run the command plane's own plan, so the SQL and the checks exist once; each answer gives the previous value and the exact call that undoes it, and each server write logs at Warning with the tool, the server and the caller. A server is found the way `edit_server` and `remove_server` find one (the storage name `list_servers` shows works); a name that matches several servers is answered with the candidates. None of the six is offered to an investigation agent. The `mcp` role holds no write on `config.config_service.paused`: a store that an earlier build granted it loses the grant on the next start, and a self-managed store re-runs `tools/provision-roles.sql`. `edit_server` still refuses `is_enabled` and `excluded_databases`, and its refusal names these tools.
 
+**Known patterns over MCP (#6398).** With `mcp.allowWrites` on (and a token), `create_known_pattern`, `update_known_pattern` and `delete_known_pattern` add, replace and remove the entries `get_known_patterns` lists, the same writes the web editor makes (`note` is required and at most 500 characters; `server_id`, `metric_name`, `time_of_day`, `time_zone`, `window_minutes` and `expires_at_utc` are optional, and a field left out means any / UTC / the default window / never). They call the same store functions as the web routes and refuse the same things (a missing or over-long note, an unknown time zone, a `server_id` that is not registered, a bad time or expiry), and write nothing when they refuse. `update_known_pattern` replaces the whole entry, as the web editor's save does. Each answer carries the entry before and after and an `undo` call (a delete's undo re-creates the entry under a new id). The `mcp` role holds EXECUTE on the three functions and nothing on the table. These tools are never offered to an agent that Darling sends to investigate an alert; it may read with `get_known_patterns`.
+
 | Key | Default | Notes |
 |---|---|---|
 | `enabled` | `false` | **Off by default** — a headless service does not open a local port unless you ask |
@@ -1473,125 +998,15 @@ A source login can read what every PostgreSQL login can: the system catalogs and
 
 ## PostgreSQL Targets
 
-Darling monitors PostgreSQL alongside SQL Server. For the ordered procedure with a proof point at each step, see [**the first-target runbook**](../docs/postgres-first-target-runbook.md); this section is the reference for what each piece does.
-
-Add `"engine": "postgres"` to a `servers` entry and that target is collected by the PostgreSQL collectors instead of the T-SQL ones:
-
-```json
-{
-  "name": "orders-prod",
-  "engine": "postgres",
-  "host": "orders-prod.cluster-abc123.us-east-1.rds.amazonaws.com",
-  "auth": "sql",
-  "username": "darling_monitor",
-  "encryptedPassword": "<DPAPI blob from --encrypt-password>"
-}
-```
-
-**Which path registers a target depends on the store, not the file.** `darling.json` seeds `config.config_monitored_servers` once, when it is empty; after that the registry is authoritative and a darling.json edit adds nothing. So a fresh install declares its PostgreSQL targets in the file, and an existing one adds them with the [`add_servers`](#mcp) tool (or the Viewer's Add Server dialog), which takes effect within one collection sweep without a restart. The registry carries `engine` and `port` per row, so a target keeps its engine across restarts and reloads.
-
-`auth` must be `"sql"` — PostgreSQL has no integrated-authentication path here, and an entry asking for it fails [`--test-connection`](#validate-the-config-pre-flight) rather than waiting to fail at first connect. `add_servers` enforces the same rule, and unlike the file parser it REFUSES an unrecognized `engine` rather than resolving it to SQL Server: the file's leniency keeps one bad line from stopping the whole fleet at startup, while onboarding is a single deliberate act where a silent fallback would surface as a connection failure against the wrong port. Password handling is identical to a SQL Server entry: `--encrypt-password` produces the DPAPI blob, and the `env:NAME` / `file:/path` references work the same way. TLS defaults to full certificate verification (`SslMode=VerifyFull`); `trustServerCertificate` relaxes it to `Require`, which is the setting Aurora usually needs since it presents an RDS CA a stock trust store does not know, and `"encryptMode": "Optional"` relaxes it further to `Prefer`.
-
-**One store, both engines.** The PostgreSQL collectors write to the same store as the SQL Server ones, into their own tables, on the same naive-UTC contract and the same `server_id` identity. Nothing is partitioned by engine — a mixed fleet is one store, one viewer, one MCP endpoint.
-
-**A collector table must never be named after a `pg_catalog` object.** `pg_catalog` is searched implicitly and *first*, ahead of every entry in `search_path`, so an unqualified reference to such a name resolves to the system object no matter what the store holds. It fails loudly in one place — `CREATE INDEX` on a view is 42809, which aborts the migration and leaves the store unusable — and silently everywhere else: a reader's `FROM <name>` would return the monitoring store's own system view instead of collected history, so the tool reports nothing and any alert behind it never fires. That is why the slot collector stores into `pg_replication_slot_stats` while still being *named* `pg_replication_slots` after the view it reads (the same split as `query_store` → `query_store_stats`). A live-store test asserts no collector table shadows a catalog object, against the real catalog rather than a hardcoded reserved list.
-
-**A collector never runs against the wrong engine.** Every definition declares its `TargetEngine`, and both SKUs check it before dispatch, so a PostgreSQL target is never sent T-SQL and a SQL Server target never sees `pg_stat_statements`. A store monitoring only SQL Server still carries the 29 PostgreSQL tables, empty; nothing else about it changes.
-
-### Connect to the server, not to a pooler
-
-A PostgreSQL target must be a direct connection to the server. When the service signs in, it sets `search_path` to `pg_catalog, pg_temp` for its own session. That way every name in its queries means the built-in object. It sends this setting in the startup `options` parameter, and connection poolers do not pass it on.
-
-PgBouncer refuses the sign-in with "unsupported startup parameter: options". If `options` is listed in its `ignore_startup_parameters`, PgBouncer drops the setting instead. RDS Proxy accepts only a short list of startup parameters, and `options` is not on it. In each case the target fails to connect with a `precondition` message, and nothing is collected from it. Point the target at the server's own host and port. On AWS, use the instance or cluster endpoint, not the RDS Proxy endpoint.
+This section covered PostgreSQL servers as monitored targets. It moved to [PostgreSQL Targets](../docs/darling/postgresql-targets.md).
 
 ### Permissions on a PostgreSQL target
 
-`pg_monitor` covers most collectors. One further grant and one extension decide whether three of them return anything, and neither absence reports as a permission error:
-
-```sql
-CREATE ROLE darling_monitor WITH LOGIN PASSWORD '<password>';
-GRANT pg_monitor TO darling_monitor;
-GRANT pg_read_all_data TO darling_monitor;   -- PostgreSQL 14+, see below
-```
-
-`pg_monitor` is the standard PostgreSQL monitoring role — it bundles `pg_read_all_stats`, `pg_read_all_settings`, and `pg_stat_scan_tables`. Without it the statistics views still return rows, but only for the connecting user's own backends, which silently turns fleet monitoring into self-monitoring. On Amazon Aurora and RDS the same grant works: `GRANT pg_monitor TO darling_monitor;` as an `rds_superuser`. No superuser is needed, and nothing is created on the monitored server — unlike a SQL Server target, there are no Extended Events sessions to provision and no server setting to bootstrap.
-
-**`pg_read_all_data` is what makes the statistics-based reads work, and without it they succeed and store nothing.** `pg_stats` filters every row through `has_column_privilege`, and `pg_monitor` confers no `SELECT` on user tables — so a `pg_monitor`-only role reads `pg_stats` as EMPTY rather than as denied, which is why nothing logs a `PERMISSIONS` skip. THREE collectors change behaviour: `pg_column_stats` stores zero rows on every run, `pg_table_bloat_stats` still collects sizes and dead-tuple counts but suppresses the bloat ESTIMATE that surface exists for (`estimate_unavailable`), and since #3234 `pg_index_bloat` does the same — it records every index at its size with a stated reason and no estimate. **That last one reverses what this paragraph used to say, and the reversal is the point.** Index bloat was measured-only at every grant level, so the grant genuinely did not affect it; #2561 had considered a statistics-based estimator and rejected it precisely because `pg_stats` is invisible to `pg_monitor`. #3234 wrote that estimator and made it the scheduled collector, which moves index bloat onto exactly the dependency the earlier text ruled out. The exact function still works without this grant, which is what the per-row `exact_measurement_command` is for. On Amazon Aurora and RDS the same grant works as an `rds_superuser`. The role is PostgreSQL 14+. On 13 and older it does not exist, so grant per schema instead — `GRANT USAGE ON SCHEMA public TO darling_monitor;`, `GRANT SELECT ON ALL TABLES IN SCHEMA public TO darling_monitor;`, and `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO darling_monitor;` so tables created later are covered too. `docs/postgres-first-target-runbook.md` carries the same fallback.
-
-**Self-hosted targets add one more pair, for the three collectors that read the server log.** `pg_deadlocks`, `pg_plan_capture` and `pg_log_events` read it with `pg_read_file()`, which `pg_monitor` does not cover: the login needs the `pg_read_server_files` role AND an explicit `GRANT EXECUTE ON FUNCTION pg_read_file(text), pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean)` — measured on #2566, the role alone does not carry it, because the function's ACL is `postgres=X/postgres`. The EXECUTE half lives in each database's own catalog, so run both grants **in the database Darling connects to**; issued in a different database on the same cluster they change nothing and the failure looks identical (#3239). Unlike the `pg_stats` gap above this one fails LOUDLY — every cycle records a `PERMISSIONS` skip whose message names this exact pair and the database to run it in. **Grant `pg_read_binary_file(text, bigint, bigint)` in the same statement** ([#4046](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4046)): `pg_read_file()` fails the WHOLE 4 MB tail read when one byte in it is not valid UTF-8. A failed login can plant such a byte with nothing more than a bad role or database name. `pg_read_binary_file()` has no such check. Once it is granted, all three collectors switch to it on their own, with no restart. The switch happens on the next cycle after a read that failed on such a byte, and otherwise within an hour. The bytes are then decoded in the connected database's own `server_encoding` — UTF8, SQL_ASCII, every LATIN and ISO_8859 variant, WIN866/WIN874/WIN1250–1258, KOI8R/KOI8U, and EUC_JP/EUC_CN/EUC_KR — so a database's own non-ASCII text comes back as itself rather than as replacement characters. Only `EUC_TW`, `EUC_JIS_2004`, `LATIN6`, `LATIN8`, `LATIN10`, `MULE_INTERNAL`, and any encoding this runtime cannot resolve stay on `pg_read_file()`; the grant does not help on those. One server log file mixes lines from backends in different databases, each in its own encoding — decoding with the connecting database's encoding can still mis-decode (never fail) a line from a database with a different encoding, exactly as `pg_read_file()`'s text route already can. On Aurora/RDS none of these three grants applies or is grantable: there is no filesystem, and all three collectors pull the log through the RDS API instead (#2538), authorized by the monitoring host's IAM role rather than any database grant. `docs/postgres-first-target-runbook.md` step 1 carries the sequence and its proof point.
-
-**`pgstattuple` is no longer required by any scheduled collector, and is the ON-REQUEST route to an exact index measurement.** Since #3234 `pg_index_bloat` estimates from catalog statistics and reads no index page, so a database without the extension collects normally rather than failing for that database — which it previously did, observed on the `postgres` maintenance database of the first production target. Every row still reports whether the extension is present, because that decides whether the `exact_measurement_command` it carries needs a `CREATE EXTENSION pgstattuple;` in front of it. That command calls `pgstatindex`, which reads every page of the index and is the analogue of `sys.dm_db_index_physical_stats` in `DETAILED` mode — run it deliberately on the one index you are about to act on rather than on a schedule. It is also the ONLY route for a PARTIAL or a DEDUPLICATED index, neither of which any statistics model can reach: PostgreSQL 13+ stores duplicate keys once in a posting list, so real storage is denser than per-tuple arithmetic allows and a correct model still over-predicts. The extension grants `EXECUTE` to `pg_stat_scan_tables`, which `pg_monitor` already carries — which is why the exact path works on a role the estimate does not.
-
-`pg_stat_statements` must be present for `pg_statement_stats`, which means the extension in `shared_preload_libraries` (a restart, or a parameter-group change plus reboot on Aurora/RDS) and `CREATE EXTENSION pg_stat_statements;` in the database Darling connects to. The extension tracks **all** databases in the cluster keyed by `dbid`, so one installation in the connect database covers the whole instance. The collectors that need something installed, named rather than counted: `pg_statement_stats` (`pg_stat_statements`, above), `pg_buffer_usage` (`pg_buffercache`), `pg_kernel_stats` (`pg_stat_kcache`, which sits on top of `pg_stat_statements`), `pg_predicate_stats` (`pg_qualstats`), and `pg_wait_sampling` (the `pg_wait_sampling` module). Every other collector needs nothing installed: they read core catalogs and Aurora's built-in functions. **Needing `shared_preload_libraries` and a server restart** (a parameter-group change plus a reboot on Aurora/RDS), and inert until then whatever else is installed: `pg_stat_statements`, `pg_stat_kcache`, `pg_qualstats` and `pg_wait_sampling`. **Additionally per database**, because the collectors that read them run per database and `CREATE EXTENSION` in one database does not create them in another: `pg_qualstats`. `pgstattuple` was on this list until #3234 and is now needed only for the on-request exact measurement, by no scheduled collector. Every one of them degrades identically when its dependency is absent — the query raises `42P01` or `42883`, which classifies as `ObjectMissing` and, because the dependency is declared, is recorded as a non-fatal `EXTENSION_MISSING` skip that names the extension (#3240; never as `PERMISSIONS`, whose remedy is a grant) — and `pg_extension_availability` reports which install would light up every one of them except `pg_wait_sampling`. It deliberately does NOT cover `pg_wait_sampling`, which was on that roster and was taken off (#2564, fixed in #2584). The roster is a **reportable-absence** list rather than a list of what collectors depend on, and those are different sets: it carries extensions no collector reads and omits this one, which a collector does read — which is why a dependency is declared on the collector rather than read off the roster. Check `pg_wait_sampling` with `SHOW shared_preload_libraries;` instead.
-
-### What gets collected
-
-| Collector | Source | Cadence / retention | Why it exists |
-|---|---|---|---|
-| `pg_wait_stats` | `aurora_stat_system_waits()` | 1 min / 30 d | **Aurora only.** Core PostgreSQL has no cumulative wait counters at all — `pg_stat_activity.wait_event` is an instantaneous sample — so there is no equivalent to `sys.dm_os_wait_stats` to read on a non-Aurora target |
-| `pg_statement_stats` | `pg_stat_statements`; `aurora_stat_statements()` on Aurora | 1 min / 30 d | Per-query-shape totals, matching `query_stats`' cadence, wherever `pg_stat_statements` is installed — since #2625 it reads BOTH sources, chosen at query-build time. Aurora's function adds the storage-vs-cache I/O split (`storage_blks_read` / `orcache_blks_hit`) and per-statement peak memory, which core PostgreSQL does not expose; on the vanilla path those columns are written NULL, not zero |
-| `pg_wraparound_stats` | `pg_database`, `pg_class` | 5 min / 90 d | XID and MultiXact freeze headroom per database. The highest-consequence signal PostgreSQL has and one with no SQL Server counterpart: run out of transaction IDs and the server stops accepting writes. Freeze headroom moves in autovacuum-sized steps rather than continuously, so 5 minutes is ample and 90 days shows the age trend against the actual freeze threshold |
-| `pg_xmin_horizon` | `pg_stat_activity`, `pg_replication_slots`, `pg_stat_replication`, `pg_prepared_xacts` | 1 min / 30 d | Why vacuum is reclaiming nothing. Four unrelated causes produce an identical symptom and need completely different fixes, so this attributes the specific holder instead of reporting the number. Per-minute because a holder is the fast-moving leading indicator — the useful answer is which session or slot appeared minutes ago |
-| `pg_replication_slots` → `collect.pg_replication_slot_stats` | `pg_replication_slots` | 1 min / 90 d | Slot health and retained WAL. An abandoned slot retains WAL without bound by default, filling the volume and stopping the server, and it grows at whatever rate the server writes WAL — hours on a busy writer, not days |
-| `pg_autovacuum_stats` | `pg_stat_user_tables`, `pg_class` | 60 min / 90 d | **Writers only**, and per database. Per-table autovacuum state. Stores each table's own computed trigger threshold beside its dead-tuple count, honouring per-table `reloptions` overrides rather than only the GUCs — without the threshold a dead-tuple count is not actionable, since the same count is routine on a large table and urgent on a small one |
-| `pg_io_stats` | `pg_stat_io` | 1 min / 30 d | I/O attributed to a `(backend_type, object, context)` triple rather than to a file — who did it, to what, and why. PostgreSQL 16+; valid on a standby. Every counter column is nullable on purpose: PostgreSQL uses NULL for "does not apply to this combination", and on Aurora the whole write side is NULL because backends there do not write data files. The read reports whether write counters are TRACKED, so absent writes cannot be misread as zero writes |
-| `pg_blocking` → `collect.pg_blocking_edges` | `pg_stat_activity`, `pg_blocking_pids()` | 1 min / 30 d | Who is blocked, by whom, and what state each side was in — stored as an edge list, one row per (blocked, blocking) pair, so the read layer can assemble chains and name the root. **This is a SAMPLE, not an event log**, and that is the one thing to carry away: SQL Server's blocked-process report is written by the engine when blocking crosses a threshold, whereas PostgreSQL records nothing unless something asks, so blocking shorter than the interval is never seen. Valid on a standby, where recovery conflicts are blocking that happens nowhere else. One minute is the floor worth paying for: `pg_blocking_pids()` takes ShareLock on the lock manager partitions per call, so it is evaluated only for backends already waiting on a lock |
-| `pg_database_stats` | `pg_stat_database` | 1 min / 30 d | Four questions off one cluster-wide view: temp-file spills (`temp_files` / `temp_bytes`), cache hit ratio (`blks_hit` / `blks_read`), a server-recorded `deadlocks` count, and the commit/rollback split. **Every major and every target shape** — the newest column selected arrived in PostgreSQL 9.2, it is core rather than Aurora, and a standby is included deliberately, because a sort on a read replica spills the way it does on a writer. Stored PER DATABASE rather than aggregated, because `stats_reset` is per database: an aggregate would have to pick one reset timestamp for rows that legitimately disagree, and one database's reset would corrupt the cluster's delta with nothing left in the data to say so. `stats_reset` is captured so the read can report a reset AS a reset. Since V133 the row also carries `numbackends` — the client backends connected to the database at the instant of the read, the one LEVEL in a row of counters and the honest numerator for "how full is `max_connections`"; written from that rung; read by the `PG_CONNECTION_SATURATION` fact (summed at one instant, the fraction's numerator) and surfaced per database as `get_pg_database_stats`' `peak_numbackends` |
-| `pg_index_usage_stats` | `pg_stat_user_indexes`, `pg_statio_user_indexes`, `pg_index` | 24 h / 90 d | Per-index scan counts, sizes, and the constraint/replica-identity/validity facts that decide droppability. **Writers only, and per database** — a replica reports its OWN scan counts rather than the writer's, so an index that is load-bearing on the primary reads as unused there, which is the single worst answer this surface can give. `last_idx_scan` is PostgreSQL 16+ and is substituted with a typed NULL below it so the row shape does not change across a mixed-version fleet. Daily rather than hourly, matching `index_object_stats`: "has anything scanned this index" is a structural question, and an hourly sample would record the same catalog facts 24 times a day at 24x the fan-out connections. 90 days of retention because the RETENTION WINDOW IS THE EVIDENCE — an index can only be called unused for as long as we have been watching it, and 30 days cannot clear a monthly report. Indexes below 64 KB are not collected (nothing to model), except invalid ones, which are a finding at any size |
-| `pg_table_bloat_stats` | `pg_class`, `pg_stats`, `pg_stat_user_tables` | 60 min / 90 d | The statistics-based per-table bloat ESTIMATE, plus measured heap/TOAST/index sizes and the dead-tuple counts. **Never reads the relation**, which is what makes it affordable on a cadence: measured at 44 ms for a 2,001-table database against 860 ms for `pgstattuple` over the same tables, and that 19x is a floor on the ratio because those tables were tiny and fully cached. Hourly to match `pg_autovacuum_stats` deliberately — this measures the DAMAGE whose CAUSE that one measures, and correlating them needs a common grain. **Writers only, and per database.** Tables below 1 MB are not collected. The estimate is suppressed rather than captioned when its inputs cannot be trusted; see V85 |
-| `pg_session_states` | `pg_stat_activity` | 1 min / 30 d | Which sessions are holding a transaction open, for how long, and — the part that decides whether it matters — whether that transaction is what pins the xmin horizon. **`idle in transaction` is NOT automatically a horizon holder**, which is the whole reason this stores an age rather than a state: measured on live PostgreSQL 16.15, a READ COMMITTED transaction that only read and one whose `UPDATE` matched zero rows both sit idle in transaction indefinitely with `backend_xmin` AND `backend_xid` NULL, pinning nothing at all. `horizon_age` is the GREATER of the two ages and is `-1` when the session holds neither — not `0`, which would read as "holds the newest possible xid". **No raw statement text is stored**: `pg_stat_activity.query` carries literal parameter values, so the normalised `query_id` and a whitelisted command keyword are stored instead. **A SAMPLE, like `pg_blocking`** — a transaction that opened and closed between two cycles is invisible, and the read carries its own capture counts so that is visible rather than assumed. Valid on a standby, deliberately: a standby holds its own transactions, and with `hot_standby_feedback` on its xmin propagates to the primary |
-| `pg_server_config` | `pg_settings` | 60 min / 365 d | The configuration history — nothing else in the stack can reconstruct one that was never recorded. Hourly because configuration changes when a person changes it, and a year because "this got slow sometime last quarter" is asked long after the fact; `get_pg_server_config_changes` reads consecutive snapshots, so the change and its timing survive the person who made it. `source` is stored so the read can state which rows are server configuration and which are the collector's own session |
-| `pg_deadlocks` | the server log via `pg_read_file()`; the RDS log API on Aurora/RDS | 5 min / 90 d | The full deadlock reports PostgreSQL writes to its log — previously only the COUNT (`pg_stat_database.deadlocks`) was collected, a number that goes up. `deadlock_hash` is the identity: the self-hosted route re-reads an overlapping log tail deliberately, so one deadlock lands many times and every read groups on the hash. `graph_text` is stored whole beside the parsed columns, so a lock shape the parser does not break out still arrives readable by a person; every query in it, and `victim_statement`, is normalized first (#4005): literals become `?`, and a query that cannot be read to its end is withheld. Reports stored before that, the deadlock alerts fired from them and the analysis findings that quoted them are rewritten in place the same way by a bounded pass each hour (#4012), so none of those three keeps a raw query or raw-graph hash for a direct `SELECT` to read; an alert whose report is gone keeps its key only as an HMAC under the store's log-hash key. Not rewritten: a deadlock's ERROR line in `pg_log_events` stored before #4020 keeps its unkeyed `raw_line_hash` until that table's 30-day retention drops it, as #4004 ruled, since re-keying it would split its dedupe identity. Needs nothing enabled at default settings, but `log_error_verbosity = terse` and a non-English `lc_messages` both silently empty it — the readiness collector's `message_locale` facet judges the latter |
-| `pg_plan_capture` | `auto_explain` JSON in the server log via `pg_read_file()`; the RDS log API on Aurora/RDS | 60 min / 14 d | Captured execution plans, redacted before storage: query text is dropped outright (identity is `query_id`, whose normalised text `pg_statement_stats` carries) and every remaining string literal is scrubbed, with `plan_hash` taken of the REDACTED plan so a shape recurs to one hash whatever values it ran with. The self-hosted read is a fixed 4 MB tail — #2565 measured 772 MB of log in twenty seconds at capture-everything, so no fixed number bounds the worst case — and a server logging faster than the window covers should lower the cadence per server |
-| `pg_log_events` | the server log via `pg_read_file()`; the RDS log API on Aurora/RDS | 5 min / 30 d | The log, CLASSIFIED (#3601): every line at WARNING or worse as an `error` event, `log_connections` / `log_disconnections` lines as `connection`, `log_lock_waits` reports as `lock_wait`, `log_temp_files` lines as `temp_file` with the spill's exact bytes lifted into a column (#3602), `log_autovacuum_min_duration` completion reports as `autovacuum` with the run's relation, duration, pages, tuples, buffers and WAL lifted into columns (#3603, V130 — `get_pg_autovacuum_health` shows them per table as `recent_runs`), and checkpoint lines recognised and stored under their family. The same 4 MB tail and the same `logging_collector` gate as `pg_deadlocks`, classified in C# by one `PgLogEventClassifier` both transports feed — the body crosses the wire so no family's recogniser is spelled twice. `message` / `detail` / `context` are stored as PostgreSQL wrote them, with the SQL in a detail or context (a deadlock's queries, a function's statement) normalized, literals replaced by `?`, and the statement is never stored, only fingerprinted; `raw_line_hash` is the identity every read dedupes on, keyed with the store's log-hash key and never returned ([#4004](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4004)). A family whose `log_*` setting is off on the target is empty by construction; the read names the setting |
-| `pg_plan_capture_readiness` | `pg_settings` (the `auto_explain` and logging GUCs) | 60 min / 365 d | Whether the target could capture plans at all, one row per facet in causal order — could it run `auto_explain`, is it loaded, is it capturing, in what format, and can a plan be attributed to a statement — because "no plans" has several unrelated causes and each carries its own remedy on the row. Hourly since every facet is a parameter-group setting; a year because "when did plan capture get turned on" is asked months later |
-| `pg_write_stats` | `pg_stat_checkpointer`, `pg_stat_bgwriter`, `pg_stat_wal` | 1 min / 30 d | Checkpoints, background writing and WAL as ONE collector because they are one story: a high share of REQUESTED checkpoints means WAL filled `max_wal_size` before the interval elapsed. A union schema with version-conditional columns — PostgreSQL 17 moved the checkpoint counters out of `pg_stat_bgwriter`, so a major that lacks a column reports NULL rather than the collector splitting into per-version twins. PostgreSQL 14+ (`pg_stat_wal`); all three views are cluster-wide singletons, so a snapshot is one row. Each row also carries `postmaster_start_time` (V139, #3955): a clean restart keeps the counters and PostgreSQL counts its shutdown checkpoint as REQUESTED, and the shutdown checkpoint's own write and sync work lands in the same counters, so the reads compare consecutive rows' start times and treat a restart-spanning interval's checkpoint figures as unknown, never as WAL or I/O pressure — `get_pg_write_stats` returns the requested count, its share, the checkpoint write and sync time and the checkpoint buffer counts as null with `postmaster_restarted: true` for a window that holds a restart, and `PG_CHECKPOINT_PRESSURE` leaves those intervals out of its requested, write, sync and buffer sums (`postmaster_restart_count` says how many) |
-| `pg_lock_stats` | `pg_locks` | 1 min / 30 d | Lock state by type, mode and relation, granted or waiting. Does NOT duplicate `pg_blocking_edges`, which stores blocked/blocker PAIRS — that answers who is stuck behind whom, and cannot answer what lock, on what object, is being waited on. Aggregated by (database, locktype, mode, granted, relation), so row count is bounded by CONTENTION rather than concurrency — and it is a SAMPLE, so the cadence is the resolution |
-| `pg_replication_stats` | `pg_stat_replication` | 1 min / 30 d | The CONNECTED standbys — four byte distances from `pg_current_wal_lsn()` and three time lags. The counterpart of the slot collector and a different question: a slot describes what the primary RETAINS and exists even when nothing is attached (the disk-filling case); this describes replicas actually attached, and one that disappears here while its slot persists is the dangerous combination. The lag columns keep growing during a stall rather than freezing, which is what makes them usable as an alerting signal |
-| `pg_buffer_usage` | `pg_buffercache` | 60 min / 30 d | What is resident in the shared buffer pool, per relation — which objects the cache is SPENT on, a different question from which are read most. Joins `pg_buffercache.relfilenode` to `pg_relation_filenode(c.oid)`, **not** to `c.oid`, which is the join every published example gets wrong, and scopes to the connected database because the pool is cluster-wide while `pg_class` is not. Hourly: the view is a scan of every buffer (6.1 ms at 512 MB, linear to ~780 ms at 64 GB), and a server without the extension records a non-fatal skip naming the one-line `CREATE EXTENSION` fix |
-| `pg_extension_availability` | `pg_available_extensions`, `pg_extension` | 24 h / 365 d | Four states, not a boolean — `installed`, `outdated`, `available`, `absent` — because `available` is a `CREATE EXTENSION` away and `absent` is not. Absence is derived against an enumerated roster; `auto_explain` and `pg_wait_sampling` are deliberately off it, being preload-only modules that never appear in `pg_available_extensions` even where they are loaded and working. Per database as of V95, because `installed`/`outdated` are per-database facts |
-| `pg_wait_sampling` | the `pg_wait_sampling` extension's profile, or — without the extension — a service-side `pg_stat_activity` sampler (#3604) | 5 min / 30 d | Wait events attributed to the query that waited — wait analysis existed ONLY on Aurora before this, which was backwards, because self-hosted is where the extension story is richest. Two arms, one table, one instrument per target: with the extension created in the monitored database the collector reads its 10 ms in-engine profile; without it the collector polls `pg_stat_activity` once a second for a 30-second window each cycle and accumulates the tallies itself, so a stock first install gets a wait profile (a floor, not parity) rather than an empty chart. Not on Aurora, which has `pg_wait_stats` and cannot load the module. Every read of this table discloses `instrument` (`extension_sampled` / `service_sampled`). `sample_count` is a tally of observations, not a duration, and `profile_period_ms` travels beside it because the count is uninterpretable alone. Since V133 the sampler arm also stores `sampled_ms` — the milliseconds of the interval its 30-second window actually observed — because samples × period over the five-minute interval understates that arm's wait rate by the duty cycle (~10×); the extension arm stores NULL there, having watched the whole interval. Written from that rung, read by nothing yet. Cluster-wide with no database attribution, deliberately: the profile carries none, and inventing one would be the scope error V95 removed elsewhere |
-| `pg_kernel_stats` | `pg_stat_kcache` | 60 min / 30 d | The kernel's own numbers per `queryid` — user/system CPU, bytes that reached the DEVICE, page faults. `pg_stat_statements` reports elapsed time, which cannot separate a query that was WAITING from one burning processor; these compose with it to make that split. `exec_read_bytes = 0` does not mean nothing was read: a read served by the OS page cache is genuinely zero. Top-level statements only, because `track = 'all'` would double-count every function body on the server |
-| `pg_predicate_stats` | `pg_qualstats` | 60 min / 30 d | Which columns are filtered on, how selectively, and where the planner's estimate was wrong. `pg_index_usage_stats` records indexes that were USED; this records predicates that were EVALUATED, including the ones with no index behind them — the index-candidate signal, invisible to everything else here. `sample_rate` is stored per row and is usually not 1 (the extension defaults to `1/max_connections`), so counts are never read as complete. Per database, because the OIDs its rows carry only resolve in their own database |
-| `pg_column_stats` | `pg_stats` | 24 h / 365 d | The planner inputs behind a misestimate — `n_distinct`, `null_frac`, `avg_width`, `correlation`, and the frequency of the single most common value. The SHAPE of the skew, never the values: `most_common_vals` and `histogram_bounds` hold raw customer data and are deliberately not stored. Per database. Daily and kept a year because these move when ANALYZE runs and are asked about retrospectively. Needs `pg_read_all_data` — without it the collector succeeds and stores zero rows, the quiet failure the paragraph above exists for |
-| `pg_index_bloat` | `pg_stats`, `pg_class`, `pg_index` | 24 h / 90 d | The complete btree census with no size floor, ESTIMATED from catalog statistics with no page reads since #3234, ranked by reclaimable bytes and never by percentage. A row with a `skipped_reason` has NO answer rather than a healthy one, and every row carries the `pgstatindex` call for its own index as the on-request exact route. **Writers only, and per database.** Daily to match `pg_index_usage_stats` — the two answer halves of one question: is this index earning its keep, and is it wasting space doing it |
-| `pg_cpu_utilization` | AWS Performance Insights (`os.cpuUtilization`) | 5 min / 30 d | Instance-level CPU for an Aurora target. This collector has no SQL route at all — PostgreSQL exposes no instance-level CPU signal — so every row arrives through the RDS/Performance Insights API, authorized by the monitoring host's AWS identity rather than any database grant. Five minutes rather than one because each cycle is an outbound `GetResourceMetrics` call per server, and each call asks for the last several 1-minute points, so a missed cycle backfills rather than gaps. Since V136 (#3691) the same row also carries the host's memory — `os.memory.total/free/cached/buffers/active` as bytes and `configured_memory_bytes` (the minute's Serverless v2 capacity × 2 GiB per ACU; NULL on a provisioned class) — from the same call: six more metric names, no second request. A stock PostgreSQL target has no row here at all, and that absence is what a memory consumer must read as *unavailable*, never as "no memory". Read by nothing yet |
-| `pg_database_size_stats` | `pg_database`, `pg_database_size()` | 60 min / 365 d | The per-database size SERIES (#3691, V136), the source the object-growth and disk-free questions never had: `size_bytes` per database and `total_bytes` for the instance on every row, templates included and flagged. Hourly because size moves in checkpoint- and autovacuum-sized steps; a year because "how has this grown since last year" is what a size series is for (~6,000 rows a day fleet-wide). A database this role may not size — the vendor-owned one on a managed target — is a row with `size_bytes NULL`, never 0 and never a failed collection, and the instance total goes NULL with it rather than becoming a partial sum. Read by nothing yet |
-
-The two Aurora-only collectors — `pg_wait_stats` and `pg_cpu_utilization`, the Performance Insights CPU read — are gated on Aurora detection, not on configuration: the connect probe looks for `aurora_version()` and the gate follows what it finds. Point Darling at self-managed PostgreSQL and the other collectors run while those two sit out.
-
-`pg_autovacuum_stats` additionally gates OFF on a standby (`pg_is_in_recovery()`), and the reason is worth knowing because it is not a permissions or availability problem. `pg_stat_user_tables` reads fine on a replica and reports **all zeros**: measured on Aurora 17.7, the same cluster, database and 15 tables, the writer reported 13,654,458 dead tuples and 150,790,506 live tuples while the reader reported 0 for every tuple counter. Those are the writer's stats-collector numbers and they are not replicated. Ungated, a replica target would return no rows, the activity filter would read that as "nothing has pending work", and you would get a confident report of perfect autovacuum health for a cluster 13 million dead tuples behind. For the same reason, treat an empty `get_pg_replication_slots` result from a replica as per-instance rather than cluster-wide — slots live on the writer.
-
-Cadences and retention are the shared defaults, with no knobs, exactly as for SQL Server.
+This section moved to [PostgreSQL Targets](../docs/darling/postgresql-targets.md#permissions-on-a-postgresql-target).
 
 ### Oldest PostgreSQL version per collector
 
-Each collector sends a query that works on the version of the target it connects to. A column that a version does not have is stored as NULL. A collector never sends a query that fails on the target, so an older target writes no error lines to its log for these collectors.
-
-| Collector | Oldest version | Older versions |
-|---|---|---|
-| `pg_statement_stats` | 10 | `pg_stat_statements` before 1.8 (PostgreSQL 12 and older) has `total_time`, `min_time`, `max_time` and `mean_time`. The collector stores them in the same columns. The WAL columns are NULL. The collector reads the extension's own version from `pg_extension`, so a newer server with an older extension is handled too. |
-| `pg_replication_slots` | 10 | `wal_status` and `safe_wal_size_bytes` need 13 and are NULL below it. `two_phase` needs 14. |
-| `pg_session_states` | 10 | Parallel workers are left out by `leader_pid` from 13. Below 13 they are left out by `backend_type`, which names them from 11. On 10 they can not be told apart from other background workers, so they add to the session total only. |
-| `pg_deadlocks`, `pg_log_events`, `pg_plan_capture` | 10 | The server log query leaves out `MATERIALIZED` below 12, because older servers already materialize those CTEs. |
-| `pg_write_stats` | 10 | The WAL columns need 14 and are NULL below it. The checkpoint and background writer columns are collected on every version. |
-| `pg_io_stats` | 16 | `pg_stat_io` does not exist before 16. The collector does not run below 16, and `get_pg_io_stats` answers `not_collected` with the server's version. |
-| `pg_wait_sampling` | 10 | `query_id` needs 14 and is NULL below it. |
-| Every other PostgreSQL collector | 10 | No version difference. `pg_wait_stats` and `pg_cpu_utilization` run on Aurora only. |
-
-The queries for versions before 13 were run against real PostgreSQL 10 and 12 servers for #6206. PostgreSQL 11 and 13 are checked against the documentation only.
-
-Three of the 29 are outage predictors rather than performance metrics, which is deliberate: PostgreSQL's most damaging failures are quiet, slow, and fully predictable days ahead, and nothing in the engine raises its hand about them. They are read through the MCP tools (see [the tool list](#mcp)), a web tab and — since #2530 — a WPF viewer tab: a PostgreSQL target gets **seven** inner tabs (Overview, Activity, Vacuum, Waits, I/O, Replication, Storage) in place of the nineteen SQL Server ones, chosen from `collect.servers.engine_kind`. The placement is derived from the collector catalog in both directions, so a new PostgreSQL collector cannot ship without a screen — or without the coverage pin's explicit, dated exemption, which is where `pg_database_size_stats` sits until its consumer lanes land (#3691).
-
-### What it does not do yet
-
-Plan capture shipped (`collect.pg_plan_capture` — `auto_explain` output read from the server log on self-hosted targets and through the AWS log API on Aurora/RDS; #2566, #2538, #2692), closing the largest gap this section used to open with. Scheduled analysis now runs for a PostgreSQL target too: the pass routes by the registry's `engine_kind` inside the analysis service, measures its 24-hour history on `pg_database_stats` and scores the PostgreSQL-target fact vocabulary (`PG_*` / `CONFIG_PG_*` / `ANOMALY_PG_*`, sources `pg_*`) — but the v1 detector families (#3542) are landing lane by lane, so until they do a PostgreSQL pass returns an honest all-clear over the facts it has rather than findings. The PostgreSQL tabs on both UIs are tables over the window: no charts, no correlated timeline, and no drill-down from a blocking root to the sessions behind it. **The three Tier 0 outage predictors DO alert.** Wraparound risk, a blocked vacuum horizon and replication-slot retention are evaluated on the alert cadence and delivered through the same deliverer, history and mute rules as every SQL Server alert, so they land in the same places and obey the same suppression. They ride alongside the shared engine rather than inside it, via a separate `IPostgresAlertReadAdapter` consulted only for PostgreSQL targets — Lite has no PostgreSQL target, and extending the shared adapter would have left it implementing three methods that can only return empty. Their thresholds are derived from the server's own settings (wraparound grades against that cluster's `autovacuum_freeze_max_age`, not a constant) and carry no knob by decision — see [`docs/postgres-alerting-design-note.md`](../docs/postgres-alerting-design-note.md) — but do not read that as "PostgreSQL alerting is not configurable": five more alert families fire on a PostgreSQL target under the SAME names and the same `alerts` switches as SQL Server (`Deadlocks Detected`, `Blocking Detected`, `Long-Running Query`, `Poison Wait`, `High CPU`; #2711, #2719), and the two count alerts have PostgreSQL-specific thresholds — `pgDeadlockCountThreshold` and `pgBlockingCountThreshold` in the table above, `deadlocks.pg_count_threshold` / `blocking.pg_count_threshold` on `get_alert_settings` (#3444, V122). The [first-target runbook](../docs/postgres-first-target-runbook.md#9-alerting)'s step 9 lays all eight out.
-
-Scheduled ANALYSIS runs for a PostgreSQL target through the PostgreSQL-target engine; its finding families are the #3542 v1 build, landing lane by lane.
-
-Collector FAILURES are classified, though. A PostgreSQL fault is routed through the same `ITargetProvider.Classify` the engine seam exposes, so a persistent, operator-actionable condition records as a non-fatal skip with an explanation instead of logging `ERROR` every cycle — a `pg_stat_statements` view that was never created (SQLSTATE 42P01; since #3240 that records as `EXTENSION_MISSING` naming the extension, because the collector declares the dependency), a source Aurora does not implement (0A000), a feature switched off in the parameter group (55006). For the cases that stay in the store's non-fatal `PERMISSIONS` bucket the message says which kind it is, because none of them is a missing grant either. Connection-level failures (the 08 class, 57P0x) still force a reconnect and reprobe; a cancelled statement (57014) deliberately does not, since dropping the connection over a slow query would turn a tuning problem into a reconnect storm. PostgreSQL raises 57014 for the target's own `statement_timeout`, for a `pg_cancel_backend()` and for the client cancel Npgsql sends on its own deadline, so the classification covers all three; which side's deadline fired is read from the server's own message text, and a wording this tool does not recognise is reported as unproven rather than attributed to a machine.
-
-The per-database fan-out itself is done — `pg_autovacuum_stats` is the collector that exercises it. Worth knowing what it costs: a SQL Server collector can reach another database without reconnecting (`EXECUTE [db].sys.sp_executesql`), while a PostgreSQL connection is bound to one database for its lifetime, so a per-database PostgreSQL collector is necessarily one connection per database per cycle. That is why its cadence is hourly and why new per-database collectors should be added deliberately rather than by default.
+This section moved to [PostgreSQL Targets](../docs/darling/postgresql-targets.md#oldest-postgresql-version-per-collector).
 
 ---
 
@@ -1975,82 +1390,15 @@ When a notification route is set to Level 2, an investigating agent may change m
 
 ## Connect a Remote Viewer
 
-For the person sitting at a machine with **nothing installed on it**, whose only goal is looking at a Darling service that already runs somewhere else. Three steps, nothing to hand-edit.
-
-**The one service-side prerequisite.** The store has to be reachable from your LAN — a `postgres.network` block on the service host, which the `--configure-network` wizard writes for you. A store still on its loopback default accepts no remote viewer at all, and no amount of viewer-side configuration changes that. See [Store endpoint (viewer over the LAN)](#store-endpoint-viewer-over-the-lan) for that side; everything below assumes it is done.
+This section covered a viewer seat on another machine. It moved to [The WPF viewer](../docs/darling/viewer.md#connect-a-remote-viewer).
 
 ### 1. Export the handoff folder (on the service host)
 
-```
-PerformanceMonitor.Darling.Service.exe --export-viewer-config
-```
-
-It writes the viewer machine's **whole configuration folder** — connection string resolved, certificate copied, every field documented in place:
-
-```
-viewer-config\darling.json    the complete viewer config: the resolved connection string and
-                              "managed": false already set, every field explained in comments
-                              IN the file
-viewer-config\server.crt      the store's TLS certificate, the file the connection pins
-viewer-config\README.txt      the same field reference in plain text, including the valid
-                              "Root Certificate=" values and the one-line install instruction
-```
-
-The folder lands beside the service's own `darling.json` by default. Pass a directory to put it elsewhere (`--export-viewer-config D:\handoff`), and `--config <path>` if `darling.json` is not where the service would resolve it.
-
-**The exported `darling.json` contains a live database password** — that is what the viewer authenticates with. The verb says so before it writes, ACLs the file to SYSTEM + Administrators + the account running it + members of the local group `PerformanceMonitor Darling Operators`, if that group exists on the machine (the Viewer reads it without elevation, the same posture as the admin/viewer credentials), and confirms the ACL took: if the secret is still readable by ordinary users it says so and exits non-zero. Copy the folder over a channel you trust and keep it ACL'd on the viewer machine.
-
-The verb refuses rather than clobbers: it will not export into the **service's own config directory** (that would overwrite the service's `darling.json` with the viewer's, destroying its servers, encrypted passwords and tokens), will not overwrite a file it did not write, and will not follow a junction or symlink. A destination it cannot use is named in the refusal.
-
-### 2. Copy the folder to the viewer machine
-
-Put the three files **next to `PerformanceMonitor.Darling.Viewer.exe`** — that works with nothing edited. (The Viewer ships in the same release zip as the service, in its `viewer\` subfolder; from source it is `dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release`.)
-
-To keep the folder somewhere else instead, point the `DARLING_CONFIG` environment variable at the exported `darling.json`. That works unedited too: a bare or relative `Root Certificate` resolves against **the folder holding `darling.json`**, so the `server.crt` beside it is found wherever you keep the folder ([#1970](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1970)). Keep the three files together and the folder can live anywhere.
-
-### 3. Start the Viewer
-
-That is the whole setup. Re-run the export after a credential or certificate rotation — the store's certificate regenerates when its bind IP changes — and copy the folder over again; it replaces its own previous output without ceremony.
-
-### If it does not connect
-
-The failure window carries a **Configuration this viewer used** block naming the `darling.json` it actually read, which rule picked it, and the host, port, username, database, SSL mode, search path and certificate path it parsed — with a **Copy details** button, and the same lines in `%APPDATA%\PerformanceMonitorDarling\logs\darling-viewer_yyyyMMdd.log`. Read it before changing anything: it separates *the viewer read a different file than you edited* from *it read your file and a value in it is wrong*. It never contains a password. See [Troubleshooting](#troubleshooting) for the individual failures.
+This section moved to [The WPF viewer](../docs/darling/viewer.md#1-export-the-handoff-folder-on-the-service-host).
 
 ### Manual configuration (fallback)
 
-Only for the case where you want the connection string itself — to paste into a config that already exists, or to check what the viewer will dial. The export above is the supported path; this one is the same values, assembled by hand.
-
-```
-PerformanceMonitor.Darling.Service.exe --print-viewer-connection
-```
-
-It decrypts the `network.role` credential and prints a paste-ready connection string plus the server certificate PEM. Every warning is printed **before** the payload, but the payload is still a **live database password on STDOUT** — redirect it to an ACL'd file or pipe it to the clipboard (`... --print-viewer-connection | clip`); do not leave it in shell scrollback, CI logs, or a screenshare. The minimal viewer `darling.json` it targets is bring-your-own mode with the string pasted in verbatim (the string is consumed as-is), and the emitted PEM saved where `Root Certificate` points:
-
-```json
-{
-  "postgres": {
-    "managed": false,
-    "connectionString": "Host=192.168.1.205;Port=5641;Username=viewer;Password=...;Database=darling;Search Path=collect,config,public;SSL Mode=VerifyFull;Root Certificate=server.crt"
-  }
-}
-```
-
-`"managed": false` is not a typo next to the service's `"managed": true`: the flag says who **owns** the PostgreSQL, not who is connecting. A viewer left on `true` goes looking for a bundled local PostgreSQL that is not there. (The export sets it for you, which is the point.)
-
-**`Root Certificate=` — what the field accepts.** It is a path to the PEM the connection validates the store's certificate against, and under `SSL Mode=VerifyFull` it is what makes the check meaningful. A relative value anchors to **the folder holding the `darling.json` the viewer read**, never the process working directory, so how the Viewer was launched cannot change the answer:
-
-| Value | Resolves to |
-|---|---|
-| `server.crt` | that name in the folder holding `darling.json` — the exported layout, correct wherever the folder lives |
-| `certs\server.crt` | same anchor, one level down |
-| `C:\Darling\server.crt` | an absolute path, used exactly as written, for a certificate kept somewhere else |
-| omitted | nothing viewer-side to pin against: the store's certificate must already chain to a root the machine trusts. A managed store's certificate is **self-signed**, so it never does — omitting the field there fails `VerifyFull` |
-
-**Where the certificate comes from.** In managed mode the service generates `server.crt` / `server.key` **beside the data directory** (`%ProgramData%\PerformanceMonitorDarling\pg\` unless you set `postgres.dataDirectory`), with an IP SAN for the `network.listen` address and a DNS SAN for the machine hostname. It **auto-regenerates if the bind IP changes**, so verify-full keeps working after a `listen` change — and every viewer must then re-copy the new certificate, because an old copy stops matching. To rotate on demand, delete the pair beside the data directory; the service regenerates it on its next start.
-
-**Bring-your-own PostgreSQL.** Darling generates no certificate — your PostgreSQL's TLS is yours to configure — so `Root Certificate` points at the PEM that signed **your** server's certificate (the CA certificate, or the server's own certificate if it is self-signed), exactly the file you would hand `psql` as `sslrootcert`. The same relative-path anchoring applies, so keeping it beside `darling.json` is still the simplest layout.
-
-**Plaintext at rest on the viewer machine.** However you get there, the connection string holds the role password in cleartext in that machine's `darling.json` (there is no client-side secret store yet). That is acceptable for the read-only `viewer` credential on a single-operator, ACL'd profile; if you use `role: "admin"`, treat that file as a secret and NTFS-ACL it to your account. DPAPI-encrypting the viewer's BYO connection string is future hardening, out of scope today.
+This section moved to [The WPF viewer](../docs/darling/viewer.md#manual-configuration-fallback).
 
 ---
 
@@ -2111,52 +1459,13 @@ Each family pages under its own name so a mute or a notification route on one is
 
 ## How It Runs (Reference)
 
-Fixed cadences, hardcoded on purpose:
-
-| What | Cadence |
-|---|---|
-| Collector sweep loop | Every 15 seconds (each collector runs when its own shared schedule is due — most every 1 minute, some every 5, sizes hourly, index stats daily) |
-| Alert evaluation | Every 30 seconds per connected server (Lite's overview cadence) |
-| Scheduled analysis | Every 30 minutes per server, 120-second budget, analyzing the last 4 hours; findings persist to `analysis_findings` and high-severity ones notify through the configured channels |
-| Retention purge | First sweep after startup, then daily |
-| Store background-job health (policy-job self-heal across compression, rollup refresh and retention; job cadence; Retention Held), the TimescaleDB availability re-probe, the retention coverage re-evaluation and the store-object convergence pass | First sweep after startup, then hourly at :30 past the minute; the availability re-probe runs first and outside the TimescaleDB gate, so a service that fell back to plain-PostgreSQL mode at startup recovers on its own (#3815); a held retention policy arms itself on the first hourly pass after its rollups cover raw, no restart needed (#3812); every pass writes one `Store job health:` line naming what it read, per family (#3816); the store-object convergence pass runs last and re-ensures every store object the start path builds — hypertables, compression policies, continuous aggregates and their refresh windows, the baseline relations, the store's statement statistics, the composer's covering indexes — so one ensure that failed at startup heals within the hour instead of at the next restart (on a store without TimescaleDB, the steps that do not need it run every hour too, #3913), and writes one `Store object convergence:` line naming what it changed and what failed even when that is nothing (#3817) |
-| Reconnect attempts | Every 60 seconds while a server is unreachable |
+This section listed the fixed cadences of the service. It moved to [Running Darling day to day](../docs/darling/admin.md#how-it-runs-reference).
 
 ---
 
 ## Managed Bundled PostgreSQL
 
-With `postgres.managed = true` (the sample's default), the service runs its own bundled PostgreSQL 18 + TimescaleDB and a from-zero install needs no database provisioning at all. Windows only, like every DPAPI surface here.
-
-```json
-{
-  "postgres": {
-    "managed": true,
-    "port": 5641,
-    "dataDirectory": null
-  }
-}
-```
-
-**What first run does.** The service looks for `pg-runtime\pgsql\` beside its binary, extracting it from `pg-runtime.zip` when only the zip is present (deleting the extracted directory is therefore always safe — it self-heals). If the data directory has no cluster, it generates a 32-character random password, protects it with DPAPI LocalMachine into `pg-credential.dpapi` beside the data directory (credential first, so a crash mid-initdb never strands a cluster nobody can log into), then runs `initdb` with `scram-sha-256` auth, data checksums, and UTF8/C locale. A marker-guarded block appended to `postgresql.conf` preloads TimescaleDB, sets the port, and restricts listening to `127.0.0.1`; a second versioned block sizes background workers up for the per-hypertable compression jobs, DERIVED from the live hypertable count so it cannot go stale as collectors are added (`timescaledb.max_background_workers = hypertables + 2`, `max_worker_processes = 3 + that + 8` — today 57 and 68 for 55 hypertables; PostgreSQL's default of 8 workers cannot launch them); a third versioned block sizes memory from the host's physical RAM for the up-to-500-servers case (`shared_buffers = min(25% RAM, 1GB)`, `effective_cache_size = 75% RAM`, `maintenance_work_mem = min(max(5% RAM, 1536MB), 25% RAM, 2048MB)`, and a deliberately-modest per-connection `work_mem = clamp(RAM/512, 16MB, 64MB)` — on an 8 GB box that is `shared_buffers 1024MB` / `work_mem 16MB`; the stock 128 MB / 4 MB defaults are fine at small scale but bottleneck at fleet scale). Later blocks re-state single settings that field measurement moved: a fifth caps `shared_buffers` for the co-located store, a sixth turns on the log-rotation ring, and a seventh carries the `maintenance_work_mem` floor that TimescaleDB's compression sort runs on (measured at ~+70% compression throughput on a 16 GB-class host, plateauing by 1536 MB). `postgresql.conf` takes the LAST assignment of a setting, so these override without rewriting anything. Every append is re-checked on every start, so a crash between initdb and the append heals itself instead of silently degrading — and clusters initialized before a given block existed gain it on their next start (effective at the next PostgreSQL restart). Then `pg_ctl start`, `CREATE DATABASE darling`, and the normal startup path (migrations, TimescaleDB adoption — you should see `N/N collector table(s) are hypertables`, both numbers equal and equal to the collector count; a converted count BELOW the total means some table stayed plain and the line above it says which) continues exactly as in bring-your-own mode. The connection string is derived from the stored credential; the Viewer and the MCP host on the same machine derive it the same way, so nothing needs configuring there either.
-
-**One service-owned settings file, `darling-managed.conf` (#4215).** Every setting the service manages lives in `darling-managed.conf`, next to the data directory, rewritten whole on every start. `postgresql.conf` gets a single `include 'darling-managed.conf'` line at its end; nothing else in `postgresql.conf` is the service's.
-
-**No opt-out.** The service puts the include line back, with a warning, if you remove it — there is no config knob that turns this off. A managed store's settings must be readable and reproducible from one file, and a missing include is the failure mode the service refuses to hide: without it PostgreSQL silently falls back to its own defaults (`work_mem` at 4MB, for example) instead of refusing to start. If you want a setting the service does not manage, add a line below the include in `postgresql.conf`, or set it with `ALTER SYSTEM`; either one wins over `darling-managed.conf`.
-
-**Downgrading to a build before 3.9.** Stop the service first. Every migration to `darling-managed.conf` keeps a backup of the `postgresql.conf` it replaced, named `postgresql.conf.pre-4215.<utc>.bak`, beside the data directory. Restore that file over the current `postgresql.conf` before starting the older build. An older build has no knowledge of `darling-managed.conf`: skip the restore and it appends its own marker-guarded blocks below the include line, which still win, but the file keeps growing with each downgrade.
-
-**Lines below the include don't survive a major PostgreSQL upgrade yet.** A major-version upgrade carries `postgresql.auto.conf` (the `ALTER SYSTEM` file) into the new cluster, but not lines added below the include in `postgresql.conf` — those stay behind. Until that's fixed (tracked in #4358), use `ALTER SYSTEM` for any setting you need to survive an upgrade.
-
-**Why scram and not trust, even loopback-only.** Trust auth would hand superuser to any local code that can open a loopback socket — every other local user, and network-capable-but-not-filesystem-capable attack primitives like SSRF from a co-hosted app. With scram the credential travels on the wire, failed attempts are auditable, and access is confined to what can read the DPAPI-protected credential file. `listen_addresses = '127.0.0.1'` keeps the server unreachable off the machine on top — unless you deliberately opt into a LAN endpoint (see [Opt-in Network Endpoints (LAN)](#opt-in-network-endpoints-lan)), which reconciles `listen_addresses`, a `hostssl` pg_hba rule, and TLS on every start and is otherwise off.
-
-**Lifecycle.** On shutdown the service stops the server (`pg_ctl stop -m fast`) **only when it started it**. A server that was already running — an operator's own `pg_ctl`, or a postmaster that survived a service crash — is adopted for connections but never stopped: you'll see `already running … will not stop it` in the log, and the service keeps collecting into it.
-
-**The runtime zip.** `pg-runtime.zip` ships beside the service binary in packaged releases. Building from source, produce it once with `Darling\tools\fetch-pg-runtime.ps1` — it downloads the pinned EDB PostgreSQL 18 binaries and TimescaleDB, verifies their SHA256, prunes what the service doesn't need, and writes the zip to `Darling\artifacts\`; copy it next to the built service exe.
-
-**When a package ships a new runtime.** Every start compares the shipped `pg-runtime.zip` with a record of the one it extracted (`pg-runtime\pg-runtime.sha256`). A difference swaps the runtime: the current one is rescued to `pg-runtime-prev`, the new one is extracted, and a store on an older PostgreSQL major is upgraded in place with `pg_upgrade`. When the new runtime also moves TimescaleDB, the store's extension is moved **before the store opens** (#3908). The service starts the store on a private loopback port with TimescaleDB's background workers off, runs `ALTER EXTENSION timescaledb UPDATE` as the first statement of a session of its own, verifies it, stops the store, and only then starts it normally. Nothing else can connect in that window, so no session and no background job ever sees the extension change under it. It costs one extra start and stop of the store, only on a start where the extension has to move or has not been read yet. The version the store ended on is recorded in `darling-timescaledb.version` in the data directory. The runtime also carries the libraries of the TimescaleDB versions earlier releases shipped. So a store whose update fails still opens on its own version: the service raises a Critical **`Store Runtime Upgrade`** alert with the reason, and retries on its next start. **Rolling back** to an earlier release keeps this runtime in place. Releases before 3.3 never swap an extracted runtime, 3.3 through 3.8 find `pg-runtime\pg-runtime.stamp` pinned to the package they shipped, and this release will not swap in, or extract, a package that has no libraries for the store's recorded TimescaleDB. Keep the `pg-runtime` folder when you roll back: a clean reinstall of 3.8 or earlier extracts that release's own runtime, which cannot open a store already on TimescaleDB 2.30.1. One cost of a rollback past 3.9: 3.8.0's hourly store-size sweep does not understand TimescaleDB 2.29+ ([#3918](https://github.com/erikdarlingdata/PerformanceMonitor/issues/3918)), so that series stops until you upgrade again. Collection is unaffected.
-
-**Server log.** The bundled server's own log is `pg.log` beside the data directory — that's where PostgreSQL explains a refused start; bootstrap errors in the service log quote its tail.
+This section covered the store that the service runs for itself in managed mode. It moved to [Managed Bundled PostgreSQL](../docs/darling/managed-postgresql.md).
 
 ## Security & Least-Privilege Roles
 
@@ -2507,13 +1816,4 @@ The gate's refusals (`agent_action_required`, `agent_action_invalid`, `actions_o
 
 ## Per-server threshold overrides
 
-Some alerts fire often on one server and never on another. A threshold override holds a value for one server, or for one database on it, that differs from the global value. The global setting is never changed.
-
-- **What can be overridden.** The integer thresholds `get_alert_settings` lists (for example `cpu.threshold_percent`, `blocking.count_threshold`, `low_disk.threshold_gb`) and the two PostgreSQL count thresholds (`blocking.pg_count_threshold`, `deadlocks.pg_count_threshold`). Database scope applies only to `pvs.threshold_percent`, `pvs.floor_gb`, `file_growth.rise_mb` and `file_growth.volume_percent`; a database override applies to that database only, and a server override covers the server's other databases. Switches, cooldowns, routes and `self_alerts.*` are refused. To silence an alert, mute it.
-- **Bounds.** A value stays inside the bounds the global setting has. Anything else is refused and nothing is written.
-- **Setting one.** `set_alert_threshold_override` (`server_name`, `key`, `value`, optional `database_name`; `clear: true` removes it). It is offered under `mcp.allowWrites`, and under `mcp.allowInvestigations` as a Level 2 action: the agent passes `agent_action`, may change only its request's server, and cannot set a threshold to the value that turns its alert off: the top of the key's range, or zero for the four `low_disk.*` keys. That value is refused as `threshold_disables_alert`; a very high count below it is allowed, and its alert still fires if that count is reached. To silence an alert, an agent mutes it. (The File Growth look-back window has no such value; the Failed Job look-back's is its shortest window, 1 minute.) Under `mcp.allowWrites` `agent_action` is ignored and `set_by` names who made the change. The row records `set_by`, and for an agent change `agent:<agent_id>` and the request id.
-- **Seeing one.** `get_alert_settings` with `server_name` adds `server_view`: each threshold with its global value, the value in effect for that server and its source (`global` or `server_override`), plus the server's database overrides.
-- **When it applies.** The service reloads overrides with the rest of its configuration (the table is on the `config_version` beacon), so a change applies within the reload interval.
-- **Bring-your-own store.** The `mcp` role needs a grant on `config.config_threshold_overrides`. Re-run `Darling/tools/provision-roles.sql` once after upgrading; until then the tool answers `precondition` and names the script. Managed and compose stores grant it themselves.
-- **The grids.** The desktop Viewer lists, adds, edits and removes overrides under Settings, Alert rules, "Manage Threshold Overrides..." (the global value sits beside each one). The web Admin page has a "Threshold Overrides" tab with the same grid. Both refuse a key outside the list and a value outside its bounds before anything is written. On the web, a change is accepted only under a store login with the admin role. A managed or compose store connects the web dashboard as the viewer role, so a person signed in to the dashboard as an admin changes it through the managed `admin` login while `web.allowAdminWrites` is on (the default). With that off, the tab is a list and a change answers 403 naming the switch. Change it in the Viewer, or turn the switch on. On a bring-your-own store, set `postgres.webConnectionString` to an admin login.
-- **Lite.** Lite keeps global thresholds only and has no override path.
+This section covered a threshold value for one server or one database. It moved to [Alerts & Notifications](../docs/alerts.md#per-server-threshold-overrides).
