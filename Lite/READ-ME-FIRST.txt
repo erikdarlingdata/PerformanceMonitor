@@ -14,8 +14,8 @@ There are none. Both builds carry their own .NET runtime.
     with no .NET on it at all is fine.
 
 This file used to be a list of runtimes to go and install. It is kept
-because both READMEs promise it is here, and because "nothing" is the
-answer people came looking for.
+because the Lite guide (docs/lite-guide.md) says it is here, and
+because "nothing" is the answer people came looking for.
 
 
 IF LITE WILL NOT START
@@ -53,5 +53,5 @@ WPF and ASP.NET Core add back.
     self-contained win-x64         277 MB tree   114.2 MB zipped
 
 
-Full detail: Lite/README.md in the source repository,
-https://github.com/erikdarlingdata/PerformanceMonitor
+Full detail: docs/changelog/3.6.md and docs/lite-guide.md in the source
+repository, https://github.com/erikdarlingdata/PerformanceMonitor

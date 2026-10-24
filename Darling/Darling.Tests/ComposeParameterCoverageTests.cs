@@ -394,7 +394,7 @@ public sealed class ComposeParameterCoverageTests
         var path = Path.Combine(
             RepoRoot(),
             "Darling",
-            "PerformanceMonitor.Darling.Service",
+            "PerformanceMonitor.Darling.Storage",
             "Compose",
             "ComposeCompiler.cs");
         Assert.True(File.Exists(path), $"ComposeCompiler.cs was not found at {path} — this pin needs re-anchoring.");

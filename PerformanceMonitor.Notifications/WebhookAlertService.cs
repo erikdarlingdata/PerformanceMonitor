@@ -3473,7 +3473,7 @@ public class WebhookAlertService
        HttpClient/handler per request leaks sockets into TIME_WAIT and can exhaust
        the ephemeral port range when many servers alert. One pooled client covers the
        no-proxy case; proxied clients are cached per proxy address. #6231: the two direct clients connect through
-       WebhookConnectGuard, which refuses link-local and cloud instance addresses (a proxied client connects to its proxy, which resolves the host). */
+       WebhookConnectGuard, which refuses link-local and cloud instance addresses (a proxied client's connection to its proxy goes through it too, #6392). */
     private static readonly HttpClient s_defaultClient =
         new(WebhookConnectGuard.NewHandler())
         { Timeout = TimeSpan.FromSeconds(30) };
@@ -3503,15 +3503,21 @@ public class WebhookAlertService
             return followRedirects ? s_defaultClient : s_defaultNoRedirectClient;
 
         return (followRedirects ? s_proxyClients : s_proxyNoRedirectClients).GetOrAdd(proxyAddress, addr =>
-            new HttpClient(new SocketsHttpHandler
-            {
-                Proxy = new WebProxy(addr),
-                UseProxy = true,
-                PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-                AllowAutoRedirect = followRedirects
-            })
+            new HttpClient(NewProxyHandler(addr, followRedirects))
             { Timeout = TimeSpan.FromSeconds(30) });
     }
+
+    /* #6392: the proxied handler's connect goes through WebhookConnectGuard too, so the connection to the proxy itself is
+       checked: a proxy that resolves to a link-local or cloud instance address is refused, and a proxy on loopback or a
+       private address still works. */
+    internal static SocketsHttpHandler NewProxyHandler(string proxyAddress, bool followRedirects) => new()
+    {
+        Proxy = new WebProxy(proxyAddress),
+        UseProxy = true,
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+        AllowAutoRedirect = followRedirects,
+        ConnectCallback = WebhookConnectGuard.ConnectAsync,
+    };
 
     /// <summary>
     /// Posts a JSON payload to a webhook URL, giving up after <see cref="WebhookPostTimeout"/>. Returns null on

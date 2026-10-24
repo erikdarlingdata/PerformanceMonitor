@@ -20,6 +20,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -57,7 +58,8 @@ public sealed class ThresholdOverrideWebLiveTests
     /// exactly what the managed <paramref name="managedRole"/> holds, on a scratch store with two servers and one stored override
     /// (srv-8 cpu.threshold_percent = 77, set by "seed").</summary>
     private static async Task WithRoutesAsync(
-        string managedRole, Func<NpgsqlDataSource, Func<string, string?, string?, Task<(int Status, JsonNode? Body)>>, CancellationToken, Task> body)
+        string managedRole, Func<NpgsqlDataSource, Func<string, string?, string?, Task<(int Status, JsonNode? Body)>>, CancellationToken, Task> body,
+        bool armed = false)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the threshold override web live tests.");
@@ -85,6 +87,12 @@ public sealed class ThresholdOverrideWebLiveTests
             }.ConnectionString;
             await using var webLogin = NpgsqlDataSource.Create(asSeat);
 
+            /* #6600: the managed-shaped store. The web reads as the role above; a signed-in admin's change and its access check use the arm, a
+               second small pool on a role that holds the admin role's grants. */
+            var adminArm = await AdminArmLive.BuildAsync(owner, scratch, roleName, armed ? AdminArmShape.Admin : AdminArmShape.None, ct);
+
+            using var armToDispose = adminArm;
+
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
                 ContentRootPath = Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Service"),
@@ -94,7 +102,17 @@ public sealed class ThresholdOverrideWebLiveTests
             builder.Logging.ClearProviders();
             builder.Services.AddSingleton(webLogin);
             await using var app = builder.Build();
-            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger());
+            if (armed)
+            {
+                app.Use(async (context, next) =>
+                {
+                    context.Items[DarlingWebSeat.HttpContextItemKey] = new DarlingWebSeat("alice", true);
+                    await next(context);
+                });
+            }
+
+            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(),
+                postgresConfig: armed ? new PostgresConfig { Managed = true } : null, adminArm: adminArm);
             await app.StartAsync(ct);
             using var server = app.GetTestServer();
 
@@ -125,7 +143,7 @@ public sealed class ThresholdOverrideWebLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
             {
                 NpgsqlConnection.ClearAllPools();
-                await using var drop = new NpgsqlCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}", connection);
+                await using var drop = new NpgsqlCommand(AdminArmLive.DropRolesSql(roleName), connection);
                 await drop.ExecuteNonQueryAsync(token);
             });
         }
@@ -221,6 +239,23 @@ public sealed class ThresholdOverrideWebLiveTests
 
             Assert.Equal(before, await ScalarAsync(owner, "SELECT string_agg(server_id || ':' || threshold_key || ':' || value, ',' ORDER BY id) FROM config.config_threshold_overrides", ct));
         });
+    }
+
+    /* #6600: the managed store's shape. The list reads as the viewer role, a signed-in admin's change goes through the arm, and the access
+       flag is true; the row records the person. */
+    [Fact]
+    public async Task OnTheManagedStore_ASignedInAdminSeat_ChangesThroughTheArm_AndCanEditIsTrue()
+    {
+        await WithRoutesAsync("viewer", async (owner, send, ct) =>
+        {
+            var list = await send("GET", null, null);
+            Assert.Equal(200, list.Status);
+            Assert.True(list.Body!["can_edit"]!.GetValue<bool>());
+
+            var answer = await send("PUT", Json, """{"server_name":"srv-7","key":"cpu.threshold_percent","value":95}""");
+            Assert.Equal(200, answer.Status);
+            Assert.Contains("alice", await ScalarAsync(owner, "SELECT set_by FROM config.config_threshold_overrides WHERE server_id = 7", ct), StringComparison.Ordinal);
+        }, armed: true);
     }
 
     [Fact]

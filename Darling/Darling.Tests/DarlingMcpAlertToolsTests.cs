@@ -72,6 +72,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         "set_notification_route_fallback",
         "update_alert_settings",
         "update_mute_rule",
+        "update_notification_channels",
         "update_notification_route",
     };
 

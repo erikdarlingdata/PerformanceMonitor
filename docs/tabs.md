@@ -51,7 +51,7 @@ In the Darling viewer, the tabs for one server differ from Lite in these ways:
 - Memory has a fifth sub-tab, Plan Cache. There is no separate Plan Cache tab.
 - Queries adds the sub-tabs Current Active Queries, Query Store Regressions, and Query Store Clutter.
 
-Both feature auto-refresh, chart drill-down to Active Queries, right-click CSV export, system tray integration, Dark, Light and Cool Breeze themes with user-adjustable palette colors (see [Themes and colors](../Lite/README.md#themes-and-colors)), and timezone display options (server time, local time, or UTC).
+Both feature auto-refresh, chart drill-down to Active Queries, right-click CSV export, system tray integration, Dark, Light and Cool Breeze themes with user-adjustable palette colors (see [Appearance](lite-guide.md#appearance)), and timezone display options (server time, local time, or UTC).
 
 Both also share one time range picker with the web pages. It has presets, calendar periods, and typed ranges such as `last 3 days` or `since 9am`. A text column's filter lists its values to tick, like Excel, and stays set across refreshes and restarts.
 
@@ -76,6 +76,6 @@ The page for one SQL Server has these tabs:
 - Overview, Wait Stats, CPU, Memory, and Blocking
 - File I/O, I/O Trends, Queries, and Configuration
 - Config Changes, Activity, and System Events
-- Collection Health and Recommendations
+- Collection Health and Recommendations (accounts that can edit get Generate now, which queues the same analysis run as the Viewer; every finding has Ask AI, which copies the same prompt)
 
 The page for one PostgreSQL server has these tabs: Overview, Activity, Vacuum, Waits, I/O, Replication, Storage, and Configuration.
