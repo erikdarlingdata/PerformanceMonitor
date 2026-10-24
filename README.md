@@ -40,7 +40,7 @@ Not sure which one? Start with Lite. It is one download, nothing is installed on
 
 Data starts to flow within 1 to 5 minutes. The monitoring login needs `VIEW SERVER STATE` ([Permissions](docs/permissions.md)).
 
-Before you upgrade an older install with `Setup.exe`, read the warning in the [Lite guide](docs/lite-guide.md). On versions older than 3.4.0, `Setup.exe` deletes the data in the install directory (see [Upgrading an install older than 3.4.0](Lite/README.md#upgrading-an-install-older-than-340)). The Lite guide also covers the portable ZIP, collectors, storage, and configuration.
+Before you upgrade an older install with `Setup.exe`, read the warning in the [Lite guide](docs/lite-guide.md). On versions older than 3.4.0, `Setup.exe` deletes the data in the install directory (see [Upgrading an install older than 3.4.0](docs/lite-guide.md#upgrading-an-install-older-than-340)). The Lite guide also covers the portable ZIP, collectors, storage, and configuration.
 
 ## Quick start: Darling
 
@@ -57,7 +57,8 @@ These steps are for Windows. For Linux, the full steps, and the web dashboard, r
 |---|---|
 | [Choosing an edition](docs/editions.md) | Lite, Darling, and Dashboard side by side |
 | [Features and screenshots](docs/features.md) | What you get, with screenshots |
-| [Lite guide](docs/lite-guide.md) | Install, upgrade, collectors, Extended Events sessions, storage, configuration |
+| [Lite guide](docs/lite-guide.md) | Install, upgrade, where Lite keeps its files, configuration, appearance, collectors |
+| [Lite Extended Events sessions](docs/lite-extended-events.md) | The sessions Lite creates on a monitored server, and how to remove them |
 | [Darling quick start](docs/darling-quick-start.md) | Install on Windows, Linux notes, web dashboard |
 | [Darling operator guide](Darling/README.md) | Darling configuration, permissions, operations |
 | [Darling store sizing](docs/darling-store-sizing.md) | Disk, RAM and vCPU for a store host, by number of servers |
