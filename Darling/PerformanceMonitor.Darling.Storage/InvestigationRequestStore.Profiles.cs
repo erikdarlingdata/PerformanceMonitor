@@ -72,10 +72,14 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
     /// <summary>Whether a tag exists (#6400). $1 tag id. No foreign key ties a profile to its tag, so a save checks it.</summary>
     public const string TagExistsSql = "SELECT 1 FROM config.server_tags WHERE id = $1";
 
+    /// <summary>Whether a server is registered (#6400). $1 server id. No foreign key ties a profile to its server, so a save checks it.</summary>
+    public const string ServerExistsSql = "SELECT 1 FROM collect.servers WHERE server_id = $1";
+
     /// <summary>A profile: one scope at most (fleet, a server or a tag), at most <see cref="MaxLength"/> characters. A tag id is 1 or more
     /// (#6400): the store matches a scope on <c>coalesce(scope_tag_id, 0)</c>, so a profile saved for tag 0 would stand in the fleet profile's place.</summary>
     public static string? Validate(int? scopeServerId, int? scopeTagId, string? profileText) =>
         scopeServerId.HasValue && scopeTagId.HasValue ? "A profile is for the fleet, one server or one tag, not a server and a tag."
+        : scopeServerId is <= 0 ? string.Create(CultureInfo.InvariantCulture, $"Server id {scopeServerId} is not a server; server ids start at 1.")
         : scopeTagId is <= 0 ? string.Create(CultureInfo.InvariantCulture, $"Tag id {scopeTagId} is not a tag; tag ids start at 1.")
         : (profileText?.Trim().Length ?? 0) > MaxLength
             ? string.Create(CultureInfo.InvariantCulture, $"A profile must be {MaxLength:N0} characters or fewer.")
@@ -151,8 +155,17 @@ public sealed partial class InvestigationRequestStore
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        /* #6400: no foreign key ties a profile to its tag, so a tag id that names no tag is refused here, in the save's transaction. A blank
-           save is let through: it only removes, and a profile left behind by a deleted tag must still be removable. */
+        /* #6400: no foreign key ties a profile to its server or its tag, so an id that names none is refused here, in the save's transaction.
+           A blank save is let through: it only removes, and a profile left behind by a deleted server or tag must still be removable. */
+        if (!blank && scopeServerId is { } serverId)
+        {
+            await using var serverCommand = Command(connection, transaction, InvestigationProfiles.ServerExistsSql, P(serverId));
+            if (await serverCommand.ExecuteScalarAsync(cancellationToken) is null)
+            {
+                throw new ArgumentException(string.Create(CultureInfo.InvariantCulture, $"Server {serverId} is not a registered server, so no profile was saved."), nameof(profileText));
+            }
+        }
+
         if (!blank && scopeTagId is { } tagId)
         {
             await using var tagCommand = Command(connection, transaction, InvestigationProfiles.TagExistsSql, P(tagId));

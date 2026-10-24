@@ -165,11 +165,7 @@ public sealed class DarlingMcpInvestigationFeedbackTools
             }
             catch (ArgumentException ex)
             {
-                return McpHelpers.Refusal(ex.Message.StartsWith("Tag ", StringComparison.Ordinal) ? "tag_id" : "profile_text", ex.Message.Split('\n')[0].Replace(" (Parameter 'profileText')", "", StringComparison.Ordinal) + " Nothing was changed.");
-            }
-            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation)
-            {
-                return McpHelpers.Refusal("server_name", "That server or tag does not exist. Nothing was changed.");
+                return McpHelpers.Refusal(ex.Message.StartsWith("Tag ", StringComparison.Ordinal) ? "tag_id" : ex.Message.StartsWith("Server ", StringComparison.Ordinal) ? "server_name" : "profile_text", ex.Message.Split('\n')[0].Replace(" (Parameter 'profileText')", "", StringComparison.Ordinal) + " Nothing was changed.");
             }
 
             var after = await ReadProfileAsync(store, serverId, tag_id, cancellationToken);

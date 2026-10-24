@@ -65,6 +65,19 @@ public sealed class ViewerInvestigationsValidationTests
         Assert.Null(ViewerDataService.ValidateInvestigationProfile(null, 1, "text"));
     }
 
+    /* #6400: the same for the server scope, which shares the coalesce(scope_server_id, 0) match. */
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void AProfile_ForAServerThatIs0OrBelow_IsRefused_NamingTheId(int serverId)
+    {
+        var refusal = ViewerDataService.ValidateInvestigationProfile(serverId, null, "text");
+        Assert.NotNull(refusal);
+        Assert.Contains($"Server id {serverId} ", refusal, StringComparison.Ordinal);
+        Assert.Equal(refusal, ViewerDataService.ValidateInvestigationProfile(serverId, null, ""));
+        Assert.Null(ViewerDataService.ValidateInvestigationProfile(1, null, "text"));
+    }
+
     [Fact]
     public void EveryWrite_NamesThePerson_AsPersonLogin()
     {

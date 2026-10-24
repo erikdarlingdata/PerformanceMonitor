@@ -942,6 +942,50 @@ public sealed class AgentSetupWebLiveTests
         }, seat: new DarlingWebSeat("alice", true));
     }
 
+    /* #6400: the server side of the tag test above. The profile table has no foreign key to a server either, so a profile for server 0 (or
+       below), or for a server id that is not registered, is a 400 with one sentence and writes nothing; a registered server still saves, and
+       a blank save still removes the profile of a server that has gone. */
+    [Fact]
+    public async Task EnvironmentProfiles_AServerThatIs0OrBelowOrIsNotRegistered_Is400_AndWritesNothing_ViaTheWebAndTheStore()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            const string Rows = "SELECT count(*) FROM config.agent_environment_profiles";
+            const string Journal = "SELECT count(*) FROM config.investigation_journal WHERE event IN ('profile_saved', 'profile_removed')";
+            var store = new InvestigationRequestStore(owner, 30);
+            var unregistered = ServerId + 1000;
+
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\"}")).Status);
+            var fleetStamp = await ScalarAsync(owner, "SELECT modified_at::text FROM config.agent_environment_profiles", ct);
+            Assert.Equal("1", await ScalarAsync(owner, Journal, ct));
+
+            /* Server 0, a negative server and an unregistered server are refused, with text and blank, and the fleet profile is not touched. */
+            foreach (var refused in new[] { 0, -1, unregistered })
+            {
+                var answer = await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{refused},\"profile_text\":\"for no server\"}}");
+                Assert.Equal(400, answer.Status);
+                var sentence = (string)answer.Body!["error"]!;
+                Assert.Contains($"{refused}", sentence, StringComparison.Ordinal);
+                Assert.DoesNotContain("Parameter", sentence, StringComparison.Ordinal);
+                await Assert.ThrowsAsync<ArgumentException>(() => store.SaveProfileAsync(refused, null, "for no server", "dave", null, ct));
+            }
+
+            Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, "{\"scope_server_id\":0,\"profile_text\":\"\"}")).Status);
+            Assert.Equal("1|fleet: OLTP", await ScalarAsync(owner, "SELECT count(*) || '|' || max(profile_text) FROM config.agent_environment_profiles WHERE scope_server_id IS NULL AND scope_tag_id IS NULL", ct));
+            Assert.Equal(fleetStamp, await ScalarAsync(owner, "SELECT modified_at::text FROM config.agent_environment_profiles", ct));
+            Assert.Equal("1", await ScalarAsync(owner, Rows, ct));
+            Assert.Equal("1", await ScalarAsync(owner, Journal, ct));
+
+            /* A registered server still saves; an orphan profile (its server gone) can still be removed by a blank save. */
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{ServerId},\"profile_text\":\"server: reporting\"}}")).Status);
+            Assert.Equal("2", await ScalarAsync(owner, Rows, ct));
+            await ExecAsync(owner, $"INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text, modified_by) VALUES ({unregistered}, 'orphan', 'test')", ct);
+            Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{unregistered},\"profile_text\":\"orphan, edited\"}}")).Status);
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{unregistered},\"profile_text\":\"\"}}")).Status);
+            Assert.Equal("2", await ScalarAsync(owner, Rows, ct));
+        }, seat: new DarlingWebSeat("alice", true));
+    }
+
     /* The page's round trip: the modified_at_utc a GET answers is sent back verbatim as expected_modified_at and is accepted, for routes and
        for profiles. The other tests stamp their PUTs from SQL; this one uses only what the page is given. */
     [Fact]
