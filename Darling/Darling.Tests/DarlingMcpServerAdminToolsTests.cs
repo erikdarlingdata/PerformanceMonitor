@@ -348,7 +348,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
 
     /* ---------------- #3541 A14: remove_server refuses what it cannot honor ---------------- */
 
-    private static DarlingServerResolver.RegisteredServer Row(int id, string name, string? display = null) => new(id, name, display);
+    private static RegisteredServer Row(int id, string name, string? display = null) => new(id, name, display);
 
     [Fact]
     public void ResolveForRemoval_ExactStorageOrDisplayName_IsOneCandidate_MatchedExact()
@@ -485,7 +485,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
     /// names its storage/display clash mode, <c>NameClash.Refuse</c> (#6230): a write that left it at the default would
     /// read as a choice nobody made.</summary>
     [Theory]
-    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs", @"(?<!RemovalTarget )\bResolveForRemoval\(", 2)]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs", @"(?<!ServerNameMatch )\bResolveForRemoval\(", 2)]
     [InlineData("Darling/PerformanceMonitor.Darling.Service/DarlingCliCommands.cs", @"\bResolveForRemoval\(", 1)]
     [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs", @"\bResolveForRemoval\(", 1)]
     [InlineData("Lite/Mcp/McpAnalysisTools.cs", @"\bMatchCandidates\(", 1)]

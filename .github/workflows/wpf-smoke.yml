@@ -9,11 +9,12 @@ name: WPF smoke
 # is taken before anything of ours runs (the probe: proof that the runner gives an interactive desktop), and again when each
 # app's main window shows, after each walk, and on any failure. No screenshots are compared.
 #
-# Triggers: every pull request, the nightly (workflow_call), and a manual dispatch. `pull_request`, never `pull_request_target`: the job
-# runs the pull request's own code, so it runs with the pull request's read-only token and no secrets.
+# Triggers: the nightly (workflow_call) and a manual dispatch. It no longer runs on pull requests (#6656): the pull request
+# workflow (pr.yml) is the one per-PR CI system, so this smoke is a nightly and on-demand check.
 #
-# Built to be a required check (#6492). The workflow has no `paths:` filter, because a workflow its path filter skips never
-# reports, and a required check that never reports blocks the merge. Instead:
+# History (#6492): it was built to be a required check on pull requests, with no `paths:` filter, because a workflow its path
+# filter skips never reports, and a required check that never reports blocks the merge. The jobs keep that shape, and on the
+# two events left every `if` below takes its non-pull-request branch:
 #   * `changes` works out, on every event, whether the smoke is needed: a non-draft pull request that changes Lite, the Darling
 #     viewer or its storage, the harness, the seed or this workflow (the list the old filter held), or any event that is not a
 #     pull request (the nightly, a dispatch). A draft pull request is skipped until it is marked ready.
@@ -21,8 +22,6 @@ name: WPF smoke
 #   * `WPF smoke (result)` always runs and is the one check to require: success when the smoke passed or was not needed, failure
 #     when the smoke failed, was cancelled, or `changes` itself failed.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   # The nightly runs it as a reusable workflow (nightly.yml, outside publish's needs).
   workflow_call:
   workflow_dispatch:

@@ -15,7 +15,8 @@
   assignment is deterministic, and this script prints the slice before running it.
 
   -Areas  all     the whole Darling suite and the whole Lite suite.
-          darling the whole Darling suite.
+          darling the whole Darling suite, and of Lite.Tests the classes that read a Darling path (ci-select.py reads-classes
+                  --suite lite), which is the scope build.yml gives a Darling-only change.
           lite    the whole Lite suite, and of Darling.Tests the Stage=Guard classes plus the classes that read a Lite
                   path (ci-select.py reads-classes), which is the scope build.yml gives a Lite-only change.
   The Darling slice is cut by run-darling-pg-shard.ps1 (shard Leg-1 of LegCount); the Lite slice is cut here, because
@@ -59,7 +60,7 @@ $liteWeights = Join-Path $scripts 'lite-shard-weights.json'
 $darlingWeights = Join-Path $scripts 'darling-shard-weights.json'
 # Every area runs some Darling.Tests classes: all of them, or under 'lite' the Guard and Lite-reads scope.
 $runDarling = $true
-$runLite = $Areas -ne 'darling'
+$runLite = $true
 # The Darling scope under -Areas lite, in run-darling-pg-shard.ps1's own -ScopeFilter vocabulary.
 $darlingScopeFilter = if ($Areas -eq 'lite') { '-trait Stage=Guard -trait Reads=Lite' } else { '' }
 
@@ -102,12 +103,21 @@ function Get-DarlingClasses {
 }
 
 function Get-LiteClasses {
+    # Under -Areas darling only the Lite classes that read a Darling file run (ci-plan.py counts them as lite_scope reads).
+    $reads = @()
+    if ($Areas -eq 'darling') {
+        $reads = @(python -I (Join-Path $scripts 'ci-select.py') reads-classes --suite lite | Where-Object { $_ })
+        if ($LASTEXITCODE -ne 0) { throw 'ci-select.py reads-classes failed' }
+    }
     if (-not (Test-Path -LiteralPath 'Lite.Tests/bin/Release')) {
         if (-not $DryRun) { throw 'no built Lite.Tests under Lite.Tests/bin/Release - the build artifact was not unpacked' }
         Write-Host '(dry run, no built Lite.Tests: Lite classes read from lite-shard-weights.json)'
-        return @(Get-WeightedNames $liteWeights '')
+        $names = @(Get-WeightedNames $liteWeights '')
     }
-    return @(Get-ListedClasses $liteProject @())
+    else { $names = @(Get-ListedClasses $liteProject @()) }
+    if ($Areas -ne 'darling') { return $names }
+    Write-Host "(darling scope: only the Lite classes that read a Darling file, $($reads.Count) named by the source scan)"
+    return @($names | Where-Object { $reads -contains $_ })
 }
 
 # darling-shard-pack.py pack: the same packer, weights and proof run-darling-pg-shard.ps1 uses. Returns the header line

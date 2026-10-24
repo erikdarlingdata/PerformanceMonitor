@@ -477,6 +477,10 @@ public partial class MainWindow : Window
         JobHistoryContent.Initialize(_dataService);
         JobHistoryContent.StatusChanged += OnServerTabStatusChanged;
 
+        /* Fleet Sweeps (#6390): a self-loading read-only control over the fleet sweep engine's record. */
+        FleetSweepsContent.Initialize(_dataService);
+        FleetSweepsContent.StatusChanged += OnServerTabStatusChanged;
+
         /* Availability Groups (#991): a self-loading fleet-wide control. Its TabItem ships Collapsed and is
            revealed only once a load finds AG rows, so an Always-On-less fleet never carries a dead tab. */
         AvailabilityGroupsContent.Initialize(_dataService);
@@ -521,6 +525,15 @@ public partial class MainWindow : Window
                 StatusText.Text = $"--open-server '{openServer}' names {choice.Ambiguous.Count} servers "
                     + $"({string.Join(", ", choice.Ambiguous.Select(ViewerArgs.DescribeServer))}); none was opened.";
             }
+        }
+
+        /* --add-server (#6480): the MSI's finish page starts the viewer with it, so a new install lands on the same
+           add-server dialog the empty state offers. Queued at idle priority so OnLoaded finishes (tray, timers)
+           before the modal dialog's loop starts, and the window is on screen behind it. No store connection means
+           no dialog (the message overlay already says why). */
+        if (_dataService is not null && ViewerArgs.AddServerRequested(Environment.GetCommandLineArgs().Skip(1).ToArray()))
+        {
+            _ = Dispatcher.BeginInvoke(new Action(() => AddServerButton_Click(this, new RoutedEventArgs())), DispatcherPriority.ContextIdle);
         }
 
         /* System tray + in-app alert toasts (the ported Lite tray, adapted for headless). The tray icon lives
@@ -1278,6 +1291,10 @@ public partial class MainWindow : Window
                 case TabItem tab when ReferenceEquals(tab, JobHistoryTabItem):
                     await JobHistoryContent.RefreshJobsAsync();
                     StampRefreshed("job history");
+                    break;
+                case TabItem tab when ReferenceEquals(tab, FleetSweepsTabItem):
+                    await FleetSweepsContent.RefreshAsync();
+                    StampRefreshed("fleet sweeps");
                     break;
                 case TabItem tab when ReferenceEquals(tab, AvailabilityGroupsTabItem):
                     await RefreshAvailabilityGroupsAsync();
@@ -2200,22 +2217,48 @@ public partial class MainWindow : Window
     /// time, through the same open-tab path the Recommendations deep link uses. Null (no link) for any other alert, a
     /// server no longer registered, or a PostgreSQL server, whose tab has no Blocking tab.
     /// </summary>
-    private Action? FullChainOpenerFor(ViewerAlertRow row)
+    private AlertChainOpener? FullChainOpenerFor(ViewerAlertRow row)
     {
-        var view = AlertChainLink.ViewFor(row.MetricName);
-        if (view == AlertChainView.None)
+        var server = FindManagedServerById(row.ServerId);
+        if (server is null)
         {
             return null;
         }
 
-        var server = FindManagedServerById(row.ServerId);
-        if (server is null || server.IsPostgres)
+        /* One choice for the target and the link's text (AlertChainLink.TargetFor), so the label names where it opens. */
+        var target = AlertChainLink.TargetFor(row.MetricName, server.IsPostgres);
+        if (target is null)
         {
             return null;
+        }
+
+        var view = target.View;
+        var tab = target.Tab;
+
+        /* #6390 S6: every other metric with a server tab (and a PostgreSQL server's Blocking Detected, which has no Blocked Process
+           Reports grid) opens that tab over the same window: the viewer's Triage. */
+        if (tab != AlertServerTab.None)
+        {
+            var (tabFrom, tabTo) = AlertChainLink.WindowUtc(row.AlertTime);
+            return new AlertChainOpener(target.Text, async () =>
+            {
+                try
+                {
+                    var serverTab = OpenServerTab(server);
+                    if (serverTab is not null)
+                    {
+                        await serverTab.DeepLinkToTabAsync(tab, tabFrom, tabTo);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    OnServerTabStatusChanged($"Opening the {tab} tab failed: {ex.Message}");
+                }
+            });
         }
 
         var (fromUtc, toUtc) = AlertChainLink.WindowUtc(row.AlertTime);
-        return async () =>
+        return new AlertChainOpener(target.Text, async () =>
         {
             try
             {
@@ -2229,7 +2272,7 @@ public partial class MainWindow : Window
             {
                 OnServerTabStatusChanged($"Opening the {view} view failed: {ex.Message}");
             }
-        };
+        });
     }
 
     /// <summary>Finds a registered server by id in the Recommendations tab's own selector list (populated

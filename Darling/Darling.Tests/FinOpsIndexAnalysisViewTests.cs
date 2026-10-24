@@ -137,18 +137,41 @@ public sealed class FinOpsIndexAnalysisViewTests
     }
 
     [Fact]
-    public void Notes_AreUptimeThenDedupeThenAnalyzerNotes()
+    public void Notes_AreUptimeThenAnalyzerNotes_WhenOnlyTheUptimeWarningApplies()
+    {
+        var root = Build(new IndexCleanupAnalysisResult
+        {
+            DatabaseRollups = [Roll("d")], UptimeWarning = true, Notes = ["n1", "n2"],
+        });
+        var notes = root.GetProperty("notes").EnumerateArray().Select(n => n.GetString()!).ToArray();
+        Assert.Equal(3, notes.Length);
+        Assert.StartsWith("Server uptime is under 14 days", notes[0], StringComparison.Ordinal);
+        Assert.Equal(new[] { "n1", "n2" }, notes.Skip(1).ToArray());
+    }
+
+    /// <summary>#6653: dedupe-only mode flags no unused index, so the uptime caveat about premature "Unused Index" findings is left
+    /// out beside the dedupe notice; the raw uptime_warning fact stays on the payload.</summary>
+    [Fact]
+    public void Notes_LeaveOutTheUptimeCaveat_WhenDedupeOnlyIsInEffect()
     {
         var root = Build(new IndexCleanupAnalysisResult
         {
             DatabaseRollups = [Roll("d")], UptimeWarning = true, DedupeOnlyApplied = true, Notes = ["n1", "n2"],
         });
         var notes = root.GetProperty("notes").EnumerateArray().Select(n => n.GetString()!).ToArray();
-        Assert.Equal(4, notes.Length);
-        Assert.StartsWith("Server uptime is under 14 days", notes[0], StringComparison.Ordinal);
-        Assert.StartsWith("Dedupe-only mode is in effect", notes[1], StringComparison.Ordinal);
-        Assert.Equal(new[] { "n1", "n2" }, notes.Skip(2).ToArray());
+        Assert.Equal(3, notes.Length);
+        Assert.StartsWith("Dedupe-only mode is in effect", notes[0], StringComparison.Ordinal);
+        Assert.Equal(new[] { "n1", "n2" }, notes.Skip(1).ToArray());
+        Assert.True(root.GetProperty("uptime_warning").GetBoolean());
     }
+
+    [Theory]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, false)]
+    public void ShowUptimeCaveat_IsTheUptimeWarning_OnlyWhenDedupeOnlyIsNotInEffect(bool uptimeWarning, bool dedupeOnly, bool expected) =>
+        Assert.Equal(expected, new IndexCleanupAnalysisResult { UptimeWarning = uptimeWarning, DedupeOnlyApplied = dedupeOnly }.ShowUptimeCaveat);
 
     [Fact]
     public void OverallRow_HasNoWorkloadKeys_AndDatabaseRowsDo()

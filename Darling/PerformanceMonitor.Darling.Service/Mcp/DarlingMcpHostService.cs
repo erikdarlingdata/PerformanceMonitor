@@ -760,9 +760,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #6281: no marker rides on this connection. The store's tag guard reads a per-transaction setting that each MCP tag write
                sets itself (DarlingStoreConnection.MarkMcpSurfaceAsync), because PgBouncer and RDS Proxy refuse a startup "options" parameter
                and a pooler set to ignore it would drop the marker without a word. */
-            var postgres = NpgsqlDataSource.Create(
-                DarlingStoreConnection.PinSessionTimeZoneUtc(
-                    DarlingStoreConnection.WithApplicationName(storeConnectionString, DarlingManagedPostgres.McpApplicationName)));
+            /* #6630: a store the operator brings gets the worker's collect/config search path the same way (set-if-absent), because the
+               bare names the reads use (servers, config_service, ...) only resolve through it, and the database default is best effort. */
+            var postgres = DarlingWorker.CreateHostStoreDataSource(storeConnectionString, DarlingManagedPostgres.McpApplicationName);
             _appDataSource = postgres;
 
             /* #6263: investigations served, but no route opens a request. A hint, never a refusal: the operator may add the
@@ -1772,6 +1772,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                command plane's own plans on config.config_collector_schedules and config_collector_run_times; the mcp role holds the
                narrow write grant on those two tables. */
             .WithGeminiCompatibleTools<DarlingMcpCollectorScheduleTools>()
+            /* #6393: update_service_flags (a write, mcp.allowWrites, never offered to an investigation agent) sets plan capture, Query Store
+               backfill, text budget, max concurrent sweeps and fetch top N on config.config_service. The mcp role holds a column grant on
+               exactly those five columns, so the MCP and web flags and ports and paused stay Viewer-only. */
+            .WithGeminiCompatibleTools<DarlingMcpServiceFlagTools>()
             /* The server-onboarding WRITE tools — add_servers (BULK) / remove_server: an MCP client can stand up
                or tear down FLEET monitoring conversationally. The service-side twin of the Viewer's Add / Add-
                Multiple dialogs: add_servers validates each entry, probes the connection IN-PROCESS (the service

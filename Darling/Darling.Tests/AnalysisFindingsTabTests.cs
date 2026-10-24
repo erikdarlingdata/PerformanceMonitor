@@ -107,7 +107,24 @@ public sealed class AnalysisFindingsTabTests
         Assert.Equal(0, Assert.Single(r.GetProperty("preChildren").EnumerateArray()).GetInt32());
         Assert.Equal(fix, Assert.Single(Strings(r.GetProperty("clipboard"))));
         Assert.Equal("Copied", r.GetProperty("label").GetString());
-        Assert.Equal(1, r.GetProperty("buttons").GetInt32());
+        Assert.Equal(5, r.GetProperty("buttons").GetInt32()); // Copy fix, and Ask AI on each of the four cards (#6389)
+    }
+
+    /// <summary>#6389: Ask AI asks the service for the prompt (the one builder the Viewer's card uses) with the finding's own headline and UTC window,
+    /// and puts exactly the service's text on the clipboard. Every card has the button, as the Viewer's does.</summary>
+    [Fact]
+    public void AskAi_FetchesTheServicesPrompt_ForTheFindingsHeadlineAndWindow_AndCopiesIt()
+    {
+        var r = Run("askAi");
+        Assert.Equal("/api/analysis/ask-ai-prompt", r.GetProperty("path").GetString());
+        var p = r.GetProperty("params");
+        Assert.Equal("srv-a", p.GetProperty("server").GetString());
+        Assert.Equal("Major", p.GetProperty("title").GetString());
+        Assert.Equal("2026-01-01T00:00:00Z", p.GetProperty("start").GetString());
+        Assert.Equal("2026-01-01T01:00:00Z", p.GetProperty("end").GetString());
+        Assert.Equal("THE PROMPT", Assert.Single(Strings(r.GetProperty("clipboard"))));
+        Assert.Equal("AI prompt copied", r.GetProperty("label").GetString());
+        Assert.Equal(4, r.GetProperty("buttons").GetInt32());
     }
 
     [Fact]
