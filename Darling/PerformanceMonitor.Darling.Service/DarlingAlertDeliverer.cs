@@ -294,7 +294,9 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         if (result.Route is { } route)
         {
             context ??= new AlertContext();
-            context.Route = route.ToDto(result.ChannelOutcomes);
+            /* #6718: the generic post's rendered {{dedup_key}} rides its destination, so a resolution after a restart closes
+               the key the receiver opened. The row's incidents are unfiltered (#3313) and cannot give that key back. */
+            context.Route = route.ToDto(result.ChannelOutcomes, result.GenericDedupKey);
         }
 
         /* Always log the alert, regardless of channel status (EmailAlertService.cs:82-94). */
@@ -340,6 +342,10 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
 
         public HashSet<string> PagerDutyDedupKeys { get; } = new(StringComparer.Ordinal);
 
+        /// <summary>The <c>{{dedup_key}}</c> the generic webhook's fires rendered (#6718), which its resolution renders again so
+        /// the receiver closes what the fire opened. Not the PagerDuty keys: the generic token ignores the auto-resolve flag.</summary>
+        public HashSet<string> GenericDedupKeys { get; } = new(StringComparer.Ordinal);
+
         /// <summary>Channels a fire read back from history reached through a route that is gone or disabled now: no
         /// destination to send to, and the row's outcome says so.</summary>
         public List<string> RouteGoneChannels { get; } = new();
@@ -384,6 +390,8 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         var now = _utcNow();
         var serverId = string.IsNullOrEmpty(outcome.ServerKey) ? outcome.ServerName : outcome.ServerKey;
         var dedupKey = WebhookAlertService.DerivePagerDutyDedupKeyForSend(serverId, outcome.MetricName, context, _settings);
+        /* #6718: the key the generic post rendered, from the filtered context, not one derived again from this unfiltered one. */
+        var genericDedupKey = result.GenericDedupKey;
         lock (_deliveredFires)
         {
             var key = (outcome.ServerKey, outcome.MetricName);
@@ -404,6 +412,10 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
                 if (channel == NotificationRouter.PagerDutyChannel)
                 {
                     fire.PagerDutyDedupKeys.Add(dedupKey);
+                }
+                else if (channel == NotificationRouter.GenericChannel && genericDedupKey is not null)
+                {
+                    fire.GenericDedupKeys.Add(genericDedupKey);
                 }
             }
         }
@@ -628,9 +640,20 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
                         destination, dedupKey, resolution.MetricName, resolution.ServerName, serverId, detail, cancellationToken);
                 }
             }
+            else if (channel == NotificationRouter.GenericChannel && fire.GenericDedupKeys.Count > 0)
+            {
+                /* #6718: one resolution post per key the fire's posts rendered, as the PagerDuty close does per incident. Usually one. */
+                error = null;
+                foreach (var dedupKey in fire.GenericDedupKeys)
+                {
+                    error ??= await _webhooks.TrySendResolutionAsync(
+                        channel, destination, facts, serverId, dedupKey, cancellationToken);
+                }
+            }
             else
             {
-                error = await _webhooks.TrySendResolutionAsync(channel, destination, facts, serverId, cancellationToken);
+                /* Teams and Slack carry no key. A generic fire with no recorded key lands here and the send reports it. */
+                error = await _webhooks.TrySendResolutionAsync(channel, destination, facts, serverId, genericDedupKey: null, cancellationToken);
             }
 
             outcomes[channel] = error is null ? AlertChannelOutcome.Delivered : AlertChannelOutcome.Failed;
@@ -733,12 +756,21 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
             firstDedupKey = dedupKey;
             foreach (var destination in route.Destinations)
             {
+                /* #6718: the key the generic post rendered, stored on its destination as sent. A row written before that was
+                   stored carries none, and the key is derived from the row's incidents, which matches the post whenever the
+                   #3313 filter dropped none of them. */
+                var genericDedupKey = destination.SentKey
+                    ?? WebhookAlertService.DeriveGenericDedupKey(resolution.ServerKey, resolution.ServerName, resolution.MetricName, context);
                 if (destination.Outcome != AlertRouteOutcomes.Delivered
                     || fire.Channels.ContainsKey(destination.Channel) || fire.RouteGoneChannels.Contains(destination.Channel))
                 {
                     if (destination.Outcome == AlertRouteOutcomes.Delivered && destination.Channel == NotificationRouter.PagerDutyChannel)
                     {
                         fire.PagerDutyDedupKeys.Add(dedupKey);
+                    }
+                    else if (destination.Outcome == AlertRouteOutcomes.Delivered && destination.Channel == NotificationRouter.GenericChannel)
+                    {
+                        fire.GenericDedupKeys.Add(genericDedupKey);
                     }
 
                     continue;
@@ -760,6 +792,10 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
                 if (destination.Channel == NotificationRouter.PagerDutyChannel)
                 {
                     fire.PagerDutyDedupKeys.Add(dedupKey);
+                }
+                else if (destination.Channel == NotificationRouter.GenericChannel)
+                {
+                    fire.GenericDedupKeys.Add(genericDedupKey);
                 }
             }
         }

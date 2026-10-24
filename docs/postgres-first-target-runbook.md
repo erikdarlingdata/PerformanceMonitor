@@ -1,5 +1,7 @@
 # Runbook: point Darling at a PostgreSQL target
 
+Audience: operators.
+
 End to end, with a **proof point at every step** — what to look at, and what it should say. The
 [PostgreSQL Targets page](darling/postgresql-targets.md) is the reference for *what*
 each collector does; this is the ordered procedure for getting one collecting and knowing that it is.

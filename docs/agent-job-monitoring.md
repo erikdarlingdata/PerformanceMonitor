@@ -1,5 +1,7 @@
 # Agent Job Monitoring
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 Every edition monitors currently running SQL Agent jobs and flags jobs running longer than expected.

@@ -1,5 +1,7 @@
 # The Darling WPF viewer
 
+Audience: operators.
+
 The viewer is the desktop app. It shows plans, blocking chains, deadlock graphs and live active queries. This page shows how to open the viewer on the service host and how to set it up on another machine. It also explains why a seat can be read-only.
 
 Install the service first. See [Install Darling](install.md).

@@ -1,5 +1,7 @@
 # How Collection Works
 
+Audience: contributors.
+
 A tour of the collection pipeline for people who know SQL but don't know this codebase. Read this, then read two or three collector definitions, and you'll understand 80% of what Performance Monitor is doing on your servers.
 
 There is **one collection brain and two storage engines**. Every collector — the exact T-SQL sent to a monitored server, the result-row mapping, the delta rules, the default cadence, the retention horizon — is defined once in the shared `PerformanceMonitor.Collectors` library. **Lite** writes those rows to DuckDB; **Darling** writes the same rows to PostgreSQL. A collector change lands once and both editions get it.

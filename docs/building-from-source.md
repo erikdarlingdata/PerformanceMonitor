@@ -1,5 +1,7 @@
 # Folder structure and building from source
 
+Audience: contributors.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 ## Folder Structure
