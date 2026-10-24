@@ -219,6 +219,28 @@ public class StoryNamedHopsTests
     /* ── the real SQL Server shape, through the real scorer and graph ── */
 
     /// <summary>
+    /// #6640: QUERY_SPILLS is a hop of MEMORY_GRANT_PENDING in today's graph, so the roster entry puts the spilling query's
+    /// name on the root card of a grant-pressure story. Without the entry the story is the same and the card names nothing.
+    /// </summary>
+    [Fact]
+    public void MemoryGrantPendingRootConsumingQuerySpills_NamesTheSpillingQueryOnTheRootCard()
+    {
+        var facts = new List<Fact>
+        {
+            Scored("MEMORY_GRANT_PENDING", 1.0),
+            new() { Source = "queries", Key = "QUERY_SPILLS", Value = 1100, BaseSeverity = 0.4, Severity = 0.4, ObjectName = "Sales/0xAB",
+                    Metadata = new() { ["total_spills"] = 1100, ["spilling_query_count"] = 2 },
+                    Ranked = [new("Sales/0xAB", "Sales", 800), new("Sales/0xCD", "Sales", 300)] },
+        };
+        var story = Assert.Single(new InferenceEngine(new RelationshipGraph()).BuildStories(facts));
+        Assert.Equal(["MEMORY_GRANT_PENDING", "QUERY_SPILLS"], story.Path);
+
+        FactAdvice.PopulateStoryText([story], facts);
+
+        Assert.Contains($" {FactIdentity.SentenceMarker} `QUERY_SPILLS` (severity 0.40) — most spilled query `Sales/0xAB`: ", Investigation(story), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The SQL Server twin of the exit check's PostgreSQL defect: LCK at 1.0 (a tenth of the window in lock waits)
     /// walks to BLOCKING_CHAIN at 0.7 (depth 3, sleeping apex ×1.4) and consumes it — before this change the only
     /// card said "lock waits" and the session at the head of the chain was named nowhere. Now the LCK card's

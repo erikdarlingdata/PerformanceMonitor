@@ -44,6 +44,18 @@ public static partial class FactRanked
 {
     /// <summary>How many objects a fact may rank, entry [0] (the fact's own subject) included.</summary>
     public const int MaxObjects = 3;
+
+    /// <summary>
+    /// #6640: the name a query fact ranks a query by, <c>database/query_hash</c> or <c>database/query_hash/query_plan_hash</c>.
+    /// Both SKUs' collectors build it here, so a NULL column reads the same on both: a legible placeholder in place of an
+    /// empty part, because the string is printed into card prose and an empty part would show as <c>Sales/</c> or <c>/</c>.
+    /// The placeholders are display only: the aggregate's own identity (the COALESCE to an empty string in its SQL) is untouched.
+    /// </summary>
+    public static string QueryName(string? database, string? queryHash, string? queryPlanHash = null)
+    {
+        var name = (string.IsNullOrEmpty(database) ? "(no database)" : database) + "/" + (string.IsNullOrEmpty(queryHash) ? "(no hash)" : queryHash);
+        return queryPlanHash is null ? name : name + "/" + (queryPlanHash.Length == 0 ? "(no plan hash)" : queryPlanHash);
+    }
 }
 
 /// <summary>

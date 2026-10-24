@@ -107,6 +107,16 @@ public sealed class FactsNameQueriesTests : IClassFixture<SharedDuckDbFixture>, 
         Assert.Equal($"{Db}/0xQA/0xPA", fact.ObjectName);
     }
 
+    [Fact]
+    public void QueryName_ReadsANullPartAsAPlaceholder_NotAnEmptyOne()
+    {
+        /* Both SKUs build the name here, so this is the one pin. A NULL database or hash must not print as `Sales/` or `/`. */
+        Assert.Equal("Sales/0xAB", FactRanked.QueryName("Sales", "0xAB"));
+        Assert.Equal("Sales/(no hash)", FactRanked.QueryName("Sales", null));
+        Assert.Equal("(no database)/0xAB/0xCD", FactRanked.QueryName(null, "0xAB", "0xCD"));
+        Assert.Equal("(no database)/(no hash)/(no plan hash)", FactRanked.QueryName("", "", ""));
+    }
+
     private Task<System.Collections.Generic.List<Fact>> CollectAsync() =>
         new DuckDbFactCollector(_duckDb).CollectFactsAsync(new AnalysisContext
         {

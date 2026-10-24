@@ -107,18 +107,28 @@ AND   v.delta_execution_count > 0";
             if (totalSpills > 0)
             {
                 await reader.CloseAsync();
-                using var rankCmd = connection.CreateCommand();
-                rankCmd.CommandText = QuerySpillsRankedSql;
-                rankCmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-                rankCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
-                rankCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
-                using var rankReader = await rankCmd.ExecuteReaderAsync(context.CancellationToken);
-                while (await rankReader.ReadAsync(context.CancellationToken))
+                /* Its own try: a throw here (the HUGEINT read cost every QUERY_STATS fact once, run 39981348396) loses the names
+                   and nothing else. record: false logs it without marking the family unread, since the facts below are whole. */
+                try
                 {
-                    var db = rankReader.IsDBNull(0) ? string.Empty : rankReader.GetString(0);
-                    var hash = rankReader.IsDBNull(1) ? string.Empty : rankReader.GetString(1);
-                    var pages = rankReader.IsDBNull(2) ? 0.0 : ToInt64(rankReader.GetValue(2));
-                    spillRanked.Add(new RankedObject(db + "/" + hash, db.Length == 0 ? null : db, pages));
+                    using var rankCmd = connection.CreateCommand();
+                    rankCmd.CommandText = QuerySpillsRankedSql;
+                    rankCmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+                    rankCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
+                    rankCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+                    using var rankReader = await rankCmd.ExecuteReaderAsync(context.CancellationToken);
+                    while (await rankReader.ReadAsync(context.CancellationToken))
+                    {
+                        var db = rankReader.IsDBNull(0) ? null : rankReader.GetString(0);
+                        var hash = rankReader.IsDBNull(1) ? null : rankReader.GetString(1);
+                        var pages = rankReader.IsDBNull(2) ? 0.0 : ToInt64(rankReader.GetValue(2));
+                        spillRanked.Add(new RankedObject(FactRanked.QueryName(db, hash), string.IsNullOrEmpty(db) ? null : db, pages));
+                    }
+                }
+                catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
+                {
+                    spillRanked.Clear();
+                    ReportCollectionFailure(ex, context, record: false);
                 }
             }
 
@@ -315,12 +325,12 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                 }
                 if (ranked.Count < FactRanked.MaxObjects)
                 {
-                    var db = reader.IsDBNull(8) ? string.Empty : reader.GetString(8);
-                    var hash = reader.IsDBNull(9) ? string.Empty : reader.GetString(9);
+                    var db = reader.IsDBNull(8) ? null : reader.GetString(8);
+                    var hash = reader.IsDBNull(9) ? null : reader.GetString(9);
                     var planHash = reader.IsDBNull(10) ? string.Empty : reader.GetString(10);
                     ranked.Add(new RankedObject(
-                        db + "/" + hash + "/" + planHash,
-                        db.Length == 0 ? null : db,
+                        FactRanked.QueryName(db, hash, planHash),
+                        string.IsNullOrEmpty(db) ? null : db,
                         reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2)),
                         new Dictionary<string, double>
                         {

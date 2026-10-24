@@ -65,7 +65,7 @@ AND   v.delta_execution_count > 0";
     /// <summary>#6640: the queries behind QUERY_SPILLS, most spilled pages first. Same window, same filter and same
     /// (database, query_hash) identity as the aggregate above, so the names are exactly the queries its spilling_query_count counts.
     /// Run only when the aggregate found spills, and capped at the ranked-list cap.</summary>
-    private static readonly string QuerySpillsRankedSql = @"
+    internal static readonly string QuerySpillsRankedSql = @"
 SELECT
     v.database_name,
     v.query_hash,
@@ -110,17 +110,26 @@ LIMIT " + FactRanked.MaxObjects + ";";
             if (totalSpills > 0)
             {
                 await reader.CloseAsync();
-                using var rankCmd = new NpgsqlCommand(QuerySpillsRankedSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
-                rankCmd.Parameters.AddWithValue(context.ServerId);
-                rankCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-                rankCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
-                using var rankReader = await rankCmd.ExecuteReaderAsync(context.CancellationToken);
-                while (await rankReader.ReadAsync(context.CancellationToken))
+                /* Its own try, as in Lite: a throw here loses the names and nothing else (record: false, the facts below are whole). */
+                try
                 {
-                    var db = rankReader.IsDBNull(0) ? string.Empty : rankReader.GetString(0);
-                    var hash = rankReader.IsDBNull(1) ? string.Empty : rankReader.GetString(1);
-                    var pages = rankReader.IsDBNull(2) ? 0.0 : Convert.ToDouble(rankReader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture);
-                    spillRanked.Add(new RankedObject(db + "/" + hash, db.Length == 0 ? null : db, pages));
+                    using var rankCmd = new NpgsqlCommand(QuerySpillsRankedSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+                    rankCmd.Parameters.AddWithValue(context.ServerId);
+                    rankCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+                    rankCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+                    using var rankReader = await rankCmd.ExecuteReaderAsync(context.CancellationToken);
+                    while (await rankReader.ReadAsync(context.CancellationToken))
+                    {
+                        var db = rankReader.IsDBNull(0) ? null : rankReader.GetString(0);
+                        var hash = rankReader.IsDBNull(1) ? null : rankReader.GetString(1);
+                        var pages = rankReader.IsDBNull(2) ? 0.0 : Convert.ToDouble(rankReader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture);
+                        spillRanked.Add(new RankedObject(FactRanked.QueryName(db, hash), string.IsNullOrEmpty(db) ? null : db, pages));
+                    }
+                }
+                catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+                {
+                    spillRanked.Clear();
+                    ReportCollectionFailure(ex, context, record: false);
                 }
             }
 
@@ -305,12 +314,14 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                 }
                 if (ranked.Count < FactRanked.MaxObjects)
                 {
-                    var db = reader.IsDBNull(8) ? string.Empty : reader.GetString(8);
-                    var hash = reader.IsDBNull(9) ? string.Empty : reader.GetString(9);
+                    /* Ordinals 8-10 are the last three columns of ParameterSensitivitySql's SELECT list (database_name, query_hash,
+                       query_plan_hash), re-read against it for #6641. FactsNameQueriesLiveTests runs them where DARLING_TEST_PG is set. */
+                    var db = reader.IsDBNull(8) ? null : reader.GetString(8);
+                    var hash = reader.IsDBNull(9) ? null : reader.GetString(9);
                     var planHash = reader.IsDBNull(10) ? string.Empty : reader.GetString(10);
                     ranked.Add(new RankedObject(
-                        db + "/" + hash + "/" + planHash,
-                        db.Length == 0 ? null : db,
+                        FactRanked.QueryName(db, hash, planHash),
+                        string.IsNullOrEmpty(db) ? null : db,
                         reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2)),
                         new Dictionary<string, double>
                         {
