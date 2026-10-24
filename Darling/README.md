@@ -2,6 +2,8 @@
 
 Darling is the headless, centralized edition of Performance Monitor: a 24/7 service (a Windows service, or Linux with systemd or Docker Compose) that collects from your SQL Servers into a central PostgreSQL (optionally TimescaleDB) store, plus a detached desktop viewer that reads that store. No desktop app has to stay open for collection to happen, and every viewer seat reads the same central data.
 
+**Running an install day to day?** [Running Darling day to day](../docs/darling/admin.md) has the steps to add or remove a server, change a password, rotate a token, pause collection, upgrade and uninstall.
+
 It runs the **same monitoring brain as the Lite edition** — one shared codebase, two storage engines:
 
 - `PerformanceMonitor.Collectors` owns all 73 collector definitions — 44 for SQL Server and 29 for PostgreSQL: the exact query sent to monitored servers, the result-row mappings, the delta rules, the default cadences and retention horizons, and the ignored-wait-types list. Lite writes those rows to DuckDB; Darling writes the same rows to PostgreSQL via binary COPY. Each definition declares which engine it targets, and a collector never runs against the other one — see [PostgreSQL targets](#postgresql-targets).
