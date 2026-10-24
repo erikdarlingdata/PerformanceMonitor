@@ -1,0 +1,47 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <!--
+    #6480: the Windows Installer package for the Darling service and viewer. The package owns what Windows Installer
+    can express (the files, the service record, the all-users shortcuts, the install marker) and runs
+    install-darling.ps1 / uninstall-darling.ps1 for the rest (permissions, operator group, store folder, firewall
+    rules), because a table cannot say those things and a second copy of them would drift from the script.
+
+    It is NOT part of PerformanceMonitor.sln and no solution build, test or publish step builds it. Only the
+    darling-msi workflow does:
+      dotnet build Darling/msi/PerformanceMonitor.Darling.Msi.wixproj -c Release -p:PayloadDir=<folder>
+    PayloadDir is the finished Darling tree, what the release zip holds: the self-contained service publish at the
+    root, the self-contained viewer publish in viewer\, the three scripts (the service project copies them in) and
+    pg-runtime.zip beside the service exe. The product version is Directory.Build.props' Version.
+  -->
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputName>PerformanceMonitorDarling-$(Version)</OutputName>
+    <PayloadDir Condition="'$(PayloadDir)' == ''">$(MSBuildThisFileDirectory)payload</PayloadDir>
+    <!-- ICE43 and ICE57 assume a shortcut in DesktopFolder or ProgramMenuFolder is per-user and want an HKCU keypath.
+         This package is per-machine (ALLUSERS=1), so those two folders ARE the all-users ones, which is what
+         install-darling.ps1's shortcuts use, and the shortcut belongs to the exe's component so it goes with the exe.
+         Every other ICE runs and the build fails on any error. -->
+    <SuppressIces>ICE43;ICE57</SuppressIces>
+    <!-- The install folder check Package.wxs runs before install-darling.ps1 (DarlingFolderCheck): New-DarlingFolderCheck.ps1
+         writes it here as a WiX include, built from the install-darling.ps1 in the payload. -->
+    <DarlingFolderCheckDir>$(MSBuildProjectDirectory)\obj\darling-folder-check</DarlingFolderCheckDir>
+    <DefineConstants>$(DefineConstants);PayloadDir=$(PayloadDir);ProductVersion=$(Version);DarlingFolderCheckWxi=$(DarlingFolderCheckDir)\DarlingFolderCheck.wxi</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Util.wixext" />
+    <PackageReference Include="WixToolset.UI.wixext" />
+  </ItemGroup>
+
+  <Target Name="RequirePayload" BeforeTargets="BeforeBuild">
+    <Error Condition="!Exists('$(PayloadDir)\PerformanceMonitor.Darling.Service.exe') Or !Exists('$(PayloadDir)\viewer\PerformanceMonitor.Darling.Viewer.exe') Or !Exists('$(PayloadDir)\install-darling.ps1')"
+           Text="PayloadDir '$(PayloadDir)' is not a finished Darling tree: it needs PerformanceMonitor.Darling.Service.exe, viewer\PerformanceMonitor.Darling.Viewer.exe and install-darling.ps1. Publish the service and the viewer into it first (see .github/scripts/darling-msi.ps1)." />
+  </Target>
+
+  <!-- Windows PowerShell 5.1, the engine the check runs on. Always run: it is quick, and a stale include would carry an
+       older script's rule. PSModulePath is cleared because a build started from PowerShell 7 hands 7's module folders
+       down, and Windows PowerShell then fails to load its own built-in modules from them. -->
+  <Target Name="BuildDarlingFolderCheck" BeforeTargets="BeforeBuild" DependsOnTargets="RequirePayload">
+    <Exec EnvironmentVariables="PSModulePath=" Command="&quot;$(SystemRoot)\System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)New-DarlingFolderCheck.ps1&quot; -InstallScript &quot;$(PayloadDir)\install-darling.ps1&quot; -Driver &quot;$(MSBuildThisFileDirectory)darling-folder-check.ps1&quot; -OutDir &quot;$(DarlingFolderCheckDir)&quot;" />
+  </Target>
+</Project>

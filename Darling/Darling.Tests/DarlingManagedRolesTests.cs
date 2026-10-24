@@ -607,7 +607,7 @@ public sealed class DarlingManagedRolesTests
 
         /* The beacon caveat: a config_alert_settings write fires the SECURITY INVOKER bump trigger, which UPDATEs
            config_service — so mcp needs a COLUMN-level UPDATE on JUST the two beacon columns (never paused /
-           capture_plans / mcp_enabled / mcp_port, and never a table-wide config_service UPDATE). */
+           mcp_enabled / mcp_port, and never a table-wide config_service UPDATE). */
         Assert.Contains("GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("GRANT UPDATE ON config.config_service TO mcp", sql, StringComparison.Ordinal);
 

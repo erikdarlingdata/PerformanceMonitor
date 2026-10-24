@@ -85,7 +85,7 @@ public sealed class QueryStoreIntervalWideBelowFloorRoutesLiveTests
         await QueryStoreIntervalWideBelowFloorLiveTests.DropRawChunksOlderThanAsync(rig, s.AddDays(2), ct);
         await QueryStoreIntervalWideBelowFloorLiveTests.PurgeTableAsync(rig.Connection, s.AddMinutes(90), ct);
 
-        var resolution = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(rig.Postgres, null, s, rig.End, rig.End, ct);
+        var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(rig.Postgres, null, s, rig.End, rig.End, ct);
         Assert.True(resolution.Eligible);
         Assert.Equal(readStart, resolution.WideStart);
 

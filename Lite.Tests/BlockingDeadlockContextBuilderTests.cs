@@ -125,7 +125,11 @@ public class BlockingDeadlockContextBuilderTests
         Assert.NotNull(context);
         /* 10 chain items + 1 trailer + 10 appended incident items. */
         Assert.Equal(21, context!.Details.Count);
-        Assert.Equal("+2 more distinct blocking incident(s)", context.Details[10].Heading);
+        Assert.Equal("+2 more distinct blocking incidents", context.Details[10].Heading);
+
+        /* #6703: one chain past the cap reads in the singular. */
+        var oneOver = AlertContextBuilders.BuildBlockingContext(Server, rows.Take(11).ToList(), NoExclusions);
+        Assert.Contains(oneOver!.Details, d => d.Heading == "+1 more distinct blocking incident");
         Assert.Empty(context.Details[10].Fields);
         Assert.Equal(10, context.Incidents!.Count);
     }

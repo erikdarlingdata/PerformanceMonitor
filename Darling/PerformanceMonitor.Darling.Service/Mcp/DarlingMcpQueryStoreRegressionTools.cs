@@ -92,6 +92,13 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                "every retained row before it", whose cost tracked retention rather than the window asked for. */
             var baselineStart = start.AddDays(-DarlingQueryStoreRegressionReader.BaselineLookbackDays);
 
+            /* #6654: with no database chosen the read leaves out the databases the server DROPPED (named by an earlier database_states
+               snapshot, absent from the newest), as get_top_procedures_by_cpu does (#5633 item 4): their queries would otherwise fill the
+               page. A named database is read as asked; an unknown set (no snapshot) leaves out nothing. The names ride the payload. */
+            databaseFilter = await CurrentDatabaseScope.NarrowAsync(postgres, resolved.ServerId, databaseFilter,
+                asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, windowStartUtc: baselineStart, logger: logger, cancellationToken: cancellationToken);
+            var leftOut = DatabasesLeftOut.Distinct(databaseFilter.ExcludedNames);
+
             /*
                 Over-fetch by one. Comparing the row count to the cap reports truncation for a server that
                 happens to have exactly `limit` regressions and nothing more, which is a false positive in
@@ -108,11 +115,12 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             var notice = await DarlingMcpWindowNotice.ReadAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, "query_store_stats", resolved.ServerName, baselineStart, end, cancellationToken),
                 baselineStart, end, "query_store_stats",
-                "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.",
+                QueryStoreRegressionRules.BaselineWindowTail,
                 emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)
-                return await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, baselineStart, hours_back, databaseFilter, notice, cancellationToken);
+                return McpHelpers.WithDatabasesLeftOut(
+                    await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, baselineStart, hours_back, databaseFilter, notice, cancellationToken), leftOut)!;
 
             var truncated = rows.Count > limit;
             var shown = rows.Take(limit);
@@ -148,6 +156,9 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 returned_count = shown.Count(),
                 truncated,
                 regressions = shown.Select(r => RegressionRowJson(r, full_text)),
+                /* #6654: the dropped databases this read left out, in the words get_top_procedures_by_cpu uses. */
+                databases_left_out = DatabasesLeftOut.Named(leftOut),
+                databases_left_out_note = DatabasesLeftOut.Note(leftOut),
             }, McpHelpers.JsonOptions);
 
             /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */

@@ -157,6 +157,25 @@ public sealed class RingBufferTruncationSignalTests
         Assert.Contains("773 event(s) are hidden", some, StringComparison.Ordinal);
     }
 
+    /* #6650: the health-parser truncation answer says how many events the read counted when it counted some, and keeps
+       "No ... events were found" only when it counted none. */
+    [Fact]
+    public void HealthParserMessage_WithEventsRead_SaysHowManyAndWhyNoneQualified_NotThatNoneWereFound()
+    {
+        var truncation = RingBufferTruncationNote.Describe(TruncatedNote)!;
+
+        var counted = RingBufferTruncationNote.HealthParserMessage(
+            "memory_broker", "srv", 24, truncation, eventsRead: 412, noneQualifiedBecause: "none passed the significance gate");
+
+        Assert.StartsWith("412 memory_broker event(s) were read for srv in the last 24 hour(s), and none passed the significance gate, and this is NOT an all-clear", counted, StringComparison.Ordinal);
+        Assert.DoesNotContain("were found", counted, StringComparison.Ordinal);
+        Assert.Contains("773 event(s) are hidden", counted, StringComparison.Ordinal);
+
+        var none = RingBufferTruncationNote.HealthParserMessage("memory_broker", "srv", 24, truncation);
+        Assert.StartsWith("No memory_broker events were found for srv in the last 24 hour(s), and this is NOT an all-clear", none, StringComparison.Ordinal);
+        Assert.Contains("773 event(s) are hidden", none, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(45, "45 s")]
     [InlineData(1200, "20 min")]

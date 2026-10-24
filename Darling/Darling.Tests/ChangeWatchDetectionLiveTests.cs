@@ -385,7 +385,7 @@ public sealed class ChangeWatchDetectionLiveTests
                 ["database_name"] = "Replicated", ["replica_server_name"] = ServerName, ["is_local"] = true,
             }, ct);
 
-            Assert.Single((await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct)).Where(Snapshot));
+            Assert.Single(await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct), Snapshot);
         });
     }
 

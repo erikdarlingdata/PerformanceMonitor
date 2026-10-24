@@ -153,11 +153,14 @@ public static class ComparisonBanding
     /// key has no baseline in the same unit. Only same-unit pairs are mapped: <c>CPU_SQL_PERCENT</c> is the
     /// window's average of the same <c>sqlserver_cpu_utilization</c> samples the CPU baseline is built from
     /// and <c>CPU_SPIKE</c> is their maximum (a single sample, so per-sample sigma is exactly its scale);
-    /// <c>IO_READ_LATENCY_MS</c> is stall ÷ reads in ms, the I/O baseline's own ratio; <c>SESSION_STATS</c>
+    /// <c>IO_READ_LATENCY_MS</c> is stall ÷ reads in ms, the I/O baseline's own ratio; <c>IO_WRITE_LATENCY_MS</c>
+    /// is stall ÷ writes in ms, the write-latency baseline's own ratio (#6696: it was unmapped while no such
+    /// bucket existed, and the anomaly gate that grades it now reads the write bucket, so leaving it unmapped
+    /// would band a write-latency move <c>absolute</c> in the window the detector calls it sigmas);
+    /// <c>SESSION_STATS</c>
     /// is the latest total-connections reading, the session baseline's own sample. Wait fractions are
     /// deliberately unmapped (the wait baselines are all-types totals, not per type), as are blocking and
-    /// deadlock rates (their baselines are events per day with no robust statistics) and
-    /// <c>IO_WRITE_LATENCY_MS</c> (no write-latency baseline exists).
+    /// deadlock rates (their baselines are events per day with no robust statistics).
     ///
     /// <para><b>The PostgreSQL-target keys (#3691 W1).</b> v1 shipped with only the SQL Server keys mapped, so
     /// <c>compare_analysis</c> on a PostgreSQL target banded a 10 → 60 tps move "stable" (<c>band_source:
@@ -206,6 +209,7 @@ public static class ComparisonBanding
         "CPU_SQL_PERCENT" => MetricNames.Cpu,
         "CPU_SPIKE" => MetricNames.Cpu,
         "IO_READ_LATENCY_MS" => MetricNames.IoLatency,
+        "IO_WRITE_LATENCY_MS" => MetricNames.IoWriteLatency,
         "SESSION_STATS" => MetricNames.SessionCount,
         PgTargetFactKeys.Tps => MetricNames.PgTps,
         PgTargetFactKeys.ConnectionSaturation => MetricNames.PgSessionCount,
