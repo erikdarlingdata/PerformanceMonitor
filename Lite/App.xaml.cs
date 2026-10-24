@@ -604,6 +604,9 @@ public partial class App : Application
         /* F17: tabs and column headers made of panels get an accessible name equal to their visible text. */
         PerformanceMonitor.Ui.AccessibleNames.Register();
 
+        /* #6678: chart text is drawn at the window's DPI scale, not at 100% of device pixels. */
+        PerformanceMonitor.Ui.ChartDisplayScale.Register();
+
         base.OnStartup(e);
 
         /* #5320 N1: the statement filter's judge takes 250-900 ms to build, and the first connection or AG alert

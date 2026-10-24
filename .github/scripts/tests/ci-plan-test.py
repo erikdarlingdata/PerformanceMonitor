@@ -57,22 +57,11 @@ jobs:
               - 'docs/**/*.{md,png}'
             all:
               - '**'
-  darling-tree-guards:
-    steps:
-      - uses: dorny/paths-filter
-        with:
-          filters: |
-            workflow:
-              - '.github/workflows/build.yml'
-            lite_tree:
-              - 'Lite/**/!(*.md)'
-  guard-build:
-    steps:
-      - uses: dorny/paths-filter
-        with:
-          filters: |
-            guard:
-              - 'Darling/**/!(*.md)'
+"""
+TREE_FILTER = """\nworkflow:
+  - '.github/workflows/build.yml'
+lite_tree:
+  - 'Lite/**/!(*.md)'
 """
 DARLING_FILTER = """\
 darling:
@@ -95,11 +84,11 @@ lite_linked_shard:
 """
 tmp = tempfile.mkdtemp()
 paths = {}
-for name, text in (("build.yml", WORKFLOW), ("darling.yml", DARLING_FILTER), ("lite.yml", LITE_FILTER)):
+for name, text in (("build.yml", WORKFLOW), ("darling.yml", DARLING_FILTER), ("lite.yml", LITE_FILTER), ("tree.yml", TREE_FILTER)):
     paths[name] = os.path.join(tmp, name)
     with open(paths[name], "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
-rules = cs.Rules(paths["build.yml"], paths["darling.yml"], paths["lite.yml"])
+rules = cs.Rules(paths["build.yml"], paths["darling.yml"], paths["lite.yml"], paths["tree.yml"])
 
 
 def classes(names, reads=None, guard=()):
