@@ -126,7 +126,7 @@ public sealed class ChangeWatchHintLiveTests
             await HintAsync(h.Connection, h.Now.AddMinutes(-45), "Sales", 1, 42, "OPTION (MAXDOP 4)", ct);      /* no marker: the pass died part way */
             await CaptureAsync(h.Connection, h.Now.AddMinutes(-40), "Sales", ct, (1, 42, "OPTION (MAXDOP 1)"));
 
-            Assert.Empty((await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct)).Where(IsHint));
+            Assert.DoesNotContain(await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct), IsHint);
         });
     }
 
@@ -140,7 +140,7 @@ public sealed class ChangeWatchHintLiveTests
             await CaptureAsync(h.Connection, first, "Sales", ct);
             await CaptureAsync(h.Connection, h.Now.AddMinutes(-45), "Sales", ct, (1, 42, "OPTION (MAXDOP 1)"));
 
-            Assert.Empty((await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct)).Where(IsHint));
+            Assert.DoesNotContain(await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct), IsHint);
         });
     }
 
