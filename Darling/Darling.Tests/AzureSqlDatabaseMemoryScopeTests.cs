@@ -115,8 +115,8 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
     [Fact]
     public void RightSizedSentence_OnAzureSqlDatabase_CitesTheBufferPoolShare_OfTheDatabasesMemoryLimit()
     {
-        var onAzure = ServerHardwareScope.RightSizedExplanation(40m, 62m, 62m, 71.0, azureSqlDatabase: true);
-        var onBox = ServerHardwareScope.RightSizedExplanation(40m, 62m, 62m, 71.0, azureSqlDatabase: false);
+        var onAzure = ServerHardwareScope.RightSizedExplanation(40m, 62m, 62, 0m, 71.0, azureSqlDatabase: true);
+        var onBox = ServerHardwareScope.RightSizedExplanation(40m, 62m, 62, 0m, 71.0, azureSqlDatabase: false);
 
         Assert.Equal(
             "CPU is moderately loaded (avg 40.0%, p95 62.0%) and memory is well-utilized (buffer pool uses 71% of the database's memory limit). No action needed.",
@@ -128,21 +128,62 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
     }
 
     /// <summary>#6646: RIGHT_SIZED is also the verdict for an idle average with one sample at 40% or more. The sentence names the test that
-    /// decided, and says "well-utilized" only for a buffer pool holding at least half of its basis.</summary>
+    /// decided, says "well-utilized" only for a buffer pool holding at least half of its basis, and names the target the way the
+    /// edition does ("database" on an Azure SQL Database, "server" elsewhere).</summary>
     [Fact]
     public void RightSizedSentence_ForAnIdleAverageWithOneBusySample_NamesThePeak_NotAModerateLoadOrWellUtilizedMemory()
     {
-        var peak = ServerHardwareScope.RightSizedExplanation(0.1m, 0m, 40m, 8.0, azureSqlDatabase: false);
-        Assert.DoesNotContain("moderately loaded", peak, StringComparison.Ordinal);
-        Assert.DoesNotContain("well-utilized", peak, StringComparison.Ordinal);
         Assert.Equal(
-            "CPU averaged 0.1% (p95 0.0%), but one sample reached 40%, so this server is not rated over-provisioned and buffer pool uses 8% of physical RAM. No action needed.",
-            peak);
+            "CPU averaged 0.1% (p95 0.0%), but one sample reached 40%, so this server is not rated over-provisioned and the buffer pool uses 8% of physical RAM. No action needed.",
+            ServerHardwareScope.RightSizedExplanation(0.1m, 0m, 40, 10m, 8.0, azureSqlDatabase: false));
+        Assert.Equal(
+            "CPU averaged 0.1% (p95 0.0%), but one sample reached 40%, so this database is not rated over-provisioned and the buffer pool uses 8% of the database's memory limit. No action needed.",
+            ServerHardwareScope.RightSizedExplanation(0.1m, 0m, 40, 10m, 8.0, azureSqlDatabase: true));
+    }
 
-        var grants = ServerHardwareScope.RightSizedExplanation(5m, 8m, 12m, 60.0, azureSqlDatabase: true);
-        Assert.DoesNotContain("moderately loaded", grants, StringComparison.Ordinal);
-        Assert.Contains("memory grants use 50% or more of their target", grants, StringComparison.Ordinal);
-        Assert.Contains("memory is well-utilized (buffer pool uses 60% of the database's memory limit)", grants, StringComparison.Ordinal);
+    /// <summary>#6646: with an idle average and no busy sample, only the measured grant utilization holds the verdict at RIGHT_SIZED, so
+    /// the sentence prints that measurement next to the bar, not the bar alone.</summary>
+    [Fact]
+    public void RightSizedSentence_ForAnIdleServerHeldByGrantUse_PrintsTheMeasuredGrantUtilization()
+    {
+        Assert.Equal(
+            "CPU is lightly loaded (avg 5.0%, p95 8.0%), but its memory grants peaked at 62% of their target (threshold: 50%), so this database is not rated over-provisioned and memory is well-utilized (buffer pool uses 60% of the database's memory limit). No action needed.",
+            ServerHardwareScope.RightSizedExplanation(5m, 8m, 12, 62m, 60.0, azureSqlDatabase: true));
+        Assert.Equal(
+            "CPU is lightly loaded (avg 5.0%, p95 8.0%), but its memory grants peaked at 97% of their target (threshold: 50%), so this server is not rated over-provisioned and the buffer pool uses 35% of physical RAM. No action needed.",
+            ServerHardwareScope.RightSizedExplanation(5m, 8m, 12, 97m, 35.0, azureSqlDatabase: false));
+    }
+
+    /// <summary>#6646: the sentence names the arm that ProvisioningVerdict.Evaluate used for the same inputs. Moving a cut point in
+    /// Evaluate without the sentence (or the reverse) leaves a RIGHT_SIZED server explained by a cause it does not have.</summary>
+    [Fact]
+    public void RightSizedSentence_NamesTheArmThatProvisioningVerdictEvaluateUsed()
+    {
+        const string Moderate = "moderately loaded";
+        const string Peak = "one sample reached";
+        const string Grants = "memory grants peaked at";
+
+        (decimal Avg, int Max, decimal P95, decimal Grant, string Arm)[] cases =
+        [
+            (40m, 62, 62m, 0m, Moderate),
+            (15m, 5, 8m, 0m, Moderate),
+            (14.9m, 40, 20m, 0m, Peak),
+            (0.1m, 84, 30m, 0m, Peak),
+            (5m, 12, 8m, 50m, Grants),
+            (14.9m, 39, 8m, 99m, Grants),
+        ];
+
+        foreach (var (avg, max, p95, grant, arm) in cases)
+        {
+            var verdict = ProvisioningVerdict.Evaluate(avg, max, p95, 0, 0, 0, grant, 512, 100);
+            Assert.Equal(ProvisioningVerdict.RightSized, verdict);
+
+            var sentence = ServerHardwareScope.RightSizedExplanation(avg, p95, max, grant, 30.0, azureSqlDatabase: false);
+            foreach (var other in new[] { Moderate, Peak, Grants })
+            {
+                Assert.Equal(other == arm, sentence.Contains(other, StringComparison.Ordinal));
+            }
+        }
     }
 
     [Fact]
