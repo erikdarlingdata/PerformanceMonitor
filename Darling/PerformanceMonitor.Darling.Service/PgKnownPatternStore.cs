@@ -34,6 +34,27 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 public sealed class PgKnownPatternStore
 {
+    /// <summary>The store function's own refusal (#6398): the sentence it raised plus the SqlState it raised it with, so a caller names the
+    /// cause (<c>DL404</c>, a server id that names no monitored server; <c>DL409</c>, the entry cap) from the code, never from the prose.
+    /// Still an <see cref="ArgumentException"/>, so every caller that already catches that keeps working. <see cref="Exception.Message"/>
+    /// is the store's sentence alone.</summary>
+    internal sealed class StoreRefusedException(string sentence, string sqlState) : ArgumentException(sentence)
+    {
+        public string SqlState { get; } = sqlState;
+    }
+
+    /// <summary>The name of the monitored server definition with this id, or null when there is none. Reads
+    /// <c>config.config_monitored_servers</c>, the table the store functions check (DL404) and both editors' server pickers list (the Viewer's
+    /// grid, the web page's <c>/api/admin/servers</c>), so a server an editor shows is a server this accepts. Not the <c>servers</c> registry:
+    /// that one has no row for a server added but not yet connected, and keeps its row for one whose definition was removed.</summary>
+    internal static async Task<string?> MonitoredServerNameAsync(NpgsqlDataSource postgres, int serverId)
+    {
+        await using var command = postgres.CreateCommand("SELECT name FROM config.config_monitored_servers WHERE server_id = $1");
+        command.CommandTimeout = CommandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        return await command.ExecuteScalarAsync() as string;
+    }
+
     private const int CommandTimeoutSeconds = 30;
 
     private const string SelectColumns =
@@ -113,7 +134,7 @@ public sealed class PgKnownPatternStore
     /// The one place a known-pattern write's raw fields become a checked <see cref="KnownPatternInput"/> (#6398): the web routes (after their JSON
     /// parse) and the MCP write tools both call it, so they refuse the same things in the same words. Returns the input, or the reason it is
     /// refused: a time of day or expiry that does not parse, <see cref="KnownPatternInput.Validate"/>'s own text, then a server id that
-    /// <paramref name="serverLookup"/> says is not registered.
+    /// <paramref name="serverLookup"/> says is not registered. The web routes and the MCP tools pass <see cref="MonitoredServerNameAsync"/>, the table the store functions check.
     /// </summary>
     internal static async Task<(KnownPatternInput? Input, string? Refusal)> BuildInputAsync(
         int? serverId, string? metricName, string? timeOfDayText, string? timeZone, int? windowMinutes, string? note, string? expiresText,
@@ -175,7 +196,7 @@ public sealed class PgKnownPatternStore
         catch (PostgresException ex) when (ex.SqlState is "DL404" or "DL409")
         {
             /* DL409: the table already holds KnownPatternMatcher.MaxEntries entries (#6398). */
-            throw new ArgumentException(ex.MessageText);
+            throw new StoreRefusedException(ex.MessageText, ex.SqlState);
         }
     }
 
@@ -197,7 +218,7 @@ public sealed class PgKnownPatternStore
         }
         catch (PostgresException ex) when (ex.SqlState == "DL404")
         {
-            throw new ArgumentException(ex.MessageText);
+            throw new StoreRefusedException(ex.MessageText, ex.SqlState);
         }
     }
 

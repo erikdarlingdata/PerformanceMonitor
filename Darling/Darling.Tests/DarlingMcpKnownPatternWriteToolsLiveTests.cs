@@ -32,6 +32,12 @@ public sealed class DarlingMcpKnownPatternWriteToolsLiveTests
 {
     private const int ServerA = 7611;
 
+    /// <summary>Has a definition (<c>config.config_monitored_servers</c>, what the editors' pickers list) and no <c>servers</c> row: added, not yet connected.</summary>
+    private const int ServerDefinedOnly = 7612;
+
+    /// <summary>Has a <c>servers</c> row and no definition: removed, its history kept.</summary>
+    private const int ServerRegistryOnly = 7613;
+
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     private static JsonNode Parse(string json) => JsonNode.Parse(json)!;
@@ -54,7 +60,7 @@ public sealed class DarlingMcpKnownPatternWriteToolsLiveTests
 
             var (input, refusal) = await PgKnownPatternStore.BuildInputAsync(
                 ServerA, "High CPU", "02:00", "America/New_York", 30, "Backup job runs here", "2099-12-31T00:00:00Z",
-                i => DarlingMcpAlertTools.MonitoredServerDisplayNameAsync(mcp, i));
+                i => PgKnownPatternStore.MonitoredServerNameAsync(mcp, i));
             Assert.Null(refusal);
             var webId = await new PgKnownPatternStore(mcp).InsertAsync(input!, "web", ct);
             Assert.Equal(await RowAsync(owner, webId, ct), await RowAsync(owner, id, ct));
@@ -69,7 +75,7 @@ public sealed class DarlingMcpKnownPatternWriteToolsLiveTests
             Assert.Equal("update_known_pattern", (string)updated["undo"]!["tool"]!);
 
             var webInput = (await PgKnownPatternStore.BuildInputAsync(
-                null, "Memory", null, null, null, "Now a quiet pattern", null, i => DarlingMcpAlertTools.MonitoredServerDisplayNameAsync(mcp, i))).Input!;
+                null, "Memory", null, null, null, "Now a quiet pattern", null, i => PgKnownPatternStore.MonitoredServerNameAsync(mcp, i))).Input!;
             Assert.True(await new PgKnownPatternStore(mcp).UpdateAsync(webId, webInput, "web", ct));
             Assert.Equal(await RowAsync(owner, webId, ct), await RowAsync(owner, id, ct));
 
@@ -125,7 +131,7 @@ public sealed class DarlingMcpKnownPatternWriteToolsLiveTests
             var seedRow = await RowAsync(owner, seedId, ct);
 
             var (_, webRefusal) = await PgKnownPatternStore.BuildInputAsync(
-                serverId, null, timeOfDay, zone, window, note, expires, i => DarlingMcpAlertTools.MonitoredServerDisplayNameAsync(mcp, i));
+                serverId, null, timeOfDay, zone, window, note, expires, i => PgKnownPatternStore.MonitoredServerNameAsync(mcp, i));
             Assert.NotNull(webRefusal);
 
             var create = Parse(await DarlingMcpKnownPatternWriteTools.CreateKnownPattern(mcp, note, serverId, null, timeOfDay, zone, window, expires, cancellationToken: ct));
@@ -164,6 +170,8 @@ public sealed class DarlingMcpKnownPatternWriteToolsLiveTests
             var message = (string)refused["message"]!;
             /* The store's whole sentence plus the tool's tail: no ".NET (Parameter 'input')" wedged between them. */
             Assert.Equal("Known patterns are capped at 500 entries and 500 exist. Delete entries you no longer need to make room. Nothing was changed.", message);
+            /* The hint comes from the store's DL409, not from the sentence's first words. */
+            Assert.Equal("known_patterns", (string)refused["hints"]!["parameter"]!);
             Assert.Equal(cap.ToString(System.Globalization.CultureInfo.InvariantCulture), await ScalarAsync(owner, "SELECT count(*) FROM config.config_known_patterns", ct));
 
             /* Edit and delete still work at the cap, and the delete makes room for one create. */
@@ -171,6 +179,62 @@ public sealed class DarlingMcpKnownPatternWriteToolsLiveTests
             Assert.Equal("updated", (string)Parse(await DarlingMcpKnownPatternWriteTools.UpdateKnownPattern(mcp, id, "edited at the cap", cancellationToken: ct))["status"]!);
             Assert.Equal("deleted", (string)Parse(await DarlingMcpKnownPatternWriteTools.DeleteKnownPattern(mcp, id, cancellationToken: ct))["status"]!);
             Assert.Equal("created", (string)Parse(await DarlingMcpKnownPatternWriteTools.CreateKnownPattern(mcp, "room again", cancellationToken: ct))["status"]!);
+        });
+    }
+
+    [Fact]
+    public async Task ADefinedServerThatNeverConnected_CanBeScopedTo_AndAServerWithOnlyARegistryRowCannot_WithTheServerIdHint()
+    {
+        await RunAsync(async (mcp, owner, ct) =>
+        {
+            /* The editors' pickers list config_monitored_servers; a server added a moment ago has no servers row yet (it is written on the first connect). */
+            var created = Parse(await DarlingMcpKnownPatternWriteTools.CreateKnownPattern(mcp, "new server", ServerDefinedOnly, cancellationToken: ct));
+            Assert.Equal("created", (string)created["status"]!);
+            var id = (long)created["id"]!;
+            Assert.Equal(ServerDefinedOnly, (int)created["after"]!["server_id"]!);
+            Assert.Equal("updated", (string)Parse(await DarlingMcpKnownPatternWriteTools.UpdateKnownPattern(mcp, id, "new server, edited", ServerDefinedOnly, cancellationToken: ct))["status"]!);
+
+            /* A removed server keeps its servers row but no editor lists it: refused in the store's registry's words, naming server_id, writing nothing. */
+            var rows = await ScalarAsync(owner, "SELECT count(*) FROM config.config_known_patterns", ct);
+            foreach (var answer in new[]
+            {
+                Parse(await DarlingMcpKnownPatternWriteTools.CreateKnownPattern(mcp, "removed server", ServerRegistryOnly, cancellationToken: ct)),
+                Parse(await DarlingMcpKnownPatternWriteTools.UpdateKnownPattern(mcp, id, "removed server", ServerRegistryOnly, cancellationToken: ct)),
+            })
+            {
+                Assert.Equal("invalid", (string)answer["status"]!);
+                Assert.Equal("server_id", (string)answer["hints"]!["parameter"]!);
+                Assert.StartsWith($"server_id {ServerRegistryOnly} is not a registered server.", (string)answer["message"]!, StringComparison.Ordinal);
+            }
+
+            Assert.Equal(rows, await ScalarAsync(owner, "SELECT count(*) FROM config.config_known_patterns", ct));
+            Assert.Equal("new server, edited", (await RowAsync(owner, id, ct)).Split('|')[5]);
+        });
+    }
+
+    [Fact]
+    public async Task AStoreRefusal_IsHintedFromItsSqlState_NotFromItsWording()
+    {
+        await RunAsync(async (mcp, owner, ct) =>
+        {
+            /* The store's own DL404 (a server removed between the tool's check and the write), reached through the real function. */
+            var store = new PgKnownPatternStore(mcp);
+            var seeded = await store.InsertAsync(new PerformanceMonitor.Common.KnownPatterns.KnownPatternInput(null, null, null, null, null, "keep", null), "seed", ct);
+            var ghost = new PerformanceMonitor.Common.KnownPatterns.KnownPatternInput(ServerRegistryOnly, null, null, null, null, "ghost", null);
+
+            foreach (var refusal in new[]
+            {
+                (await DarlingMcpKnownPatternWriteTools.Guarded(() => store.InsertAsync(ghost, "x", ct))).Refusal,
+                (await DarlingMcpKnownPatternWriteTools.Guarded(() => store.UpdateAsync(seeded, ghost, "x", ct))).Refusal,
+            })
+            {
+                var answer = Parse(DarlingMcpKnownPatternWriteTools.Refused(refusal!.Value.Sentence, refusal.Value.Parameter));
+                Assert.Equal("invalid", (string)answer["status"]!);
+                Assert.Equal("server_id", (string)answer["hints"]!["parameter"]!);
+                Assert.Equal("No monitored server with that id. Nothing was changed.", (string)answer["message"]!);
+            }
+
+            Assert.Equal("keep", (await RowAsync(owner, seeded, ct)).Split('|')[5]);
         });
     }
 
@@ -283,7 +347,9 @@ public sealed class DarlingMcpKnownPatternWriteToolsLiveTests
 
             await using (var seed = new NpgsqlCommand(
                 $"INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) VALUES ({ServerA}, 'srv{ServerA}', 'srv{ServerA}', TRUE, 16, now(), now()); " +
-                $"INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ({ServerA}, 'kp-a', 'kp-a', TRUE) ON CONFLICT DO NOTHING", ownerConnection))
+                $"INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ({ServerA}, 'kp-a', 'kp-a', TRUE) ON CONFLICT DO NOTHING; " +
+                $"INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ({ServerDefinedOnly}, 'kp-b', 'kp-b', TRUE) ON CONFLICT DO NOTHING; " +
+                $"INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) VALUES ({ServerRegistryOnly}, 'srv{ServerRegistryOnly}', 'srv{ServerRegistryOnly}', FALSE, 16, now(), now())", ownerConnection))
             {
                 await seed.ExecuteNonQueryAsync(ct);
             }

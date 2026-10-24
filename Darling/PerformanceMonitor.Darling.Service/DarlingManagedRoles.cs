@@ -2464,8 +2464,7 @@ FROM (
     /// <summary>
     /// The <c>SECURITY DEFINER</c> functions (#6334) that are the writes of the known-pattern entries
     /// (<c>config.config_known_patterns</c>): <c>insert_known_pattern</c>, <c>update_known_pattern</c> and <c>delete_known_pattern</c>. The
-    /// web editor (viewer) and the Viewer (admin) call them; the table itself carries NO direct write grant for any reader role, and the
-    /// MCP role (mcp) gets neither the functions nor a write, because entries are operator-written context and no MCP tool writes them.
+    /// web editor (viewer), the Viewer (admin) and the MCP write tools (mcp, #6398) call them; the table itself carries NO direct write grant for any reader role.
     /// Returns the <c>CREATE OR REPLACE FUNCTION</c> statements plus the <c>REVOKE ALL ... FROM PUBLIC</c> of each (a new function is
     /// EXECUTE-able by PUBLIC); the caller adds the <c>GRANT EXECUTE</c>. Because the body runs as the owner, the table's
     /// <c>config_version</c> trigger bumps the beacon as the owner, so the caller needs no grant on <c>config_service</c>. Pinned
@@ -2496,8 +2495,8 @@ BEGIN
       RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
    END IF;
    SELECT count(*) INTO v_count FROM {config}.config_known_patterns;
-   IF v_count >= 500 THEN
-      RAISE EXCEPTION 'Known patterns are capped at 500 entries and % exist. Delete entries you no longer need to make room.', v_count USING ERRCODE = 'DL409';
+   IF v_count >= {PerformanceMonitor.Common.KnownPatterns.KnownPatternMatcher.MaxEntries} THEN
+      RAISE EXCEPTION 'Known patterns are capped at {PerformanceMonitor.Common.KnownPatterns.KnownPatternMatcher.MaxEntries} entries and % exist. Delete entries you no longer need to make room.', v_count USING ERRCODE = 'DL409';
    END IF;
    INSERT INTO {config}.config_known_patterns
       (server_id, metric_name, time_of_day, time_zone, window_minutes, note, created_by, expires_at_utc)

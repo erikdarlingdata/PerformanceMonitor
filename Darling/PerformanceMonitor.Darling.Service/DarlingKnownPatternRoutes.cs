@@ -8,7 +8,6 @@
 
 using System;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -29,7 +28,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// is refused by the host's method gate (<see cref="DarlingWebSeat.IsRequestAllowed"/>) before a route runs, a bad body is a 400 carrying the
 /// reason, and an unknown id is a 404. Writes go through <see cref="PgKnownPatternStore"/> only, on the viewer-role pool, which holds EXECUTE on the
 /// three store functions and nothing else on the table. The entry's <c>created_by</c> is the seat's <see cref="DarlingWebSeat.EditorPrincipal"/>.
-/// A server id must name a registered server, as a mute rule's must. The MCP tools create_known_pattern / update_known_pattern / delete_known_pattern (#6398) call the same store and the same input check (<see cref="PgKnownPatternStore.BuildInputAsync"/>).
+/// A server id must name a monitored server definition (<c>config.config_monitored_servers</c>), the table the store functions check, so a server the editors' pickers list is never refused. The MCP tools create_known_pattern / update_known_pattern / delete_known_pattern (#6398) call the same store and the same input check (<see cref="PgKnownPatternStore.BuildInputAsync"/>).
 ///
 /// <para>Body (add and replace, one JSON object): <c>note</c> (required), <c>server_id</c>, <c>metric_name</c>, <c>time_of_day</c> ("HH:mm"),
 /// <c>time_zone</c> (IANA id), <c>window_minutes</c>, <c>expires_at_utc</c> (ISO 8601). A field left out or null means any / UTC / the default window / never.
@@ -47,7 +46,7 @@ internal static class DarlingKnownPatternRoutes
     {
         PgKnownPatternStore.UseSharedLogger(logger);
         var store = new PgKnownPatternStore(postgres, logger);
-        Func<int, Task<string?>> serverLookup = id => Mcp.DarlingMcpAlertTools.MonitoredServerDisplayNameAsync(postgres, id);
+        Func<int, Task<string?>> serverLookup = id => PgKnownPatternStore.MonitoredServerNameAsync(postgres, id);
 
         app.MapPost("/api/known-patterns", async (HttpContext context) =>
         {
