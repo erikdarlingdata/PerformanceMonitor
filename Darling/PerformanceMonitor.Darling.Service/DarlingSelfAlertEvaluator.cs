@@ -5343,7 +5343,7 @@ internal sealed class DarlingSelfAlertEvaluator
     private static (string ShortMessage, string Detail) RenderExternalAlerts(ExternalAlertsReport report)
     {
         var shortMessage = string.Create(CultureInfo.InvariantCulture,
-            $"{report.Total} external alert(s) were not delivered in the last hour: {report.Of("expired")} expired, {report.Of("interrupted")} interrupted, {report.Of("failed")} failed to send");
+            $"{report.Total} external {(report.Total == 1 ? "alert was" : "alerts were")} not delivered in the last hour: {report.Of("expired")} expired, {report.Of("interrupted")} interrupted, {report.Of("failed")} failed to send");
 
         var sb = new StringBuilder();
         sb.Append(shortMessage).Append('.');
@@ -5359,7 +5359,9 @@ internal sealed class DarlingSelfAlertEvaluator
 
         if (perSource.Count > MaxListedExternalSources)
         {
-            sb.Append("\n+ ").Append((perSource.Count - MaxListedExternalSources).ToString(CultureInfo.InvariantCulture)).Append(" more source(s).");
+            /* #6700: "1 more source." / "N more sources." */
+            var unlisted = perSource.Count - MaxListedExternalSources;
+            sb.Append("\n+ ").Append(unlisted.ToString(CultureInfo.InvariantCulture)).Append(unlisted == 1 ? " more source." : " more sources.");
         }
 
         sb.Append("\nExpired: still queued when its deadline passed. Interrupted: a stopped service had claimed it and it is not sent again. Failed: every channel refused it and the retries ran out.");
