@@ -267,6 +267,7 @@ public partial class ViewerServerTab
             /* #4231 stage 3b: an hourly-routed page holds no object_type/sql_handle/plan_handle — the raw-floor
                banner and this tier disclosure are independent facts, same reasoning as the Queries sub-tab. */
             UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), startUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
+            await UpdateProcStatsLeftOutBannerAsync(read, startUtc, endUtc);
             await LoadProcStatsSlicerAsync(startUtc, endUtc, slicerTask);
         }
         catch
@@ -278,6 +279,25 @@ public partial class ViewerServerTab
         }
 
         await RefreshProcStatsComparisonAsync(startUtc, endUtc, timer);
+    }
+
+    /// <summary>
+    /// #6651 (#5633 item 4): says what the Top Procedures read left out. The grid's ranking skips the databases the server no longer
+    /// lists, so the page names them (the words the web page and get_top_procedures_by_cpu use), and an EMPTY page says only that
+    /// no procedure ran in a database the server still has, from the collector's own run history, never "nothing was recorded".
+    /// Collapsed when nothing was left out.
+    /// </summary>
+    private async Task UpdateProcStatsLeftOutBannerAsync(ViewerRoutedRead<ViewerProcedureStatsRow> read, DateTime startUtc, DateTime endUtc)
+    {
+        CollectorRunFacts? facts = null;
+        if (read.Rows.Count == 0 && read.LeftOutDatabases is { Count: > 0 })
+        {
+            facts = await _dataService.GetProcedureStatsRunFactsAsync(_server.ServerId, startUtc, endUtc);
+        }
+
+        var text = DatabasesLeftOut.ProcedureBanner(read.LeftOutDatabases, read.Rows.Count, facts, (int)Math.Max(1, Math.Round((endUtc - startUtc).TotalHours)));
+        ProcStatsLeftOutBanner.Text = text ?? "";
+        ProcStatsLeftOutBanner.Visibility = text is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private async Task LoadQueryStoreAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
@@ -613,6 +633,7 @@ public partial class ViewerServerTab
             var rows = read.Rows;
             _procStatsFilterMgr!.UpdateData(rows);
             UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), e.StartUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
+            await UpdateProcStatsLeftOutBannerAsync(read, e.StartUtc, e.EndUtc);
             await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)

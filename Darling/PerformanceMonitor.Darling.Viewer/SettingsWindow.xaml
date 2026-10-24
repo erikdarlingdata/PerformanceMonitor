@@ -2,6 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:ui="clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui"
+        xmlns:local="clr-namespace:PerformanceMonitor.Darling.Viewer"
         Title="Settings"
         Height="750" Width="750"
         MinHeight="500" MinWidth="600"
@@ -978,7 +979,7 @@
                                         <ComboBoxItem Content="Use the service's darling.json value (store column cleared)" Tag=""/>
                                     </ComboBox>
                                 </WrapPanel>
-                                <TextBlock Text="Digest and Page take effect in the running service within one collection sweep, no restart, and win over darling.json's analysis.uncorroboratedRoute; the third choice clears the store column so the file governs again. get_alert_settings reports which one is deciding under analysis.uncorroborated_route_source."
+                                <TextBlock Text="{x:Static local:ViewerLabels.UncorroboratedRouteNote}"
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,2,0,0" TextWrapping="Wrap"/>
                                 <TextBlock Text="Requires SMTP or a webhook configured below for delivery; findings are recorded in the Alerts tab either way."
