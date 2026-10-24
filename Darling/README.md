@@ -596,6 +596,22 @@ If a tab or column is empty and you expect data, check **Collection Health**: a 
 
 All sections except `postgres` and `servers` are optional — omit a section (or any key) to get the defaults listed here. Defaults deliberately mirror a fresh Lite install.
 
+### Where each setting lives: first-run seed or file only
+
+`darling.json` does two jobs. Some keys are read from the file at every start. Others are only a **first-run seed**: the first time the service starts against a store that has no settings yet, it copies them into the store. After that the store holds the only copy that counts, and the service replaces the file's value with the store's on every load. If you change a seeded key in the file and restart, nothing changes. Each seeded section is copied once, only while its own store table is empty.
+
+| Keys | Where they live | Where to change them after the first start |
+|---|---|---|
+| `alerts` (every key), `analysis` (`enabled`, `intervalMinutes`, `notificationsEnabled`, `notifySeverity`) | First-run seed | The Viewer's Settings window, or the MCP tool `update_alert_settings` |
+| `smtp`, and in `webhooks` the Teams and Slack keys (`teamsUrl`, `teamsProxy`, `slackUrl`, `slackProxy`) | First-run seed | The Viewer's Settings > Notifications, or the MCP tool `update_notification_channels` |
+| `webhooks.genericUrl`, `genericHeaders`, `genericBodyTemplate`, `genericProxy`, the `pagerDuty*` keys, the `slackSendResolutions`, `teamsSendResolutions` and `genericSendResolutions` keys, and `smtp.emailSendResolutions` | Store only. The seed does not copy them, so a value in the file has no effect | The Viewer's Settings > Notifications, or `update_notification_channels` |
+| `capturePlans`, `queryStoreBackfillEnabled`, `queryStoreTextBudgetMb` (default `64`), `queryStoreFetchTopN` (default `100`), `maxConcurrentSweeps` (default `4`) | First-run seed | The Viewer's Settings window, or the MCP tool `update_service_flags` |
+| `planContentRetentionDays` (default `21`), `composeStatementTimeoutSeconds` (default `60`), `planXmlCompression` (default `"gzip"`) | First-run seed | Neither the Viewer nor MCP edits them. Change the column in `config.config_service` (`plan_content_retention_days`, `compose_statement_timeout_seconds`, `plan_xml_compression`). The statement timeout reaches the `viewer` and `mcp` roles on the next service start |
+| `mcp.enabled`, `mcp.port`, `web.enabled`, `web.port` | First-run seed | The Viewer's Settings window, live and with no restart. On a box with no Viewer, `--enable-mcp` and `--enable-web` |
+| `servers` | First-run seed, copied once while the server registry is empty. A server added to the file later is ignored | The Viewer, the web dashboard's Admin page, or the MCP tools `add_servers` and `edit_server`. The one exception is the `remediation*` and `hypotheticalIndex*` login keys, which the service syncs from the file at every start |
+| `analysis.uncorroboratedRoute` | Both. The store's value wins when it is set; otherwise the file's value is used | The store value, from the same places as the rest of `analysis`. Clear it to hand the choice back to the file |
+| `postgres`, `collectSchemaChangeEvents`, `rawChunkIntervalReconcileEnabled` (default `true`), `procedureStatsPlanCycleInterval`, `queryStatsDeferredPlanFetch`, `procedureStatsDeferredPlanFetch`, `allowedAwsRoles`, `peers`, `heartbeat`, `reads`, `forcePlanBot`, `analyzer`, and every other key in `mcp` and `web` (including `mcp.network` and `web.network`) | File only | Edit `darling.json` and restart the service |
+
 ### postgres
 
 Two mutually exclusive modes — setting `managed: true` together with `connectionString` (or with either login setting below) is a validation error:
@@ -629,6 +645,8 @@ Two mutually exclusive modes — setting `managed: true` together with `connecti
 | `encryptMode` | `"Mandatory"` | `Mandatory` / `Strict` / `Optional`; unknown values fail closed to `Mandatory` |
 | `multiSubnetFailover` | `false` | |
 | `excludedDatabases` | `[]` | Databases excluded from collection |
+| `monthlyCostUsd` | `0` | The server's monthly cost in USD. Every cost figure on the FinOps tab is proportional math on this number; `0` hides the cost columns and cards |
+| `alertDeliveryModeOverride` | *(none)* | `"Summary"` or `"PerEvent"` for this server's deadlock and blocking alerts. With none, the server follows `alerts.deliveryMode` |
 | `awsRoleArn` | *(none)* | PostgreSQL targets on Amazon RDS or Aurora only: the IAM role ARN (such as `arn:aws:iam::123456789012:role/darling-monitor`) Darling assumes for this server's AWS calls (the host check, CPU and host memory from Performance Insights, and the log reads behind plan capture, deadlocks and log events). With none, the process's own AWS credentials are used. The role must be allowed: a role named in `servers[]` is allowed by being here, and the web, MCP, desktop viewer and `--add-server` can set only roles listed in [`allowedAwsRoles`](#allowedawsroles-array-optional). See the [runbook](../docs/postgres-first-target-runbook.md) for the trust policy |
 | `awsExternalId` | *(none)* | Optional, needs `awsRoleArn`: the external ID sent when the role is assumed, to match the trust policy's `sts:ExternalId` condition. 2 to 1224 characters. Never returned by the web or MCP and never written to a log |
 | `remediationUsername` | *(none)* | **Optional second credential, for operator-initiated remediation (#2138) and the Level 3 server actions an agent can run (#5632).** The credential above stays read-only forever and is never used for a write. Omit both remediation keys — the default — and a server you add has no remediation login. For a server that is already registered, leaving the keys out changes nothing: the store keeps the login it has. Both halves are required; one alone counts as unarmed and the service says so at connect. Always SQL auth when set, so there is no `remediationAuth` key: an integrated remediation identity would be the service account, which is the monitoring identity |
@@ -804,6 +822,44 @@ The shared alert engine's switches and thresholds. Every default mirrors Lite's 
 | `longRunningQueryExcludedLogins` | `["NT AUTHORITY\\SYSTEM", "NT AUTHORITY\\NETWORK SERVICE"]` | Long-Running Query opt-out knob, login arm (#3653): sessions whose `login_name` *equals* an entry are not evaluated (case-insensitive, whole name). Seeded with the two service principals that carried the read's permanent multi-day background; the application's admin login is deliberately not a default (it also runs real ad-hoc long-runners). `[]` excludes nothing by login |
 
 The long-running-query read shape is configurable too, on the same defaults Lite ships: `longRunningQueryMaxResults` (`5`, clamped 1–1000) and the five noise opt-outs `longRunningQueryExcludeSpServerDiagnostics`, `longRunningQueryExcludeWaitFor`, `longRunningQueryExcludeBackups`, `longRunningQueryExcludeMiscWaits`, `longRunningQueryExcludeCdc` (all `true`). Since #3653 the SQL Server read also carries the Long-Running Query **opt-out knob**: sessions whose `program_name` starts with a configured prefix or whose `login_name` equals a configured login are *not evaluated* by the alert at all — not read into the decision, not counted, not fingerprinted, the opposite of a mute rule — and the exclusion is applied inside the read ahead of `longRunningQueryMaxResults`, because the sessions it names are the longest-running on the server by construction and would otherwise fill the cap on every sweep. Its defaults come from a 7-day read of one large production store, whose long-running population was four classes: (1) SQL Agent job steps (`SQLAgent - TSQL JobStep…`, ~460 sessions a week across 11 jobs, medians 35–62 min) — the seeded **program-name prefix**; (2) the `NT AUTHORITY\SYSTEM` / `NT AUTHORITY\NETWORK SERVICE` logins (~70 sessions across 42 servers, medians 4.8–8.6 *days*, CDC-capture shaped) — the seeded **exact logins**; (3) the application's admin login — deliberately *not* a default, because it carries the job wave but also real ad-hoc long-runners, and the job-step prefix already removes its share; (4) named humans — 3 a week, never excluded. Matching is case-insensitive with no wildcard grammar; the fired card's `Excluded Count` item splits the sessions removed by arm (a session matching both arms counts once, under the prefix). **On Darling the knob lives on the settings row since V135**: two `text[]` columns on `config_alert_settings` (`longRunningQueryExcludedProgramNamePrefixes` / `longRunningQueryExcludedLogins` in `darling.json`, seeded on first run; the store row wins afterwards like every alert knob), edited in the Viewer's Settings window or through `update_alert_settings`, reported by `get_alert_settings`; a pre-rung row reads as the seeds, and a list an operator clears stays cleared. Lite ships the same defaults in `settings.json`. The PostgreSQL twin consults the same knob through the same shared predicate builder (#3743): `application_name` is the `program_name` twin and `usename` (stored as `username`) the `login_name` twin, so an entry means the same thing on both engines — prefix for programs, whole name for logins, case-insensitive — applied ahead of the row cap, with the fired card's `Excluded Count` split rendered the same way. The seeds name SQL Server internals and match nothing on PostgreSQL by construction; whether that engine wants seeds of its own is a production read, not a guess. On a PostgreSQL target the read also honours `longRunningQueryExcludeBackups` (it drops `pg_dump` / `pg_dumpall` / `pg_restore` / `pg_basebackup` sessions by `application_name`) and `excludedDatabases` through the same builder's database arm, ahead of the same row cap (#3742) — the PostgreSQL twin applies all three exclusions in the read, so an excluded database's sessions can no longer consume the page, and the fired card carries an `Excluded By Database` count beside the knob's when the list is set — and unconditionally skips non-client backends (autovacuum workers, walsenders) and the `VACUUM` / `ANALYZE` / `REINDEX` / `CLUSTER` statements; the other three switches name SQL Server internals with no PostgreSQL reading and are ignored there — see the engine-coverage table below. Not configurable: the analysis-finding notification policy (notify at severity >= 1.5, 6-hour per-finding cooldown).
+
+#### More `alerts` keys
+
+These keys are in the same `alerts` section and are first-run seeds like the table above.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `notifyConnectionChanges` | `true` | Send the Server Unreachable and Server Restored alerts |
+| `notifyConnectionDownAtStartup` | `false` | Also announce a server that is already down on its first connect attempt after the service starts |
+| `connectionRefireMinutes` | `0` | Re-announce a server that stays down every N minutes; `0` is off |
+| `notifyAgHealth` | `true` | Master switch for the Availability Group alerts (failover, replica disconnect and reconnect, sync fell behind, database suspended) |
+| `agLagAlertSeconds` | `300` | AG Sync Fell Behind fires when a secondary's lag reaches this many seconds; `0` is off |
+| `agRedoQueueAlertKb` | `0` | The second AG Sync Fell Behind trigger: a secondary's redo queue in KB; `0` is off |
+| `agDisconnectRefireMinutes` | `0` | Re-announce a replica that stays disconnected every N minutes; `0` is off |
+| `pvsEnabled` | `true` | The persistent version store alert (SQL Server databases with accelerated database recovery) |
+| `pvsThresholdPercent` | `40` | Fire when the version store reaches this percent of the database's data files; `0` turns the check off |
+| `pvsFloorGb` | `1` | A breach also needs at least this many GB of version store; `0` removes the floor |
+| `fileGrowthEnabled` | `false` | The database file-growth alert. Off by default |
+| `fileGrowthRiseMb` | `10240` | Fire when a database file grows faster than this many MB per hour, averaged over `fileGrowthLookbackMinutes`; `0` turns this gate off |
+| `fileGrowthVolumePercent` | `60` | Also fire when a growing database file is over this percent of its volume; `0` turns this gate off |
+| `fileGrowthLookbackMinutes` | `60` | The window the growth rate is averaged over; it does not rescale `fileGrowthRiseMb` |
+| `selfDiskFreeWarnPercent` | `10` | Store Disk Pressure warns below this percent free on the store's volume; `0` turns the check off |
+| `selfDiskFreeWarnGb` | `50` | The percent also needs free space below this many GB, so a large volume at a low percent does not page; `0` removes the floor |
+| `collectionStaleMinutes` | `30` | How long collection may go quiet before Collection Stopped fires |
+| `collectionFailureThreshold` | `10` | Consecutive failures with no success that fire Collection Stopped without waiting out the window above |
+| `diskCriticalFreePercent` | `3` | The Low Disk alert is graded Critical below this percent free |
+| `diskCriticalFreeGb` | `2` | The Low Disk alert is graded Critical below this many GB free |
+| `analysisNotifyCooldownMinutes` | `360` | Cooldown between notifications for the same analysis finding (clamped 30 to 10080) |
+| `storeJobCadenceWarnPercent` | `25` | Store Job Over Cadence warns when a store job's last run reaches this percent of its schedule interval; Critical is fixed at 100 |
+| `retentionHoldWarnRatio` | `2.0` | Retention Held warns when a policy held by rollup coverage is holding this many times its own horizon |
+| `retentionHoldCriticalRatio` | `4.0` | The same for the Critical tier |
+| `fleetSweepEnabled` | `true` | Run the scheduled fleet sweep. It has its own switch and keeps running when `enabled` is `false` |
+| `fleetSweepIntervalMinutes` | `60` | How often the fleet sweep runs, 15 to 1440 |
+| `deadlockWarnPerHour` | `5` | The deadlock health band's Warning tier, in deadlocks per hour |
+| `deadlockCriticalPerHour` | `20` | The deadlock health band's Critical tier |
+| `databaseStateEnabled` | `true` | The database-state alert (a database in a state other than its expected one) |
+| `deliveryMode` | `"Summary"` | How deadlock and blocking alerts are delivered: `"Summary"` is one batched card per cycle, `"PerEvent"` is one notification per incident. A server's `alertDeliveryModeOverride` wins over it |
+| `perEventMax` | `5` | In `"PerEvent"` mode, the most incidents sent one by one per cycle before a trailing "+N more" (clamped 1 to 100) |
 
 #### Which engine each built-in alert and health band covers
 
@@ -1155,7 +1211,9 @@ An identical long read is answered from memory for a short time: 15 seconds for 
 
 ### No Schedule Knobs, by Design
 
-There are deliberately **no collection-schedule or retention settings** in `darling.json`. The service consumes the shared per-collector defaults (`CollectorScheduleDefaults`) — the same cadences and retention horizons a fresh Lite install uses, identity-pinned by tests so the two editions cannot drift. If a schedule knob is ever genuinely needed, it will be added then, not speculatively.
+There are deliberately **no collection-schedule settings and no per-collector retention settings** in `darling.json`. The service consumes the shared per-collector defaults (`CollectorScheduleDefaults`) — the same cadences and retention horizons a fresh Lite install uses, identity-pinned by tests so the two editions cannot drift. If a schedule knob is ever genuinely needed, it will be added then, not speculatively.
+
+One retention setting does exist in the file: `planContentRetentionDays`. It sets how many days a stored plan outlives its last sighting before it may be removed. The default is `21`, `0` turns it off, and any other value is held to 7 through 365. It is a first-run seed (see [Where each setting lives](#where-each-setting-lives-first-run-seed-or-file-only)), so after the first start you change it in the store. The plan's query statistics keep their normal retention; a plan older than this limit shows as a missing plan.
 
 The overrides that do exist live in the **store**, not the file. `config.config_collector_schedules` is a sparse table where an absent row means "the code default". The Viewer's Collector Schedules window is where cadence, retention, database scope, the enabled flag and the run time are edited, per fleet or per server. The two columns an operator *must* be able to change without a desktop are the enabled flag and the run time. The next two sections are those paths.
 
