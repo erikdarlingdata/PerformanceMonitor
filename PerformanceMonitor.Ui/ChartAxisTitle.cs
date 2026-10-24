@@ -24,8 +24,8 @@ namespace PerformanceMonitor.Ui
         public const double BaseFontSize = 12;
         public const double MinFontSize = 9;
 
-        /// <summary>Pixels of the figure height the bottom tick labels, bottom title and padding take.</summary>
-        public const double ReservedHeight = 60;
+        /// <summary>Scaled units (DIPs) of the figure height the bottom tick labels (two lines for a date), legend and padding take; measured at 250% scaling once the text drew at its real size (#6678). Over-reserving only trims a title earlier.</summary>
+        public const double ReservedHeight = 112;
 
         /// <summary>Average glyph width as a fraction of the font size (sans-serif, mixed case and digits).</summary>
         private const double GlyphWidth = 0.6;
@@ -91,7 +91,7 @@ namespace PerformanceMonitor.Ui
     public static class ChartLayout
     {
         /// <summary>Smallest height a chart row may shrink to; below it the tab scrolls instead (a shorter plot cannot draw its ticks).</summary>
-        public const double MinPlotHeight = 150;
+        public const double MinPlotHeight = 200;
 
         /// <summary>
         /// A chart inside a vertical <see cref="System.Windows.Controls.ScrollViewer"/> keeps the mouse wheel for its own
