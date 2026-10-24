@@ -180,6 +180,8 @@ public sealed class ViewerBlockingStatsLivePostgresTests
     /// #6705: a parallel query waiting on itself (the same non-zero spid on both sides) is not blocking, on the desktop trend,
     /// the duration stats, the existence check that picks the arm, and the MCP trend and stats reads. A minute with one self-wait
     /// report and one real report counts 1; a window whose only XE reports are self-waits draws the DMV arm, as the detector does.
+    /// The Blocking-tab slicer reads the same pair by the hour and agrees (Lite's <c>BlockingSeries_LeaveSelfWaitsOut_OnTheXeArm</c>).
+    /// A (0, 0) report is a system spid pair the predicate keeps, so it counts.
     /// </summary>
     [Fact]
     public async Task SelfWaitReports_AreNotBlocking_OnEveryTrendRead_AndOnlySelfWaitsDrawTheDmvArm_AgainstDevPostgres()
@@ -204,24 +206,35 @@ public sealed class ViewerBlockingStatsLivePostgresTests
             var start = TruncateToMinute(DateTime.UtcNow.AddMinutes(-10));
             var end = start.AddMinutes(11);
 
-            /* One real report (1000 ms) and one self-wait (7000 ms, spid 7 on itself) in the same minute. */
+            /* One real report (1000 ms), one self-wait (7000 ms, spid 7 on itself) and one (0, 0) report (3000 ms) in the same minute. */
             await InsertBlockedProcessReportAsync(connection, StatsServerId, start, start.AddSeconds(5), 1000);
+            await InsertBlockedProcessReportAsync(connection, StatsServerId, start, start.AddSeconds(25), 3000, blockedSpid: 0, blockingSpid: 0);
             await InsertBlockedProcessReportAsync(connection, StatsServerId, start, start.AddSeconds(30), 7000, blockedSpid: 7, blockingSpid: 7);
             await InsertDmvBlockingSnapshotAsync(connection, StatsServerId, start, start.AddSeconds(20), 9999);
+            /* A DMV self-wait (spid 166 on itself, 5555 ms) in the same minute: every DMV-arm read below must leave it out. */
+            await InsertDmvBlockingSnapshotAsync(connection, StatsServerId, start, start.AddSeconds(25), 5555, blockedSpid: 166, blockingSpid: 166, collectionId: 2);
 
             var trend = await viewer.GetBlockingTrendAsync(StatsServerId, start.AddMinutes(-1), end);
-            Assert.Equal(1, trend.Sum(p => p.Count));
+            Assert.Equal(2, trend.Sum(p => p.Count));
             var mcpTrend = await PerformanceMonitor.Darling.Service.Mcp.DarlingBlockingTrendReader.GetBlockingTrendAsync(postgres, StatsServerId, start.AddMinutes(-1), end, ct);
-            Assert.Equal(1, mcpTrend.Sum(p => p.Count));
+            Assert.Equal(2, mcpTrend.Sum(p => p.Count));
 
             var stats = await viewer.GetBlockingDurationStatsAsync(StatsServerId, start.AddMinutes(-1), end);
-            Assert.Equal(1, stats.Sum(p => p.EventCount));
-            Assert.Equal(1000, stats.Sum(p => p.TotalDurationMs));
-            Assert.Equal(1000, stats.Max(p => p.MaxDurationMs));
+            Assert.Equal(2, stats.Sum(p => p.EventCount));
+            Assert.Equal(4000, stats.Sum(p => p.TotalDurationMs));
+            Assert.Equal(3000, stats.Max(p => p.MaxDurationMs));
             var mcpStats = await PerformanceMonitor.Darling.Service.Mcp.DarlingDataReader.GetBlockingDurationStatsAsync(postgres, StatsServerId, start.AddMinutes(-1), end, ct);
-            Assert.Equal(1, mcpStats.Sum(p => p.EventCount));
-            Assert.Equal(1000, mcpStats.Sum(p => p.TotalDurationMs));
+            Assert.Equal(2, mcpStats.Sum(p => p.EventCount));
+            Assert.Equal(4000, mcpStats.Sum(p => p.TotalDurationMs));
             Assert.True(await viewer.HasBlockedProcessReportsInWindowAsync(StatsServerId, start.AddMinutes(-1), end));
+
+            /* The slicer: the real and (0, 0) reports count, the 7000 ms self-wait does not (4.0 s, not 11.0 s), and it
+               names two blockers (60 and 0) and two blocked spids (55 and 0), not the self-wait's spid 7. */
+            var slicer = Assert.Single(await viewer.GetBlockingSlicerDataAsync(StatsServerId, start.AddMinutes(-1), end));
+            Assert.Equal(2, slicer.SessionCount);
+            Assert.Equal(4.0, slicer.TotalCpu);
+            Assert.Equal(2, slicer.TotalElapsed);
+            Assert.Equal(2, slicer.TotalReads);
 
             /* Only the self-wait remains in XE: the window draws the DMV snapshot, and the existence check says so. */
             await DeleteRowsAsync(connection, "blocked_process_reports", StatsServerId, ct);
@@ -232,9 +245,19 @@ public sealed class ViewerBlockingStatsLivePostgresTests
             Assert.All(dmvTrend, p => Assert.Equal("DMV snapshot", p.Source));
             var dmvMcp = await PerformanceMonitor.Darling.Service.Mcp.DarlingBlockingTrendReader.GetBlockingTrendAsync(postgres, StatsServerId, start.AddMinutes(-1), end, ct);
             Assert.All(dmvMcp, p => Assert.Equal("DMV snapshot", p.Source));
+            Assert.Equal(1, dmvMcp.Sum(p => p.Count));
             var dmvStats = await viewer.GetBlockingDurationStatsAsync(StatsServerId, start.AddMinutes(-1), end);
             Assert.Equal(9999, dmvStats.Sum(p => p.TotalDurationMs));
+            Assert.Equal(1, dmvStats.Sum(p => p.EventCount));
+            var dmvMcpStats = await PerformanceMonitor.Darling.Service.Mcp.DarlingDataReader.GetBlockingDurationStatsAsync(postgres, StatsServerId, start.AddMinutes(-1), end, ct);
+            Assert.Equal(1, dmvMcpStats.Sum(p => p.EventCount));
+            Assert.Equal(9999, dmvMcpStats.Sum(p => p.TotalDurationMs));
             Assert.False(await viewer.HasBlockedProcessReportsInWindowAsync(StatsServerId, start.AddMinutes(-1), end));
+
+            /* The slicer draws the DMV arm too: its one real snapshot (9999 ms), none of the XE self-wait's 7000 ms or the DMV self-wait's 5555 ms. */
+            var dmvSlicer = Assert.Single(await viewer.GetBlockingSlicerDataAsync(StatsServerId, start.AddMinutes(-1), end));
+            Assert.Equal(1, dmvSlicer.SessionCount);
+            Assert.Equal(9.999, dmvSlicer.TotalCpu, 3);
 
             bodySucceeded = true;
         }
@@ -275,21 +298,22 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", connectio
     }
 
     private static async Task InsertDmvBlockingSnapshotAsync(
-        NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc, DateTime eventTimeUtc, long waitTimeMs)
+        NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc, DateTime eventTimeUtc, long waitTimeMs,
+        int blockedSpid = 155, int blockingSpid = 160, long collectionId = 1)
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO dmv_blocking_snapshots
     (collection_id, collection_time, server_id, server_name, event_time, database_name,
      blocked_spid, blocking_spid, wait_time_ms, lock_mode, blocked_sql_text, blocking_sql_text, contentious_object)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)", connection);
-        command.Parameters.AddWithValue(1L);
+        command.Parameters.AddWithValue(collectionId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(ServerName);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(eventTimeUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue("AppDb");
-        command.Parameters.AddWithValue(155);
-        command.Parameters.AddWithValue(160);
+        command.Parameters.AddWithValue(blockedSpid);
+        command.Parameters.AddWithValue(blockingSpid);
         command.Parameters.AddWithValue(waitTimeMs);
         command.Parameters.AddWithValue("S");
         command.Parameters.AddWithValue("SELECT 2");

@@ -913,7 +913,7 @@ WITH NO DATA";
                    aggregate, and it is about to hold only what raw still holds. Say where that begins BEFORE the refresh. */
                 if (view == BlockedProcessBaselineView && coverageOldest is null)
                 {
-                    await RecordBlockedBaselineSupplyFloorAsync(connection, logger, DateTime.UtcNow, cancellationToken);
+                    await TryRecordBlockedBaselineSupplyFloorAsync(connection, logger, cancellationToken);
                 }
 
                 var after = await RefreshFromAsync(connection, view, needFrom.Value, force: false, cancellationToken);
@@ -1217,6 +1217,31 @@ WITH NO DATA";
         logger?.LogInformation(
             "TimescaleDB: {View} was rebuilt over the {RetentionDays} days of blocked process reports the store keeps -- the Blocking baseline counts no day before {Floor:u}.",
             BlockedProcessBaselineView, retentionDays, floor);
+    }
+
+    private static async Task<bool> RawHoldsRowsAsync(NpgsqlConnection connection, string sourceTable, CancellationToken cancellationToken)
+    {
+        using var probe = new NpgsqlCommand($"SELECT EXISTS (SELECT 1 FROM collect.{sourceTable})", connection) { CommandTimeout = SetupTimeoutSeconds };
+        return await probe.ExecuteScalarAsync(cancellationToken) is true;
+    }
+
+    /// <summary>
+    /// #6705: <see cref="RecordBlockedBaselineSupplyFloorAsync"/>, failure-isolated. A failed comment write must not skip the
+    /// backfill that follows it (it would fail again on every start and the baseline would never be backfilled); it logs and the
+    /// pass goes on, and the next start tries the write again.
+    /// </summary>
+    private static async Task TryRecordBlockedBaselineSupplyFloorAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await RecordBlockedBaselineSupplyFloorAsync(connection, logger, DateTime.UtcNow, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not record where the {View} supply begins -- the Blocking baseline counts quiet days it cannot back until this succeeds: {Message}",
+                BlockedProcessBaselineView, ex.Message);
+        }
     }
 
     /// <summary>Does this baseline relation exist under any implementation — continuous aggregate or plain view?</summary>
@@ -6501,9 +6526,27 @@ WITH NO DATA";
         {
             try
             {
+                /* #6705: was the blocking baseline absent before this CREATE? The plain fallback view was dropped above, so
+                   a relation that exists here is a real aggregate. Read before the CREATE, as IF NOT EXISTS says nothing. */
+                var createsBlockedBaseline = false;
+                if (view == BlockedProcessBaselineView)
+                {
+                    using var exists = new NpgsqlCommand(BaselineRelationExistsSql(view), connection) { CommandTimeout = SetupTimeoutSeconds };
+                    createsBlockedBaseline = await exists.ExecuteScalarAsync(cancellationToken) is false;
+                }
+
                 using (var create = new NpgsqlCommand(createSql, connection) { CommandTimeout = SetupTimeoutSeconds })
                 {
                     await create.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                /* #6705: the floor is written on the pass that CREATES the baseline, before its refresh policy can materialize
+                   anything. Written only at backfill time, a service that stopped between this CREATE and the backfill left the
+                   policy to materialize the last day first, so the backfill saw a non-empty materialization and recorded
+                   nothing. A fresh store (raw empty) records nothing: its aggregate will hold everything raw ever gets. */
+                if (createsBlockedBaseline && await RawHoldsRowsAsync(connection, SourceTableFor(view), cancellationToken))
+                {
+                    await TryRecordBlockedBaselineSupplyFloorAsync(connection, logger, cancellationToken);
                 }
 
                 /* #3893: an off-grid aggregate's materialization width is set HERE, after its CREATE and BEFORE

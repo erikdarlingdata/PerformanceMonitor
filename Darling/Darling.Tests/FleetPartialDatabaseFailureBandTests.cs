@@ -748,6 +748,28 @@ VALUES ($1, $2, -6690, 'srv-6690', $2, 'testdb', $3, 0, $4, 0, 100, 'KEY', 'X', 
         return (map.Buckets.Values.Sum(b => b.SampleCount), map.Buckets.Values.Sum(b => b.Mean * b.SampleCount));
     }
 
+    /// <summary>#6705: the ensure sweep records no floor on a fresh store, where raw holds nothing and the aggregate will hold everything raw ever gets.</summary>
+    [Fact]
+    public async Task EnsureOnAFreshStore_RecordsNoSupplyFloor_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #6705 fresh-store test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "the dev fixture is expected to have TimescaleDB installed");
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+        Assert.Null(await TimescaleSupport.ReadBlockedBaselineSupplyFloorAsync(connection, ct));
+    }
+
     [Fact]
     public async Task BlockingBaseline_OfARebuiltAggregate_CountsNoDayBeforeTheFloor_AndAStoreWithNoFloorReadsAsBefore_AgainstDevPostgres()
     {
@@ -796,15 +818,25 @@ FROM generate_series(0, 29) AS g", connection))
             await log.ExecuteNonQueryAsync(ct);
         }
 
-        /* The reshape drops the old aggregate, the ensure sweep recreates it, the start path's backfill records the floor. */
+        /* The reshape drops the old aggregate and the ensure sweep recreates it over raw rows, which records the floor on that
+           pass: a service that stops before the backfill, with the refresh policy then materializing the last day, still has it. */
         Assert.Equal(1, await TimescaleSupport.DropStaleContinuousAggregatesAsync(connection, null, ct));
-        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
-        Assert.Null(await TimescaleSupport.ReadBlockedBaselineSupplyFloorAsync(connection, ct));
         var before = DateTime.UtcNow;
-        Assert.True(await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, null, ct) >= 1);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
         var floor = await TimescaleSupport.ReadBlockedBaselineSupplyFloorAsync(connection, ct);
         Assert.NotNull(floor);
         Assert.InRange(floor!.Value, before.AddDays(-10).AddMinutes(-5), DateTime.UtcNow.AddDays(-10).AddSeconds(1));
+
+        /* The policy's run materializes the last day before the backfill; the backfill then sees a non-empty materialization. */
+        await using (var recentOnly = new NpgsqlCommand("CALL refresh_continuous_aggregate('collect.blocked_process_baseline', $1, $2)", connection))
+        {
+            recentOnly.Parameters.AddWithValue(now.AddDays(-1));
+            recentOnly.Parameters.AddWithValue(now.AddHours(1));
+            await recentOnly.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.True(await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, null, ct) >= 1);
+        Assert.Equal(floor, await TimescaleSupport.ReadBlockedBaselineSupplyFloorAsync(connection, ct));
 
         /* A later start does not move it. */
         await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, null, ct);
