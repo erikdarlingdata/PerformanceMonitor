@@ -2326,7 +2326,8 @@ CREATE INDEX IF NOT EXISTS ix_investigation_reports_family_of
     /// <para><b>Why moving the row is right.</b> Nothing offered "off" as a choice distinct from the default until now. A stored FALSE is the
     /// old default, written by V179 or by a Settings save that sent the whole row back, and a store cannot tell it from an operator's choice. The
     /// rung says so rather than guessing: an operator who turned the alert off on purpose switches it off again, once. The repo has no
-    /// settings-change journal to write to, so the reason is stated here and in the release note.</para>
+    /// settings-change journal to write to, so the reason is stated here, in the Darling README's V216 rollback note, in docs/alerts.md
+    /// for both editions, and in this change's CHANGELOG entry, which joins the release notes at the release cut.</para>
     ///
     /// <para><b>Cost.</b> <c>config_alert_settings</c> is the one-row singleton (<c>id = 1</c>), so the UPDATE touches at most one row and the
     /// SET DEFAULT is catalog-only. Neither is given a <c>lock_timeout</c>, the shape V147 and V211 used on the same kind of table: the only thing
