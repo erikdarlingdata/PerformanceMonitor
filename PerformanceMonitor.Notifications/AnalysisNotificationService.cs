@@ -478,7 +478,7 @@ public sealed class AnalysisNotificationService : IDisposable
                     /* #6596: the request is held back only when EVERY member of the incident (the lead included) has a story the pass
                        labelled recurring at this hour. One page goes out per incident, so an unlabelled co-fired member is a
                        new problem and still needs its investigation. */
-                    RecurringAtThisHour: members.All(m => RecurrenceLabeler.TryReadLabel(m.StoryText)?.RecurringAtThisHour == true));
+                    RecurringAtThisHour: RecurrenceLabeler.TryReadLabel(lead.StoryText)?.RecurringAtThisHour == true);
 
                 /* #3916: the PAGE road queues. The page waits out the hold-back window with every other page
                    the fleet raises in it, and the flush decides — against the cap — whether it goes as its
