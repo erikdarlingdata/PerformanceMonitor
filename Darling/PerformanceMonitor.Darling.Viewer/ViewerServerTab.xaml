@@ -4071,6 +4071,13 @@
                                 <DataGridTextColumn Binding="{Binding AvgDurationFormatted}" Width="120" MinWidth="120" SortMemberPath="AvgDurationMs">
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Duration" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
+                                <!-- #6629: the network bytes the collector's SQL Server connections received and sent per day, over the last 7 days. "not measured" when no run had a SQL Server connection, never 0. Hidden on a store below V219. -->
+                                <DataGridTextColumn Binding="{Binding BytesReceivedPerDayFormatted}" ElementStyle="{StaticResource NumericCell}" Width="130" MinWidth="130" SortMemberPath="BytesReceivedPerDay">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BytesReceivedPerDayFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Received / day" FontWeight="Bold" VerticalAlignment="Center"/></DockPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding BytesSentPerDayFormatted}" ElementStyle="{StaticResource NumericCell}" Width="120" MinWidth="120" SortMemberPath="BytesSentPerDay">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BytesSentPerDayFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Sent / day" FontWeight="Bold" VerticalAlignment="Center"/></DockPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding LastSuccessFormatted}" Width="140" MinWidth="140" SortMemberPath="LastSuccessTime">
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSuccessFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Success" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
@@ -4175,6 +4182,13 @@
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding RowsCollected, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RowsCollected" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Rows" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <!-- #6629: per run, the bytes its SQL Server connections received and sent; "not measured" for a run with none. -->
+                                <DataGridTextColumn Binding="{Binding BytesReceivedFormatted}" ElementStyle="{StaticResource NumericCell}" Width="110" SortMemberPath="BytesReceived">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BytesReceivedFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Received" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding BytesSentFormatted}" ElementStyle="{StaticResource NumericCell}" Width="100" SortMemberPath="BytesSent">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BytesSentFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Sent" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding MessageFormatted}" Width="*">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MessageFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Error" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>

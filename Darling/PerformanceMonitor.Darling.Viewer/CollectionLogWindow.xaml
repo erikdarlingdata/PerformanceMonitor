@@ -105,6 +105,18 @@
                         <TextBlock Text="Store Duration" FontWeight="Bold"/>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
+                <!-- #6629: per run, the bytes its SQL Server connections received and sent. "not measured" for a run with none, never 0;
+                     hidden on a store below V219 (CollectorBytesText.ShowColumns). -->
+                <DataGridTextColumn Binding="{Binding BytesReceivedFormatted}" ElementStyle="{StaticResource NumericCell}" Width="110" SortMemberPath="BytesReceived">
+                    <DataGridTextColumn.Header>
+                        <TextBlock Text="Received" FontWeight="Bold"/>
+                    </DataGridTextColumn.Header>
+                </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding BytesSentFormatted}" ElementStyle="{StaticResource NumericCell}" Width="100" SortMemberPath="BytesSent">
+                    <DataGridTextColumn.Header>
+                        <TextBlock Text="Sent" FontWeight="Bold"/>
+                    </DataGridTextColumn.Header>
+                </DataGridTextColumn>
                 <DataGridTextColumn Binding="{Binding MessageFormatted}" Width="*">
                     <DataGridTextColumn.Header>
                         <TextBlock Text="Error Message" FontWeight="Bold"/>

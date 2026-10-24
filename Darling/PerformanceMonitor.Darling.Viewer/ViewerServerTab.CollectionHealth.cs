@@ -85,6 +85,11 @@ public partial class ViewerServerTab
            await is not priced against contention that has already finished. */
         readFanOut.Release();
 
+        /* #6629: the byte columns exist only on a store at V219 or later. */
+        var bytesShown = await _dataService.CollectionBytesSupportedAsync();
+        CollectorBytesText.ShowColumns(CollectionHealthGrid, bytesShown);
+        CollectorBytesText.ShowColumns(CollectionLogGrid, bytesShown);
+
         await ShowCollectionHealthAsync(
             healthTask.Result, logTask.Result, durationTask.Result, caveatsTask.Result, dataStartTask, startUtc, CollectionLogTruncationBanner,
             _collectionHealthFilterMgr!.UpdateData, _collectionLogFilterMgr!.UpdateData, RenderCollectorDurationChart, ShowCollectionCaveats);

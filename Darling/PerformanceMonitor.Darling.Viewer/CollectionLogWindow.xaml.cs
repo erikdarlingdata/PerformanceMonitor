@@ -85,6 +85,7 @@ namespace PerformanceMonitor.Darling.Viewer
             {
                 var logs = await ReadDrillAsync(_dataService, _serverId, _collectorName, CollectionLogTruncationBanner);
                 LogDataGrid.ItemsSource = logs;
+                CollectorBytesText.ShowColumns(LogDataGrid, await _dataService.CollectionBytesSupportedAsync());
 
                 if (logs.Count > 0)
                 {
