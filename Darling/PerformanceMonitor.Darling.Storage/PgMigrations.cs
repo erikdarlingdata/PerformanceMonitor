@@ -2706,7 +2706,25 @@ $rung$;";
         new Migration(213, "query-store-replica", V213Sql),
         new Migration(214, "known-patterns", V214Sql),
         new Migration(215, "agent-table-indexes", V215Sql),
+        new Migration(219, "collection-log-bytes", V219Sql),
     };
+
+    /// <summary>
+    /// V219 (#6629): the network bytes a collector run moved. <c>collect.collection_log.bytes_received</c> and <c>bytes_sent</c> are what the
+    /// run received from and sent to the monitored SQL Server on its connections (SqlClient's connection statistics, summed over a
+    /// fan-out's connections); NULL for every existing row and for a run that measured nothing (a PostgreSQL target, a connection that
+    /// failed at open), never 0. <c>collect.collection_log_hourly.bytes_received_sum</c> and <c>bytes_sent_sum</c> are their per-hour sums,
+    /// NULL for an hour with no measured run. Four nullable <c>ADD COLUMN</c>s with no default, so each is catalog-only, including on the
+    /// compressed hypertable (the V213 precedent); no backfill and no grant (the roles' table-level SELECT covers a new column). The log's
+    /// passthrough view freezes its column list at CREATE (the V80 lesson), so it is re-created to show them. An older build ignores the
+    /// columns, so there is no rollback line. Idempotent.
+    /// </summary>
+    private const string V219Sql = @"
+ALTER TABLE collect.collection_log ADD COLUMN IF NOT EXISTS bytes_received bigint;
+ALTER TABLE collect.collection_log ADD COLUMN IF NOT EXISTS bytes_sent bigint;
+ALTER TABLE collect.collection_log_hourly ADD COLUMN IF NOT EXISTS bytes_received_sum bigint;
+ALTER TABLE collect.collection_log_hourly ADD COLUMN IF NOT EXISTS bytes_sent_sum bigint;
+CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
 
     /// <summary>
     /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c>, the failure record of the Query Store compose builder: one row

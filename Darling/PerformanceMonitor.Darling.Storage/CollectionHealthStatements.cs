@@ -323,6 +323,8 @@ public static class CollectionHealthStatements
                     l.rows_collected,
                     l.duration_ms,
                     l.slowest_item_ms,
+                    l.bytes_received,
+                    l.bytes_sent,
                     width_bucket(l.duration_ms - 1, {CollectionLogHourly.BoundsArraySql}) AS slot
                 FROM raw_ranges rr
                 JOIN v_collection_log l

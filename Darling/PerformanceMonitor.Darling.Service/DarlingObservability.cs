@@ -116,8 +116,8 @@ WHERE s.is_enabled
       (SELECT 1 FROM config.config_monitored_servers c WHERE c.server_id = s.server_id);";
 
     private const string InsertCollectionLogSql = @"
-INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms, sql_open_ms, sql_drain_ms, watermark_ms, drain_rows_read, drain_bytes_read, drain_last_read_ms, target_session_id, sweep_peer_max_ms, plan_fetch_probe_ms, plan_fetch_target_ms, plan_fetch_write_ms, plan_fetch_ids_attempted, plan_fetch_probe_ids, text_fetch_probe_ms, text_fetch_target_ms, text_fetch_write_ms, text_fetch_ids_attempted, text_fetch_probe_ids, read_source)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33);";
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms, sql_open_ms, sql_drain_ms, watermark_ms, drain_rows_read, drain_bytes_read, drain_last_read_ms, target_session_id, sweep_peer_max_ms, plan_fetch_probe_ms, plan_fetch_target_ms, plan_fetch_write_ms, plan_fetch_ids_attempted, plan_fetch_probe_ids, text_fetch_probe_ms, text_fetch_target_ms, text_fetch_write_ms, text_fetch_ids_attempted, text_fetch_probe_ids, read_source, bytes_received, bytes_sent)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35);";
 
     /* The fleet-sentinel server_id the daily retention purge writes its run-record under. collection_log's
        server_id is NOT NULL and Collection Health reads per real server_id, but the purge is fleet-wide (per
@@ -317,10 +317,11 @@ ON CONFLICT (server_id) DO UPDATE SET
         int? sweepPeerMaxMs,
         ILogger? logger,
         CancellationToken cancellationToken,
-        string? readSource = null)
+        string? readSource = null,
+        CollectorBytes? bytes = null)
         => WriteCollectionLogRowAsync(postgres, server, collectorName, DateTime.UtcNow, status, rowsCollected,
             (int)(sqlMs + storageMs), (int)sqlMs, (int)storageMs, errorMessage, fanout, phases, drain, fetchPhases,
-            sweepPeerMaxMs, logger, cancellationToken, readSource);
+            sweepPeerMaxMs, logger, cancellationToken, readSource, bytes);
 
     /// <summary>
     /// #5735: records the collection slots a server's loop stepped over as one <c>collection_log</c> row, through the
@@ -387,7 +388,8 @@ ON CONFLICT (server_id) DO UPDATE SET
         int? sweepPeerMaxMs,
         ILogger? logger,
         CancellationToken cancellationToken,
-        string? readSource = null)
+        string? readSource = null,
+        CollectorBytes? bytes = null)
     {
         try
         {
@@ -492,6 +494,11 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.ProbeIds : (object)DBNull.Value });
             /* #6254: which host the run's Query Store reads came from; NULL for every other row and when no replica is set. */
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)readSource ?? DBNull.Value });
+            /* V219 (#6629): the bytes the run received from and sent to the monitored SQL Server. Both NULL when no SQL Server connection
+               opened (a PostgreSQL target, a connection that failed at open, a row that is not a collector run); never a 0 that would read
+               as "this collector is free". */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = bytes.HasValue ? bytes.Value.Received : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = bytes.HasValue ? bytes.Value.Sent : (object)DBNull.Value });
             await command.ExecuteNonQueryAsync(cancellationToken);
             return true;
         }
@@ -595,6 +602,8 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_ids_attempted
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_probe_ids
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value }); // read_source
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = DBNull.Value }); // bytes_received
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = DBNull.Value }); // bytes_sent
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)
@@ -704,6 +713,8 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_ids_attempted
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_probe_ids
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value }); // read_source
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = DBNull.Value }); // bytes_received
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = DBNull.Value }); // bytes_sent
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)

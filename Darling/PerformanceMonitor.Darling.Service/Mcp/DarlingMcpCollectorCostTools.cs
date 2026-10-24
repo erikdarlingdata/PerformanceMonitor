@@ -58,7 +58,7 @@ public sealed class DarlingMcpCollectorCostTools
         + "55-81% of the figure here, with no phase split — never read it as server-slowness; "
         + "get_collection_log.sql_store_ms has the per-run split. Empty means no run in the window, not a "
         + "failure. <<GUIDE>> "
-        + "Gets the monitoring tool's OWN per-collector cost ON the monitored servers — which of THIS tool's collectors are the most expensive to run, so a hog shows on a dashboard instead of a log scrape. This is the tool measuring itself, NOT a monitored SQL Server. The service records an hourly aggregate per (server, collector): run count, total and average query duration in ms (sql_ms is a DURATION that includes waits, not pure CPU), the WORST single execution in the window (max_sql_ms — the tail is how a collector sticks out on a target), store-write time, rows collected, and how many servers ran it. Returns the ranked fleet list, most expensive by total_sql_ms first. Pass collector_name to get that ONE collector's daily trend instead (summed cost and the day's worst execution), for spotting a regression against its own history. Read sql_ms with care: it is NOT purely target-side on the collectors that fetch plan XML or statement text (query_store). Those fetches run inside the driver's per-item SQL stopwatch and each one round-trips the MONITORING STORE to decide what content is already held before writing back what came off the target, so the store's probe and write land in this figure. Where this was measured, the store probe is the largest single term in both fetches — 55.4% of plan_fetch and 80.6% of text_fetch. This series carries NO phase split (it is an hourly total per server and collector, nothing more), so the attribution cannot be recovered here at all: use get_collection_log, whose sql_store_ms names the store share per run. Do NOT read a large total_sql_ms or max_sql_ms on query_store as evidence that the monitored servers are slow.")]
+        + "Gets the monitoring tool's OWN per-collector cost ON the monitored servers — which of THIS tool's collectors are the most expensive to run, so a hog shows on a dashboard instead of a log scrape. This is the tool measuring itself, NOT a monitored SQL Server. The service records an hourly aggregate per (server, collector): run count, total and average query duration in ms (sql_ms is a DURATION that includes waits, not pure CPU), the WORST single execution in the window (max_sql_ms — the tail is how a collector sticks out on a target), store-write time, rows collected, and how many servers ran it. Returns the ranked fleet list, most expensive by total_sql_ms first. Pass collector_name to get that ONE collector's daily trend instead (summed cost and the day's worst execution), for spotting a regression against its own history. Read sql_ms with care: it is NOT purely target-side on the collectors that fetch plan XML or statement text (query_store). Those fetches run inside the driver's per-item SQL stopwatch and each one round-trips the MONITORING STORE to decide what content is already held before writing back what came off the target, so the store's probe and write land in this figure. Where this was measured, the store probe is the largest single term in both fetches — 55.4% of plan_fetch and 80.6% of text_fetch. This series carries NO phase split (it is an hourly total per server and collector, nothing more), so the attribution cannot be recovered here at all: use get_collection_log, whose sql_store_ms names the store share per run. Do NOT read a large total_sql_ms or max_sql_ms on query_store as evidence that the monitored servers are slow. NETWORK COST (#6629): each collector also carries bytes_received_per_day and bytes_sent_per_day, the bytes it received from and sent to the monitored SQL Server, taken from SqlClient's connection statistics for every run and summed over a fan-out's per-database connections, then divided by the window in days. The window is days_back cut to 7, the longest the hourly rollup keeps (network_bytes.window_days says what it was), and the figure is summed over ALL servers, so a collector that is cheap on one and heavy on another reads as the mix; get_collection_log has the per-run, per-server figures. network_bytes.top_collectors_by_bytes_received_per_day names the five collectors that pull the most. A collector whose runs recorded no figure reads bytes_status \"not measured\" with null bytes, never 0: a PostgreSQL target is not measured, nor are runs from before this was recorded or runs whose connection never opened. Use it to choose which collector to re-cadence or turn off before putting a monitoring host across a WAN link.")]
     public static async Task<string> GetCollectorCost(
         NpgsqlDataSource postgres,
         [Description("Days of history to summarize. Default 7; max 90 (the series' own retention).")] int days_back = 7,
@@ -88,7 +88,9 @@ public sealed class DarlingMcpCollectorCostTools
                         "The service records an hourly aggregate; a collector that has not run in the window has no row.");
                 }
 
-                return JsonSerializer.Serialize(new
+                var bytesDays = DarlingCollectorBytes.WindowDays(days_back);
+                var trendBytes = await DarlingCollectorBytes.ReadAsync(postgres, null, DateTime.UtcNow, bytesDays, cancellationToken);
+                return DarlingCollectorBytes.MergeSingle(JsonSerializer.Serialize(new
                 {
                     collector_name = collector_name.Trim(),
                     days_back,
@@ -102,7 +104,7 @@ public sealed class DarlingMcpCollectorCostTools
                         avg_sql_ms = p.RunCount > 0 ? p.TotalSqlMs / p.RunCount : 0,
                         max_sql_ms = p.MaxSqlMs
                     })
-                });
+                }), trendBytes, collector_name.Trim(), bytesDays);
             }
 
             var top = await DarlingCollectorCostReader.GetTopAsync(postgres, since, cancellationToken);
@@ -114,7 +116,9 @@ public sealed class DarlingMcpCollectorCostTools
                     "the first lands within an hour of starting on a store at schema V105 or later.");
             }
 
-            return JsonSerializer.Serialize(new
+            var costBytesDays = DarlingCollectorBytes.WindowDays(days_back);
+            var costBytes = await DarlingCollectorBytes.ReadAsync(postgres, null, DateTime.UtcNow, costBytesDays, cancellationToken);
+            return DarlingCollectorBytes.Merge(JsonSerializer.Serialize(new
             {
                 days_back,
                 note = "The tool's OWN cost on the monitored servers. sql_ms is query DURATION (includes waits), not pure CPU. max_sql_ms is the worst single execution in the window — the tail that makes a collector stick out on a target. "
@@ -130,7 +134,7 @@ public sealed class DarlingMcpCollectorCostTools
                     total_rows = r.TotalRows,
                     server_count = r.ServerCount
                 })
-            });
+            }), costBytes, costBytesDays, "collector_name", explicitStatus: true);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

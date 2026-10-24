@@ -8460,6 +8460,7 @@ RETURNING s.state_key";
         try
         {
             using var connection = new SqlConnection(masterConnectionString);
+            CollectorByteMeter.Track(connection); // #6629: the listing is part of the run's traffic
             await connection.OpenAsync(cancellationToken);
             /* Azure master enumeration is SQL-Server-only, but it goes through the same parameter
                mapping as every other command so a type cannot be mapped two ways. */

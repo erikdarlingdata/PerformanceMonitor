@@ -127,7 +127,11 @@ internal static class DarlingDataReader
         long? TextFetchProbeIds = null,
         /* V213 (#6254): which host a Query Store run read from, e.g. "replica 12, primary 2 (redo_behind: Sales)". NULL on every run
            written before the setting existed and on every run of a server with the setting off: the tools then show nothing. */
-        string? ReadSource = null)
+        string? ReadSource = null,
+        /* V219 (#6629): the network bytes the run received from and sent to the monitored SQL Server. NULL means NOT MEASURED (a
+           PostgreSQL target, a run before the rung, a connection that never opened) and is never shown as 0. */
+        long? BytesReceived = null,
+        long? BytesSent = null)
     {
         /* The residual, derived rather than read (V108 stores no other_ms column on purpose): open + drain
            + this SUM to SqlDurationMs by construction, so a large value here is a real finding - cost in
@@ -4359,7 +4363,9 @@ FROM config.config_collector_schedules";
             text_fetch_write_ms,
             text_fetch_ids_attempted,
             text_fetch_probe_ids,
-            read_source
+            read_source,
+            bytes_received,
+            bytes_sent
         FROM v_collection_log
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -4535,7 +4541,9 @@ FROM config.config_collector_schedules";
             reader.IsDBNull(i + 23) ? null : Convert.ToDouble(reader.GetValue(i + 23)),
             reader.IsDBNull(i + 24) ? null : Convert.ToInt64(reader.GetValue(i + 24)),
             reader.IsDBNull(i + 25) ? null : Convert.ToInt64(reader.GetValue(i + 25)),
-            reader.IsDBNull(i + 26) ? null : reader.GetString(i + 26));
+            reader.IsDBNull(i + 26) ? null : reader.GetString(i + 26),
+            reader.IsDBNull(i + 27) ? null : reader.GetInt64(i + 27),
+            reader.IsDBNull(i + 28) ? null : reader.GetInt64(i + 28));
 
     /// <summary>One <see cref="CollectionLogEntry"/> plus which server it came from — the fleet-wide row shape
     /// (#4199), needed only because <see cref="GetCollectionLogFleetAsync"/> merges runs across every enabled
@@ -4587,7 +4595,9 @@ FROM config.config_collector_schedules";
             cl.text_fetch_write_ms,
             cl.text_fetch_ids_attempted,
             cl.text_fetch_probe_ids,
-            cl.read_source
+            cl.read_source,
+            cl.bytes_received,
+            cl.bytes_sent
         FROM v_collection_log cl
         JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
         WHERE cl.collection_time >= $1

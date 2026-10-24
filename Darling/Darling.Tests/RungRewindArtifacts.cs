@@ -510,6 +510,16 @@ DROP TABLE IF EXISTS config.config_known_patterns;"),
 DROP INDEX IF EXISTS config.ix_investigation_requests_reported_condition, config.ix_investigation_requests_follow_up_of,
     config.ix_investigation_requests_follow_up_at, config.ix_investigation_requests_opened_at,
     config.ix_investigation_requests_practice_of, config.ix_investigation_reports_family_of;"),
+        // V219 (#6629): the network bytes on the collection log and its hourly rollup. The hourly sum column is the probe's newest sentinel. The rewind
+        // drops all four columns and re-creates the log's passthrough view, so a re-run of V219 adds them again. Safe on a store that never had them.
+        new(219, "hasCollectionLogBytes",
+            @"
+DROP VIEW IF EXISTS collect.v_collection_log;
+ALTER TABLE IF EXISTS collect.collection_log DROP COLUMN IF EXISTS bytes_received, DROP COLUMN IF EXISTS bytes_sent;
+ALTER TABLE IF EXISTS collect.collection_log_hourly DROP COLUMN IF EXISTS bytes_received_sum, DROP COLUMN IF EXISTS bytes_sent_sum;
+DO $$ BEGIN IF to_regclass('collect.collection_log') IS NOT NULL THEN
+  EXECUTE 'CREATE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log';
+END IF; END $$;"),
     ];
 
     /// <summary>

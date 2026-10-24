@@ -16321,9 +16321,11 @@ LIMIT 1";
         DrainForensics? drain, FetchPhaseCost? fetchPhases, int? sweepPeerMaxMs, ILogger? logger, CancellationToken cancellationToken,
         string? readSource = null)
     {
+        /* #6629: the bytes the run moved on its SQL Server connections; null (stored NULL) when none opened. */
+        var bytes = CollectorByteMeter.Current?.Snapshot();
         await DarlingObservability.LogCollectionAsync(
             _postgres!, runtime, collectorName, status, rowsCollected, sqlMs, storageMs, errorMessage, fanout, phases, drain,
-            fetchPhases, sweepPeerMaxMs, logger, cancellationToken, readSource);
+            fetchPhases, sweepPeerMaxMs, logger, cancellationToken, readSource, bytes);
         RecordRunForBackoff(server, runtime, collectorName, status, errorMessage);
     }
 
@@ -16525,6 +16527,10 @@ LIMIT 1";
            something different from every other target's. duration_ms is sqlMs + storageMs either way,
            so the wall clock is honest under both; only the decomposition differs. */
         var runClock = System.Diagnostics.Stopwatch.StartNew();
+
+        /* #6629: this run's SQL Server connections count their bytes into one meter, which LogRunAsync reads when it writes the
+           row. Set here, inside the async method, so it reaches every awaited call and task of the run and no other run's. */
+        using var byteMeterScope = CollectorByteMeter.Begin();
 
         try
         {

@@ -166,7 +166,9 @@ public static class CollectionLogHourly
     MAX(w.collection_time) FILTER (WHERE NOT (w.status = 'SUCCESS'
                                               AND COALESCE(w.rows_collected, 0) = 0
                                               AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})),
-    {HistogramSql}";
+    {HistogramSql},
+    SUM(w.bytes_received)::bigint,
+    SUM(w.bytes_sent)::bigint";
 
     /// <summary>The bounds as a SQL array literal, for a statement that inlines them instead of binding them.</summary>
     internal static string BoundsArraySql => "'{" + string.Join(",", DurationBucketBounds) + "}'::integer[]";
@@ -176,7 +178,7 @@ public static class CollectionLogHourly
     abandoned_count, extension_missing_count, session_missing_count, note_count, runs_with_rows, rows_stored,
     duration_sum, duration_count, max_duration_ms, max_slowest_item_ms,
     last_success_time, last_run_time, last_error_time, last_failure_text_time, last_note_time, last_denied_time,
-    last_non_skip_time, last_productive_time, last_streak_break_time, duration_histogram";
+    last_non_skip_time, last_productive_time, last_streak_break_time, duration_histogram, bytes_received_sum, bytes_sent_sum";
 
     /// <summary>
     /// One pass's upsert. <c>$1</c> is the current hour (exclusive end), <c>$2</c> the oldest hour kept, <c>$3</c> the first
@@ -250,6 +252,8 @@ FROM
         l.rows_collected,
         l.duration_ms,
         l.slowest_item_ms,
+        l.bytes_received,
+        l.bytes_sent,
         t.hour_start,
         width_bucket(l.duration_ms - 1, $4::integer[]) AS slot
     FROM todo AS t

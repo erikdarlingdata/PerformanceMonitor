@@ -29,7 +29,14 @@ public sealed class SqlServerTargetProvider : ITargetProvider
 
     public CollectorTargetEngine Engine => CollectorTargetEngine.SqlServer;
 
-    public DbConnection CreateConnection(string connectionString) => new SqlConnection(connectionString);
+    public DbConnection CreateConnection(string connectionString)
+    {
+        var connection = new SqlConnection(connectionString);
+
+        /* #6629: with a collector run in scope, the run counts this connection's bytes; with none, a no-op. */
+        CollectorByteMeter.Track(connection);
+        return connection;
+    }
 
     public DbCommand CreateCommand(CollectorQuery query, DbConnection connection, int commandTimeoutSeconds)
     {
