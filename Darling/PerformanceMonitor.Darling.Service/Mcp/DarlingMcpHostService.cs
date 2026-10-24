@@ -1767,6 +1767,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpCollectionStateTools>()
             .WithGeminiCompatibleTools<DarlingMcpIncidentActionTools>()
             .WithGeminiCompatibleTools<DarlingMcpPlanUndoTools>()
+            /* #6401: set_agent_actions_enabled (the global agent switch) and undo_agent_change (a non-plan agent change), the web's two PUT
+               routes over MCP. Writes under mcp.allowWrites, never offered to an investigation agent; they run AgentChangeUndo as the mcp role. */
+            .WithGeminiCompatibleTools<DarlingMcpAgentChangeAdminTools>()
             /* #6227: disable_collector / enable_collector / set_collector_frequency / set_collector_run_at / set_collector_retention
                (writes, mcp.allowWrites, never offered to an investigation agent) and get_collector_schedules (a read). They run the
                command plane's own plans on config.config_collector_schedules and config_collector_run_times; the mcp role holds the
