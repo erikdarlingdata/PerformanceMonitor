@@ -585,7 +585,7 @@ GROUP BY hh, dw";
     }
 
     /// <summary>
-    /// The eleven per-metric baseline queries. Internal (was private) since #3653 Q6 so Lite.Tests can pin every
+    /// The twelve per-metric baseline queries. Internal (was private) since #3653 Q6 so Lite.Tests can pin every
     /// arm to the local-clock key and run the real text over a DuckDB fixture; null for a metric with no baseline.
     /// </summary>
     internal static string? GetBaselineQuery(string metricName)

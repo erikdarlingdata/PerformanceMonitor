@@ -1204,10 +1204,10 @@ FROM slots
 GROUP BY hh, dw";
 
     /// <summary>
-    /// The eleven per-metric baseline queries — Lite's, verbatim, except the QUALIFY
+    /// The twelve per-metric baseline queries — Lite's, verbatim, except the QUALIFY
     /// sites rewritten for Postgres (no QUALIFY support). Internal (not private like Lite's)
     /// so Darling.Tests can pin every query's dialect and the rewrites' structure ungated.
-    /// <para>#1743: the nine non-event metrics route their cleaned rowsets through
+    /// <para>#1743: the ten non-event metrics route their cleaned rowsets through
     /// <see cref="RobustTierScaffold"/> and return EIGHT columns (…, median_val, mad_val) — CPU
     /// and I/O latency included, reading their RAW hypertables at Lite's grain (their retired
     /// sum/sumsq rollups could not produce a median; both tables carry their own 30-day

@@ -907,6 +907,14 @@ SELECT
             var map = await _baselineProvider.GetBucketMapAsync(
                 context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
+            /* #6696: the write baseline and map are fetched here, beside the read ones and BEFORE the store read lock.
+               On the first pass of a UTC day each is a cold 30-day file_io scan (the daily cache tier), and run inside
+               the lock they would sit against the command wall. */
+            var writeBaseline = await _baselineProvider.GetBaselineAsync(
+                context.ServerId, MetricNames.IoWriteLatency, context.TimeRangeStart, context.CancellationToken);
+            var writeMap = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.IoWriteLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
+
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -1023,10 +1031,6 @@ ORDER BY local_hour";
             // Write latency anomaly — #6696: scored against the WRITE-latency baseline (IoWriteLatency), not the read series.
             if (wholeWrite.Samples > 0)
             {
-                var writeBaseline = await _baselineProvider.GetBaselineAsync(
-                    context.ServerId, MetricNames.IoWriteLatency, context.TimeRangeStart, context.CancellationToken);
-                var writeMap = await _baselineProvider.GetBucketMapAsync(
-                    context.ServerId, MetricNames.IoWriteLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
                 var writeThreshold = GetDeviationThreshold(MetricNames.IoWriteLatency);
                 var writeModifiedZThreshold = ModifiedZThresholdFor(MetricNames.IoWriteLatency, writeThreshold);
 
