@@ -355,7 +355,7 @@ public sealed class RecommendationCardViewModel
     /// (and starts at a local time that never happened) and one real hour too many across a fall-back change.
     /// </summary>
     internal static (DateTime From, DateTime To) FallbackWindow(ServerClock serverClock, DateTime utcNow)
-        => PerformanceMonitor.Darling.Storage.RecommendationAskAiPrompt.FallbackWindow(serverClock, utcNow);
+        => PerformanceMonitor.Analysis.RecommendationAskAiPrompt.FallbackWindow(serverClock, utcNow);
 }
 
 /// <summary>
@@ -782,7 +782,7 @@ public sealed class RecommendationsViewModel
     /// (RecommendationsTab AskAi_Click -> LiteRecommendationsViewModel.BuildAskAiPrompt).
     /// </summary>
     public static string BuildAskAiPrompt(string serverName, string title, DateTime from, DateTime to)
-        => PerformanceMonitor.Darling.Storage.RecommendationAskAiPrompt.Build(serverName, title, from, to);
+        => PerformanceMonitor.Analysis.RecommendationAskAiPrompt.Build(serverName, title, from, to);
 
     /// <summary>
     /// #6135: the status line with the Overview card's offline sentence after it for an offline server, so findings

@@ -221,13 +221,13 @@ function say(server, text) {
   paintGenerate(server);
 }
 
-/** The "Generate now" block: nothing for a read-only seat, a note for a store login that cannot queue, else the button and its status line. */
-function generateBar(server) {
+/** The "Generate now" block: nothing for a read-only seat, a note for a store login that cannot queue, else the button and its status line. The probe takes this render's abort signal, so a render the next tick replaced does not leave it running. */
+function generateBar(server, signal) {
   const slot = el("div", { class: "reco-generate" }, []);
   (async () => {
     const session = await getSession();
     if (!session || !session.can_edit) return;
-    const avail = await apiGet("/api/analyze-now/available");
+    const avail = await apiGet("/api/analyze-now/available", signal);
     if (avail.kind !== "data" || !avail.data) return;
     if (avail.data.can_queue !== true) {
       slot.appendChild(noticeStrip(generateUnavailableNote(avail.data.managed_store === true)));
@@ -339,6 +339,6 @@ export const analysisFindingsTab = {
     };
     reloaders.set(server, load);
     load();
-    return [el("div", { class: "panel card span-2" }, [el("h3", {}, ["Recommendations", el("span", { class: "panel-sub", text: " " + ctx.label }), dbScopeChip("get_analysis_findings")]), generateBar(server), body])];
+    return [el("div", { class: "panel card span-2" }, [el("h3", {}, ["Recommendations", el("span", { class: "panel-sub", text: " " + ctx.label }), dbScopeChip("get_analysis_findings")]), generateBar(server, ctx && ctx.signal), body])];
   },
 };

@@ -95,7 +95,7 @@ public sealed class ViewerRecommendationCardTests
     }
 
     [Fact]
-    public void BuildAskAiPrompt_PortsLitesExactText_ReferencingTheMcpTools()
+    public void BuildAskAiPrompt_ReferencesTheMcpTools_AndFramesTheHeadlineAsData()
     {
         var from = new DateTime(2026, 7, 1, 14, 0, 0, DateTimeKind.Utc);
         var to = new DateTime(2026, 7, 1, 15, 30, 0, DateTimeKind.Utc);

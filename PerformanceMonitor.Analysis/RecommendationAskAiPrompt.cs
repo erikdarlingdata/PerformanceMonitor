@@ -10,11 +10,11 @@ using System;
 using System.Globalization;
 using PerformanceMonitor.Analysis.Baselines;
 
-namespace PerformanceMonitor.Darling.Storage;
+namespace PerformanceMonitor.Analysis;
 
 /// <summary>
-/// The text "Ask AI" copies for a Recommendations finding (#6389). One builder for the Viewer's card and the web's route, so the two
-/// say the same thing for the same finding. It holds no key and calls no model: it is a prompt for the reader's own MCP client.
+/// The text "Ask AI" copies for a Recommendations finding (#6389). One builder for the Darling Viewer's card, the web's route and
+/// Lite's card, so the three say the same thing for the same finding. It holds no key and calls no model: it is a prompt for the reader's own MCP client.
 /// </summary>
 public static class RecommendationAskAiPrompt
 {

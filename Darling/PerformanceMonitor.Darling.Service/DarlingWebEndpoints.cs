@@ -4335,7 +4335,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 }
 
                 var clocks = await DarlingServerClocksReader.GetAsync(postgres, serverId, McpCommandDeadlines.ReadSeconds, context.RequestAborted);
-                var prompt = RecommendationAskAiPrompt.BuildFor(
+                var prompt = PerformanceMonitor.Analysis.RecommendationAskAiPrompt.BuildFor(
                     server, title, start, end, DarlingServerClocksReader.ClockFor(clocks, serverId), (clock ?? TimeProvider.System).GetUtcNow().UtcDateTime);
                 context.Response.Headers.CacheControl = "no-store";
                 return JsonNodeResult(new JsonObject { ["prompt"] = prompt });
