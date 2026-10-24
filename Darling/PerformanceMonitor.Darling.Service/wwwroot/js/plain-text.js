@@ -190,6 +190,35 @@ export function plainTextNamed(text) {
   return namedTokenText(text);
 }
 
+/**
+ * A collector's measurement counts put into words (shred_gated=1 events_read=0 -> "shred gated: 1, events read: 0"), and the
+ * underscore form of the same counts. Only these two rules apply to text that may echo a real error message (a collection
+ * log's Error cell holds a failed run's error and a successful run's note in the same column).
+ */
+function measurementCountsText(text) {
+  let t = text;
+
+  /* A collector's measurement counts: shred_gated=1 events_read=0 report_xml_empty=0. A run of two or more pairs, or a
+     lone pair whose label a collector really writes; any other lone pair, such as timeout=30 in a driver message, stays. */
+  t = t.replace(/(?<![\w.-])[a-z][a-z0-9]*(?:_[a-z0-9]+)*=-?\d+(?:\.\d+)?(?: [a-z][a-z0-9]*(?:_[a-z0-9]+)*=-?\d+(?:\.\d+)?)*(?![\w=])/g, (run) =>
+    run.includes(" ") || LABEL_SET.has(run.slice(0, run.indexOf("="))) ? pairsToText(run) : run,
+  );
+
+  /* The same counts written with an underscore for the "=": a run of two or more name_digits words. A lone word such as
+     pg_stat_statements_1 is left alone, so a real object name followed by a number is not rewritten. */
+  t = t.replace(/(?<![\w.])[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_\d+(?: [a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_\d+)+(?![\w])/g, underscoreCountsToText);
+  return t;
+}
+
+/**
+ * `text` with the named internal tokens and the measurement counts put into words, nothing else (#6649). For a collection
+ * log's message cell: a successful run leaves its counts there, and a failed run leaves a real error message.
+ */
+export function plainTextCounts(text) {
+  if (typeof text !== "string" || text === "") return text;
+  return measurementCountsText(namedTokenText(text));
+}
+
 /** Whether a word is a tool the service registers, get_ or otherwise. */
 function isToolName(word) {
   return TOOL_NAME_SET.has(word) || ACTION_TOOL_SET.has(word);
@@ -295,15 +324,7 @@ export function plainText(text) {
   t = t.replace(/\bpg_wraparound_stats\b/g, "the freeze-headroom collector");
   for (const [re, words] of FIELD_WORDS) t = t.replace(re, words);
 
-  /* A collector's measurement counts: shred_gated=1 events_read=0 report_xml_empty=0. A run of two or more pairs, or a
-     lone pair whose label a collector really writes; any other lone pair, such as timeout=30 in a driver message, stays. */
-  t = t.replace(/(?<![\w.-])[a-z][a-z0-9]*(?:_[a-z0-9]+)*=\d+(?: [a-z][a-z0-9]*(?:_[a-z0-9]+)*=\d+)*(?![\w=])/g, (run) =>
-    run.includes(" ") || LABEL_SET.has(run.slice(0, run.indexOf("="))) ? pairsToText(run) : run,
-  );
-
-  /* The same counts written with an underscore for the "=": a run of two or more name_digits words. A lone word such as
-     pg_stat_statements_1 is left alone, so a real object name followed by a number is not rewritten. */
-  t = t.replace(/(?<![\w.])[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_\d+(?: [a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_\d+)+(?![\w])/g, underscoreCountsToText);
+  t = measurementCountsText(t);
 
   /* The index-bloat "answered only" read says it in the read's own parameter name. The page shows the sentence under the
      answered-ranking panel, so it says why that ranking is empty, in words, and points at the table above that lists each
@@ -350,6 +371,18 @@ export function plainText(text) {
   t = t.replace(/\bcollector_name '/g, "collector '");
   t = t.replace(/\bmin_duration_ms (?=\d)/g, "minimum duration (ms) ");
   t = t.replace(/\bblocking_only\b/g, "blocking queries only");
+  /* #6649: field names inside the service's own sentences. The left-out databases' names live in the MCP answer's
+     `databases_left_out` list, which the page never shows, so the pointer goes and the count before it stays. */
+  t = t.replace(/ \(see databases_left_out\)/g, "");
+  t = t.replace(
+    /Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end\./g,
+    "Here the window starts before the baseline period, so the baseline holds only the part the store has.",
+  );
+  /* The memory clerk note has four arms (memory_clerk.note): two name latest_memory_mb, the Queries tab's "Latest MB" column,
+     and two name the collector's own relation, memory_clerks. */
+  t = t.replace(/\blatest_memory_mb\b/g, "Latest MB");
+  t = t.replace(/\bmemory_clerks capture\b/g, "memory clerk capture");
+  t = t.replace(/\bmemory_clerks stores\b/g, "The memory clerks collector stores");
   /* The system-health "events were captured, none qualified" closing. */
   t = t.replace(/so this is the healthy answer for this read rather than missing data/g, "so this is a normal result, not missing data");
 

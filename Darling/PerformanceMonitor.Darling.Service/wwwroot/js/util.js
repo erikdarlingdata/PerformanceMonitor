@@ -284,7 +284,11 @@ export function localizeIsoText(text) {
  */
 export function localizeAlertDetail(text, sample) {
   if (typeof text !== "string") return text;
-  let out = text.replace(/^(\s*(?:Incident Since|Started|Failed At|Snapshot|From|To|Window): )(.*)$/gm,
+  /* #6649: the collection-history audit's sentence says "N source(s)"; the count is known, so the word agrees with it. The audit's
+     body (CollectionHistoryAudit.Render) is ONE line of ". "-joined clauses, so the match is the sentence, up to its ". " or the
+     end of the text, never the line: the clauses after it (the source names, the ranges, the "Not read" list) print as written. */
+  let out = text.replace(/Retained history for .*?(?:\.(?=\s)|$)/gs, (sentence) => plainText(sentence));
+  out = out.replace(/^(\s*(?:Incident Since|Started|Failed At|Snapshot|From|To|Window): )(.*)$/gm,
     (m, lead, value) => lead + localizeIsoText(value));
   const at = sample && typeof sample.instant_utc === "string" ? parseUtc(sample.instant_utc) : null;
   if (at) {

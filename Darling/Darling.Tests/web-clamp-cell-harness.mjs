@@ -156,4 +156,21 @@ out.alertDetail = {
   sqlLine: "Blocked Query: SELECT * FROM t WHERE d = '2026-01-01 00:00:00Z'",
 };
 
+/* #6649: the cell's `plain` modes through the shared renderer. "counts" (the Collection Log's Error column) says the measurement counts in
+   words and leaves a tool name in a real error message; true is the full pass (a tool name becomes its tab); "named" puts only the
+   named tokens into words; no key prints as stored. */
+const modeNote = "Connection failed (timeout=30): ring_buffer_truncated=1 ring_buffer_events_hidden=167 newest_visible_event_age_s=4300; ask get_collection_health for hours_back";
+const pm = VIZ.table({ rows: [{ note: modeNote }] }, {
+  rowsKey: "rows", title: "Plain modes", tools: false,
+  columns: [
+    { key: "note", label: "Counts", wrap: true, plain: "counts" },
+    { key: "note", label: "Full", wrap: true, plain: true },
+    { key: "note", label: "Named", wrap: true, plain: "named" },
+    { key: "note", label: "As stored", wrap: true },
+  ],
+});
+const pmr = pm.findAll((n) => n.tag === "tr").filter((n) => n.parent && n.parent.tag === "tbody")[0];
+const pmt = pmr.children.map((c) => c.textContent);
+out.plainModes = { raw: modeNote, counts: pmt[0], full: pmt[1], named: pmt[2], asStored: pmt[3] };
+
 console.log(JSON.stringify(out));
