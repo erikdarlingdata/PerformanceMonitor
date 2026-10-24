@@ -25,6 +25,7 @@ using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -141,7 +142,7 @@ public sealed class ReadAdmissionCoverageCensusTests
 
         var web = File.ReadAllText(Path.Combine(ServiceDir, "DarlingWebEndpoints.cs"));
         var runner = web.IndexOf("internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(", StringComparison.Ordinal);
-        var core = web.IndexOf("RunComposedPanelCoreAsync(postgres, body,", runner, StringComparison.Ordinal);
+        var core = web.IndexOf("RunComposedPanelCoreAsync(ComposeHost, postgres, body,", runner, StringComparison.Ordinal);
         Assert.True(runner >= 0 && core > runner);
         Assert.Contains("ReadScope.AdmitAsync(admission, ReadSurface.Compose, composeRoute, composeBand, cancellationToken)", web[runner..core], StringComparison.Ordinal);
 

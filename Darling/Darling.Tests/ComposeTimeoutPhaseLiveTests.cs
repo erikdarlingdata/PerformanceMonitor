@@ -74,7 +74,7 @@ public sealed class ComposeTimeoutPhaseLiveTests
         Assert.True(outcome.IsServerError, outcome.Error);
         Assert.StartsWith("Error running query: could not get a store connection in time: ", outcome.Error, StringComparison.Ordinal);
         Assert.Contains("connection pool has been exhausted", outcome.Error, StringComparison.Ordinal);
-        Assert.NotEqual(DarlingWebEndpoints.StatementTimeoutText, outcome.Error);
+        Assert.NotEqual(ComposePanelRunner.StatementTimeoutText, outcome.Error);
         Assert.NotEqual("57014", outcome.AuthorSqlState);
     }
 
@@ -110,7 +110,7 @@ public sealed class ComposeTimeoutPhaseLiveTests
 
             Assert.True(clock.Elapsed < TimeSpan.FromSeconds(60), $"The 5 s compose timeout plus headroom should bound the measure query; it took {clock.Elapsed.TotalSeconds:F1} s.");
             Assert.Equal("57014", outcome.AuthorSqlState);
-            Assert.Equal(DarlingWebEndpoints.StatementTimeoutText, outcome.Error);
+            Assert.Equal(ComposePanelRunner.StatementTimeoutText, outcome.Error);
         }
         finally
         {

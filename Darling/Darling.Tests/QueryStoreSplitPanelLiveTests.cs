@@ -140,7 +140,7 @@ VALUES (1, (now() AT TIME ZONE 'UTC') - interval '30 hours', now() AT TIME ZONE 
         foreach (var panel in s_panels)
         {
             var (start, end, plan, rollups, coverage) = await PrepareAsync(source, panel, ct);
-            var resolution = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct, plan);
+            var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct, plan);
             Assert.True(resolution.Eligible, "servers 1 to 3 pass, so the panel must read the interval table for them: " + panel);
             Assert.Equal(new[] { 4 }, resolution.RawServerIds);
 
@@ -188,7 +188,7 @@ VALUES (1, (now() AT TIME ZONE 'UTC') - interval '30 hours', now() AT TIME ZONE 
 
         async Task<(string Sql, IReadOnlyList<int>? Raw, bool Eligible)> RunAsync(params string[] scope)
         {
-            var resolution = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(source, scope, start, end, null, ct, plan);
+            var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(source, scope, start, end, null, ct, plan);
             var context = new ComposeRunContext(scope, start, end, ComposeRunContext.NoVariables, rollups, end, coverage, resolution.Eligible, resolution.WideStart,
                 QueryStoreGroupMembers: resolution.GroupMembers, QueryStoreStampThrough: resolution.StampThrough, QueryStoreRawServerIds: resolution.RawServerIds);
             var (compiled, error) = ComposeCompiler.Compile(plan, context);
@@ -278,7 +278,7 @@ FROM collect.query_store_stats AS r WHERE r.server_id = 1", ct);
             async Task<(List<string> Split, List<string> AllRaw, string Sql)> RunBothAsync(string panel)
             {
                 var (start, end, plan, rollups, coverage) = await PrepareAsync(source, panel, ct);
-                var resolution = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct, plan);
+                var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct, plan);
                 Assert.True(resolution.Eligible, "servers 1 to 3 pass, so the panel must read the wide route: " + panel);
                 Assert.Equal(new[] { 4 }, resolution.RawServerIds);
                 Assert.Equal(hourNow.AddHours(-2), resolution.StampThrough);
@@ -328,7 +328,7 @@ FROM collect.query_store_stats AS r WHERE r.server_id = 1", ct);
             "INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected) "
             + $"VALUES ({6_115_000_000L + logId}, {serverId}, 'srv{serverId}', 'query_store', (now() AT TIME ZONE 'UTC') - interval '{ago}', 20, 'SUCCESS', {rows})", ct);
 
-    private static async Task<DarlingWebEndpoints.ComposeRunOutcome> RunPanelAsync(NpgsqlDataSource source, CancellationToken ct) =>
+    private static async Task<ComposeRunOutcome> RunPanelAsync(NpgsqlDataSource source, CancellationToken ct) =>
         await DarlingWebEndpoints.RunComposedPanelAsync(source, new JsonObject { ["panel"] = JsonNode.Parse(s_panels[0]), ["hours"] = 24 }, ct);
 
     /// <summary>#6115: the raw half of the read guard (<see cref="QueryStoreWideReadGuard.Estimate.RawRows"/>). Server 4 is read raw; its collection

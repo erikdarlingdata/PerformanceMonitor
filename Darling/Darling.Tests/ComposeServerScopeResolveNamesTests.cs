@@ -102,7 +102,7 @@ public sealed class ComposeServerScopeResolveNamesTests
     {
         var (scope, refusal) = ComposeServerScope.ResolveNames(new[] { "NO-SUCH-SERVER" }, Servers);
         Assert.Null(refusal);
-        var message = DarlingWebEndpoints.UnknownServerMessage(scope, new[] { "NO-SUCH-SERVER" }, new System.Text.Json.Nodes.JsonArray());
+        var message = ComposePanelRunner.UnknownServerMessage(scope, new[] { "NO-SUCH-SERVER" }, new System.Text.Json.Nodes.JsonArray());
         Assert.NotNull(message);
         Assert.Contains("'NO-SUCH-SERVER'", message, StringComparison.Ordinal);
     }

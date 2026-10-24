@@ -314,7 +314,7 @@ public sealed class QueryStoreWideReadRefusalLiveTests
             $"SELECT applied_through FROM collect.query_store_interval_wide_coverage WHERE server_id = {ServerId}", ct))!;
         await ExecAsync(connection, $"SELECT drop_chunks('collect.query_store_stats', older_than => TIMESTAMP '{S.AddDays(1):yyyy-MM-dd HH:mm:ss}')", ct);
 
-        var resolution = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(postgres, null, S, end, end, ct);
+        var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(postgres, null, S, end, end, ct);
         Assert.True(resolution.Eligible, "the seeded store must route the panel to the wide table, or this test proves nothing");
 
         /* The window end carries the microseconds applied_through has: a whole-second end can fall before it, and the gate

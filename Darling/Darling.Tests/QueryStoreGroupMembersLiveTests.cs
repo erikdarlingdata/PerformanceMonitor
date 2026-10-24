@@ -128,7 +128,7 @@ public sealed class QueryStoreGroupMembersLiveTests
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         /* An empty store is not wide-eligible, whatever the plan: nothing to count, and the default tuple says so. */
-        var none = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(
+        var none = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(
             postgres, null, DateTime.UtcNow.AddDays(-2), DateTime.UtcNow, null, ct, QueryStoreRankedHarness.Parse(Panel("module_name")));
         Assert.False(none.Eligible);
         Assert.Null(none.GroupMembers);
