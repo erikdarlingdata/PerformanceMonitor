@@ -597,5 +597,16 @@ public partial class AlertsHistoryTab : UserControl
         window.ShowDialog();
     }
 
+    private void CustomViews_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService == null)
+        {
+            return;
+        }
+
+        var window = new CustomViewsWindow(_dataService) { Owner = Window.GetWindow(this) };
+        window.ShowDialog();
+    }
+
     #endregion
 }

@@ -22,9 +22,10 @@ public sealed record ReadPanelParam(string Name, bool Required);
 /// write. In Storage so the web, the MCP tools and the Viewer share one copy (#6390 S2b-B); the Service's
 /// <c>DarlingWebEndpoints</c> keeps forwarders. A v1 read panel names a read, checked against <see cref="KnownReadNames"/>
 /// (a test pins it equal to the Service's read dispatch keys, so a new read cannot be missed); its parameters are checked
-/// against whatever the caller's <c>readParams</c> returns for that read (the Service passes its hand-authored catalog).
+/// against whatever the caller's <c>readParams</c> returns for that read (the Service passes its hand-authored catalog; the Viewer,
+/// which has no catalog, uses <see cref="KnownReadParams"/> through the one-argument <see cref="ValidateDefinition(string?)"/>, #6390 S5).
 /// </summary>
-public static class CustomViewValidation
+public static partial class CustomViewValidation
 {
     /// <summary>Every read name a v1 read panel may reference: the keys of the Service's read dispatch.</summary>
     public static readonly IReadOnlyList<string> KnownReadNames = new[]
@@ -361,6 +362,10 @@ public static class CustomViewValidation
     /// only when someone next edits it. v1 READ panels keep their open presentation vocabulary — see the note
     /// on the key sets above.</para>
     /// </summary>
+    public static DefinitionValidation ValidateDefinition(string? definitionJson) =>
+        ValidateDefinition(definitionJson, ReadParams);
+
+    /// <inheritdoc cref="ValidateDefinition(string?)"/>
     public static DefinitionValidation ValidateDefinition(string? definitionJson, Func<string, IReadOnlyList<ReadPanelParam>?> readParams)
     {
         if (string.IsNullOrWhiteSpace(definitionJson))

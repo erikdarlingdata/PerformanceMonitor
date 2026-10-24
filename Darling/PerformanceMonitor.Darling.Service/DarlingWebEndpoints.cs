@@ -5717,7 +5717,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static string[] RefreshChoices => CustomViewValidation.RefreshChoices;
 
     /// <summary>The declared parameters of one read from <see cref="CatalogDescriptors"/>, null when it has no entry.</summary>
-    private static IReadOnlyList<ReadPanelParam>? ReadPanelParams(string read) =>
+    internal static IReadOnlyList<ReadPanelParam>? ReadPanelParams(string read) =>
         CatalogDescriptors.TryGetValue(read, out var descriptor)
             ? descriptor.Params.Select(p => new ReadPanelParam(p.Name, p.Required)).ToList()
             : null;
