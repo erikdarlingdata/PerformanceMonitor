@@ -330,7 +330,7 @@ public sealed class AgentChangeAdminToolsLiveTests
             foreach (var sql in new[]
             {
                 "UPDATE config.config_service SET paused = TRUE WHERE id = 1",
-                "UPDATE config.config_service SET capture_plans = NOT capture_plans WHERE id = 1",
+                "UPDATE config.config_service SET mcp_port = 1 WHERE id = 1", /* #6401 merge: dev now grants mcp capture_plans (update_service_flags), so a column it still lacks stands in */
                 "UPDATE config.investigation_journal SET reason = 'x'",
                 "DELETE FROM config.investigation_journal",
                 "UPDATE config.investigation_signature_merges SET reason = 'x'",

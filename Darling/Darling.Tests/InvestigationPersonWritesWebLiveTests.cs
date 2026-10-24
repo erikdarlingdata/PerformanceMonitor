@@ -83,7 +83,8 @@ public sealed class InvestigationPersonWritesWebLiveTests
     private static async Task WithWebRoutesAsync(
         string managedRole,
         Func<string?> signedInAs,
-        Func<NpgsqlDataSource, InvestigationRequestStore, Func<string, string, string?, string?, Task<(int Status, JsonNode? Body)>>, CancellationToken, Task> body)
+        Func<NpgsqlDataSource, InvestigationRequestStore, Func<string, string, string?, string?, Task<(int Status, JsonNode? Body)>>, CancellationToken, Task> body,
+        AdminArmShape arm = AdminArmShape.None, bool managedStore = false, bool seatCanEdit = true)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation person-write live tests.");
@@ -118,6 +119,7 @@ public sealed class InvestigationPersonWritesWebLiveTests
                 Pooling = false,
             }.ConnectionString;
             await using var webLogin = NpgsqlDataSource.Create(asSeat);
+            using var adminArm = await AdminArmLive.BuildAsync(owner, scratch, roleName, arm, ct);
 
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
@@ -132,12 +134,13 @@ public sealed class InvestigationPersonWritesWebLiveTests
             {
                 if (signedInAs() is { } name)
                 {
-                    http.Items[DarlingWebSeat.HttpContextItemKey] = new DarlingWebSeat(name, true);
+                    http.Items[DarlingWebSeat.HttpContextItemKey] = new DarlingWebSeat(name, seatCanEdit);
                 }
 
                 await next(http);
             });
-            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger());
+            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(),
+                postgresConfig: managedStore ? new PostgresConfig { Managed = true } : null, adminArm: adminArm);
             await app.StartAsync(ct);
             using var server = app.GetTestServer();
 
@@ -168,7 +171,7 @@ public sealed class InvestigationPersonWritesWebLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
             {
                 NpgsqlConnection.ClearAllPools();
-                await using var drop = new NpgsqlCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}", connection);
+                await using var drop = new NpgsqlCommand(AdminArmLive.DropRolesSql(roleName), connection);
                 await drop.ExecuteNonQueryAsync(token);
             });
         }
@@ -323,6 +326,63 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
             Assert.Equal("IsPractice", (string)(await Send("PUT", $"/api/investigation-practice-requests/{practiceId}", Json, "{}")).Body!["outcome"]!);
             Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_requests WHERE practice_of IS NOT NULL", ct));
         });
+    }
+
+    /* #6600: the managed store's shape. The web reads as the viewer role; a signed-in admin's close, note and practice request go through the arm
+       and each records the person. */
+    [Fact]
+    public async Task OnTheManagedStore_ASignedInAdminSeat_ClosesWritesAndPractisesThroughTheArm_AsThePerson()
+    {
+        await WithWebRoutesAsync("viewer", () => "alice", async (owner, store, Send, ct) =>
+        {
+            var judged = await ReportedAsync(store, DateTime.UtcNow.AddHours(-5), null, ct);
+            var open = await OpenAsync(store, DateTime.UtcNow.AddHours(-1), ct);
+            await new InvestigationFeedbackStore(owner, 30).RecordAsync(new InvestigationFeedbackSubmission(judged, "right", null, null, null, "lee"), ct);
+
+            var closed = await Send("PUT", $"/api/investigation-requests/{open}/close", Json, "{\"reason\":\"duplicate\"}");
+            Assert.Equal(200, closed.Status);
+            Assert.Equal("person:alice", (string)closed.Body!["closed_by"]!);
+
+            var note = await Send("PUT", "/api/investigation-notes", Json, "{\"note_text\":\"a person wrote this\",\"server_id\":" + ServerId + "}");
+            Assert.Equal(200, note.Status);
+            Assert.Equal("person:alice", (string)note.Body!["author"]!);
+
+            var practice = await Send("PUT", $"/api/investigation-practice-requests/{judged}", Json, "{}");
+            Assert.Equal(200, practice.Status);
+            Assert.Equal("person:alice", (string)practice.Body!["opened_by"]!);
+
+            Assert.Equal("3", await ScalarAsync(owner,
+                "SELECT count(*) FROM config.investigation_journal WHERE actor = 'person:alice' AND event IN ('closed', 'note_written', 'opened')", ct));
+        }, arm: AdminArmShape.Admin, managedStore: true);
+    }
+
+    /* #6600: an OIDC viewer seat never opens the arm (its login is refused here, so opening it would fail): the writes answer as they do today. */
+    [Fact]
+    public async Task OnTheManagedStore_AViewerSeat_NeverOpensTheArm_AndAnswersAsToday()
+    {
+        await WithWebRoutesAsync("viewer", () => "viewer-person", async (owner, store, Send, ct) =>
+        {
+            var open = await OpenAsync(store, DateTime.UtcNow.AddHours(-1), ct);
+            var refused = await Send("PUT", $"/api/investigation-requests/{open}/close", Json, "{\"reason\":\"viewer tries\"}");
+            Assert.Equal(403, refused.Status);
+            Assert.Equal(DarlingWebEndpoints.InvestigationWriteSignInMessage, (string)refused.Body!["error"]!);
+            Assert.Equal("open", await ScalarAsync(owner, $"SELECT state FROM config.investigation_requests WHERE request_id = '{open}'", ct));
+        }, arm: AdminArmShape.Refused, managedStore: true, seatCanEdit: false);
+    }
+
+    /* #6600: with the switch off (no arm on a managed store) the signed-in admin gets today's 403, which now names the switch. */
+    [Fact]
+    public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminGets403_NamingTheSwitch()
+    {
+        await WithWebRoutesAsync("viewer", () => "alice", async (owner, store, Send, ct) =>
+        {
+            var open = await OpenAsync(store, DateTime.UtcNow.AddHours(-1), ct);
+            var refused = await Send("PUT", $"/api/investigation-requests/{open}/close", Json, "{\"reason\":\"no switch\"}");
+            Assert.Equal(403, refused.Status);
+            Assert.Equal(DarlingWebEndpoints.InvestigationWriteRefusedMessage(true, adminWritesOff: true), (string)refused.Body!["error"]!);
+            Assert.Contains("web.allowAdminWrites", (string)refused.Body["error"]!, StringComparison.Ordinal);
+            Assert.Equal("open", await ScalarAsync(owner, $"SELECT state FROM config.investigation_requests WHERE request_id = '{open}'", ct));
+        }, managedStore: true);
     }
 
     [Fact]

@@ -560,7 +560,7 @@ public partial class SettingsWindow : Window
         /* #2164 / #2170 collector memory knobs. Unlike the ports these are always in force (there is no
            "disabled" state to excuse a bad value), so a bad entry always blocks the save rather than
            silently keeping a last-known value. The service clamps on read as defense in depth. */
-        if (int.TryParse(QueryStoreTextBudgetMbTextBox.Text, out var parsedBudget) && parsedBudget is >= 4 and <= 256)
+        if (int.TryParse(QueryStoreTextBudgetMbTextBox.Text, out var parsedBudget) && ServiceFlagLimits.TextBudgetMbError(parsedBudget) is null)
         {
             textBudgetMb = parsedBudget;
         }
@@ -568,12 +568,12 @@ public partial class SettingsWindow : Window
         {
             SelectTabOf(QueryStoreTextBudgetMbTextBox);
             MessageBox.Show(
-                "Query Store text budget must be between 4 and 256 MB.",
+                ServiceFlagLimits.TextBudgetMbMessage,
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
 
-        if (int.TryParse(MaxConcurrentSweepsTextBox.Text, out var parsedSweeps) && parsedSweeps is >= 1 and <= 16)
+        if (int.TryParse(MaxConcurrentSweepsTextBox.Text, out var parsedSweeps) && ServiceFlagLimits.ConcurrentSweepsError(parsedSweeps) is null)
         {
             maxSweeps = parsedSweeps;
         }
@@ -581,14 +581,14 @@ public partial class SettingsWindow : Window
         {
             SelectTabOf(MaxConcurrentSweepsTextBox);
             MessageBox.Show(
-                "Concurrent server sweeps must be between 1 and 16.",
+                ServiceFlagLimits.ConcurrentSweepsMessage,
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
 
         /* #6211: plans per database-hour and metric whose text and plan the Query Store collector fetches. 0 means every new plan, so the floor
            is 0; the service clamps on read as defense in depth. */
-        if (int.TryParse(QueryStoreFetchTopNTextBox.Text, out var parsedTopN) && parsedTopN is >= 0 and <= 100000)
+        if (int.TryParse(QueryStoreFetchTopNTextBox.Text, out var parsedTopN) && ServiceFlagLimits.FetchTopNError(parsedTopN) is null)
         {
             fetchTopN = parsedTopN;
         }
@@ -596,7 +596,7 @@ public partial class SettingsWindow : Window
         {
             SelectTabOf(QueryStoreFetchTopNTextBox);
             MessageBox.Show(
-                "Query Store fetch top N must be between 0 and 100000 (0 fetches every new plan).",
+                ServiceFlagLimits.FetchTopNMessage,
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
@@ -607,13 +607,13 @@ public partial class SettingsWindow : Window
     private void CopyMcpCommandButton_Click(object sender, RoutedEventArgs e)
     {
         var port = McpPortTextBox.Text;
-        /* The service needs the MCP token on loopback too unless mcp.allowTokenlessLoopback is on, so the command
-           carries the header with a placeholder; the token itself never reaches the clipboard from here. */
-        var command = $"claude mcp add --transport http --scope user sql-monitor-darling http://localhost:{port}/ "
-            + "--header \"Authorization: Bearer <token>\"";
+        /* The same text the service's --enable-mcp prints (#6474). The service needs the MCP token on loopback too
+           unless mcp.allowTokenlessLoopback is on, so the command carries the header with a placeholder; the token
+           itself never reaches the clipboard from here. */
+        var command = DarlingEndpointClientText.ClaudeMcpAddCommand(port);
         /* SetDataObject with copy=false avoids WPF's problematic Clipboard.Flush(). */
         McpStatusText.Text = ClipboardText.TrySetDataObject(command)
-            ? "Copied to clipboard! Replace <token> with the MCP token: --print-mcp-token on the service host prints it."
+            ? "Copied to clipboard! Replace <token> with the MCP token: --print-mcp-token on the service host prints it. If the service's MCP network listener has a tls block, change http to https in the copied command."
             : "Couldn't copy: the clipboard is in use.";
     }
 

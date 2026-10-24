@@ -96,7 +96,7 @@ public sealed class McpAlertTools
                 return dismissedExcludedCount > 0
                     ? McpHelpers.Status(
                         "empty",
-                        $"No undismissed alerts found in the specified time range{filterSentence}, but {dismissedExcludedCount} dismissed alert(s) were excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.")
+                        $"No undismissed alerts found in the specified time range{filterSentence}, but {dismissedExcludedCount} dismissed {(dismissedExcludedCount == 1 ? "alert was" : "alerts were")} excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.")
                     : McpHelpers.Status("empty", $"No alerts found in the specified time range{filterSentence}.");
             }
 
@@ -795,7 +795,7 @@ public sealed class McpAlertTools
                     "empty",
                     configured == 0
                         ? "No mute rules are configured for this store, so no alert is being suppressed anywhere — a quiet alert history is genuine rather than muted."
-                        : $"No mute rules are in force right now: {configured} rule(s) exist but every one of them is disabled or expired, so nothing is being suppressed. Pass enabled_only=false to list them — this is a lapsed mute, not an absent one.",
+                        : $"No mute rules are in force right now: {configured} {(configured == 1 ? "rule exists but it is" : "rules exist but every one of them is")} disabled or expired, so nothing is being suppressed. Pass enabled_only=false to list them — this is a lapsed mute, not an absent one.",
                     new { enabled_only, configured_count = configured, excluded_by_filter = configured - rules.Count }));
             }
 

@@ -33,6 +33,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 public partial class TimeRangeSlicerControl : UserControl
 {
     private List<TimeSliceBucket> _data = new();
+    private List<(int Start, int Count)> _runs = new();
+
+    /// <summary>The pieces the line and area are drawn in after the last LoadData (see <see cref="StripGaps.RunsOverFilledBuckets"/>).</summary>
+    internal IReadOnlyList<(int Start, int Count)> DrawnRuns => _runs;
+
     private DateTime? _requestedStartUtc;
     private DateTime? _requestedEndUtc;
     private string _metricLabel = "Sessions";
@@ -106,6 +111,7 @@ public partial class TimeRangeSlicerControl : UserControl
         _requestedStartUtc = requestedStartUtc;
         _requestedEndUtc = requestedEndUtc;
         _data = FillEmptyBuckets(data, requestedStartUtc, requestedEndUtc);
+        _runs = StripGaps.RunsOverFilledBuckets(_data.Select(d => d.BucketTime).ToList(), data.Select(d => d.BucketTime).ToList());
         _emptyText = null;
         _metricLabel = metricLabel;
 
@@ -132,6 +138,7 @@ public partial class TimeRangeSlicerControl : UserControl
     public void ShowEmpty(string text)
     {
         _data = new List<TimeSliceBucket>();
+        _runs = new List<(int Start, int Count)>();
         _overlayData = null;
         _requestedStartUtc = null;
         _requestedEndUtc = null;
@@ -278,13 +285,20 @@ public partial class TimeRangeSlicerControl : UserControl
             linePoints.Add(new Point(x, y));
         }
 
+        /* #6651 (#5644 W7): a stretch with no samples (the service host was off overnight) is a break in the strip, not a ramp or a flat
+           line across it. LoadData judged it on the real buckets, before the fill. */
+        var runs = _runs;
+
         var fillBrush = FindBrush("SlicerChartFillBrush", "#332EAEF1");
         var areaGeo = new StreamGeometry();
         using (var ctx = areaGeo.Open())
         {
-            ctx.BeginFigure(new Point(linePoints[0].X, chartBottom), true, true);
-            foreach (var pt in linePoints) ctx.LineTo(pt, true, false);
-            ctx.LineTo(new Point(linePoints[^1].X, chartBottom), true, false);
+            foreach (var (start, count) in runs)
+            {
+                ctx.BeginFigure(new Point(linePoints[start].X, chartBottom), true, true);
+                for (int i = start; i < start + count; i++) ctx.LineTo(linePoints[i], true, false);
+                ctx.LineTo(new Point(linePoints[start + count - 1].X, chartBottom), true, false);
+            }
         }
         SlicerCanvas.Children.Add(new Path { Data = areaGeo, Fill = fillBrush });
 
@@ -292,8 +306,11 @@ public partial class TimeRangeSlicerControl : UserControl
         var lineGeo = new StreamGeometry();
         using (var ctx = lineGeo.Open())
         {
-            ctx.BeginFigure(linePoints[0], false, false);
-            for (int i = 1; i < linePoints.Count; i++) ctx.LineTo(linePoints[i], true, false);
+            foreach (var (start, count) in runs)
+            {
+                ctx.BeginFigure(linePoints[start], false, false);
+                for (int i = start + 1; i < start + count; i++) ctx.LineTo(linePoints[i], true, false);
+            }
         }
         SlicerCanvas.Children.Add(new Path { Data = lineGeo, Stroke = lineBrush, StrokeThickness = 1.5 });
 

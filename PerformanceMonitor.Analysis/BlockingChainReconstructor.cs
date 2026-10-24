@@ -212,6 +212,11 @@ internal static class BlockingChainReconstructor
 
         foreach (var row in pairs)
         {
+            // #6645: a parallel query's threads write reports with blocked spid = blocking spid (different ecid).
+            // That is the query waiting on itself, not blocking: make no node, so no edge or cycle either.
+            if (row.BlockingSpid == row.BlockedSpid)
+                continue;
+
             // The collector reconstructs cumulatively (loop = null) so an episode's per-scan re-fires merge into
             // one chain (preserves window-level depth/victims for the severity fact); the viewer scopes per scan.
             var loop = scopeByMonitorLoop ? row.MonitorLoop : null;

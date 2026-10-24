@@ -22,9 +22,9 @@
 --              dismissed column of config.config_alert_log (the web Alert History dismiss, #4843), and INSERT
 --              on config.config_monitored_servers and no UPDATE on it: the web add-server route (#4843) inserts, and
 --              the web edit-server route (#5240) edits through config.edit_monitored_server, a function it may
---              execute (its credential column stays SELECT-carved), and the web Run collectors now (#5941) and Run live now
---              (#6386) buttons queue their command rows through config.request_snapshot_now and
---              config.request_active_queries_live, functions it may execute (mcp may execute request_snapshot_now too). Every table is non-secret-keyed; over the web every write is gated server-side by the host's auth + seat model -- these
+--              execute (its credential column stays SELECT-carved), and the web Run collectors now (#5941), Run live now
+--              (#6386) and Generate now (#6389) buttons queue their command rows through config.request_snapshot_now,
+--              config.request_active_queries_live and config.request_analyze_now, functions it may execute (mcp may execute request_snapshot_now too). Every table is non-secret-keyed; over the web every write is gated server-side by the host's auth + seat model -- these
 --              grants are only the floor beneath that gate. All other write actions degrade gracefully. The
 --              web dashboard's identity, and a locked-down Viewer's (postgres.connectAs = "viewer").
 --   mcp     -- the MCP server's identity: viewer's reads (the same secret-column carve), plus the MCP tools'
@@ -856,6 +856,19 @@ GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;
 -- #6230: pause_collection / resume_collection queue a pause or resume command through config.request_mcp_command, so mcp holds no
 --     write on the paused column. An earlier build granted it; this revoke takes it back from an upgraded store.
 REVOKE UPDATE (paused) ON config.config_service FROM mcp;
+-- #6393: update_service_flags runs as mcp and sets exactly these five service flags (plan capture, Query Store backfill, text budget, max concurrent
+--    sweeps, fetch top N): a column list, so mcp still cannot write mcp_enabled, mcp_port, web_enabled, web_port or paused (turning MCP off from MCP
+--    would lock the admin out; those stay Viewer-only). The write fires the config_service self-bump trigger (BEFORE UPDATE, it assigns NEW.config_version and NEW.updated_at), so it needs no further grant.
+--    Skipped, with a warning, on a store the service has not upgraded to the fetch-top-N column yet (V209); re-run this script after it has.
+DO $do$
+BEGIN
+   IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_service' AND column_name = 'query_store_fetch_top_n') THEN
+      GRANT UPDATE (capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n) ON config.config_service TO mcp;
+   ELSE
+      RAISE WARNING 'config.config_service has no query_store_fetch_top_n column yet: skipped the mcp service-flag column grant. Start the service once to migrate the store, then re-run this script.';
+   END IF;
+END
+$do$;
 -- #5085: the fleet server-tag write tools run as mcp; these two single-table grants are the admin gate. Both
 --     tables are non-secret, and server_tags.id is an identity column (no sequence grant). V181 (#5750) put a
 --     statement-level reload-beacon trigger on each, so a tag write bumps config_service; the config_service column grant above covers it.
@@ -1449,14 +1462,68 @@ END
 $fn$;
 REVOKE ALL ON FUNCTION config.request_active_queries_live(integer, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION config.request_active_queries_live(integer, text) TO viewer;
+-- #6389: the web's Generate now button on the Recommendations tab. The web route (viewer) queues an analyze_now command through
+--     config.request_analyze_now, the only way viewer writes that command row. The command type is fixed in the body and the
+--     caller supplies a server id and a requested_by label (the label is not checked: the web host and a locked-down Viewer share the
+--     viewer login, and the web's log line is the record of who asked). One request per server at a time, not within 15 seconds of
+--     the last, under the same advisory lock key the MCP analyze_now takes. Same function, same text, as managed provisioning
+--     rebuilds on every start.
+CREATE OR REPLACE FUNCTION config.request_analyze_now(
+   p_server_id integer,
+   p_requested_by text)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_id bigint;
+   v_last_status text;
+   v_last_at timestamp;
+BEGIN
+   -- The one-request-at-a-time rule below reads the newest row of its kind with a fresh snapshot per statement. A transaction that
+   -- keeps one snapshot (REPEATABLE READ and up) could miss a row another session just queued, so it is refused.
+   IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'This request must run at the READ COMMITTED isolation level.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM config.config_monitored_servers WHERE server_id = p_server_id) THEN
+      RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   -- Never blocks (provisioning rule): a request that holds the lock for this server is a concurrent request, which is the same
+   -- conflict as a pending row, so this refuses with DL409 instead of waiting. The key is the one config.request_mcp_command takes
+   -- for an analyze_now on this server, so a web click and an MCP call for the same server share one guard.
+   IF NOT pg_try_advisory_xact_lock(6230, hashtext('analyze_now:' || p_server_id::text)) THEN
+      RAISE EXCEPTION 'An analysis run for this server is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   SELECT c.status, c.created_at INTO v_last_status, v_last_at
+   FROM config.config_command AS c
+   WHERE c.command_type = 'analyze_now' AND c.target_server_id = p_server_id
+   ORDER BY c.command_id DESC
+   LIMIT 1;
+   IF v_last_status IN ('pending', 'in_progress') THEN
+      RAISE EXCEPTION 'An analysis run for this server is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   IF v_last_at IS NOT NULL AND v_last_at > (now() AT TIME ZONE 'UTC') - interval '15 seconds' THEN
+      RAISE EXCEPTION 'An analysis run was requested for this server less than 15 seconds ago.'
+         USING ERRCODE = 'DL429',
+               HINT = to_char(v_last_at + interval '15 seconds', 'YYYY-MM-DD') || 'T' || to_char(v_last_at + interval '15 seconds', 'HH24:MI:SS') || 'Z';
+   END IF;
+   INSERT INTO config.config_command (requested_by, command_type, target_server_id, args_json, status, created_at)
+   VALUES (left(COALESCE(p_requested_by, 'web'), 200), 'analyze_now', p_server_id, NULL, 'pending', (now() AT TIME ZONE 'UTC'))
+   RETURNING command_id INTO v_id;
+   RETURN v_id;
+END
+$fn$;
+REVOKE ALL ON FUNCTION config.request_analyze_now(integer, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION config.request_analyze_now(integer, text) TO viewer;
 -- #6231: the MCP route tools. mcp holds no INSERT on config.config_notification_routes and no SELECT or UPDATE on its
 --     destination columns, and gets none here: create_notification_route and update_notification_route reach the table only
 --     through these functions. create leaves every channel empty and update writes the match, scope, enabled flag, resolution
 --     override and fallback (the match or scope only on a route with no explicit agent setting); neither takes a destination.
 --     set_notification_route_destinations is the one function that sets a route's own destinations: the service seals each
 --     webhook value for the route's own row first and passes it in, and the function stores only an empty value or a sealed one
---     (the address list is plain text). All three re-read the row FOR UPDATE and refuse an agent route inside the transaction.
---     Granted to mcp only.
+--     (the address list is plain text). All three re-read the row FOR UPDATE and refuse an agent route inside the transaction,
+--     unless the actor the service passes is an operator-class token (#6542 part 2). Granted to mcp only.
 BEGIN;
 CREATE OR REPLACE FUNCTION config.create_notification_route(
    p_metric_match text,
@@ -1508,8 +1575,11 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer) FROM PUBLIC;
+-- #6542 part 2: the actor is an argument now and the before row comes back, so the old signature is dropped and stays uncallable.
+DROP FUNCTION IF EXISTS config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer);
 CREATE OR REPLACE FUNCTION config.update_notification_route(
    p_route_id integer,
+   p_actor text,
    p_columns text[],
    p_metric_match text,
    p_enabled boolean,
@@ -1517,13 +1587,16 @@ CREATE OR REPLACE FUNCTION config.update_notification_route(
    p_scope_tag_id integer,
    p_send_resolutions boolean,
    p_fallback_route_id integer)
-RETURNS void
+RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
    v_row config.config_notification_routes%ROWTYPE;
+   -- #6542 part 2: an operator-class MCP token (MCP is full admin) changes a route with an agent setting too. Every token connects as the
+   -- same mcp role, so this is the label the service passes, and the service's own tool gate is what holds an agent token away.
+   v_operator boolean := COALESCE(p_actor ~ '^operator:[A-Za-z0-9._: -]{1,64}$', false);
    v_match text;
    v_enabled boolean;
    v_server integer;
@@ -1542,18 +1615,18 @@ BEGIN
    IF NOT FOUND THEN
       RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
    END IF;
-   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 THEN
+   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 AND NOT v_operator THEN
       RAISE EXCEPTION 'That route is an agent route: it is changed in the Viewer, not over MCP.' USING ERRCODE = 'DL403';
    END IF;
    -- What a route matches and which servers it covers decide which servers an agent route covers, so a route with an
    -- explicit agent setting (Off included) keeps both in the Viewer. A route's own destinations do not stop a change
    -- to what it matches: the destinations are set over MCP too. (#6231)
-   IF ('metric_match' = ANY (p_columns) OR 'scope' = ANY (p_columns)) AND v_row.agent_level IS NOT NULL THEN
+   IF ('metric_match' = ANY (p_columns) OR 'scope' = ANY (p_columns)) AND v_row.agent_level IS NOT NULL AND NOT v_operator THEN
       RAISE EXCEPTION 'That route has an agent setting (Off), so what it matches and which servers it covers are changed in the Viewer or on the web dashboard, not over MCP. Turning it on, send_resolutions and fallback_route_id can still be changed here.' USING ERRCODE = 'DL403';
    END IF;
    -- An Off route keeps servers away from a broader agent route, so turning it off widens agent coverage: that is done in the Viewer
    -- or on the web dashboard. Turning it on stays here. (#6281)
-   IF 'enabled' = ANY (p_columns) AND v_row.agent_level IS NOT NULL AND COALESCE(p_enabled, v_row.enabled) = false THEN
+   IF 'enabled' = ANY (p_columns) AND v_row.agent_level IS NOT NULL AND COALESCE(p_enabled, v_row.enabled) = false AND NOT v_operator THEN
       RAISE EXCEPTION 'That route has an agent setting (Off), so turning it off is done in the Viewer or on the web dashboard, not over MCP. Turning it on can still be done here.' USING ERRCODE = 'DL403';
    END IF;
    v_match := CASE WHEN 'metric_match' = ANY (p_columns) THEN btrim(COALESCE(p_metric_match, '')) ELSE v_row.metric_match END;
@@ -1597,13 +1670,140 @@ BEGIN
           fallback_route_id = v_fallback,
           modified_at = (now() AT TIME ZONE 'UTC')
     WHERE route_id = p_route_id;
+   -- The row as it was before this change, in the journal's words: set_notification_route_agent journals it as the before of a
+   -- route_agent_changed row in the same transaction, so a match or scope change made with the agent fields is named in the row.
+   RETURN jsonb_build_object(
+      'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
+      'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
+      'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled);
 END
 $fn$;
-REVOKE ALL ON FUNCTION config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer) FROM PUBLIC;
+-- #6542: a named operator token sets a route's agent level, its four limits and its fallback over MCP through this function, and
+-- the change is journaled as route_agent_changed under the token's name (operator:<name>), in the same transaction. Levels 0 to 3 are
+-- set here (MCP is full admin). A level 3 server action still needs that server's switch (config_server_actions) and its remediation login.
+-- p_before is the row update_notification_route returned in the same transaction, so the journal row names a match, scope or enabled change
+-- made in the same call. The old signature is dropped and stays uncallable.
+DROP FUNCTION IF EXISTS config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean);
+CREATE OR REPLACE FUNCTION config.set_notification_route_agent(
+   p_route_id integer,
+   p_actor text,
+   p_columns text[],
+   p_agent_level integer,
+   p_agent_max_per_hour integer,
+   p_agent_max_per_day integer,
+   p_agent_lease_minutes integer,
+   p_agent_expiry_minutes integer,
+   p_fallback_route_id integer,
+   p_created boolean,
+   p_before jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_row config.config_notification_routes%ROWTYPE;
+   v_level integer;
+   v_hour integer;
+   v_day integer;
+   v_lease integer;
+   v_expiry integer;
+   v_fallback integer;
+   v_changed text[] := ARRAY[]::text[];
+   v_before jsonb;
+   v_after jsonb;
+BEGIN
+   IF p_actor IS NULL OR p_actor !~ '^operator:[A-Za-z0-9._: -]{1,64}$' THEN
+      RAISE EXCEPTION 'The actor is operator: and the operator token''s name, or the single token''s identity.' USING ERRCODE = 'DL400';
+   END IF;
+   -- No column is allowed only with p_before: a match, scope or enabled change to a route with an agent setting is journaled on its own.
+   IF p_columns IS NULL OR (cardinality(p_columns) = 0 AND p_before IS NULL)
+      OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
+                 WHERE c.name IS NULL OR c.name NOT IN ('agent_level', 'agent_max_per_hour', 'agent_max_per_day', 'agent_lease_minutes', 'agent_expiry_minutes', 'fallback_route_id')) THEN
+      RAISE EXCEPTION 'The columns to change are agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes and fallback_route_id.' USING ERRCODE = 'DL400';
+   END IF;
+   SELECT * INTO v_row FROM config.config_notification_routes WHERE route_id = p_route_id FOR UPDATE;
+   IF NOT FOUND THEN
+      RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
+   END IF;
+   v_level := CASE WHEN 'agent_level' = ANY (p_columns) THEN p_agent_level ELSE v_row.agent_level END;
+   v_hour := CASE WHEN 'agent_max_per_hour' = ANY (p_columns) THEN p_agent_max_per_hour ELSE v_row.agent_max_per_hour END;
+   v_day := CASE WHEN 'agent_max_per_day' = ANY (p_columns) THEN p_agent_max_per_day ELSE v_row.agent_max_per_day END;
+   v_lease := CASE WHEN 'agent_lease_minutes' = ANY (p_columns) THEN p_agent_lease_minutes ELSE v_row.agent_lease_minutes END;
+   v_expiry := CASE WHEN 'agent_expiry_minutes' = ANY (p_columns) THEN p_agent_expiry_minutes ELSE v_row.agent_expiry_minutes END;
+   v_fallback := CASE WHEN 'fallback_route_id' = ANY (p_columns) THEN p_fallback_route_id ELSE v_row.fallback_route_id END;
+   IF v_level IS NOT NULL AND v_level NOT IN (0, 1, 2, 3) THEN
+      RAISE EXCEPTION 'The agent level is Off (0), Investigate (1), Act (2) or Act on servers (3).' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_hour IS NULL OR v_hour NOT BETWEEN 1 AND 60 THEN
+      RAISE EXCEPTION 'Requests per hour must be between 1 and 60.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_day IS NULL OR v_day NOT BETWEEN 1 AND 500 THEN
+      RAISE EXCEPTION 'Requests per day must be between 1 and 500.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_lease IS NULL OR v_lease NOT BETWEEN 5 AND 120 THEN
+      RAISE EXCEPTION 'Lease minutes must be between 5 and 120.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_expiry IS NULL OR v_expiry NOT BETWEEN 15 AND 1440 THEN
+      RAISE EXCEPTION 'Expiry minutes must be between 15 and 1440.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_fallback IS NOT NULL AND v_fallback = p_route_id THEN
+      RAISE EXCEPTION 'A route cannot be its own fallback route.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_fallback IS NOT NULL AND v_fallback IS DISTINCT FROM v_row.fallback_route_id
+      AND NOT EXISTS (SELECT 1 FROM config.config_notification_routes WHERE route_id = v_fallback) THEN
+      RAISE EXCEPTION 'The fallback route does not exist.' USING ERRCODE = 'DL404';
+   END IF;
+   -- The names and their order are the Viewer's (NotificationRouteWriter.AgentChange).
+   IF p_before IS NOT NULL THEN
+      IF (p_before ->> 'metric_match') IS DISTINCT FROM btrim(v_row.metric_match) THEN v_changed := array_append(v_changed, 'metric_match'); END IF;
+      IF (p_before ->> 'scope_server_id')::integer IS DISTINCT FROM v_row.scope_server_id THEN v_changed := array_append(v_changed, 'scope_server_id'); END IF;
+      IF (p_before ->> 'scope_tag_id')::integer IS DISTINCT FROM v_row.scope_tag_id THEN v_changed := array_append(v_changed, 'scope_tag_id'); END IF;
+   END IF;
+   IF v_level IS DISTINCT FROM v_row.agent_level THEN v_changed := array_append(v_changed, 'agent_level'); END IF;
+   IF v_hour IS DISTINCT FROM v_row.agent_max_per_hour THEN v_changed := array_append(v_changed, 'agent_max_per_hour'); END IF;
+   IF v_day IS DISTINCT FROM v_row.agent_max_per_day THEN v_changed := array_append(v_changed, 'agent_max_per_day'); END IF;
+   IF v_lease IS DISTINCT FROM v_row.agent_lease_minutes THEN v_changed := array_append(v_changed, 'agent_lease_minutes'); END IF;
+   IF v_expiry IS DISTINCT FROM v_row.agent_expiry_minutes THEN v_changed := array_append(v_changed, 'agent_expiry_minutes'); END IF;
+   IF p_before IS NOT NULL AND ((p_before ->> 'agent_level') IS NOT NULL OR v_level IS NOT NULL)
+      AND (p_before ->> 'enabled')::boolean IS DISTINCT FROM v_row.enabled THEN
+      v_changed := array_append(v_changed, 'enabled');
+   END IF;
+   UPDATE config.config_notification_routes
+      SET agent_level = v_level::smallint,
+          agent_max_per_hour = v_hour,
+          agent_max_per_day = v_day,
+          agent_lease_minutes = v_lease,
+          agent_expiry_minutes = v_expiry,
+          fallback_route_id = v_fallback,
+          modified_at = (now() AT TIME ZONE 'UTC')
+    WHERE route_id = p_route_id;
+   -- The journal row the Viewer's save writes (NotificationRouteWriter.AgentChange): a new route journals only when it sets a level,
+   -- an edit when a level or a limit changed. A fallback alone changes no agent coverage, so it is not journaled, as in the Viewer.
+   IF (COALESCE(p_created, false) AND v_level IS NOT NULL) OR (NOT COALESCE(p_created, false) AND cardinality(v_changed) > 0) THEN
+      v_before := CASE WHEN COALESCE(p_created, false) THEN NULL WHEN p_before IS NOT NULL THEN p_before ELSE jsonb_build_object(
+         'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
+         'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
+         'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled) END;
+      v_after := jsonb_build_object(
+         'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
+         'agent_level', v_level, 'agent_max_per_hour', v_hour, 'agent_max_per_day', v_day,
+         'agent_lease_minutes', v_lease, 'agent_expiry_minutes', v_expiry, 'enabled', v_row.enabled);
+      INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail)
+      VALUES (now(), NULL, p_route_id, v_row.scope_server_id, 'route_agent_changed', p_actor,
+              CASE WHEN COALESCE(p_created, false) THEN 'created route' ELSE 'changed ' || array_to_string(v_changed, ', ') END,
+              jsonb_build_object('before', v_before, 'after', v_after));
+   END IF;
+END
+$fn$;
+REVOKE ALL ON FUNCTION config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb) FROM PUBLIC;
 -- The return type changed (a previous value is now only a flag for whether one was saved), which CREATE OR REPLACE cannot do on its own.
+-- #6542 part 2: the actor is an argument too, so the old signature is dropped and stays uncallable.
 DROP FUNCTION IF EXISTS config.set_notification_route_destinations(integer, text[], text, text, text, text, text);
 CREATE OR REPLACE FUNCTION config.set_notification_route_destinations(
    p_route_id integer,
+   p_actor text,
    p_columns text[],
    p_teams_url text,
    p_slack_url text,
@@ -1629,12 +1829,12 @@ BEGIN
       RAISE EXCEPTION 'The destinations to change are teams_url, slack_url, generic_url, pagerduty_routing_key and smtp_recipients.' USING ERRCODE = 'DL400';
    END IF;
    -- The row is read under its lock, so every check below is on what is stored now. The agent-route rule of
-   -- update_notification_route holds here too: an agent route is changed in the Viewer.
+   -- update_notification_route holds here too: an agent route is changed in the Viewer, or by an operator-class MCP token (#6542 part 2).
    SELECT * INTO v_row FROM config.config_notification_routes WHERE route_id = p_route_id FOR UPDATE;
    IF NOT FOUND THEN
       RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
    END IF;
-   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 THEN
+   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 AND NOT COALESCE(p_actor ~ '^operator:[A-Za-z0-9._: -]{1,64}$', false) THEN
       RAISE EXCEPTION 'That route is an agent route: it is changed in the Viewer, not over MCP.' USING ERRCODE = 'DL403';
    END IF;
    v_teams := CASE WHEN 'teams_url' = ANY (p_columns) THEN COALESCE(p_teams_url, '') ELSE v_row.teams_url END;
@@ -1687,10 +1887,205 @@ BEGIN
       CASE WHEN 'smtp_recipients' = ANY (p_columns) THEN v_row.smtp_recipients <> '' END;
 END
 $fn$;
-REVOKE ALL ON FUNCTION config.set_notification_route_destinations(integer, text[], text, text, text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer) TO mcp;
-GRANT EXECUTE ON FUNCTION config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) TO mcp;
-GRANT EXECUTE ON FUNCTION config.set_notification_route_destinations(integer, text[], text, text, text, text, text) TO mcp;
+GRANT EXECUTE ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer) TO mcp;
+GRANT EXECUTE ON FUNCTION config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) TO mcp;
+GRANT EXECUTE ON FUNCTION config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb) TO mcp;
+-- #6392: the MCP update_notification_channels tool. mcp holds no UPDATE on any secret column of config.config_notification (the SMTP
+--     user name and password, the Teams, Slack and generic webhook URLs, the generic headers, the PagerDuty routing key) and no SELECT
+--     on them, and gets none here: set_notification_channels is the one way it writes the default channels. The service seals each
+--     secret first (the SMTP password for its host, port, SSL flag and user name; a webhook value for its slot, proxy and, for the
+--     headers, the generic URL), and the function stores only an empty value or a sealed one, reads the row FOR UPDATE and makes the
+--     Viewer's refusals (a change to what a saved secret is tied to needs the secret again, a signing key blocks a URL or proxy change).
+--     It returns only whether each secret named in the call was saved before. The tool is served only under mcp.allowWrites with a token.
+--     Granted to mcp only.
+CREATE OR REPLACE FUNCTION config.set_notification_channels(
+   p_columns text[],
+   p_smtp_host text,
+   p_smtp_port integer,
+   p_smtp_use_ssl boolean,
+   p_smtp_username text,
+   p_smtp_password text,
+   p_smtp_from_address text,
+   p_smtp_recipients text,
+   p_teams_url text,
+   p_teams_proxy text,
+   p_slack_url text,
+   p_slack_proxy text,
+   p_generic_url text,
+   p_generic_headers text,
+   p_generic_body_template text,
+   p_generic_proxy text,
+   p_pagerduty_routing_key text,
+   p_pagerduty_use_eu_region boolean,
+   p_pagerduty_proxy text,
+   p_pagerduty_auto_resolve boolean)
+RETURNS TABLE (prev_smtp_username_set boolean, prev_smtp_password_set boolean, prev_teams_url_set boolean, prev_slack_url_set boolean,
+               prev_generic_url_set boolean, prev_generic_headers_set boolean, prev_pagerduty_routing_key_set boolean)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_row config.config_notification%ROWTYPE;
+   v_host text;
+   v_port integer;
+   v_ssl boolean;
+   v_user text;
+   v_password text;
+   v_from text;
+   v_recipients text;
+   v_teams text;
+   v_teams_proxy text;
+   v_slack text;
+   v_slack_proxy text;
+   v_generic text;
+   v_headers text;
+   v_body text;
+   v_generic_proxy text;
+   v_key text;
+   v_eu boolean;
+   v_pd_proxy text;
+   v_auto boolean;
+BEGIN
+   IF p_columns IS NULL OR cardinality(p_columns) = 0
+      OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
+                 WHERE c.name IS NULL OR c.name NOT IN (
+                    'smtp_host', 'smtp_port', 'smtp_use_ssl', 'smtp_username', 'smtp_encrypted_password', 'smtp_from_address', 'smtp_recipients',
+                    'teams_url', 'teams_proxy', 'slack_url', 'slack_proxy', 'generic_url', 'generic_headers', 'generic_body_template',
+                    'generic_proxy', 'pagerduty_routing_key', 'pagerduty_use_eu_region', 'pagerduty_proxy', 'pagerduty_auto_resolve')) THEN
+      RAISE EXCEPTION 'The notification channel columns to change are the SMTP, Teams, Slack, generic webhook and PagerDuty settings.' USING ERRCODE = 'DL400';
+   END IF;
+   -- The row is read under its lock, so every check below is on what is stored now.
+   SELECT * INTO v_row FROM config.config_notification WHERE id = 1 FOR UPDATE;
+   IF NOT FOUND THEN
+      RAISE EXCEPTION 'The notification settings row does not exist yet.' USING ERRCODE = 'DL404';
+   END IF;
+   v_host := CASE WHEN 'smtp_host' = ANY (p_columns) THEN COALESCE(p_smtp_host, '') ELSE v_row.smtp_host END;
+   v_port := CASE WHEN 'smtp_port' = ANY (p_columns) THEN COALESCE(p_smtp_port, v_row.smtp_port) ELSE v_row.smtp_port END;
+   v_ssl := CASE WHEN 'smtp_use_ssl' = ANY (p_columns) THEN COALESCE(p_smtp_use_ssl, v_row.smtp_use_ssl) ELSE v_row.smtp_use_ssl END;
+   v_user := CASE WHEN 'smtp_username' = ANY (p_columns) THEN COALESCE(p_smtp_username, '') ELSE COALESCE(v_row.smtp_username, '') END;
+   v_password := CASE WHEN 'smtp_encrypted_password' = ANY (p_columns) THEN COALESCE(p_smtp_password, '') ELSE COALESCE(v_row.smtp_encrypted_password, '') END;
+   v_from := CASE WHEN 'smtp_from_address' = ANY (p_columns) THEN COALESCE(p_smtp_from_address, '') ELSE v_row.smtp_from_address END;
+   v_recipients := CASE WHEN 'smtp_recipients' = ANY (p_columns) THEN btrim(COALESCE(p_smtp_recipients, '')) ELSE v_row.smtp_recipients END;
+   v_teams := CASE WHEN 'teams_url' = ANY (p_columns) THEN COALESCE(p_teams_url, '') ELSE v_row.teams_url END;
+   v_teams_proxy := CASE WHEN 'teams_proxy' = ANY (p_columns) THEN COALESCE(p_teams_proxy, '') ELSE v_row.teams_proxy END;
+   v_slack := CASE WHEN 'slack_url' = ANY (p_columns) THEN COALESCE(p_slack_url, '') ELSE v_row.slack_url END;
+   v_slack_proxy := CASE WHEN 'slack_proxy' = ANY (p_columns) THEN COALESCE(p_slack_proxy, '') ELSE v_row.slack_proxy END;
+   v_generic := CASE WHEN 'generic_url' = ANY (p_columns) THEN COALESCE(p_generic_url, '') ELSE v_row.generic_url END;
+   v_headers := CASE WHEN 'generic_headers' = ANY (p_columns) THEN COALESCE(p_generic_headers, '') ELSE v_row.generic_headers END;
+   v_body := CASE WHEN 'generic_body_template' = ANY (p_columns) THEN COALESCE(p_generic_body_template, '') ELSE v_row.generic_body_template END;
+   v_generic_proxy := CASE WHEN 'generic_proxy' = ANY (p_columns) THEN COALESCE(p_generic_proxy, '') ELSE v_row.generic_proxy END;
+   v_key := CASE WHEN 'pagerduty_routing_key' = ANY (p_columns) THEN COALESCE(p_pagerduty_routing_key, '') ELSE v_row.pagerduty_routing_key END;
+   v_eu := CASE WHEN 'pagerduty_use_eu_region' = ANY (p_columns) THEN COALESCE(p_pagerduty_use_eu_region, v_row.pagerduty_use_eu_region) ELSE v_row.pagerduty_use_eu_region END;
+   v_pd_proxy := CASE WHEN 'pagerduty_proxy' = ANY (p_columns) THEN COALESCE(p_pagerduty_proxy, '') ELSE v_row.pagerduty_proxy END;
+   v_auto := CASE WHEN 'pagerduty_auto_resolve' = ANY (p_columns) THEN COALESCE(p_pagerduty_auto_resolve, v_row.pagerduty_auto_resolve) ELSE v_row.pagerduty_auto_resolve END;
+   IF v_port < 1 OR v_port > 65535 THEN
+      RAISE EXCEPTION 'The SMTP port is between 1 and 65535.' USING ERRCODE = 'DL400';
+   END IF;
+   IF length(v_host) > 1000 OR length(v_user) > 1000 OR length(v_from) > 1000 OR length(v_teams_proxy) > 2000 OR length(v_slack_proxy) > 2000
+      OR length(v_generic_proxy) > 2000 OR length(v_pd_proxy) > 2000 OR length(v_body) > 16384 THEN
+      RAISE EXCEPTION 'A notification channel setting is longer than can be stored.' USING ERRCODE = 'DL400';
+   END IF;
+   -- A secret is sealed by the Darling service before it gets here. This function stores only an empty value or a sealed one (the shape
+   -- of sealed:v1:, the 16 character key id, base64, at most 16384 characters), so no caller of it can store a secret as text.
+   IF EXISTS (SELECT 1
+                FROM (VALUES (v_password, COALESCE(v_row.smtp_encrypted_password, '')), (v_teams, v_row.teams_url), (v_slack, v_row.slack_url),
+                             (v_generic, v_row.generic_url), (v_headers, v_row.generic_headers), (v_key, v_row.pagerduty_routing_key))
+                     AS w(new_value, old_value)
+               WHERE w.new_value <> w.old_value AND w.new_value <> ''
+                 AND (length(w.new_value) > 16384
+                      OR w.new_value !~ '^sealed:v1:[0-9a-f]+:[A-Za-z0-9+/]+=?=?$'
+                      OR length(split_part(w.new_value, ':', 3)) <> 16)) THEN
+      RAISE EXCEPTION 'A secret is stored sealed by the Darling service, never as text.' USING ERRCODE = 'DL400';
+   END IF;
+   IF length(v_recipients) > 4000 THEN
+      RAISE EXCEPTION 'The email recipients are longer than can be stored.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_recipients <> v_row.smtp_recipients
+      AND (v_recipients ~ '[[:cntrl:]<>]' OR position(chr(34) IN v_recipients) > 0
+           OR (SELECT count(*) FROM unnest(string_to_array(v_recipients, ',')) AS e(item) WHERE btrim(e.item) <> '') > 50) THEN
+      RAISE EXCEPTION 'The email recipients are a comma separated list of at most 50 plain addresses such as name@example.com.' USING ERRCODE = 'DL400';
+   END IF;
+   -- A saved secret opens only for what it was sealed for (#5366), and this function cannot show a secret to the caller, so the same
+   -- refusals the Viewer's Settings window makes are made here, on the stored row: a change to what a saved value is tied to needs the
+   -- value given again in the same call.
+   IF COALESCE(v_row.smtp_encrypted_password, '') <> '' AND NOT ('smtp_encrypted_password' = ANY (p_columns))
+      AND (v_host IS DISTINCT FROM v_row.smtp_host OR v_port IS DISTINCT FROM v_row.smtp_port OR v_ssl IS DISTINCT FROM v_row.smtp_use_ssl
+           OR v_user IS DISTINCT FROM COALESCE(v_row.smtp_username, '')) THEN
+      RAISE EXCEPTION 'Changing how mail is sent needs the SMTP password again.' USING ERRCODE = 'DL403';
+   END IF;
+   IF v_teams_proxy IS DISTINCT FROM v_row.teams_proxy AND v_row.teams_url <> '' AND NOT ('teams_url' = ANY (p_columns)) THEN
+      RAISE EXCEPTION 'Enter the Teams webhook URL again: its proxy changed.' USING ERRCODE = 'DL403';
+   END IF;
+   IF v_slack_proxy IS DISTINCT FROM v_row.slack_proxy AND v_row.slack_url <> '' AND NOT ('slack_url' = ANY (p_columns)) THEN
+      RAISE EXCEPTION 'Enter the Slack webhook URL again: its proxy changed.' USING ERRCODE = 'DL403';
+   END IF;
+   IF v_pd_proxy IS DISTINCT FROM v_row.pagerduty_proxy AND v_row.pagerduty_routing_key <> '' AND NOT ('pagerduty_routing_key' = ANY (p_columns)) THEN
+      RAISE EXCEPTION 'Enter the PagerDuty routing key again: its proxy changed.' USING ERRCODE = 'DL403';
+   END IF;
+   IF v_generic_proxy IS DISTINCT FROM v_row.generic_proxy
+      AND ((v_row.generic_url <> '' AND NOT ('generic_url' = ANY (p_columns))) OR (v_row.generic_headers <> '' AND NOT ('generic_headers' = ANY (p_columns)))) THEN
+      RAISE EXCEPTION 'Enter the generic webhook URL and headers again: the proxy changed.' USING ERRCODE = 'DL403';
+   END IF;
+   -- The headers are sealed for the generic URL text as stored, so the two change together.
+   IF 'generic_url' = ANY (p_columns) AND v_generic <> v_row.generic_url AND v_row.generic_headers <> '' AND NOT ('generic_headers' = ANY (p_columns)) THEN
+      RAISE EXCEPTION 'Enter the generic webhook headers again: the generic webhook URL changed.' USING ERRCODE = 'DL403';
+   END IF;
+   IF 'generic_headers' = ANY (p_columns) AND v_headers <> '' AND v_headers <> v_row.generic_headers AND NOT ('generic_url' = ANY (p_columns)) THEN
+      RAISE EXCEPTION 'Type the generic webhook URL again to change its headers.' USING ERRCODE = 'DL403';
+   END IF;
+   -- A signing key is sealed for the generic URL text and proxy (#5998): a change to either needs the key removed first.
+   IF (v_generic <> v_row.generic_url AND v_row.signing_key <> '')
+      OR (v_generic_proxy IS DISTINCT FROM v_row.generic_proxy
+          AND (v_row.signing_key <> '' OR EXISTS (SELECT 1 FROM config.config_notification_routes WHERE signing_key <> ''))) THEN
+      RAISE EXCEPTION 'A signing key is saved for this destination, and it is tied to the generic webhook URL and proxy. Remove the key first, save the change, then generate a new key.' USING ERRCODE = 'DL403';
+   END IF;
+   -- A route's own destination value is sealed for its channel's proxy on this row, so a proxy change would turn that route's channel off on
+   -- the next reload (and leave a value saved before sealing to go out through the new proxy): it is refused while any route holds one (#6392).
+   IF (v_teams_proxy IS DISTINCT FROM v_row.teams_proxy AND EXISTS (SELECT 1 FROM config.config_notification_routes WHERE teams_url <> ''))
+      OR (v_slack_proxy IS DISTINCT FROM v_row.slack_proxy AND EXISTS (SELECT 1 FROM config.config_notification_routes WHERE slack_url <> ''))
+      OR (v_generic_proxy IS DISTINCT FROM v_row.generic_proxy AND EXISTS (SELECT 1 FROM config.config_notification_routes WHERE generic_url <> ''))
+      OR (v_pd_proxy IS DISTINCT FROM v_row.pagerduty_proxy AND EXISTS (SELECT 1 FROM config.config_notification_routes WHERE pagerduty_routing_key <> '')) THEN
+      RAISE EXCEPTION 'A notification route holds its own value for a channel whose proxy is changing, and that value is tied to the proxy. Clear the value on each route first, change the proxy, then enter the value on the route again.' USING ERRCODE = 'DL403';
+   END IF;
+   UPDATE config.config_notification
+      SET smtp_host = v_host,
+          smtp_port = v_port,
+          smtp_use_ssl = v_ssl,
+          smtp_username = NULLIF(v_user, ''),
+          smtp_encrypted_password = NULLIF(v_password, ''),
+          smtp_from_address = v_from,
+          smtp_recipients = v_recipients,
+          teams_url = v_teams,
+          teams_proxy = v_teams_proxy,
+          slack_url = v_slack,
+          slack_proxy = v_slack_proxy,
+          generic_url = v_generic,
+          generic_headers = v_headers,
+          generic_body_template = v_body,
+          generic_proxy = v_generic_proxy,
+          pagerduty_routing_key = v_key,
+          pagerduty_use_eu_region = v_eu,
+          pagerduty_proxy = v_pd_proxy,
+          pagerduty_auto_resolve = v_auto,
+          modified_at = (now() AT TIME ZONE 'UTC')
+    WHERE id = 1;
+   -- What was stored before comes back only as a flag for whether a secret was saved, and only for the columns this call names: the
+   -- function runs with the owner's rights, so it never hands a stored secret (sealed text, or a value saved before sealing) to its caller.
+   RETURN QUERY SELECT
+      CASE WHEN 'smtp_username' = ANY (p_columns) THEN COALESCE(v_row.smtp_username, '') <> '' END,
+      CASE WHEN 'smtp_encrypted_password' = ANY (p_columns) THEN COALESCE(v_row.smtp_encrypted_password, '') <> '' END,
+      CASE WHEN 'teams_url' = ANY (p_columns) THEN v_row.teams_url <> '' END,
+      CASE WHEN 'slack_url' = ANY (p_columns) THEN v_row.slack_url <> '' END,
+      CASE WHEN 'generic_url' = ANY (p_columns) THEN v_row.generic_url <> '' END,
+      CASE WHEN 'generic_headers' = ANY (p_columns) THEN v_row.generic_headers <> '' END,
+      CASE WHEN 'pagerduty_routing_key' = ANY (p_columns) THEN v_row.pagerduty_routing_key <> '' END;
+END
+$fn$;
+REVOKE ALL ON FUNCTION config.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION config.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean) TO mcp;
 COMMIT;
 
 -- #6230: the MCP incident tools queue analyze_now, purge_now, test_connect, pause and resume through this function, the only way the
@@ -1949,7 +2344,8 @@ GRANT INSERT, UPDATE, DELETE ON config.database_state_expected TO mcp;
 --     analyze_server persists its findings and mute_analysis_finding records a mute (INSERT, and DELETE for
 --     unmute_analysis_finding, #6383); update_alert_settings writes the singleton alert-settings row and the ONE non-secret
 --     column of config_notification it spans, email_cooldown_minutes (COLUMN-level: the row holds the SMTP
---     password and the webhook URLs, which mcp can neither read nor write); set_notification_route_enabled
+--     password and the webhook URLs, which mcp can neither read nor write; it sets them only through the SECURITY DEFINER
+--     set_notification_channels function, #6392, served only under mcp.allowWrites with a token); set_notification_route_enabled
 --     and delete_notification_route take a route out of force or remove it (never INSERT, never a
 --     destination column: a route IS a destination); add_servers / remove_server edit the monitored-server
 --     registry (whose credential column stays carved, so mcp can WRITE a password blob and never READ one).
@@ -2881,9 +3277,11 @@ BEGIN
    'config.delete_known_pattern(bigint)',
    'config.request_snapshot_now(integer, text, text)',
    'config.request_active_queries_live(integer, text)',
+   'config.request_analyze_now(integer, text)',
    'config.create_notification_route(text, boolean, integer, integer, boolean, integer)',
-   'config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer)',
-   'config.set_notification_route_destinations(integer, text[], text, text, text, text, text)',
+   'config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer)',
+   'config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb)',
+   'config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text)',
    'config.request_mcp_command(text, integer, integer, text)',
    'config.read_mcp_command_result(bigint)',
    'config.submit_external_alert(text, text, text, text, text, text, double precision)'

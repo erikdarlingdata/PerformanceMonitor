@@ -624,11 +624,16 @@ public sealed class McpQueryTools
                 the one field whose whole reason for existing is that the cap should not have to be inferred.
             */
             var databases = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
-            var rows = await dataService.GetQueryStoreRegressionsAsync(
-                resolved.ServerId, hours_back, limit + 1, databases, asOfUtc: windowEnd);
-
             var windowStart = windowEnd.AddHours(-hours_back);
             var baselineStart = windowStart.AddDays(-LocalDataService.BaselineLookbackDays);
+            /* #6654: with no database named, the read leaves out the databases the server DROPPED (named by an earlier database_states
+               snapshot, absent from the newest), as get_top_procedures_by_cpu does (#5633 item 4); the names ride the payload. */
+            var droppedDatabases = databases is null
+                ? await dataService.GetDroppedDatabasesAsync(resolved.ServerId, asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, windowStartUtc: baselineStart)
+                : null;
+            var leftOut = DatabasesLeftOut.Distinct(droppedDatabases);
+            var rows = await dataService.GetQueryStoreRegressionsAsync(
+                resolved.ServerId, hours_back, limit + 1, databases, asOfUtc: windowEnd, excludedDatabases: droppedDatabases?.ToList());
 
             /* #4966: where this server's query_store_stats start, checked against the EARLIER of the two windows this
                tool compares — the baseline's start, not the recent window's: a store that began inside the baseline
@@ -639,11 +644,12 @@ public sealed class McpQueryTools
             var notice = await WindowNoticeAsync(
                 () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, baselineStart, windowEnd),
                 baselineStart, windowEnd, "query_store_stats",
-                "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.",
+                QueryStoreRegressionRules.BaselineWindowTail,
                 emptyAnswer: rows.Count == 0);
 
             if (rows.Count == 0)
-                return await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, databases);
+                return McpHelpers.WithDatabasesLeftOut(
+                    await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, databases), leftOut)!;
 
             var truncated = rows.Count > limit;
 
@@ -669,6 +675,9 @@ public sealed class McpQueryTools
                 returned_count = Math.Min(rows.Count, limit),
                 truncated,
                 regressions = rows.Take(limit).Select(r => RegressionRowJson(r, full_text)),
+                /* #6654: the dropped databases this read left out, in the words get_top_procedures_by_cpu uses. */
+                databases_left_out = DatabasesLeftOut.Named(leftOut),
+                databases_left_out_note = DatabasesLeftOut.Note(leftOut),
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)

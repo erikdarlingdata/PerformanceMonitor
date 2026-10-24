@@ -107,6 +107,9 @@ public sealed class DarlingWebHostService : BackgroundService
     private WebApplication? _app;
     private NpgsqlDataSource? _appDataSource;
 
+    /// <summary>#6600: the second, small pool the Admin writes use on the managed store (null on a store you bring, or with web.allowAdminWrites off).</summary>
+    private WebAdminArm? _adminArm;
+
     /// <summary>The TLS certificate the current network listener presents — the leaf AND the intermediates
     /// that travel with it (#2562) — held for its lifetime. Disposal is not bookkeeping: on Windows the
     /// private key is loaded with <c>MachineKeySet</c> and no <c>PersistKeySet</c>, so disposing is what
@@ -356,6 +359,9 @@ public sealed class DarlingWebHostService : BackgroundService
             _appDataSource = null;
         }
 
+        _adminArm?.Dispose();
+        _adminArm = null;
+
         /* #3514 follow-up: the served certificate is gone, so stop advertising its expiry to the worker's
            alert sweep. A runtime disable of the dashboard (a no-restart op) reaches here; without the clear
            the worker keeps firing the expiry alert about a dashboard the operator turned off. A port-change
@@ -401,6 +407,9 @@ public sealed class DarlingWebHostService : BackgroundService
             try { await _appDataSource.DisposeAsync(); } catch { /* best-effort */ }
             _appDataSource = null;
         }
+
+        try { _adminArm?.Dispose(); } catch { /* best-effort */ }
+        _adminArm = null;
 
         /* #3514 follow-up: a start that published its certificate (before the port-in-use / credential
            bail below it) but never served TLS must not leave the worker alerting on a non-served cert.
@@ -855,10 +864,17 @@ public sealed class DarlingWebHostService : BackgroundService
                WebApplicationName, but a CONFIGURED (postgres.webConnectionString) or owner-fallback login
                never runs through that builder — set-if-absent here so every path this string can take still
                names the surface. */
-            var postgres = NpgsqlDataSource.Create(
-                DarlingStoreConnection.PinSessionTimeZoneUtc(
-                    DarlingStoreConnection.WithApplicationName(storeConnectionString, DarlingManagedPostgres.WebApplicationName)));
+            /* #6630: a store the operator brings gets the worker's collect/config search path the same way (set-if-absent), because the
+               bare names the reads use (servers, config_service, ...) only resolve through it, and the database default is best effort. */
+            var postgres = DarlingWorker.CreateHostStoreDataSource(storeConnectionString, DarlingManagedPostgres.WebApplicationName);
             _appDataSource = postgres;
+
+            /* #6600: on the managed store, a signed-in admin's Admin writes use a second, small pool on the stored admin login. It opens
+               nothing until the first such request. A store you bring yourself, or web.allowAdminWrites off, builds none. */
+            if (OperatingSystem.IsWindows())
+            {
+                _adminArm = WebAdminArm.ForHost(config.Postgres, web.AllowAdminWrites, _logger);
+            }
 
             /* FOOTGUN (load-bearing): pin BOTH the content root AND the web root to the binary's directory. A
                Windows service's CWD is System32, so the parameterless CreateBuilder would 404 every static file
@@ -980,7 +996,7 @@ public sealed class DarlingWebHostService : BackgroundService
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
                ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
                loopback-only admits loopback names only, whatever it parsed. */
-            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpToken: mcpToken, sharedTokenReadsOnlyProblem: writeTokenProblem);
+            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpToken: mcpToken, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -995,6 +1011,7 @@ public sealed class DarlingWebHostService : BackgroundService
                    listen there is ONE listener, HTTPS for loopback too, and saying otherwise sends a local
                    client to the wrong scheme. With no TLS the text is unchanged. Text only: no listener
                    decision moves. */
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogInformation(
                     "Starting web dashboard on {Scheme}://{Listen}:{Port} (LAN-exposed to {Cidr} behind a token->cookie gate + in-app CIDR; "
                     + "{Loopback}, and since #1649 it authenticates too) — "
@@ -1006,6 +1023,7 @@ public sealed class DarlingWebHostService : BackgroundService
             }
             else
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogInformation(
                     "Starting web dashboard on http://localhost:{Port} (loopback only){TokenNote} — enabled/port from {Origin}",
                     effectivePort, requireTokenWhenLoopbackOnly ? ", token required" : "", origin);
@@ -1228,7 +1246,8 @@ public sealed class DarlingWebHostService : BackgroundService
         Func<DateTime>? utcNow = null,
         McpDataDetail dataDetail = McpDataDetail.MetadataOnly,
         string? mcpToken = null,
-        string? sharedTokenReadsOnlyProblem = null)
+        string? sharedTokenReadsOnlyProblem = null,
+        WebAdminArm? adminArm = null)
     {
         /* A caller that does not say whether the token is under the length floor gets the same answer the start path
            computes: a short shared token serves reads only. Without this a forgotten argument meant writes. */
@@ -1607,7 +1626,7 @@ public sealed class DarlingWebHostService : BackgroundService
             });
         }
 
-        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys);
+        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm);
         app.UseDefaultFiles();
 
         /* Static assets carry an ETag/Last-Modified already (the framework default); no-cache (#4188) makes

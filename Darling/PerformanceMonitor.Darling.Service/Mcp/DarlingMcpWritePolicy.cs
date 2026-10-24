@@ -46,7 +46,7 @@ internal static class DarlingMcpWritePolicy
     /// <summary>The darling.json key that offers the write tools.</summary>
     internal const string WritesSetting = "mcp.allowWrites";
 
-    /// <summary>The darling.json key that additionally offers <c>add_servers</c>, <c>edit_server</c> and <c>remove_server</c>.</summary>
+    /// <summary>The darling.json key that additionally offers <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c> and <c>set_server_action</c>.</summary>
     internal const string ServerAdminSetting = "mcp.allowServerAdmin";
 
     /// <summary>The tools that change which servers the service connects to, or where. They present the service's
@@ -92,6 +92,7 @@ internal static class DarlingMcpWritePolicy
         "set_notification_route_fallback",
         "create_notification_route",
         "update_notification_route",
+        "update_notification_channels",
         "dismiss_alert_history",
         "restore_alert_history",
         "create_custom_alert_rule",
@@ -136,6 +137,7 @@ internal static class DarlingMcpWritePolicy
         "set_collector_retention",
         "set_collector_databases",
         "reset_collector_schedules",
+        "update_service_flags",
     };
 
     /// <summary>The darling.json key that offers the investigation tools (#5632 Phase A, ruling R2).</summary>
@@ -178,6 +180,7 @@ internal static class DarlingMcpWritePolicy
         "set_notification_route_fallback",
         "create_notification_route",
         "update_notification_route",
+        "update_notification_channels",
         "dismiss_alert_history",
         "restore_alert_history",
         "create_custom_view",
@@ -217,6 +220,7 @@ internal static class DarlingMcpWritePolicy
         "set_collector_retention",
         "set_collector_databases",
         "reset_collector_schedules",
+        "update_service_flags",
         "add_servers",
         "remove_server",
         "edit_server",
@@ -246,6 +250,17 @@ internal static class DarlingMcpWritePolicy
         /// <summary>The name an agent call must act as (#6542): the token's name when the token is a named agent token, else null. An
         /// operator token has a name too, but it is not an agent, so no agent_id is held to it.</summary>
         internal string? AgentTokenName => Investigations ? TokenName : null;
+
+        /// <summary>True for an operator-class caller (#6542 part 2, agreed with the coordinator 10-23): a named operator token, or the legacy
+        /// single token served the writes. Under R2 of #5632 neither holds the investigation tools, so no investigation agent holds it.</summary>
+        internal bool IsOperator => Writes && !Investigations;
+
+        /// <summary>The journal actor of an operator-class caller's route agent change, else null: <c>operator:&lt;token name&gt;</c> for a named
+        /// operator token, and for the legacy token <c>operator:</c> with the token identity the route write log lines already carry
+        /// (<see cref="ReadCaller.AmbientMcpToken"/>, the fingerprint). Never a token value.</summary>
+        internal string? OperatorActor => !IsOperator ? null
+            : TokenName is { } name ? "operator:" + name
+            : "operator:" + (ReadCaller.AmbientMcpToken ?? "token unknown");
 
         /// <summary>True when a tool named <paramref name="toolName"/> is offered under this policy.</summary>
         internal bool Offers(string toolName) => Offers(toolName, AgentActionTools);
@@ -411,7 +426,7 @@ internal static class DarlingMcpWritePolicy
             ? "The server registry tools are served too, because mcp.allowWrites and mcp.allowServerAdmin are both on."
             : "The server registry tools are not served: they need mcp.allowWrites and mcp.allowServerAdmin both on (both default off).";
         return "This token has the operator role, so it is served the reads and the write tools (alerting, mutes, custom alert rules, " +
-            "Custom Views, collector schedules, collection state), which change only the MONITORING store. " + admin +
+            "Custom Views, collector schedules, service flags, collection state), which change only the MONITORING store. " + admin +
             " The investigation tools are served only to an agent token. An unserved write fails as unknown: ask the operator, " +
             "do not retry. " + Data;
     }
@@ -420,7 +435,7 @@ internal static class DarlingMcpWritePolicy
     /// and that says collected text is data. Kept short: the instructions have a size budget
     /// (<c>DarlingMcpInstructionsBudgetTests</c>).</summary>
     internal const string InstructionsLine =
-        "Its write tools (alerting, mutes, custom alert rules, Custom Views, collector schedules, collection state, the server registry) change only the " +
+        "Its write tools (alerting, mutes, custom alert rules, Custom Views, collector schedules, service flags, collection state, the server registry) change only the " +
         "MONITORING store and are served when darling.json sets mcp.allowWrites (add_servers/edit_server/remove_server " +
         "also need mcp.allowServerAdmin; both default off). An unserved write fails as unknown: ask the operator, do not " +
         "retry. Investigation tools (claim_investigation_request, submit_investigation_report) write only investigation " +

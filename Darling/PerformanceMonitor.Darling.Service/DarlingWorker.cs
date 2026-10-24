@@ -2083,6 +2083,7 @@ LIMIT 1";
                 var next = StartupFailureTriage.NextAction(attempt, configRetryBudget.Elapsed, ex);
                 if (!configSustainedRetryCriticalLogged)
                 {
+                    // install-darling.ps1 waits for this text (#6470): reword both together.
                     _logger.LogCritical(
                         ex,
                         "Cannot load configuration within the {Budget}s retry budget ({Message}); this is " +
@@ -2108,6 +2109,7 @@ LIMIT 1";
             }
             catch (Exception ex)
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogCritical(ex, "Cannot load configuration: {Message}", ex.Message);
                 _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Configuration);
                 return;
@@ -2125,6 +2127,7 @@ LIMIT 1";
         {
             foreach (var problem in problems)
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogCritical("Configuration problem: {Problem}", problem);
             }
 
@@ -2213,6 +2216,7 @@ LIMIT 1";
         {
             if (!OperatingSystem.IsWindows())
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogCritical(
                     "postgres.managed = true requires Windows (the bundled runtime and the DPAPI-protected credential); " +
                     "set postgres.managed = false and point postgres.connectionString at your own PostgreSQL instead.");
@@ -2286,6 +2290,7 @@ LIMIT 1";
                     var next = StartupFailureTriage.NextAction(attempt, bootstrapRetryBudget.Elapsed, ex);
                     if (!bootstrapSustainedRetryCriticalLogged)
                     {
+                        // install-darling.ps1 waits for this text (#6470): reword both together.
                         _logger.LogCritical(
                             ex,
                             "Managed Postgres bootstrap has not succeeded within the {Budget}s retry budget " +
@@ -2311,6 +2316,7 @@ LIMIT 1";
                 }
                 catch (Exception ex)
                 {
+                    // install-darling.ps1 waits for this text (#6470): reword both together.
                     _logger.LogCritical(ex, "Managed Postgres bootstrap failed: {Message}", ex.Message);
                     _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.ManagedStore);
                     return;
@@ -2806,7 +2812,7 @@ LIMIT 1";
         await using var postgres = NpgsqlDataSource.Create(
             DarlingStoreConnection.PinSessionTimeZoneUtc(
                 DarlingStoreConnection.WithApplicationName(
-                    EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName)));
+                    DarlingStoreConnection.EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName)));
         _postgres = postgres;
         _ownerSource?.Publish(postgres);
         /* #2936: a failure here is triaged rather than uniformly terminal. A store that is unreachable for
@@ -2903,6 +2909,7 @@ LIMIT 1";
                 var next = StartupFailureTriage.NextAction(attempt, storeRetryBudget.Elapsed, ex);
                 if (!storeSustainedRetryCriticalLogged)
                 {
+                    // install-darling.ps1 waits for this text (#6470): reword both together.
                     _logger.LogCritical(
                         ex,
                         "Cannot reach or migrate the Postgres store within the {Budget}s retry budget " +
@@ -2927,7 +2934,7 @@ LIMIT 1";
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogCritical(ex, "Cannot reach or migrate the Postgres store: {Message}", ex.Message);
+                _logger.LogCritical(ex, "Cannot reach or migrate the Postgres store: {Message}", ex.Message); // install-darling.ps1 waits for this text (#6470): reword both together.
                 /* #2953: AFTER the critical line, deliberately. The log line is the diagnosis of record and
                    predates this seam; publishing first would put a new call between the failure and the one
                    message an operator greps for. */
@@ -3450,7 +3457,7 @@ LIMIT 1";
            service is hoisted too so a reload can re-LoadAsync() it (closes F16 — the engine holds
            its IsAlertMuted delegate, so refreshing the same instance's cache mutes the next sweep). */
         var alertSettings = new DarlingAlertSettings(config, _logger);
-        var historyStore = new PgAlertHistoryStore(postgres, _logger);
+        var historyStore = new PgAlertHistoryStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, _logger);
         var webhookAlertService = new WebhookAlertService(
             alertSettings, DarlingAlertDeliverer.Branding,
             _loggerFactory.CreateLogger<WebhookAlertService>(), historyStore);
@@ -3467,7 +3474,7 @@ LIMIT 1";
             InvestigationDispatcher.WithLockTimeout(
                 DarlingStoreConnection.PinSessionTimeZoneUtc(
                     DarlingStoreConnection.WithApplicationName(
-                        EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName))));
+                        DarlingStoreConnection.EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName))));
         var investigationStore = new InvestigationRequestStore(
             investigationPostgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
         /* #5821: the generic webhook's {{investigation_json}} masks the stored brief at the level the MCP tools serve; an
@@ -3553,8 +3560,8 @@ LIMIT 1";
         if (customAlertViewerSource is not null)
         {
             _customAlertEvaluator = new CustomAlertEvaluator(
-                new CustomAlertRuleStore(postgres),
-                new CustomAlertStateStore(postgres),
+                new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds),
+                new CustomAlertStateStore(postgres, McpCommandDeadlines.ReadSeconds),
                 customAlertViewerSource,
                 deliverer,
                 muteRuleService.IsAlertMuted,
@@ -3803,6 +3810,7 @@ LIMIT 1";
            once, here. No daily run can be going yet, so nothing has to give a permit back. */
         ApplyDailyRunCap(StorePoolMaxSize(postgres), initialSweepWidth);
 
+        // install-darling.ps1 waits for this text (#6470): reword both together.
         _logger.LogInformation("PerformanceMonitor Darling collection loop started");
         /* #2953: the one publish that clears the failure phases. Set HERE — the last statement before the
            sweep loop's first iteration — and not re-published per cycle: this seam answers "did collection
@@ -7831,47 +7839,16 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// Ensures the store connection string carries the collect/config search path (the V8 schema
-    /// split) so every pooled physical connection resolves the shared SQL's bare table names to the
-    /// <c>collect</c>/<c>config</c> schemas from its FIRST use. Managed mode already sets it
-    /// (<see cref="DarlingManagedPostgres.SearchPath"/>) — that string is returned unchanged, no
-    /// double-set. A bring-your-own connection string usually omits it and would otherwise rely on
-    /// the database-default <c>search_path</c> that
-    /// <see cref="PgMigrations.MigrateAsync(NpgsqlConnection, ILogger, CancellationToken)"/>
-    /// best-effort sets via <c>ALTER DATABASE ... SET search_path</c>.
-    ///
-    /// <para>That database default only governs the startup search_path of connections established
-    /// AFTER the ALTER commits, but the Npgsql pool's physical connections opened around it (for the
-    /// migration itself, the hypertable conversion, and the first collection sweep) keep their
-    /// pre-ALTER session search_path for their entire lifetime. On a FRESH BYO store that means the
-    /// whole first run fails — hypertable conversion, delta seeding, and every collector write hit
-    /// <c>42P01: relation "wait_stats" does not exist</c> — and collection only starts working after
-    /// a service restart hands out a fresh pool. Carrying the search path on the connection string
-    /// itself is deterministic and pool-timing-independent; any login may <c>SET</c> its own
-    /// search_path, so this is safe for least-privilege BYO logins too.</para>
+    /// The store data source the MCP and web hosts open (#6630): the operator's string (a configured
+    /// <c>postgres.mcpConnectionString</c>/<c>webConnectionString</c> or the owner fallback never runs through the managed
+    /// builder) with the collect/config search path set-if-absent, then the application name, then the UTC session pin,
+    /// in the order the worker builds its own. Without the path a login that does not own the database, on a database
+    /// with no default path, fails every unqualified read with 42P01.
     /// </summary>
-    internal static string EnsureStoreSearchPath(string connectionString)
-    {
-        var builder = new NpgsqlConnectionStringBuilder(connectionString);
-        if (string.IsNullOrWhiteSpace(builder.SearchPath))
-        {
-            /* Append, don't rewrite through the builder: round-1 review on #4285's PR found the builder's
-               writer erases a caller keyword set to an explicit empty value (Password='', ...), because it
-               emits that as a bare Key=, which its own reader treats as "not set". Appending keeps every
-               other keyword byte for byte. The constant below holds no ';', '=' or quote character, so it
-               never needs quoting — a plain "Search Path=<value>" is unambiguous.
-               DarlingManagedPostgres is annotated [SupportedOSPlatform("windows")] for its DPAPI /
-               bundled-cluster surface, but SearchPath is a platform-neutral compile-time constant
-               with no runtime dependency, and BYO mode runs on any OS — so the CA1416 cross-platform
-               reachability flag is spurious for this const reference. Suppressed narrowly rather than
-               forking the constant, keeping managed and BYO byte-identical (a test pins them equal). */
-#pragma warning disable CA1416
-            return connectionString + ";Search Path=" + DarlingManagedPostgres.SearchPath;
-#pragma warning restore CA1416
-        }
-
-        return connectionString;
-    }
+    internal static NpgsqlDataSource CreateHostStoreDataSource(string storeConnectionString, string applicationName) =>
+        NpgsqlDataSource.Create(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(DarlingStoreConnection.EnsureStoreSearchPath(storeConnectionString), applicationName)));
 
     /// <summary>
     /// Assembles the Phase-5 shared alert engine over Darling's third-party implementations:
@@ -8886,7 +8863,7 @@ LIMIT 1";
                         NumericThresholdValue: threshold,
                         Muted: muted,
                         Severity: AlertEngine.GradeDeadlockFire(count, rateTiers),
-                        ShortMessage: $"{count} deadlock(s) in the last hour"),
+                        ShortMessage: $"{count} {(count == 1 ? "deadlock" : "deadlocks")} in the last hour"),
                     cancellationToken);
                 readClock.Restart();
 
@@ -9065,7 +9042,7 @@ LIMIT 1";
                         NumericThresholdValue: threshold,
                         Muted: muted,
                         Severity: PgBlockingFireSeverity,
-                        ShortMessage: $"{count} blocking session(s)"),
+                        ShortMessage: $"{count} blocking {(count == 1 ? "session" : "sessions")}"),
                     cancellationToken);
                 readClock.Restart();
 
@@ -9278,7 +9255,7 @@ LIMIT 1";
                         key,
                         snapshot.ServerName,
                         metricName,
-                        $"{rows.Count} query(s), longest {elapsedMinutes}m",
+                        $"{rows.Count} {(rows.Count == 1 ? "query" : "queries")}, longest {elapsedMinutes}m",
                         $"{thresholdMinutes}m",
                         Context: AlertSampleAge.Stamp(
                             new AlertContext
@@ -9697,7 +9674,7 @@ LIMIT 1";
                    without this, a multi-line statement breaks the one-line-per-incident rendering and an
                    unbounded one can bloat the stored context past what Slack/Teams will accept. */
                 string.IsNullOrWhiteSpace(row.VictimStatement)
-                    ? $"victim pid {row.VictimPid}, {row.ParticipantCount} participant(s)"
+                    ? $"victim pid {row.VictimPid}, {row.ParticipantCount} {(row.ParticipantCount == 1 ? "participant" : "participants")}"
                     : AlertContextBuilders.TruncateText(row.VictimStatement!),
             });
 
@@ -9790,7 +9767,7 @@ LIMIT 1";
                 : row.RootBackendId.ToString(CultureInfo.InvariantCulture),
             new[]
             {
-                $"root pid {row.RootPid} blocking {row.TotalVictims} session(s)"
+                $"root pid {row.RootPid} blocking {row.TotalVictims} {(row.TotalVictims == 1 ? "session" : "sessions")}"
                     + (row.Databases.Length > 0 ? $" in [{string.Join(", ", row.Databases)}]" : string.Empty)
                     /* AlertContextBuilders.TruncateText — same reasoning as BuildPgDeadlockIncident's
                        VictimStatement: root queries are commonly multi-line and otherwise unbounded. */

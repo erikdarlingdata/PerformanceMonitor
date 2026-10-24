@@ -648,11 +648,6 @@ public class JobHistoryRow
     /// otherwise on the one clock the header names (#6137).</summary>
     public string RunTimeLocal => Shown(RunDateTime, RunDateTimeUtc);
 
-    /// <summary><see cref="LastSuccessfulRun"/> is <c>MAX(run_datetime)</c> over this job's successful
-    /// step-0 rows, so it is the same server-local wall clock as <see cref="RunTimeLocal"/> and is shown
-    /// the same way.</summary>
-    public string LastSuccessfulRunLocal => LastSuccessfulRun is null ? "Never" : Shown(LastSuccessfulRun, LastSuccessfulRunUtc);
-
     public string DurationFormatted => FormatDuration(RunDurationSeconds);
 
     public string StepDisplay => StepId == 0
