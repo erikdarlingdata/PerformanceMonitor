@@ -108,6 +108,8 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "JobHistoryTab.xaml", "JobHistoryDataGrid", "RunTimeLocal", Name(typeof(ViewerJobHistoryRow)), "RunDateTimeUtc" },
         { "JobHistoryTab.xaml", "JobHistoryDataGrid", "LastSuccessfulRunLocal", Name(typeof(ViewerJobHistoryRow)), "LastSuccessfulRunUtc" },
         { "MuteRulesWindow.xaml", "RulesGrid", "ExpiresDisplay", Name(typeof(MuteRule)), "ExpiresAtUtc" },
+        { "FleetSweepsTab.xaml", "WatchItemsDataGrid", "FirstSeen", Name(typeof(FleetSweepWatchRow)), "FirstSeenUtc" },
+        { "FleetSweepsTab.xaml", "WatchItemsDataGrid", "LastSeen", Name(typeof(FleetSweepWatchRow)), "LastSeenUtc" },
         { "ProcedureHistoryWindow.xaml", "HistoryDataGrid", "CollectionTimeLocal", Name(typeof(ViewerProcedureStatsHistoryRow)), "CollectionTime" },
         { "QueryStatsHistoryWindow.xaml", "HistoryDataGrid", "CollectionTimeLocal", Name(typeof(ViewerQueryStatsHistoryRow)), "CollectionTime" },
         { "QueryStoreHistoryWindow.xaml", "HistoryDataGrid", "CollectionTimeLocal", Name(typeof(ViewerQueryStoreHistoryRow)), "CollectionTime" },

@@ -25,7 +25,14 @@ public sealed record FleetSweepWouldHavePagedRow(string Server, string Family, s
 public sealed record FleetSweepVerdictRow(string Server, string Previous, string Band, string Reason);
 
 public sealed record FleetSweepWatchRow(
-    string Server, string Item, string State, string Position, string FirstSeen, string LastSeen, string Condition, string ConditionTooltip);
+    string Server, string Item, string State, string Position, string FirstSeen, string LastSeen, string Condition, string ConditionTooltip)
+{
+    /// <summary>The first-seen instant in UTC, the column's sort key (<see cref="FirstSeen"/> is display text); MinValue when the node had none.</summary>
+    public DateTime FirstSeenUtc { get; init; }
+
+    /// <summary>The last-seen instant in UTC, the column's sort key (<see cref="LastSeen"/> is display text); MinValue when the node had none.</summary>
+    public DateTime LastSeenUtc { get; init; }
+}
 
 /// <summary>
 /// Turns the JSON nodes <see cref="ViewerDataService"/> returns (the web's own wire shape, built by
@@ -74,6 +81,12 @@ internal static class FleetSweepsRows
     private static string Num(long n) => n.ToString("N0", CultureInfo.CurrentCulture);
 
     /// <summary>An ISO instant (as the builders write them) as the viewer's display time; empty when it is not one.</summary>
+    /// <summary>An ISO instant as a UTC DateTime, for a column's sort key; MinValue when it is not one.</summary>
+    internal static DateTime Utc(string iso) =>
+        DateTime.TryParse(iso, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var t)
+            ? DateTime.SpecifyKind(t, DateTimeKind.Utc)
+            : DateTime.MinValue;
+
     internal static string Local(string iso) =>
         DateTime.TryParse(iso, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var t)
             ? ViewerTimeHelper.FormatForDisplay(DateTime.SpecifyKind(t, DateTimeKind.Utc), "yyyy-MM-dd HH:mm:ss")
@@ -237,7 +250,11 @@ internal static class FleetSweepsRows
                 return new FleetSweepWatchRow(
                     server, Str(w, "item"), StateLabel(state), position,
                     Local(Str(w, "first_seen_at")), Local(Str(w, "last_seen_at")),
-                    condition, evidence is null ? condition : condition + "\n" + evidence);
+                    condition, evidence is null ? condition : condition + "\n" + evidence)
+                {
+                    FirstSeenUtc = Utc(Str(w, "first_seen_at")),
+                    LastSeenUtc = Utc(Str(w, "last_seen_at")),
+                };
             })
             .ToList();
     }

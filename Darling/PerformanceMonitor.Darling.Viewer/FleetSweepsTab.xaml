@@ -170,8 +170,8 @@
                         <DataGridTextColumn Header="Item" Binding="{Binding Item}" Width="180"/>
                         <DataGridTextColumn Header="State" Binding="{Binding State}" Width="80"/>
                         <DataGridTextColumn Header="Position" Binding="{Binding Position}" Width="170"/>
-                        <DataGridTextColumn Header="First seen" Binding="{Binding FirstSeen}" Width="140"/>
-                        <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeen}" Width="140"/>
+                        <DataGridTextColumn Header="First seen" Binding="{Binding FirstSeen}" SortMemberPath="FirstSeenUtc" Width="140"/>
+                        <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeen}" SortMemberPath="LastSeenUtc" Width="140"/>
                         <DataGridTextColumn Header="Condition / evidence" Binding="{Binding Condition}" Width="*" MinWidth="200">
                             <DataGridTextColumn.ElementStyle>
                                 <Style TargetType="TextBlock">
