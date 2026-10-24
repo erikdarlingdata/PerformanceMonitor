@@ -44,12 +44,14 @@ Before you upgrade an older install with `Setup.exe`, read the warning in the [L
 
 ## Quick start: Darling
 
-1. Download `PerformanceMonitorDarling-<version>.zip` from the [latest release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest). It carries its own .NET runtime, so there is nothing to install first.
-2. Copy `darling.sample.json` to `darling.json` and add your servers.
-3. Run the service, in a console for a trial or as a Windows service.
-4. Start the **Darling Viewer** from the `viewer\` folder in the same zip.
+1. Download `PerformanceMonitorDarling-<version>.zip` and `SHA256SUMS.txt` from the [latest release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest). Check the zip hash against `SHA256SUMS.txt`. The zip carries its own .NET runtime, so there is nothing to install first.
+2. Extract the zip to `C:\Program Files\PerformanceMonitorDarling`. Do not use your Desktop, Downloads, or any folder under `C:\Users\`. The service runs as a virtual account that cannot read a user profile ([why](docs/darling/install.md#step-3-extract-to-a-machine-scoped-path)).
+3. Copy `darling.sample.json` to `darling.json` and add one server. `darling.json` is only a seed. The service reads it on the first start, and after that the store is the authority. If you edit the file later to add a server, nothing changes. Add servers in the viewer instead ([why](docs/darling/install.md#darlingjson-is-only-a-seed)).
+4. From an elevated PowerShell in the install folder, run `.\install-darling.ps1`. It installs the Windows service and creates a **Darling Viewer** shortcut.
+5. Wait about two minutes for the first start, then open **Darling Viewer**. It opens on the fleet.
+6. The service log is in `%ProgramData%\PerformanceMonitorDarling\logs`.
 
-These steps are for Windows. For Linux, the full steps, and the web dashboard, read the [Darling quick start](docs/darling-quick-start.md). If you have not done this before, [docs/darling/install.md](docs/darling/install.md) is the ordered path from the zip to a working install. The [Darling operator guide](Darling/README.md) is the configuration reference.
+[Install Darling](docs/darling/install.md) gives each step with the log line or screen that proves it worked. To upgrade, run `upgrade-darling.ps1`. To remove the service, run `uninstall-darling.ps1`. Both are in the install folder. For Linux and the web dashboard, read the [Darling quick start](docs/darling-quick-start.md). The [Darling operator guide](Darling/README.md) is the configuration reference.
 
 ## Documentation
 

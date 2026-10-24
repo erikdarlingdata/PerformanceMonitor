@@ -47,7 +47,7 @@ public sealed class ComposeReadOnlyTransactionLiveTests
         await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString, ct);
         await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        var rows = await DarlingWebEndpoints.RunComposedQueryAsync(
+        var rows = await ComposePanelRunner.RunComposedQueryAsync(
             store, new ComposeCompiled("SELECT 7 AS n, 'x'::text AS label", new List<NpgsqlParameter>(), RawRoute), 30, ct);
 
         var row = Assert.Single(rows)!.AsObject();
@@ -66,7 +66,7 @@ public sealed class ComposeReadOnlyTransactionLiveTests
             await setup.ExecuteNonQueryAsync(ct);
         }
 
-        var ex = await Assert.ThrowsAsync<PostgresException>(() => DarlingWebEndpoints.RunComposedQueryAsync(
+        var ex = await Assert.ThrowsAsync<PostgresException>(() => ComposePanelRunner.RunComposedQueryAsync(
             store, new ComposeCompiled("INSERT INTO public.compose_readonly_probe (x) VALUES (1) RETURNING x", new List<NpgsqlParameter>(), RawRoute), 30, ct));
 
         Assert.Equal("25006", ex.SqlState);

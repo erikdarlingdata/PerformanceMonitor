@@ -175,7 +175,7 @@ public sealed class CustomAlertTeardownLiveTests
             var evaluator = new CustomAlertEvaluator(
                 rules, state, dataSource /* viewer: unused by reconcile */, new NoopDeliverer(),
                 isAlertMuted: null, alertsEnabled: static () => true,
-                new PgAlertHistoryStore(dataSource), defaultIntervalSeconds: 60,
+                new PgAlertHistoryStore(dataSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds), defaultIntervalSeconds: 60,
                 cacheTtl: TimeSpan.Zero /* force a fresh rule read */, NullLogger.Instance);
 
             await evaluator.ReconcileStateAsync(monitored, ct);

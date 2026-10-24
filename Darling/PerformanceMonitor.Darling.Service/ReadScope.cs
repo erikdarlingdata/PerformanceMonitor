@@ -12,26 +12,9 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
-
-/// <summary>A silent read fallback a reader noted into the current <see cref="ReadScope"/> (#5097).</summary>
-internal enum ReadFallback
-{
-    /// <summary>The gate said the interval table serves, the table read faulted, and raw answered.</summary>
-    FallbackRaw,
-
-    /// <summary>The source decision itself (or the connection / transaction it needs) faulted, so raw answered
-    /// without a decision. Outranks <see cref="FallbackRaw"/> and <see cref="LedgerUncovered"/> when more than one was
-    /// noted in one call.</summary>
-    GateFailed,
-
-    /// <summary>The hourly-edges count guard found the hour ledger does not cover the window yet (#4605), so the
-    /// route was not taken and raw answered. An expected state, not a fault: it is noted with
-    /// <see cref="ReadScope.Note"/> (no log line) and shows as <c>fallback_raw</c> in <c>get_read_latency</c>. Ranks below
-    /// <see cref="GateFailed"/> and <see cref="FallbackRaw"/>, which are the bigger facts when noted in the same call.</summary>
-    LedgerUncovered,
-}
 
 /// <summary>
 /// The ambient scope one recorded read runs inside (#5097). A recorder (the MCP tool filter, the
@@ -57,9 +40,9 @@ internal sealed class ReadScope
     internal const int MaxStatements = 64;
 
     /// <summary>The fixed vocabulary <see cref="NoteSource"/> accepts.</summary>
-    internal const string SourceRaw = "raw";
-    internal const string SourceIntervalTable = "interval_table";
-    internal const string SourceHourlyEdges = "hourly_edges";
+    internal const string SourceRaw = ComposeReadSources.Raw;
+    internal const string SourceIntervalTable = ComposeReadSources.IntervalTable;
+    internal const string SourceHourlyEdges = ComposeReadSources.HourlyEdges;
 
     private readonly ConcurrentQueue<StatementTiming> _statements = new();
     private int _statementCount;
@@ -329,6 +312,18 @@ internal sealed class ReadScope
 
     /// <summary>The scope the calling async flow runs inside, or null outside any recorder.</summary>
     internal static ReadScope? Current => s_current.Value;
+
+    /* #6390 S2c: the composed-panel run lives in Storage and cannot name this class; it notes through ComposeReadNotes, which is
+       pointed at this scope here, before any service type is used. */
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void InstallComposeReadNotes()
+    {
+        ComposeReadNotes.NoteSourceSink = NoteSource;
+        ComposeReadNotes.NoteSink = Note;
+        ComposeReadNotes.NoteFallbackSink = NoteFallback;
+        ComposeReadNotes.WarnSink = Warn;
+        ComposeReadNotes.CurrentLoggerSource = static () => Current?.Logger;
+    }
 
     /// <summary>The recorder's logger, or null.</summary>
     internal ILogger? Logger { get; }

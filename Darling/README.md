@@ -30,7 +30,9 @@ Nothing is installed on the monitored SQL Servers by either edition beyond two l
 
 ## Quick Start
 
-> **First time, on a box with nothing on it?** [**`docs/uat-onboarding.md`**](../docs/uat-onboarding.md) is the ordered procedure from a downloaded zip to a running service and whichever of the three surfaces you need — the WPF viewer, the web dashboard, or MCP — with a proof point at every step. This section, and the rest of this document, is the reference it links back into.
+> **Installing on Windows?** Follow [`docs/darling/install.md`](../docs/darling/install.md). It is the ordered path from a downloaded zip to a working install, with a proof point at every step.
+>
+> **Installing on Linux, or turning on the web dashboard?** Read [`docs/darling-quick-start.md`](../docs/darling-quick-start.md).
 
 ### Prerequisites
 
@@ -1248,9 +1250,29 @@ With `mcp.allowWrites` on (and a token), seven MCP tools change collector schedu
 
 The writes run the same plans as `--enable-collector`, `--disable-collector` and `--set-collector-run-at`, and refuse the same things: an unknown collector name, a frequency that is negative or past the cap for a collector that stores deltas, a retention under 1 day, a run time on a collector that runs more often than daily. A refusal changes nothing and says why. A write changes only its own column: the other columns on the row are kept, and a row the tool creates never switches a collector on or off. Each answer gives what changed, the previous value and the exact call that undoes it (`undo`). The service picks the change up on its next config poll; there is no restart.
 
-These tools are never offered to an agent that Darling sends to investigate an alert: it may read with `get_collector_schedules` and may not stop, start or reschedule collection. Lite's MCP server has no write tools, so none of this applies to Lite.
+These tools are never offered to an agent that Darling sends to investigate an alert: it may read with `get_collector_schedules` and may not stop, start or reschedule collection.
 
-The `mcp` database role gets `INSERT, UPDATE, DELETE` on `config.config_collector_schedules` and `config.config_collector_run_times` when the service provisions roles (every start). It gets no other new privilege. A bring-your-own store needs `tools/provision-roles.sql` run again to add the same two grants.
+The `mcp` database role gets `INSERT, UPDATE, DELETE` on `config.config_collector_schedules` and `config.config_collector_run_times` when the service provisions roles (every start). A bring-your-own store needs `tools/provision-roles.sql` run again to add the same two grants.
+
+### Set the service flags from MCP (#6393)
+
+With `mcp.allowWrites` on (and a token), `update_service_flags` sets the collection flags the Viewer's Settings window saves under Data Collection. Send only the ones to change; an omitted argument keeps the stored value.
+
+| Argument | Meaning | Range |
+|---|---|---|
+| `capture_plans` | Global plan capture. | true or false |
+| `query_store_backfill_enabled` | Query Store history backfill. | true or false |
+| `query_store_text_budget_mb` | Query Store text budget. | 4 to 256 |
+| `max_concurrent_sweeps` | Server sweeps that run at once. | 1 to 16 |
+| `query_store_fetch_top_n` | Plans per database-hour and metric the Query Store collector fetches. | 0 to 100000 (0 = every new plan) |
+
+The ranges are the Settings window's: both call one class (`ServiceFlagLimits`). An out-of-range value answers `invalid`, names the argument and its range, and changes nothing, including the other flags in the same call. The answer carries all five values before and after. The running service reloads on its next sweep.
+
+The MCP on/off flag and port, the web on/off flag and port, and pause are not settable from MCP: turning MCP off from MCP would lock the admin out, and the `mcp` role's column grant covers only these five columns. Change those in the Viewer. Like the schedule tools, `update_service_flags` is never offered to an investigation agent. Lite's MCP server has no write tools, so none of this applies to Lite.
+
+The service grants the `mcp` role `UPDATE` on exactly those five `config.config_service` columns when it provisions roles (every start). A bring-your-own store needs `tools/provision-roles.sql` run again to add that grant; until then `update_service_flags` answers `error` with a permission failure from the store.
+
+
 
 ### Drop the Extended Events sessions a removed server left behind (`--drop-xe-sessions`)
 

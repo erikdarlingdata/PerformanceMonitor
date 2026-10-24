@@ -222,7 +222,7 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
 
     /// <summary>The runner's StampThrough lookup on a connection, for the servers 1 to <paramref name="servers"/>.</summary>
     internal static Task<DateTime?> StampThroughAsync(NpgsqlConnection connection, DateTime wideStart, DateTime end, CancellationToken ct, int servers = 3) =>
-        PerformanceMonitor.Darling.Service.DarlingWebEndpoints.ResolveQueryStoreStampThroughAsync(
+        PerformanceMonitor.Darling.Storage.ComposePanelRunner.ResolveQueryStoreStampThroughAsync(
             connection, System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Range(1, servers)), wideStart, end, QueryStoreComposeStamp.RungVersion, ct);
 
     internal static async Task CleanupAsync(ScratchPostgres scratch, NpgsqlConnection connection, NpgsqlDataSource source, bool bodySucceeded)

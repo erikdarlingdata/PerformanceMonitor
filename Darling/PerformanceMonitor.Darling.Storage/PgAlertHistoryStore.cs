@@ -16,7 +16,7 @@ using NpgsqlTypes;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
-namespace PerformanceMonitor.Darling.Service;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// Postgres-backed <see cref="IAlertHistoryStore"/> over the V3 <c>config_alert_log</c> table —
@@ -31,13 +31,17 @@ public sealed class PgAlertHistoryStore : IAlertHistoryStore, IDeliveredFireRead
 {
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;
+    private readonly int _commandTimeoutSeconds;
 
     /* Failure tracking for louder logging — Lite's _consecutiveLogFailures cadence. */
     private int _consecutiveLogFailures;
 
-    public PgAlertHistoryStore(NpgsqlDataSource postgres, ILogger? logger = null)
+    /// <summary><paramref name="commandTimeoutSeconds"/> is the deadline of every statement this store runs; the caller
+    /// states it (the alert pass passes its own 10 s, <c>DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds</c>).</summary>
+    public PgAlertHistoryStore(NpgsqlDataSource postgres, int commandTimeoutSeconds, ILogger? logger = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
+        _commandTimeoutSeconds = commandTimeoutSeconds;
         _logger = logger;
     }
 
@@ -80,7 +84,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
                the twelve-column insert it always had. */
             var resolution = record.ResolutionOutcome is not null;
             using var command = new NpgsqlCommand(resolution ? InsertResolutionSql : InsertSql, connection)
-                { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+                { CommandTimeout = _commandTimeoutSeconds };
 
             /* #5632 Phase A: a stamped AlertTimeUtc is written as is, so the investigation link row that names this alert
                carries the same instant; otherwise the store's own clock, as before. */
@@ -153,7 +157,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(
             "SELECT config.record_custom_alert_resolution($1, $2, $3, $4)", connection)
-            { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            { CommandTimeout = _commandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = serverName });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = metricName });
@@ -221,7 +225,7 @@ AND   alert_time >= $3"
             + (untilUtc is null ? "" : "\nAND   alert_time < $4")
             + AlertHistoryEscalationSeed.KeepUnlessEveryChannelFailedFilter
             + (countMuted ? "" : AlertHistoryEscalationSeed.ExcludeMutedFilter)
-            + "\nORDER BY alert_time DESC\nLIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds })
+            + "\nORDER BY alert_time DESC\nLIMIT 1", connection) { CommandTimeout = _commandTimeoutSeconds })
         {
             fireCommand.Parameters.AddWithValue(sid.Value);
             fireCommand.Parameters.AddWithValue(metricName);
@@ -248,7 +252,7 @@ AND   alert_time >= $3"
 SELECT MAX(alert_time)
 FROM config_alert_log
 WHERE server_id = $1
-AND   metric_name = $2", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+AND   metric_name = $2", connection) { CommandTimeout = _commandTimeoutSeconds };
         resolutionCommand.Parameters.AddWithValue(sid.Value);
         resolutionCommand.Parameters.AddWithValue(resolutionMetricName);
         var resolved = await resolutionCommand.ExecuteScalarAsync();
@@ -293,7 +297,7 @@ AND   alert_time > COALESCE(
           (SELECT MAX(r.alert_time) FROM config_alert_log AS r WHERE r.server_id = $1 AND r.metric_name = $3),
           '-infinity'::timestamp)
 ORDER BY alert_time DESC
-LIMIT $4", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+LIMIT $4", connection) { CommandTimeout = _commandTimeoutSeconds };
         command.Parameters.AddWithValue(sid.Value);
         command.Parameters.AddWithValue(metricName);
         command.Parameters.AddWithValue(resolutionTitle);
@@ -354,7 +358,7 @@ AND   metric_name = $2" + extraFilter
                    special characters escaped) by AlertContextSerializer.BuildDedupKeyLikePattern
                    rather than hand-concatenated here — see its doc comment for why. NULL context_json
                    rows fail the match either way. */
-                + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'"), connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+                + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'"), connection) { CommandTimeout = _commandTimeoutSeconds };
             command.Parameters.AddWithValue(sid.Value);
             command.Parameters.AddWithValue(metricName);
             if (dedupKey is not null)

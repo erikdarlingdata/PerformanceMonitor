@@ -795,7 +795,11 @@ public sealed class AlertPassCommandTimeoutTests
         var dir = Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service");
 
         var paths = s_alertPassSources
-            .Select(f => Path.Combine(dir, f))
+            /* #6390 S2b-B: PgAlertHistoryStore moved to Storage (the Viewer's rule delete shares it); it still runs inside the pass,
+               under the deadline the Service passes at construction, so it stays in this sweep. */
+            .Select(f => f == "PgAlertHistoryStore.cs"
+                ? Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Storage", f)
+                : Path.Combine(dir, f))
             .ToArray();
 
         /* A renamed or moved alert-pass type must fail loudly here rather than silently shrinking the

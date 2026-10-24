@@ -8068,7 +8068,7 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
             return CollectorScope.Fleet;
         }
 
-        List<DarlingServerResolver.RegisteredServer> servers;
+        List<RegisteredServer> servers;
         try
         {
             servers = await DarlingServerResolver.LoadEnabledAsync(dataSource, CancellationToken.None);

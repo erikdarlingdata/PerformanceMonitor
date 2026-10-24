@@ -160,7 +160,7 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
 
             var evaluator = new CustomAlertEvaluator(
                 rules, state, dataSource, deliverer, isAlertMuted: null, alertsEnabled: static () => true,
-                new PgAlertHistoryStore(dataSource), defaultIntervalSeconds: 0,
+                new PgAlertHistoryStore(dataSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds), defaultIntervalSeconds: 0,
                 cacheTtl: TimeSpan.Zero, NullLogger.Instance);
 
             await SeedCpuAsync(dataSource, serverId, storage, 30, ct);
