@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
