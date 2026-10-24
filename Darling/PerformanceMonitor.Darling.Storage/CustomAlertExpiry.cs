@@ -4,7 +4,7 @@
 using System;
 using System.Globalization;
 
-namespace PerformanceMonitor.Darling.Service;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The optional expiry of a custom alert rule (#6235): one parse, one refusal and one wire spelling for the MCP tools and the web
@@ -43,4 +43,57 @@ internal static class CustomAlertExpiry
         expiresAtUtc is { } e
             ? DateTime.SpecifyKind(e, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture)
             : null;
+
+    /// <summary>
+    /// The expiry of a CREATE (#6235): omitted or empty means the rule does not expire; otherwise an ISO-8601 UTC instant that must be in
+    /// the future. Shared by the MCP create tool, its agent arm and the web create route, so the three refuse the same way.
+    /// </summary>
+    internal static (DateTime? Expiry, string? Error) ResolveCreateExpiry(string? sent)
+    {
+        if (string.IsNullOrWhiteSpace(sent))
+        {
+            return (null, null);
+        }
+
+        var (parsed, parseError) = CustomAlertExpiry.Parse(sent, "expires_at_utc");
+        if (parseError is not null)
+        {
+            return (null, parseError);
+        }
+
+        var past = CustomAlertExpiry.RefusePast(parsed, DateTime.UtcNow, "expires_at_utc");
+        return past is not null ? (null, past) : (parsed, null);
+    }
+
+    /// <summary>
+    /// The expiry of an UPDATE (#6235), in the vocabulary the description uses: <c>null</c> keeps <paramref name="current"/>, empty
+    /// clears it, anything else is an ISO-8601 UTC instant. A value that is NOT a change (the rule's own stored expiry sent back) is
+    /// never refused, so re-saving an already-expired rule still works; a new value must be in the future.
+    /// </summary>
+    internal static (DateTime? Expiry, string? Error) ResolveUpdateExpiry(string? sent, DateTime? current)
+    {
+        if (sent is null)
+        {
+            return (current, null);
+        }
+
+        if (string.IsNullOrWhiteSpace(sent))
+        {
+            return (null, null);
+        }
+
+        var (parsed, parseError) = CustomAlertExpiry.Parse(sent, "expires_at_utc");
+        if (parseError is not null)
+        {
+            return (null, parseError);
+        }
+
+        if (parsed == current)
+        {
+            return (parsed, null);
+        }
+
+        var past = CustomAlertExpiry.RefusePast(parsed, DateTime.UtcNow, "expires_at_utc");
+        return past is not null ? (null, past) : (parsed, null);
+    }
 }

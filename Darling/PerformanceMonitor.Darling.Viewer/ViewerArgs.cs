@@ -60,6 +60,14 @@ public static class ViewerArgs
         return null;
     }
 
+    /// <summary>
+    /// True when <c>--add-server</c> is among <paramref name="args"/> (#6480): the MSI's finish page starts the viewer
+    /// with it so a new install opens the add-server dialog the empty state offers. A bare flag, it takes no value and
+    /// is skipped by <see cref="ExplicitConfigPath"/> like every other <c>--</c> flag, so it is never a config path.
+    /// </summary>
+    public static bool AddServerRequested(string[] args) =>
+        Array.Exists(args, a => string.Equals(a, "--add-server", StringComparison.OrdinalIgnoreCase));
+
     /// <summary>The value following <c>--open-server</c>, or null when absent or dangling.</summary>
     public static string? OpenServerName(string[] args)
     {
