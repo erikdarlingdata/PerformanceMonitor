@@ -1,6 +1,6 @@
 # Darling store sizing
 
-This guide gives the disk, RAM and vCPU counts for a Darling store host, by the number of monitored servers. The numbers come from three production stores that we measured on 2026-10-14. A load test on a restored copy of a store ([#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794)) reached 126 servers in one store, and is now on hold. A new one is provisioned only when an estate of 100 or more servers is planned. This guide stays based on what was measured. The harness and its runbook are in [`Darling/loadtest/`](../Darling/loadtest/README.md).
+This guide gives the disk, RAM and vCPU counts for a Darling store host, by the number of monitored servers. The numbers come from three production stores that we measured on 2026-10-14. A load test on a restored copy of a store ([#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794)) went to 210 servers in one store and is done. The next numbers come from production stores, after the read fixes it found have shipped. This guide stays based on what was measured. The harness and its runbook are in [`Darling/loadtest/`](../Darling/loadtest/README.md).
 
 To back up, restore or move a store, and to see how much disk it uses, see [Back up, restore and move the store](darling-store-backup.md).
 
@@ -82,12 +82,14 @@ Only the store A row is measured. The other rows are estimates from these rules.
 | 46 to 90 | 16 | 256 GB | 1.4 TiB | Estimate: 90 x 2.1 GiB = 189 GiB (203 GB) uncompressed, 90 x 10 GiB x 1.5 = 1,350 GiB |
 | 91 to 150 | 32 | 384 GB | 2.2 TiB | Estimate: 150 / 5.4 = 27.8 vCPUs, rounded up to 32. 150 x 2.1 GiB = 315 GiB (338 GB) uncompressed, 150 x 10 GiB x 1.5 = 2,250 GiB |
 
-Of the stores we measured, the one with Query Store collected has 43 servers, so the rows above 45 servers are estimates. One load test ran at 126 servers in one store, on a host like store A's. Ingest kept up. Replay lag stayed at about 1 to 2 minutes, with no PANIC, out-of-memory or signal exits. The Query Store reads and rollup builds were the first limits seen, as this guide predicted:
+Of the stores we measured, the one with Query Store collected has 43 servers, so the rows above 45 servers are estimates. The load test copy held N copies of one production store with 42 servers. N=3 is 126 servers and N=5 is 210 servers, about 1.1 TB. The host was like store A's, with a gp3 disk at 6,000 IOPS and 250 MB/s.
 
-- The fleet Query Store panel timed out at its 60 second limit in 3 of 3 runs. It read the raw `collect.query_store_stats` form, because one server that failed the interval-table gate sent the whole fleet panel to raw ([#6115](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6115)). [#6259](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6259) fixed that on 2026-10-21, so a rerun would read the interval table for every server that can use it. The panel result at 126 servers is not valid for sizing.
-- The Query Store compose rollup had 13 hour builds fail on the 60 second statement timeout, across 3 hourly runs. The build statement averaged 11.6 seconds, with a maximum of 27.7 seconds over 12 calls. The failures came in a window shared with the 12:00Z policy jobs. We infer that link. We did not prove it.
+- Writes fit at 210 servers on that host and disk class. Replay lag stayed at about 1.5 minutes.
+- Reads were the first limit, as this guide predicted. At 210 servers the regressions read had a p95 of 40.9 s through MCP and 59.4 s through the web, with one reader. The fleet Query Store panel hit its 60 second limit every time. With 10 readers, 28% of calls were refused as busy and 10 more timed out. At 126 servers, 4.6% were refused.
+- The disk was the limit. A faster disk was not measured.
+- The Query Store compose rollup had 13 hour builds fail on the 60 second statement timeout at 126 servers, across 3 hourly runs. The failures came in a window shared with the 12:00Z policy jobs. We infer that link. We did not prove it.
 
-The clean read pass planned after the fix was not run before the copy was torn down. We have no valid read numbers above 43 servers.
+These read numbers predate the fixes, so they do not set a server count. The fixes are [#6259](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6259) (the fleet panel reads the interval table for the servers that can use it), [#6260](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6260) (the regressions baseline comes from the per-day totals) and [#6484](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6484) (the text label is a keyed lookup). The measured edge margin is in progress. On a production store with 42 servers, after #6260, a first regressions call takes 9 to 22 s and a second one under 2 s.
 
 ### SQL Server without Query Store, and PostgreSQL
 
@@ -106,7 +108,7 @@ A store that holds both kinds of server needs the sum of the two sizes.
 
 ## More than 150 servers
 
-The sizes for more than 150 servers are estimates. The load test in [#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794) is on hold. It reached 126 servers in one store, and we have no measurement above that. A new load test is provisioned only when an estate of 100 or more servers is planned.
+The sizes for more than 150 servers are estimates. The load test in [#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794) went to 210 servers in one store and is done. Writes fit there, and reads failed before the fixes above. We have no measurement above 210 servers. The next numbers come from production stores after the read fixes ship.
 
 For reference, these are the straight-line estimates for 400 servers like those on store A. They are estimates, not measurements.
 
@@ -119,7 +121,7 @@ For reference, these are the straight-line estimates for 400 servers like those 
 | Rows in a day-scan read | about 10 times the rows on store A |
 | Hourly aggregate refresh | about 2 minutes each hour |
 
-We expect the day-scan reads on the Query Store tables to reach their limits first. The 126-server result points the same way, but its read numbers are not valid for sizing, so this is still an expectation.
+We expect the day-scan reads on the Query Store tables to reach their limits first. The 210-server result points the same way, but its read numbers predate the fixes and do not set a server count.
 
 ## What to watch after you install
 
