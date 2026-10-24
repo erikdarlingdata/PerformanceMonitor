@@ -573,7 +573,7 @@ public sealed class InvestigationBriefComposer
                 ("get_file_io_trend", null, "Chart read and write latency over the alert window to see when the anomaly began."),
                 ("get_file_io_stats", null, "Check which database files carry the latency."),
                 /* #6614: a long-running maintenance job is a common cause of an I/O anomaly. Darling only: Lite's gate drops it. */
-                ("get_job_history", new Dictionary<string, string> { ["min_duration_seconds"] = "60" }, "A long-running maintenance job, such as an index rebuild or a backup, is a common cause of an I/O anomaly. This lists the Agent runs of 60 seconds or more."),
+                ("get_job_history", new Dictionary<string, string> { ["min_duration_seconds"] = "60" }, "List Agent runs of 60 seconds or more. A long index rebuild or backup often causes I/O latency."),
             };
         }
 

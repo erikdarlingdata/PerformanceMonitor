@@ -314,11 +314,11 @@ public sealed class InvestigationBriefComposerTests
         Assert.Contains("get_blocking", names);
     }
 
-    /// <summary>#6614: an I/O anomaly story names get_job_history for runs of 60 seconds or more, after the two file I/O reads.</summary>
+    /// <summary>#6614: an I/O anomaly story names get_job_history for runs of 60 seconds or more, after the two file I/O reads.
+    /// The rows are the two root keys the anomaly detectors emit. ANOMALY_IO is a recommendation-table bucket, not a root key, so it has no row.</summary>
     [Theory]
     [InlineData("ANOMALY_WRITE_LATENCY")]
     [InlineData("ANOMALY_READ_LATENCY")]
-    [InlineData("ANOMALY_IO")]
     public void AnIoAnomalyStory_NamesLongJobRuns_AfterTheFileIoReads(string rootFactKey)
     {
         var finding = Finding() with { RootFactKey = rootFactKey, NextTools = Array.Empty<InvestigationNextCall>() };
