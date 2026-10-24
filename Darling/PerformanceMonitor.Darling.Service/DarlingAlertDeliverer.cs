@@ -296,7 +296,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
             context ??= new AlertContext();
             /* #6718: the generic post's rendered {{dedup_key}} rides its destination, so a resolution after a restart closes
                the key the receiver opened. The row's incidents are unfiltered (#3313) and cannot give that key back. */
-            context.Route = route.ToDto(result.ChannelOutcomes, result.GenericDedupKey);
+            context.Route = route.ToDto(result.ChannelOutcomes, result.GenericDedupKey, result.PagerDutyDedupKey);
         }
 
         /* Always log the alert, regardless of channel status (EmailAlertService.cs:82-94). */
@@ -389,7 +389,10 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
 
         var now = _utcNow();
         var serverId = string.IsNullOrEmpty(outcome.ServerKey) ? outcome.ServerName : outcome.ServerKey;
-        var dedupKey = WebhookAlertService.DerivePagerDutyDedupKeyForSend(serverId, outcome.MetricName, context, _settings);
+        /* The key the PagerDuty trigger carried, from the filtered context, so the resolve closes the incident it opened and
+           the triage link names it. Derived from this unfiltered context only when PagerDuty was not sent, for the link. */
+        var dedupKey = result.PagerDutyDedupKey
+            ?? WebhookAlertService.DerivePagerDutyDedupKeyForSend(serverId, outcome.MetricName, context, _settings);
         /* #6718: the key the generic post rendered, from the filtered context, not one derived again from this unfiltered one. */
         var genericDedupKey = result.GenericDedupKey;
         lock (_deliveredFires)
@@ -752,7 +755,11 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
             }
 
             AlertContextSerializer.TryDeserialize(row.ContextJson, out var context);
-            var dedupKey = WebhookAlertService.DerivePagerDutyDedupKeyForSend(serverId, resolution.MetricName, context, _settings);
+            /* The key the PagerDuty trigger carried, stored on its destination as sent. A row written before that was stored,
+               or one that did not send PagerDuty, carries none, and the key is derived from the row's incidents, which
+               matches the trigger whenever the #3313 filter dropped none of them. The triage link takes the same key. */
+            var dedupKey = route.Destinations.FirstOrDefault(d => d.Channel == NotificationRouter.PagerDutyChannel)?.SentKey
+                ?? WebhookAlertService.DerivePagerDutyDedupKeyForSend(serverId, resolution.MetricName, context, _settings);
             firstDedupKey = dedupKey;
             foreach (var destination in route.Destinations)
             {

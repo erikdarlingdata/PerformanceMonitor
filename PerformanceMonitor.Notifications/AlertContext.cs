@@ -442,9 +442,10 @@ public record AlertRouteDto(string Family, int? RouteId, List<AlertRouteDestinat
 /// <c>send_error</c> stays the only place a failure's reason is written.
 ///
 /// <para><c>SentKey</c> (#6718) is the <c>{{dedup_key}}</c> the generic webhook's post rendered, set on the generic
-/// destination only. The post renders it from the #3313 delivery-filtered context, which the row does not keep, so it
-/// is stored as sent and a resolution after a restart closes the key the receiver opened. Trailing and nullable like
-/// <c>Outcome</c>: a row written before it existed, and every other channel, read null. Not named <c>DedupKey</c>, so the
+/// destination, and the <c>dedup_key</c> the PagerDuty trigger carried, set on the PagerDuty destination. Both are derived
+/// from the #3313 delivery-filtered context, which the row does not keep, so each is stored as sent and a resolution after a
+/// restart closes the key the receiver opened. Trailing and nullable like <c>Outcome</c>: a row written before it existed,
+/// and every other channel, read null. Not named <c>DedupKey</c>, so the
 /// cooldown seed's <c>"DedupKey":"..."</c> match never reads it as an incident.</para>
 /// </summary>
 public record AlertRouteDestinationDto(string Channel, int? RouteId, string Source, string? Outcome = null, string? SentKey = null);

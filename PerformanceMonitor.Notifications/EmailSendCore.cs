@@ -324,7 +324,7 @@ public sealed class EmailSendCore
 
         return new EmailFanoutResult(
             emailOutcome, sendError, webhook.Outcome, webhook.SendError, anyChannelConfigured,
-            webhook.Route ?? emailRoute, channelOutcomes, webhook.GenericDedupKey);
+            webhook.Route ?? emailRoute, channelOutcomes, webhook.GenericDedupKey, webhook.PagerDutyDedupKey);
     }
 
     /// <summary>Gets email delivery health summary (consecutive failures + last error).</summary>
@@ -522,6 +522,8 @@ public sealed class EmailSendCore
 /// </param>
 /// <param name="GenericDedupKey">#6718: the webhook fan-out's <see cref="WebhookFanoutResult.GenericDedupKey"/>, the key the
 /// generic post rendered, passed through for the deliverer to record. Trailing and defaulted like <paramref name="Route"/>.</param>
+/// <param name="PagerDutyDedupKey">The webhook fan-out's <see cref="WebhookFanoutResult.PagerDutyDedupKey"/>, the key the
+/// PagerDuty trigger carried, passed through for the deliverer to record. Trailing and defaulted like <paramref name="Route"/>.</param>
 public readonly record struct EmailFanoutResult(
     AlertChannelOutcome EmailOutcome,
     string? SendError,
@@ -530,7 +532,8 @@ public readonly record struct EmailFanoutResult(
     bool AnyChannelConfigured,
     NotificationRouteDecision? Route = null,
     IReadOnlyDictionary<string, AlertChannelOutcome>? ChannelOutcomes = null,
-    string? GenericDedupKey = null)
+    string? GenericDedupKey = null,
+    string? PagerDutyDedupKey = null)
 {
     /// <summary>Whether an SMTP send was attempted — configured, outside its cooldown, and not folded.</summary>
     public bool EmailAttempted =>
