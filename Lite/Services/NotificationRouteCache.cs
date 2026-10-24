@@ -199,7 +199,9 @@ internal sealed class NotificationRouteCacheCore
             }
             while (MoreToLoad());
 
-            Volatile.Write(ref _backgroundRunning, 0);
+            /* A full fence, not a release store: the look below must not be read before the clear is seen, or an Invalidate in
+               between would start nothing and this loop would stop with its change unloaded. */
+            Interlocked.Exchange(ref _backgroundRunning, 0);
 
             /* Look again after clearing the flag: an Invalidate that landed between the last look and the clear saw the flag set
                and started nothing, so this loop goes on (or that Invalidate won the race and started its own loop). */
