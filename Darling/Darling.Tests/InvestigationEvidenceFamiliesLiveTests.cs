@@ -236,7 +236,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             foreach (var (queryId, text) in new[]
             {
                 (511L, "SELECT * FROM dbo.Orders"),
-                (512L, "delete top(@batch_size) from sys.change_tracking_1234567 where x < @y"),
+                (512L, "(@csn bigint,@batch_size int)delete top(@batch_size) from sys.[change_tracking_1228027148] where sys_change_xdes_id < @csn"),
                 (513L, "(@cutoff_time datetime2(7))SELECT /* " + PerformanceMonitor.Collectors.QueryStoreCollector.SelfQueryMarker + " */ qsrs.plan_id"),
             })
             {
