@@ -168,6 +168,27 @@ public sealed class DarlingMcpJobHistoryToolSurfaceTests
         var negative = await DarlingMcpJobTools.GetJobHistory(null!, min_duration_seconds: -1);
         Assert.Equal("invalid", DarlingMcpTestData.StatusOf(negative));
     }
+
+    /// <summary>
+    /// #6614: the web dispatch reads <c>min_duration_seconds</c> under a hand-typed key. An unparseable value is answered with
+    /// the refusal that names the parameter, before any store read, so this runs on the PR suite with a data source that points
+    /// nowhere. Revert proof: if the dispatch read a mistyped key (say <c>min_duration_second</c>), the value sent here would
+    /// never be seen, the read would go on to the unreachable store, and the answer would be an error envelope, not
+    /// <c>invalid</c>, so the status and message assertions fail. The live half (a value of 60 drops the short runs) is the
+    /// MCP-path test <c>MinDurationSeconds_KeepsTheLongRunOnTheFirstPage_BeforeTheLimit</c>, which needs DARLING_TEST_PG.
+    /// </summary>
+    [Fact]
+    public async Task ApiRead_RefusesAnUnparseableMinDurationSeconds_ByName_BeforeAnyStoreRead()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var unreachable = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Database=none;Username=none;Timeout=1;Pooling=false");
+        var (status, body) = await DarlingMcpJobHistoryToolLiveTests.WebGetAsync(unreachable, "/api/read/get_job_history?min_duration_seconds=abc", ct);
+
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(body));
+        using var doc = JsonDocument.Parse(body);
+        Assert.Contains("min_duration_seconds", doc.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.Equal(StatusCodes.Status400BadRequest, status);
+    }
 }
 
 [Collection("live-postgres")]
@@ -260,7 +281,7 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         await DarlingMcpTestData.ExecAsync(c, ct, $"DELETE FROM servers WHERE server_id IN ({ids})");
     }
 
-    private static async Task<(int Status, string Body)> WebGetAsync(NpgsqlDataSource postgres, string pathAndQuery, CancellationToken ct)
+    internal static async Task<(int Status, string Body)> WebGetAsync(NpgsqlDataSource postgres, string pathAndQuery, CancellationToken ct)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
