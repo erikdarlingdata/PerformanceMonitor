@@ -307,10 +307,9 @@ LIMIT 6";
        snapshot's event_time IS its collection time. The BASELINE this count is judged against comes from the
        continuous aggregates, which bucket the hypertable's own column (collection_time) by design.
 
-       #6645: this CURRENT count leaves out a parallel query's self-waits, but the BASELINE aggregate
-       (collect.blocked_process_baseline, count(*) over every report row) still counts them until a store
-       migration rebuilds it with the same predicate, so a server with many self-waits has a high baseline and
-       its real blocking is under-flagged in the meantime. */
+       #6645: this CURRENT count leaves out a parallel query's self-waits, and so does the BASELINE aggregate
+       (collect.blocked_process_baseline, #6690: its select carries the same BlockingWaits.NotSelfWaitSql), so the
+       ratio compares like with like. A store that built the aggregate earlier is rebuilt on start. */
     public const string BlockingWindowSql = $@"
 /* #6645: a row whose blocked and blocking spid are the same is a parallel query waiting on itself, not blocking. */
 SELECT

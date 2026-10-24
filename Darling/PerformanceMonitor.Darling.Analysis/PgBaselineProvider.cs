@@ -974,6 +974,19 @@ LIMIT 1";
                 windowStart = await ClampToPlainViewPurgeHorizonAsync(connection, metricName, windowStart, cancellationToken);
             }
 
+            /* #6705 (the #3590 trap): the Blocking arm counts a collection_log run with no event as a measured zero, and the
+               log is kept twice as long as the events behind blocked_process_baseline. After that aggregate was rebuilt it
+               holds only what raw still held, so a day before that would read as a quiet day, not a missing one. The
+               start path recorded where its supply begins; the window starts no earlier. Absent or unreadable is no floor,
+               and it is never derived from the aggregate's own oldest bucket (a server that rarely blocks has real zero days).
+               The text of the arm is unchanged: it still reads $2. */
+            if (keys is null && metricName == MetricNames.Blocking
+                && await TimescaleSupport.ReadBlockedBaselineSupplyFloorAsync(connection, cancellationToken) is DateTime supplyFloor
+                && supplyFloor > windowStart)
+            {
+                windowStart = supplyFloor;
+            }
+
             /* #3653 Q6: the target's clock over this window, read on the same connection and INSIDE this try on
                purpose — a store that cannot answer a one-row indexed read of server_properties cannot answer the
                aggregate scan either, and one classified catch (AnalysisShutdownResidueTests pins exactly one) is

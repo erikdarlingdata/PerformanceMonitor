@@ -315,16 +315,18 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// Whether the XE blocked_process_reports source holds a report in the window: the same predicate the Blocking charts' reads
-    /// use for their <c>bpr</c> arm (event time in the window, the event-window floor on collection time, the database filter),
-    /// so true here means the charts draw from XE rows and not from the DMV fallback beside them.
+    /// use for their <c>bpr</c> arm (event time in the window, the event-window floor on collection time, the database filter,
+    /// and <see cref="BlockingWaits.NotSelfWaitSql"/>: a parallel query waiting on itself is not blocking, #6705), so true here
+    /// means the charts draw from XE rows and not from the DMV fallback beside them.
     /// </summary>
-    public const string BlockedProcessReportsInWindowSql = """
+    public const string BlockedProcessReportsInWindowSql = $"""
         SELECT EXISTS (
             SELECT 1
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
+            AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
         )
         """;
 
@@ -435,7 +437,9 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// Where the XE blocked-process-report data starts for one server, as two columns: the XE collector's first logged run
     /// in the window (or the window's start when a run exists before it, which is covered), and the earliest XE report in the
-    /// window (the same predicate as <see cref="BlockedProcessReportsInWindowSql"/>). The caller takes the earlier of the two,
+    /// window, a self-wait report included (it still proves the XE session was capturing, so this read leaves out the
+    /// <see cref="PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql"/> filter that <see cref="BlockedProcessReportsInWindowSql"/> takes, #6705).
+    /// The caller takes the earlier of the two,
     /// through <see cref="BlockingThresholdCoverage.Combine"/>, which also folds in the threshold's history.
     /// $1 server, $2 window start, $3 window end, $4 database filter, $5 the event-window floor on collection time. Both run
     /// reads are bounded, the first run in <c>[$2, $3]</c> and the newest run before $2, and ride

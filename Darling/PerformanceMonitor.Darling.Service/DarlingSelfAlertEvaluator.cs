@@ -1822,12 +1822,12 @@ internal sealed class DarlingSelfAlertEvaluator
                 var list = string.Join(" and ", missing);
                 var delivery = await FireAsync(
                     key, serverName, CaptureDownMetric, list, "session running",
-                    detail: StateRepeatNote(decision, refire) + $"The {list} Extended Events session(s) are missing and could not be created. " +
+                    detail: StateRepeatNote(decision, refire) + $"The {list} Extended Events {(missing.Count == 1 ? "session is" : "sessions are")} missing and could not be created. " +
                         "Blocking/deadlock data is NOT being captured, so those alerts can never fire. Check the " +
                         "collection log for the SESSION_MISSING detail (usually a permissions problem: " +
                         "ALTER ANY EVENT SESSION on-prem, CREATE ANY DATABASE EVENT SESSION on Azure SQL DB).",
                     severity: AlertSeverityLevel.Critical,
-                    shortMessage: $"{list} capture is not running — XE session missing",
+                    shortMessage: $"{list} capture is not running — XE {(missing.Count == 1 ? "session" : "sessions")} missing",
                     /* Which capture is missing ("Blocking and Deadlock") against "session running". */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
@@ -2461,7 +2461,7 @@ internal sealed class DarlingSelfAlertEvaluator
         if (remaining > 0)
         {
             /* A heading-only item, the shape AlertContextBuilders already uses for a stated remainder
-               (BuildBlockingContext's "+N more distinct blocking incident(s)"): a surface that renders only
+               (BuildBlockingContext's "+N more distinct blocking incidents"): a surface that renders only
                rows must not be able to read this document as complete. */
             context.Details.Add(new AlertDetailItem
             {
@@ -3185,10 +3185,10 @@ internal sealed class DarlingSelfAlertEvaluator
         var hours = CollectionHistoryAudit.FlaggedHours(findings);
         return new HistoryAuditAlertText(
             hours,
-            string.Create(CultureInfo.InvariantCulture, $"{hours} hours"),
+            string.Create(CultureInfo.InvariantCulture, $"{hours} {(hours == 1 ? "hour" : "hours")}"),
             CollectionHistoryAudit.Render(held.Day, findings, unread, incomplete),
             string.Create(CultureInfo.InvariantCulture,
-                $"{hours} thin hour(s) in retained history on {held.Day:yyyy-MM-dd}"));
+                $"{hours} thin {(hours == 1 ? "hour" : "hours")} in retained history on {held.Day:yyyy-MM-dd}"));
     }
 
     /* ------------------------- #3712: the analysis singles digest ------------------------- */
@@ -5216,7 +5216,7 @@ internal sealed class DarlingSelfAlertEvaluator
     private static (string ShortMessage, string Detail) RenderCustomRuleHealth(CustomAlertHealthReport report)
     {
         var shortMessage = string.Create(CultureInfo.InvariantCulture,
-            $"{report.TotalIssues} custom alert rule(s) need attention: {report.BrokenRules.Count} no longer compile, {report.NeverFiringRules.Count} armed but never fire");
+            $"{report.TotalIssues} custom alert {(report.TotalIssues == 1 ? "rule needs" : "rules need")} attention: {report.BrokenRules.Count} no longer {(report.BrokenRules.Count == 1 ? "compiles" : "compile")}, {report.NeverFiringRules.Count} armed but never {(report.NeverFiringRules.Count == 1 ? "fires" : "fire")}");
 
         var sb = new StringBuilder();
         sb.Append(shortMessage).Append('.');
@@ -5585,7 +5585,7 @@ internal sealed class DarlingSelfAlertEvaluator
     {
         var oldestDays = (nowUtc - stale[0].CreatedAtUtc).TotalDays;
         var shortMessage = string.Create(CultureInfo.InvariantCulture,
-            $"{stale.Count} mute rule(s) have been suppressing alerts with no expiry for over {StaleMuteAge.TotalDays:F0} days (oldest {oldestDays:F0} days)");
+            $"{stale.Count} {(stale.Count == 1 ? "mute rule has" : "mute rules have")} been suppressing alerts with no expiry for over {StaleMuteAge.TotalDays:F0} days (oldest {oldestDays:F0} days)");
 
         var sb = new StringBuilder();
         sb.Append(shortMessage).Append('.');
@@ -5797,7 +5797,7 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             var rejectedList = string.Join(", ", report.RejectedSettingNames);
             reasons.Add(string.Create(CultureInfo.InvariantCulture,
-                $"PostgreSQL rejected the managed value for {report.RejectedSettingNames.Count} owned setting(s): {rejectedList}"));
+                $"PostgreSQL rejected the managed value for {report.RejectedSettingNames.Count} owned {(report.RejectedSettingNames.Count == 1 ? "setting" : "settings")}: {rejectedList}"));
         }
 
         if (anyUnknown && reasons.Count == 0)
@@ -5833,7 +5833,7 @@ internal sealed class DarlingSelfAlertEvaluator
         _lastStoreSettingsAlert[StoreSettingsKey] = now;
 
         var detail = string.Join(". ", reasons) + ". Run --check-settings for the full picture.";
-        var shortMessage = FormattableString.Invariant($"{reasons.Count} managed-store setting condition(s) need attention");
+        var shortMessage = FormattableString.Invariant($"{reasons.Count} managed-store setting {(reasons.Count == 1 ? "condition needs" : "conditions need")} attention");
 
         var delivery = await FireAsync(
             StoreKey(StoreSettingsKey), _storeLabel, StoreSettingsMetric,
@@ -7040,7 +7040,7 @@ WHERE c.is_enabled";
                         StoreKey(RetentionHoldKeyPrefix + key), _storeLabel, RetentionHoldMetric,
                         $"{ratio:F1}x its {policy.DropAfter} horizon", $"{warnRatio:F1}x",
                         detail: StateRepeatNote(decision, refire) + $"Store {label} is HELD PAUSED by the rollup-coverage gate, and the tier now " +
-                            $"holds {spanDays:F1} days across {policy.ChunkCount} chunk(s) against a configured " +
+                            $"holds {spanDays:F1} days across {policy.ChunkCount} {(policy.ChunkCount == 1 ? "chunk" : "chunks")} against a configured " +
                             $"{policy.DropAfter} horizon ({ratio:F1}x). " +
                             (critical
                                 ? "The tier is now several times its intended depth and still growing, so this " +
@@ -7287,15 +7287,15 @@ WHERE c.is_enabled";
                 var reason = string.IsNullOrEmpty(oldest.LastSqlState) ? oldest.LastReason : $"{oldest.LastSqlState}: {oldest.LastReason}";
                 var delivery = await FireAsync(
                     StoreKey(ComposeHoursStuckKeyPrefix + key), _storeLabel, ComposeHoursStuckMetric,
-                    $"{stuck.Count} hour(s)", "0 hours",
+                    $"{stuck.Count} {(stuck.Count == 1 ? "hour" : "hours")}", "0 hours",
                     detail: StateRepeatNote(decision, refire) +
-                        $"{stuck.Count} hour(s) of the Query Store compose rollup failed to build {QueryStoreComposeStamp.FailuresBeforeBackoff} times in a row " +
-                        "(or timed out under the longer timeout) and are now retried once a day. " +
-                        $"The oldest is {oldest.Hour:yyyy-MM-dd HH}:00 UTC: {oldest.Failures} failure(s), last reason {reason}, next attempt {oldest.NextAttemptAt:yyyy-MM-dd HH:mm} UTC. " +
+                        $"{stuck.Count} {(stuck.Count == 1 ? "hour" : "hours")} of the Query Store compose rollup failed to build {QueryStoreComposeStamp.FailuresBeforeBackoff} times in a row " +
+                        $"(or timed out under the longer timeout) and {(stuck.Count == 1 ? "is" : "are")} now retried once a day. " +
+                        $"The oldest is {oldest.Hour:yyyy-MM-dd HH}:00 UTC: {oldest.Failures} {(oldest.Failures == 1 ? "failure" : "failures")}, last reason {reason}, next attempt {oldest.NextAttemptAt:yyyy-MM-dd HH:mm} UTC. " +
                         "get_store_metrics lists every such hour under query_store_compose; the service log's 'Query Store compose rollup: building hour' " +
                         "lines carry each failure.",
                     severity: AlertSeverityLevel.Warning,
-                    shortMessage: $"{stuck.Count} Query Store compose hour(s) retried once a day - {reason}",
+                    shortMessage: $"{stuck.Count} Query Store compose {(stuck.Count == 1 ? "hour" : "hours")} retried once a day - {reason}",
                     numericCurrentValue: stuck.Count,
                     numericThresholdValue: 0,
                     cancellationToken);
@@ -7709,7 +7709,7 @@ WHERE c.is_enabled";
 
                 if (requested > 0 || armParts.Count == 0)
                 {
-                    armParts.Add($"{requested} requested checkpoint(s)");
+                    armParts.Add($"{requested} requested {(requested == 1 ? "checkpoint" : "checkpoints")}");
                 }
 
                 var arms = armParts.Count == 1
@@ -7737,9 +7737,9 @@ WHERE c.is_enabled";
 
                 var delivery = await FireAsync(
                     StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
-                    $"{arms} over {checkpointCount} checkpoint(s) in {intervalMinutes} min",
+                    $"{arms} over {checkpointCount} {(checkpointCount == 1 ? "checkpoint" : "checkpoints")} in {intervalMinutes} min",
                     thresholdText,
-                    detail: $"The store's own checkpointer ran {checkpointCount} checkpoint(s) over the {intervalMinutes} minutes " +
+                    detail: $"The store's own checkpointer ran {checkpointCount} {(checkpointCount == 1 ? "checkpoint" : "checkpoints")} over the {intervalMinutes} minutes " +
                         $"between the last two self-metrics sweeps, spending {(syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s " +
                         $"total in its sync (fsync) phase and {writeSeconds}s in its write phase — an average of {averageSecondsText}s of sync " +
                         $"per checkpoint — and {requested} of those checkpoints were REQUESTED — started by something other than " +
@@ -7764,7 +7764,7 @@ WHERE c.is_enabled";
                         "new interval breaches and recovers when one reads clean.",
                     /* No override: the per-metric map's declared INFO arm decides (the digest reasoning). */
                     severity: null,
-                    shortMessage: $"store checkpointer: {arms} over {checkpointCount} checkpoint(s) in the last {intervalMinutes} min",
+                    shortMessage: $"store checkpointer: {arms} over {checkpointCount} {(checkpointCount == 1 ? "checkpoint" : "checkpoints")} in the last {intervalMinutes} min",
                     numericCurrentValue: currentValue,
                     numericThresholdValue: CheckpointSyncBarMs,
                     cancellationToken);
@@ -7780,8 +7780,8 @@ WHERE c.is_enabled";
                 StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
                 CheckpointerPressureRecoveredMetric,
                 /* Label rather than the constant for the #3500 reason the cadence recovery gives. */
-                $"{_storeLabel}: checkpointer {recoveredAverageText} and {requested} requested checkpoint(s) over {checkpointCount} " +
-                $"checkpoint(s) in the last {intervalMinutes} min" +
+                $"{_storeLabel}: checkpointer {recoveredAverageText} and {requested} requested {(requested == 1 ? "checkpoint" : "checkpoints")} over {checkpointCount} " +
+                $"{(checkpointCount == 1 ? "checkpoint" : "checkpoints")} in the last {intervalMinutes} min" +
                 (longestSync is CheckpointSyncMax recoveredLongest ? $", longest single sync {FormatSyncSeconds(recoveredLongest.SyncMs)}s" : "") +
                 " — under the line again"), cancellationToken);
         }
@@ -8210,8 +8210,8 @@ WHERE c.is_enabled";
 
             var delivery = await FireAsync(
                 StoreKey(PolicyJobFailingKeyPrefix + key), _storeLabel, PolicyJobFailingMetric,
-                $"{grew} new failure(s), {job.TotalFailures} total", "at least one new failure",
-                detail: $"TimescaleDB {label} recorded {grew} more failed run(s) since the previous hourly sample " +
+                $"{grew} new {(grew == 1 ? "failure" : "failures")}, {job.TotalFailures} total", "at least one new failure",
+                detail: $"TimescaleDB {label} recorded {grew} more failed {(grew == 1 ? "run" : "runs")} since the previous hourly sample " +
                     $"({job.TotalFailures} failures total since the policy was created) and its last run reports Failed. " +
                     $"{band.Consequence} The job is still SCHEDULED — the scheduler is running it and it is failing — " +
                     "which is why neither the dead-job arm (next_start = -infinity) nor the #2136 cadence check (which " +
@@ -8223,7 +8223,7 @@ WHERE c.is_enabled";
                    #3443/#3783 idiom. The value IS a measurement — how many more failures — so unlike the
                    stuck family this metric is deliberately not state-only. */
                 severity: null,
-                shortMessage: $"{label} failed {grew} more time(s) since the last sample",
+                shortMessage: $"{label} failed {grew} more {(grew == 1 ? "time" : "times")} since the last sample",
                 numericCurrentValue: grew,
                 numericThresholdValue: 1,
                 cancellationToken);
