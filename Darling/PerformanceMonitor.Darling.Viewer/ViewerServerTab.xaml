@@ -4071,11 +4071,13 @@
                                 <DataGridTextColumn Binding="{Binding AvgDurationFormatted}" Width="120" MinWidth="120" SortMemberPath="AvgDurationMs">
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Duration" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <!-- #6629: the network bytes the collector's SQL Server connections received and sent per day, over the last 7 days. "not measured" when no run had a SQL Server connection, never 0. Hidden on a store below V219. -->
-                                <DataGridTextColumn Binding="{Binding BytesReceivedPerDayFormatted}" ElementStyle="{StaticResource NumericCell}" Width="130" MinWidth="130" SortMemberPath="BytesReceivedPerDay">
+                                <!-- #6629: the network bytes the collector's SQL Server connections received and sent per day, over the time measured within the last 7 days (the tooltip says how long). "not measured" when no run had a SQL Server connection, never 0. Hidden on a store below V219. -->
+                                <DataGridTextColumn Binding="{Binding BytesReceivedPerDayFormatted}" Width="130" MinWidth="130" SortMemberPath="BytesReceivedPerDay">
+                                    <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock" BasedOn="{StaticResource NumericCell}"><Setter Property="ToolTip" Value="{Binding BytesMeasuredText}"/></Style></DataGridTextColumn.ElementStyle>
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BytesReceivedPerDayFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Received / day" FontWeight="Bold" VerticalAlignment="Center"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding BytesSentPerDayFormatted}" ElementStyle="{StaticResource NumericCell}" Width="120" MinWidth="120" SortMemberPath="BytesSentPerDay">
+                                <DataGridTextColumn Binding="{Binding BytesSentPerDayFormatted}" Width="120" MinWidth="120" SortMemberPath="BytesSentPerDay">
+                                    <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock" BasedOn="{StaticResource NumericCell}"><Setter Property="ToolTip" Value="{Binding BytesMeasuredText}"/></Style></DataGridTextColumn.ElementStyle>
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BytesSentPerDayFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Sent / day" FontWeight="Bold" VerticalAlignment="Center"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding LastSuccessFormatted}" Width="140" MinWidth="140" SortMemberPath="LastSuccessTime">

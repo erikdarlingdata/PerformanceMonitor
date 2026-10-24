@@ -639,13 +639,15 @@ LIMIT 1";
     /// <summary>
     /// #6629: the bytes each collector received and sent on one server over the Collection Health window. $1 server_id, $2 window start
     /// (naive UTC). The same rows the web's get_collection_health sums (its closed hours come from the hourly rollup of this column, which
-    /// adds up to the same figure). A collector with no measured run in the window has no row here, so it reads "not measured", never 0.
+    /// adds up to the same figure). The fourth column is the collector's first run with a byte figure, which sets the span the sums are
+    /// divided by (<see cref="CollectorBytesSpan"/>). A collector with no measured run in the window has no row here, so it reads "not measured", never 0.
     /// </summary>
     public const string CollectionBytesSql = $"""
         SELECT
             collector_name,
             SUM(bytes_received)::bigint,
-            SUM(bytes_sent)::bigint
+            SUM(bytes_sent)::bigint,
+            MIN(collection_time)
         FROM v_collection_log
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -655,7 +657,7 @@ LIMIT 1";
         """;
 
     /// <summary>
-    /// #6629: stamps each health row with its bytes per day (<see cref="CollectionBytesSql"/>, spread over the 7-day window). Skipped on a
+    /// #6629: stamps each health row with its bytes per day (<see cref="CollectionBytesSql"/>, over the time measured within the 7-day window). Skipped on a
     /// store below V219. A failed read leaves the rows unstamped ("not measured") and the grid answers without the columns' figures;
     /// a cancellation is not swallowed.
     /// </summary>
@@ -668,7 +670,7 @@ LIMIT 1";
                 return;
             }
 
-            var sums = new Dictionary<string, (long Received, long Sent)>(StringComparer.Ordinal);
+            var sums = new Dictionary<string, (long Received, long Sent, DateTime FirstMeasuredUtc)>(StringComparer.Ordinal);
             await using var command = _dataSource.CreateCommand(CollectionBytesSql);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
@@ -680,11 +682,11 @@ LIMIT 1";
             {
                 while (await reader.ReadAsync(cancellationToken))
                 {
-                    sums[reader.GetString(0)] = (reader.GetInt64(1), reader.IsDBNull(2) ? 0 : reader.GetInt64(2));
+                    sums[reader.GetString(0)] = (reader.GetInt64(1), reader.IsDBNull(2) ? 0 : reader.GetInt64(2), DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc));
                 }
             }
 
-            ApplyBytesPerDay(rows, sums, CollectionBytesWindowDays);
+            ApplyBytesPerDay(rows, sums, CollectionBytesWindowDays, DateTime.UtcNow);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -692,16 +694,19 @@ LIMIT 1";
         }
     }
 
-    /// <summary>#6629: puts each collector's window sums, spread over <paramref name="windowDays"/>, on its row. A row with no sums is left
+    /// <summary>#6629: puts each collector's window sums on its row, as bytes per day over the time measured (<see cref="CollectorBytesSpan"/>:
+    /// from its first measured run to <paramref name="nowUtc"/>, at least an hour, at most <paramref name="windowDays"/>). A row with no sums is left
     /// null ("not measured"). Pure, so a test needs no store.</summary>
-    internal static void ApplyBytesPerDay(IEnumerable<CollectorHealthRow> rows, IReadOnlyDictionary<string, (long Received, long Sent)> sums, double windowDays)
+    internal static void ApplyBytesPerDay(IEnumerable<CollectorHealthRow> rows, IReadOnlyDictionary<string, (long Received, long Sent, DateTime FirstMeasuredUtc)> sums, double windowDays, DateTime nowUtc)
     {
         foreach (var row in rows)
         {
             if (sums.TryGetValue(row.CollectorName, out var sum))
             {
-                row.BytesReceivedPerDay = (long)Math.Round(sum.Received / windowDays);
-                row.BytesSentPerDay = (long)Math.Round(sum.Sent / windowDays);
+                var measuredDays = CollectorBytesSpan.MeasuredDays(sum.FirstMeasuredUtc, nowUtc, windowDays);
+                row.BytesReceivedPerDay = CollectorBytesSpan.PerDay(sum.Received, measuredDays);
+                row.BytesSentPerDay = CollectorBytesSpan.PerDay(sum.Sent, measuredDays);
+                row.BytesMeasuredHours = CollectorBytesSpan.Hours(measuredDays);
             }
         }
     }
@@ -1490,6 +1495,15 @@ public class CollectorHealthRow
 
     /// <summary>#6629: the bytes sent per day over the same window. Null = not measured.</summary>
     public long? BytesSentPerDay { get; set; }
+
+    /// <summary>#6629: the hours the per-day figures were measured over (one decimal): the time since the collector's first run with a byte
+    /// figure in the window, at least 1, at most 168. Null when not measured.</summary>
+    public double? BytesMeasuredHours { get; set; }
+
+    /// <summary>#6629: the cell tooltip saying how long the per-day figures were measured over.</summary>
+    public string BytesMeasuredText => BytesMeasuredHours.HasValue
+        ? string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Per day, measured over {BytesMeasuredHours.Value:0.#} hours")
+        : CollectorBytesText.NotMeasured;
 
     public string BytesReceivedPerDayFormatted => CollectorBytesText.Format(BytesReceivedPerDay);
 

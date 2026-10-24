@@ -96,13 +96,39 @@ public sealed class CollectorBytesViewerLiveTests : IAsyncLifetime
         var alpha = rows.Single(r => r.CollectorName == "alpha");
         var beta = rows.Single(r => r.CollectorName == "beta");
 
-        /* The window is 7 days: 3,000 received and 300 sent over the measured runs, the NULL run adding nothing. */
+        /* #6629: 3,000 received and 300 sent over the measured runs, the NULL run adding nothing. The first measured run is 30 minutes old,
+           under the one-hour floor, so the figure divides by 1 hour: 3,000 x 24 and 300 x 24, not 3,000 / 7. */
         Assert.NotNull(alpha.BytesReceivedPerDay);
         Assert.NotNull(alpha.BytesSentPerDay);
-        Assert.InRange(alpha.BytesReceivedPerDay!.Value, 3_000 / 7 - 1, 3_000 / 7 + 1);
-        Assert.InRange(alpha.BytesSentPerDay!.Value, 300 / 7 - 1, 300 / 7 + 1);
+        Assert.InRange(alpha.BytesReceivedPerDay!.Value, 3_000 * 24 - 1, 3_000 * 24 + 1);
+        Assert.InRange(alpha.BytesSentPerDay!.Value, 300 * 24 - 1, 300 * 24 + 1);
+        Assert.Equal(1.0, alpha.BytesMeasuredHours);
         Assert.Null(beta.BytesReceivedPerDay);
         Assert.Null(beta.BytesSentPerDay);
+    }
+
+    [Fact]
+    public async Task CollectionHealth_ADayIsTheSumOverTheTimeMeasured_ForAStoreYoungerThanTheWindow()
+    {
+        RequireStore();
+
+        await using (var connection = new NpgsqlConnection(_scratch!.ConnectionString))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            /* gamma: measured only in the last two hours (119 and 60 minutes ago), 1,000 received and 100 sent each run. */
+            await PlantAsync(connection, "gamma", 119, 1_000, 100);
+            await PlantAsync(connection, "gamma", 60, 1_000, 100);
+        }
+
+        var rows = await _viewer!.GetCollectionHealthAsync(ServerId, TestContext.Current.CancellationToken);
+        var gamma = rows.Single(r => r.CollectorName == "gamma");
+
+        /* About 2 hours measured (a little over: the read runs after the plant), so a day is the 2,000 sum x about 12, not 2,000 / 7. */
+        Assert.NotNull(gamma.BytesMeasuredHours);
+        Assert.InRange(gamma.BytesMeasuredHours!.Value, 1.9, 2.2);
+        Assert.InRange(gamma.BytesReceivedPerDay!.Value, 2_000 * 24 / 2.2 - 1, 2_000 * 24 / 1.9 + 1);
+        Assert.InRange(gamma.BytesReceivedPerDay!.Value / 2_000.0, 24 / (gamma.BytesMeasuredHours!.Value + 0.06), 24 / (gamma.BytesMeasuredHours!.Value - 0.06));
+        Assert.InRange(gamma.BytesSentPerDay!.Value, 200 * 24 / 2.2 - 1, 200 * 24 / 1.9 + 1);
     }
 
     [Fact]

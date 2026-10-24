@@ -113,8 +113,8 @@ public sealed class CollectorBytesTests
     {
         var rows = new List<DarlingCollectorBytes.Row>
         {
-            new("query_store", 700_000, 7_000),
-            new("wait_stats", 70_000, 700),
+            new("query_store", 700_000, 7_000, 7),
+            new("wait_stats", 70_000, 700, 7),
             new("blocking", null, null),
         };
         var json = """
@@ -126,6 +126,7 @@ public sealed class CollectorBytesTests
         Assert.Equal(100_000, (long)collectors[0]!["bytes_received_per_day"]!);
         Assert.Equal(1_000, (long)collectors[0]!["bytes_sent_per_day"]!);
         Assert.Equal("measured", (string)collectors[0]!["bytes_status"]!);
+        Assert.Equal(168, (double)collectors[0]!["bytes_measured_hours"]!);
         Assert.Equal(10_000, (long)collectors[1]!["bytes_received_per_day"]!);
 
         foreach (var unmeasured in new[] { collectors[2]!, collectors[3]! })
@@ -137,6 +138,7 @@ public sealed class CollectorBytesTests
 
         var top = merged["network_bytes"]!["top_collectors_by_bytes_received_per_day"]!.AsArray();
         Assert.Equal(new[] { "query_store", "wait_stats" }, top.Select(t => (string)t!["collector"]!).ToArray());
+        Assert.Equal(168, (double)top[0]!["bytes_measured_hours"]!);
         Assert.Equal(7, (double)merged["network_bytes"]!["window_days"]!);
         Assert.Equal(2, (int)merged["network_bytes"]!["collectors_not_measured"]!);
 
@@ -147,7 +149,24 @@ public sealed class CollectorBytesTests
         Assert.Null(compactRows[0]!["bytes_status"]);
         Assert.Null(compactRows[2]!["bytes_received_per_day"]);
         Assert.Null(compactRows[2]!["bytes_status"]);
+        Assert.Null(compactRows[2]!["bytes_measured_hours"]);
         Assert.Equal(2, (int)compact["network_bytes"]!["collectors_not_measured"]!);
+    }
+
+    [Fact]
+    public void TheTopFive_AreOrderedByTheCorrectedPerDayFigure_NotTheRawSum()
+    {
+        /* A young collector with a smaller sum but a shorter span out-ranks an old one: 1,000 over 2 hours is 12,000 a day, 7,000 over 7 days is 1,000. */
+        var rows = new List<DarlingCollectorBytes.Row>
+        {
+            new("old", 7_000, 70, 7),
+            new("young", 1_000, 10, 2.0 / 24),
+        };
+        var merged = JsonNode.Parse(DarlingCollectorBytes.Merge("""{"collectors":[{"collector":"old"},{"collector":"young"}]}""", rows, 7, "collector", explicitStatus: true))!;
+        var top = merged["network_bytes"]!["top_collectors_by_bytes_received_per_day"]!.AsArray();
+        Assert.Equal(new[] { "young", "old" }, top.Select(t => (string)t!["collector"]!).ToArray());
+        Assert.Equal(12_000, (long)top[0]!["bytes_received_per_day"]!);
+        Assert.Equal(2, (double)top[0]!["bytes_measured_hours"]!);
     }
 
     [Fact]
@@ -190,6 +209,9 @@ public sealed class CollectorBytesTests
             await PlantAsync(connection, ct, "alpha", hour.AddMinutes(10), 400, 40);
             await PlantAsync(connection, ct, "beta", hour.AddHours(-1).AddMinutes(5), null, null);
             await PlantAsync(connection, ct, "beta", hour.AddMinutes(10), null, null);
+            /* gamma: a young store, measured only in the last 2.5 hours (the 10:00 and 11:00 hours roll up, 100 + 100). */
+            await PlantAsync(connection, ct, "gamma", hour.AddHours(-2).AddMinutes(35), 100, 10);
+            await PlantAsync(connection, ct, "gamma", hour.AddHours(-1).AddMinutes(5), 100, 10);
 
             await CollectionLogHourly.RollUpAsync(connection, now, null, ct);
 
@@ -210,6 +232,19 @@ public sealed class CollectorBytesTests
             var alpha = Assert.Single(rows, r => r.Collector == "alpha");
             Assert.Equal(1_000L, alpha.Received);
             Assert.Equal(100L, alpha.Sent);
+            /* alpha's first measured run is the rolled 09:00 hour (planted at 09:05), 3.5 hours before 12:30. */
+            Assert.Equal(3.5, CollectorBytesSpan.Hours(alpha.MeasuredDays!.Value));
+            Assert.Null(Assert.Single(rows, r => r.Collector == "beta").MeasuredDays);
+
+            /* #6629: the young collector's 200 bytes were measured over 2.5 hours (its first rolled hour starts at 10:00), so a day is 200 x 9.6,
+               not 200 spread over the 1-day window. */
+            var gamma = Assert.Single(rows, r => r.Collector == "gamma");
+            Assert.Equal(200L, gamma.Received);
+            Assert.Equal(2.5, CollectorBytesSpan.Hours(gamma.MeasuredDays!.Value));
+            Assert.Equal(1_920L, DarlingCollectorBytes.PerDay(gamma.Received, gamma.MeasuredDays));
+            var merged = JsonNode.Parse(DarlingCollectorBytes.Merge("""{"collectors":[{"collector":"gamma"}]}""", rows, 1, "collector", explicitStatus: true))!;
+            Assert.Equal(1_920L, (long)merged["collectors"]![0]!["bytes_received_per_day"]!);
+            Assert.Equal(2.5, (double)merged["collectors"]![0]!["bytes_measured_hours"]!);
             Assert.Null(Assert.Single(rows, r => r.Collector == "beta").Received);
 
             /* A window that starts at 09:03 reads that partial hour from the raw log (the 09:05 run, 100) and the closed hours from the rollup

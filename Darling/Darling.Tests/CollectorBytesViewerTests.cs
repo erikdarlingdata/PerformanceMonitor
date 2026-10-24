@@ -56,16 +56,29 @@ public sealed class CollectorBytesViewerTests
     }
 
     [Fact]
-    public void BytesPerDay_SpreadTheWindowSums_AndLeaveACollectorWithNoSumsNotMeasured()
+    public void BytesPerDay_DivideTheSumsByTheTimeMeasured_AndLeaveACollectorWithNoSumsNotMeasured()
     {
+        var now = new DateTime(2026, 10, 20, 12, 0, 0, DateTimeKind.Utc);
         var measured = new CollectorHealthRow { CollectorName = "wait_stats" };
+        var young = new CollectorHealthRow { CollectorName = "query_store" };
         var unmeasured = new CollectorHealthRow { CollectorName = "pg_database_stats" };
-        var sums = new Dictionary<string, (long Received, long Sent)> { ["wait_stats"] = (7000, 700) };
+        var sums = new Dictionary<string, (long Received, long Sent, DateTime FirstMeasuredUtc)>
+        {
+            ["wait_stats"] = (7000, 700, now.AddDays(-7)),
+            /* #6629: first measured two hours ago, so the sum is two hours of traffic, not a week's: x12 a day. */
+            ["query_store"] = (1000, 100, now.AddHours(-2)),
+        };
 
-        ViewerDataService.ApplyBytesPerDay([measured, unmeasured], sums, 7);
+        ViewerDataService.ApplyBytesPerDay([measured, young, unmeasured], sums, 7, now);
 
         Assert.Equal(1000, measured.BytesReceivedPerDay);
         Assert.Equal(100, measured.BytesSentPerDay);
+        Assert.Equal(168, measured.BytesMeasuredHours);
+        Assert.Equal(12_000, young.BytesReceivedPerDay);
+        Assert.Equal(1_200, young.BytesSentPerDay);
+        Assert.Equal(2, young.BytesMeasuredHours);
+        Assert.Contains("2 hours", young.BytesMeasuredText);
+        Assert.Null(unmeasured.BytesMeasuredHours);
         Assert.Null(unmeasured.BytesReceivedPerDay);
         Assert.Null(unmeasured.BytesSentPerDay);
         Assert.Equal("not measured", unmeasured.BytesReceivedPerDayFormatted);
