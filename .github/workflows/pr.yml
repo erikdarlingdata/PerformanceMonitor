@@ -122,6 +122,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
+      # #6497: a runner whose processes cannot start (0xC0000142 STATUS_DLL_INIT_FAILED) would otherwise fail one
+      # step at a time and pay each job's own timeout. This is the first step, so such a runner fails here in seconds.
+      - name: Check the runner can start a process
+        timeout-minutes: 2
+        shell: bash
+        run: dotnet --version
+
       - uses: actions/checkout@v7
 
       - name: Setup .NET 10.0
@@ -226,6 +233,13 @@ jobs:
       matrix:
         leg: ${{ fromJSON(needs.plan.outputs.legs_json) }}
     steps:
+      # #6497: a runner whose processes cannot start (0xC0000142 STATUS_DLL_INIT_FAILED) would otherwise fail one
+      # step at a time and pay each job's own timeout. This is the first step, so such a runner fails here in seconds.
+      - name: Check the runner can start a process
+        timeout-minutes: 2
+        shell: bash
+        run: dotnet --version
+
       - uses: actions/checkout@v7
 
       - name: Fetch the build

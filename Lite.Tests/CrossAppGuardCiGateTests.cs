@@ -64,7 +64,7 @@ namespace Lite.Tests;
 /// <para><b>The one thing the evaluated read does not report is an <c>&lt;Import&gt;</c>'s own path.</b>
 /// Items an imported file DEFINES arrive with the rest; the imported file's path is not an item, and
 /// <c>-getProperty</c> answers only for the build files MSBuild locates itself. So a scanned project
-/// carrying an <c>&lt;Import&gt;</c> element fails <see cref="Check"/> loudly rather than being quietly
+/// carrying an <c>&lt;Import&gt;</c> element fails <c>Check</c> (removed with the old CI jobs, #6656) loudly rather than being quietly
 /// half-scanned. There are none in this repository, which is what makes a gate cheaper than an
 /// evaluator.</para>
 ///
@@ -78,9 +78,9 @@ namespace Lite.Tests;
 /// <para><b>A filter entry is not the only thing that can cover a read.</b> <c>darling-tree-guards</c>
 /// runs the whole <c>Darling.Tests</c> suite exactly when the <c>darling</c> filter did not fire, so on
 /// that arm a read is covered either by a filter entry or by that job. The reads resting on the second
-/// are enumerated in <see cref="DarlingTestsBackstopped"/> with the bound each rests on, compared for
+/// are enumerated in <c>DarlingTestsBackstopped</c> (removed with the old CI jobs, #6656) with the bound each rests on, compared for
 /// EQUALITY against what the filter could not reach, and honoured only while
-/// <see cref="WholeTreeBackstopIsIntact"/> holds.</para>
+/// <c>WholeTreeBackstopIsIntact</c> (removed with the old CI jobs, #6656) holds.</para>
 /// </summary>
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public class CrossAppGuardCiGateTests
@@ -90,7 +90,7 @@ public class CrossAppGuardCiGateTests
        is release-only now, and the step that decides whether the suite runs on a pull request is the
        one in the lite-tests matrix. Its filter block is a byte-for-byte copy of the build job's,
        renamed *_shard so each set is findable unambiguously and pinned equal by
-       TheShardJobsFilters_AreByteForByteCopiesOfTheBuildJobs below. */
+       a test that went with the old CI jobs (#6656). */
     private const string LiteAppDir = "Lite";
     private const string LiteTestsDir = "Lite.Tests";
     private const string DarlingAppDir = "Darling";
@@ -131,7 +131,7 @@ public class CrossAppGuardCiGateTests
     ///
     /// <para>A NAMED pair rather than two positions in a list, because two different things are taken
     /// off it and reading the wrong one is silent both ways. <see cref="Roots"/> is what a cross-app
-    /// path is anchored on; <see cref="TestsDir"/> alone is what <see cref="Check"/>'s anti-vacuity
+    /// path is anchored on; <see cref="TestsDir"/> alone is what <c>Check</c> (removed with the old CI jobs, #6656)'s anti-vacuity
     /// floor is taken over — floored on the app tree instead, that floor would be satisfied by the
     /// references #3067 never lost.</para></summary>
     private sealed class SkuTrees
@@ -159,66 +159,6 @@ public class CrossAppGuardCiGateTests
 
         public IReadOnlyList<string> Roots { get; }
     }
-
-    /// <summary>
-    /// Cross-app reads of <see cref="LiteTestsDir"/> from <see cref="DarlingTestsDir"/> that the
-    /// <c>darling</c> filter does not reach, each with the bound its exemption rests on.
-    ///
-    /// <para><b>Why an exemption rather than a filter entry.</b> Every one of these is a read of Lite's
-    /// TEST project, and the only entry that reaches a tree enumeration is <c>Lite.Tests/**</c> —
-    /// nothing narrower covers a guard that opens every file under it. In the <c>darling</c> filter that
-    /// entry would buy no guard execution at all: what a build-job filter decides is which products get
-    /// COMPILED AND PUBLISHED, and the suite reading these files already runs on every such change — in
-    /// the build job when another entry lit <c>darling</c>, and in <c>darling-tree-guards</c> when none
-    /// did. Measured over the 100 pull requests merged to <c>dev</c> before this landed: 6 touched
-    /// <c>Lite.Tests/**</c> without touching <c>Darling/**</c>, all 6 ran the Darling suite, and the
-    /// entry would have changed only WHERE it ran, for 1 of the 6, while making that one build the
-    /// Darling Viewer and publish both Darling artifacts.</para>
-    ///
-    /// <para><b>The exemption is not standing permission.</b> It is honoured only while
-    /// <see cref="WholeTreeBackstopIsIntact"/> holds, so narrowing that job to a class filter or losing
-    /// its gate turns all of these back into failures on the next run instead of leaving them resting on
-    /// something that stopped being true. And the set is compared for EQUALITY against what the filter
-    /// could not reach, so an entry whose read is deleted — or which a later filter entry makes
-    /// reachable — fails here rather than lingering as a permission nobody needs.</para>
-    /// </summary>
-    private static readonly Dictionary<string, string> DarlingTestsBackstopped = new(StringComparer.Ordinal)
-    {
-        [$"{LiteTestsDir}/QueryHighDopStaleMaxDopParityTests.cs"] =
-            "NAMED READ. The Darling half declares this path as its `twin`, probes it with File.Exists "
-            + "and parses the ExpectedGuardCopies total declared there, so an edit to the Lite half has "
-            + "to run the Darling guard. It does: darling-tree-guards runs the whole suite exactly when "
-            + "the darling filter did not fire, which is the case a Lite.Tests-only change produces.",
-
-        [$"{LiteTestsDir}/ParameterSensitivityFiringSignatureParityTests.cs"] =
-            "NAMED READ. Same shape as the entry above, against ExpectedSignatureCopies.",
-
-        [$"{LiteTestsDir}/CrossSkuSurfaceSourceTests.cs"] =
-            "LINKED COMPILE (#3938). Darling.Tests.csproj compiles this Lite.Tests file so its cross-SKU "
-            + "source-scan pins run on a Mac; an edit to it changes the Darling suite, and a Lite.Tests-only "
-            + "change is exactly the case darling-tree-guards runs the whole suite for.",
-    };
-
-    /// <summary>The exact command <c>darling-tree-guards</c> has to run for anything in
-    /// <see cref="DarlingTestsBackstopped"/> to be covered: the WHOLE Darling suite. Since #5459 change 2 the
-    /// Stage=Guard classes are left out of it exactly when the job used the Guard job's build of the same run
-    /// (<see cref="BackstopGuardFilterLine"/>, the only argument it may carry): that job ran them on the very
-    /// same binaries, so every class still runs once per run. Without the artifact the job builds for itself and
-    /// the filter is empty, which is the whole suite as before.
-    ///
-    /// <para>Compared as a whole line rather than searched for as a substring, which is the difference
-    /// between a bound and a hope. A <c>-class</c> or <c>-method</c> filter appended to this invocation
-    /// would still CONTAIN it, so a containment check would keep reporting the backstop intact while it
-    /// had stopped running the two twin guards the exemptions above name — and those exemptions would
-    /// then be the only thing standing between an unreachable read and a green build.</para></summary>
-    private const string BackstopRunLine =
-        "dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @guardFilter";
-
-    /// <summary>The one statement that decides whether the backstop leaves the Guard classes out: only when the
-    /// job's own check proved it used the Guard job's build of this run (a separate step output, pinned by
-    /// GuardStageWorkflowTests).</summary>
-    private const string BackstopGuardFilterLine =
-        "$guardFilter = @(if ($env:GUARD_BUILD_USED -eq 'true') { '-trait-'; 'Stage=Guard' })";
 
     [Fact]
     public void TheGlobMatcher_AgreesWithKnownAnswers()
@@ -1130,100 +1070,6 @@ public class CrossAppGuardCiGateTests
     }
 
     [Fact]
-    public void EveryCrossAppSourceRead_IsReachableByTheFilterThatGatesItsSuite()
-    {
-        var repo = RepoRoot();
-        var yaml = ReadBuildYaml(repo);
-
-        var failures = new List<string>();
-
-        Check(repo, yaml, failures,
-            scannedProject: LiteTestsDir,
-            other: DarlingTrees,
-            /* #3887: the lite-tests matrix job's copy, because that is the step that now decides
-               whether the suite runs on a pull request. The copy is pinned byte-equal to the build
-               job's 'lite' by TheShardJobsFilters_AreByteForByteCopiesOfTheBuildJobs, so reading
-               either set here asserts the same reachability. */
-            filterNames: new[] { "lite_shard", "darling_reads_shard" },
-            gatingStep: "Decide how much of the Lite suite runs",
-            gatingWindow: 1600,
-            backstopped: null);
-
-        Check(repo, yaml, failures,
-            scannedProject: DarlingTestsDir,
-            other: LiteTrees,
-            filterNames: new[] { "darling" },
-            gatingStep: "Run Darling tests",
-            gatingWindow: 400,
-            /* This arm alone, because this arm alone has a backstop: darling-tree-guards runs the whole
-               Darling suite exactly when the darling filter did not fire. There is no counterpart for
-               Lite.Tests, so the Lite arm gets no exemptions at all rather than an empty list that would
-               read as "none needed yet". */
-            backstopped: DarlingTestsBackstopped);
-
-        Assert.True(
-            failures.Count == 0,
-            "Cross-app guards that PR CI cannot run — add the path to the named filter in " +
-            ".github/workflows/build.yml, or the guard only fires in the nightly, after the merge:\n  " +
-            string.Join("\n  ", failures));
-    }
-
-    /// <summary>
-    /// #3887 moved the Lite suite into its own matrix job, which needs the same path filters the build job
-    /// uses. A job cannot read another job's <c>steps.filter</c> outputs, and making the shards
-    /// <c>needs: build</c> would serialize them behind the very job they were split out of — so the
-    /// predicates are COPIED, and a copy is a thing that drifts.
-    ///
-    /// <para>This is the drift alarm, and it is the argument the retired <c>lite_analysis</c> split lost on:
-    /// the danger was never the split itself but a filter somebody had to keep in step by hand. The shard cut
-    /// INSIDE the job is arithmetic over the class name and cannot drift; these three predicate SETS can, so
-    /// they are pinned byte-for-byte against the build job's originals. A pattern edited on one side and not
-    /// the other reds here, naming both sets, instead of silently gating the Lite suite on a narrower diff
-    /// than the build job gates its Lite BUILD on.</para>
-    ///
-    /// <para>Compared as ordered sequences rather than sets: these blocks are meant to be literal copies, so
-    /// a reordering is a diff worth seeing.</para>
-    /// </summary>
-    [Fact]
-    public void TheShardJobsFilters_AreByteForByteCopiesOfTheBuildJobs()
-    {
-        var yaml = ReadBuildYaml(RepoRoot());
-
-        /* The build job's 'lite' set is carried in two blocks here: lite_shard (Lite and Lite.Tests, which
-           run the whole suite) followed by darling_reads_shard (the three Darling trees Lite.Tests reads as
-           source, which run only the classes tagged as reading them). Their concatenation, in order, is the
-           copy. */
-        foreach (var (original, copies) in new[]
-                 {
-                     ("lite", new[] { "lite_shard", "darling_reads_shard" }),
-                     ("core", new[] { "core_shard" }),
-                     ("root", new[] { "root_shard" }),
-                 })
-        {
-            var copy = string.Join(" + ", copies);
-            var originalPatterns = FilterPatterns(yaml, original);
-            var copiedPatterns = copies.SelectMany(c => FilterPatterns(yaml, c)).ToList();
-
-            /* Anti-vacuity on BOTH sides: a renamed or moved block returns an empty list, and two empty
-               lists are equal — which is exactly the green that would mean this pin had stopped reading the
-               thing it is named for. */
-            Assert.True(
-                originalPatterns.Count > 0,
-                $"build.yml's '{original}' filter is gone — find where it moved before editing this test");
-            Assert.True(
-                copiedPatterns.Count > 0,
-                $"build.yml's '{copy}' filter is gone — the lite-tests matrix job needs its own copy of "
-              + $"'{original}', because a job cannot read another job's step outputs");
-
-            Assert.Equal(originalPatterns, copiedPatterns);
-        }
-    }
-
-    /// <summary>
-    /// The Lite shard script and its packer are test inputs, so every filter that gates a Lite run names them
-    /// (#5616). Without the entries a pull request that edits only one of them ran no shard at all.
-    /// </summary>
-    [Fact]
     public void TheLiteFilters_NameTheShardScriptAndItsPacker()
     {
         var yaml = ReadBuildYaml(RepoRoot());
@@ -1241,184 +1087,6 @@ public class CrossAppGuardCiGateTests
             {
                 Assert.Contains(".github/scripts/run-darling-pg-shard.ps1", patterns);
             }
-        }
-    }
-
-    /// <summary>
-    /// The suite that reads the whole tree has to run on the whole tree.
-    ///
-    /// <para><see cref="EveryCrossAppSourceRead_IsReachableByTheFilterThatGatesItsSuite"/> above covers reads
-    /// of a NAMED path, which is what a cross-app guard does — there is a path, so a filter can name it. Some
-    /// guards in <c>Darling.Tests</c> take the repository ITSELF as input instead: <c>FleetIdentifierScrubTests</c>
-    /// enumerates every tracked file carrying one of nine extensions, and <c>MigrationUpgradeLadderLiveTests</c>
-    /// derives the fixture it requires from <c>CHANGELOG.md</c>. Those have no path to add, and
-    /// <c>darling</c> / <c>core</c> / <c>root</c> describe Darling product code rather than the tree.</para>
-    ///
-    /// <para>So <c>build.yml</c> answers it from the other side: the <c>build</c> job publishes whether it ran
-    /// the suite, and a second job runs the suite when that reads <c>skipped</c>. Three pieces of wiring carry
-    /// that, and losing any one of them leaves a job reporting success having run nothing — the step must
-    /// carry the id, the job must publish its outcome, and the consuming job must actually invoke the suite.
-    /// Pinned here rather than in <c>Darling.Tests</c> because the failure being pinned is a suite that does
-    /// not run: a pin inside it would be gated by the thing it is checking.</para>
-    /// </summary>
-    [Fact]
-    public void TheDarlingSuite_RunsWhereTheAreaFiltersDoNotReach()
-    {
-        var yaml = ReadBuildYaml(RepoRoot());
-
-        var step = yaml.IndexOf("- name: Run Darling tests", StringComparison.Ordinal);
-        Assert.True(step > 0, "the step that runs Darling.Tests was renamed — re-point this assertion before editing it");
-        Assert.Contains(
-            "id: darling-tests",
-            yaml[step..Math.Min(step + 200, yaml.Length)],
-            StringComparison.Ordinal);
-
-        Assert.Contains("darling-tests: ${{ steps.darling-tests.outcome }}", yaml, StringComparison.Ordinal);
-
-        var consumer = yaml.IndexOf("needs.build.outputs.darling-tests", StringComparison.Ordinal);
-        Assert.True(
-            consumer > 0,
-            "nothing reads the build job's Darling.Tests outcome, so the suite runs only where the area "
-          + "filters reach and a markdown-only or .github-only change runs none of it");
-
-        /* From the consumer onward, so this cannot be satisfied by the darling-pg job's invocation earlier
-           in the file — the job that reads the outcome is the one that has to run the suite. */
-        var consumingJob = yaml[consumer..];
-        Assert.Contains("= \"skipped\"", consumingJob, StringComparison.Ordinal);
-
-        /* The WHOLE line, not the invocation as a substring. A -class or -method filter appended to it
-           still contains the invocation, so a containment check would report the backstop intact while
-           it had stopped running whichever guards were not in the filter — and the exemptions in
-           DarlingTestsBackstopped rest on this job running all of them. Failing on any added argument is
-           the right direction: a widened invocation reds and gets read, rather than quietly narrowing. */
-        Assert.Contains(
-            BackstopRunLine,
-            consumingJob.Split('\n').Select(line => line.Trim()),
-            StringComparer.Ordinal);
-        Assert.Contains(
-            BackstopGuardFilterLine,
-            consumingJob.Split('\n').Select(line => line.Trim()),
-            StringComparer.Ordinal);
-
-        /* And the same fact through the predicate the exemptions are gated on, so the two cannot drift:
-           the pin above would keep passing on a yaml this returns false for if it ever stopped reading
-           the same slice. */
-        Assert.True(
-            WholeTreeBackstopIsIntact(yaml),
-            "the wiring above reads intact but the predicate that gates the DarlingTestsBackstopped "
-          + "exemptions does not agree — they are asserting different things about the same job");
-    }
-
-    private static void Check(
-        string repo,
-        string yaml,
-        List<string> failures,
-        string scannedProject,
-        SkuTrees other,
-        string[] filterNames,
-        string gatingStep,
-        int gatingWindow,
-        IReadOnlyDictionary<string, string>? backstopped)
-    {
-        /* A suite can be gated by more than one filter block: the Lite suite's Darling entries live in
-           their own block so a diff that reaches only them can run a narrower selection. The union is what
-           decides whether a read is reachable at all. */
-        var filterName = string.Join("' + '", filterNames);
-        var patterns = new List<string>();
-        foreach (var name in filterNames)
-        {
-            var named = FilterPatterns(yaml, name);
-            Assert.True(
-                named.Count > 0,
-                $"build.yml's '{name}' path filter is gone — find where it moved before editing this test");
-            patterns.AddRange(named);
-        }
-
-        /* The step must actually consume every filter, or the entries are decoration. */
-        var step = yaml.IndexOf("name: " + gatingStep, StringComparison.Ordinal);
-        Assert.True(step > 0, $"the '{gatingStep}' step is gone — find where it moved before editing this test");
-        foreach (var name in filterNames)
-        {
-            Assert.Contains(
-                $"steps.filter.outputs.{name}",
-                yaml[step..Math.Min(step + gatingWindow, yaml.Length)],
-                StringComparison.Ordinal);
-        }
-
-        var scan = Scan(repo, scannedProject, other);
-
-        /* #3063: a widened population that reaches no project files passes exactly as the *.cs-only one
-           did, which is the defect committed by its own fix. Each stage is floored by name, because
-           "found no references" and "opened no files" are otherwise the same green. */
-        Assert.True(scan.CSharpFiles > 0, $"the C# stage opened no files under {scannedProject}");
-        Assert.True(
-            scan.ProjectFiles.Count > 0,
-            $"the MSBuild stage found no project file under {scannedProject}, so a cross-app reference " +
-            "written as an Include= attribute is invisible again");
-
-        /* The shell-out, floored in the three places it can fail without saying so, for every project
-           evaluated. Asserted here and not only in the pins, because this is where an empty answer
-           becomes a pass. */
-        Assert.NotEmpty(scan.Evaluated);
-        foreach (var evaluation in scan.Evaluated)
-        {
-            AssertInvocationSucceeded(evaluation);
-        }
-
-        /* An <Import>'s own path is the one cross-app read the evaluated population does not carry, so a
-           project that grows one is a failure rather than a silent partial scan. */
-        Assert.True(
-            scan.UnreportedImports.Count == 0,
-            "project files under " + scannedProject + " carry an <Import> element, and the evaluated read " +
-            "reports the ITEMS an imported file defines but not the imported file's own path — so whether " +
-            "that path crosses apps is unanswered here. Resolve it by hand, or add coverage for the " +
-            "construct:\n  " +
-            string.Join("\n  ", scan.UnreportedImports));
-
-        /* #3067's floor, and the one the stage floors above cannot provide. Both arms opened hundreds of
-           files and found a healthy pile of references while the other SKU's TEST tree contributed NONE
-           of them: the anchor was the app directory, and Lite.Tests is a sibling of Lite rather than a
-           child. So the floor is taken over the tree whose invisibility was the defect rather than over
-           the reference total — a total stays comfortably non-zero while a whole tree drops out of it,
-           which is exactly how this went unnoticed. */
-        Assert.True(
-            scan.References.Any(r => r.Probe.StartsWith(other.TestsDir + "/", StringComparison.Ordinal)),
-            $"{scannedProject} named no file under {other.TestsDir}, so the other SKU's test tree is out " +
-            "of the found set entirely and every decision below it is vacuous for that tree. That is " +
-            $"#3067: an anchor on {other.AppDir} alone cannot see a read of a test project that is its " +
-            $"SIBLING. Found {scan.References.Count} reference(s): " +
-            $"[{string.Join(", ", scan.References.Select(r => r.Raw))}]");
-
-        var unreachable = scan.References
-            .Where(r => !patterns.Any(p => Matches(p, r.Probe)))
-            .ToList();
-
-        foreach (var reference in unreachable)
-        {
-            if (backstopped is not null &&
-                backstopped.ContainsKey(reference.Raw) &&
-                WholeTreeBackstopIsIntact(yaml))
-            {
-                continue;
-            }
-
-            failures.Add(
-                $"{scannedProject} reads {reference.Raw} (named in {reference.Origin}) but the " +
-                $"'{filterName}' filter does not reach it (probe path: {reference.Probe})");
-        }
-
-        /* The other half of the set comparison, and the half an allow-list stops having once nobody is
-           forced to look at it: an entry whose read was deleted, or which a later filter entry made
-           reachable, is a standing permission for nothing. Reported as a failure rather than asserted
-           separately so both directions arrive in one message. */
-        foreach (var stale in (backstopped?.Keys ?? Enumerable.Empty<string>())
-            .Where(k => !unreachable.Any(r => r.Raw.Equals(k, StringComparison.Ordinal)))
-            .OrderBy(k => k, StringComparer.Ordinal))
-        {
-            failures.Add(
-                $"{nameof(DarlingTestsBackstopped)} still exempts {stale}, but {scannedProject} no longer " +
-                $"has a read of it that the '{filterName}' filter cannot reach — delete the entry rather " +
-                "than leaving an exemption nothing needs");
         }
     }
 
@@ -1545,7 +1213,7 @@ public class CrossAppGuardCiGateTests
     /// manufactures a reference nothing reads: <c>ParitySource</c> locates the repo root by probing
     /// <c>Directory.Exists</c> on a root name, which the widened arm reports as a whole-tree read of
     /// <c>Darling</c> — on the Lite arm, which has no exemption list and no backstop job, so
-    /// <see cref="EveryCrossAppSourceRead_IsReachableByTheFilterThatGatesItsSuite"/> fails and the only
+    /// <c>EveryCrossAppSourceRead_IsReachableByTheFilterThatGatesItsSuite</c> (removed with the old CI jobs, #6656) fails and the only
     /// ways to green it are to put <c>Darling/**</c> in the <c>lite</c> filter or to grow this arm one
     /// more carve-out. Precision is bought with structure, and the bill arrives again each time.</para>
     ///
@@ -1561,7 +1229,7 @@ public class CrossAppGuardCiGateTests
     /// <para><b>Reporting is the whole remaining job, and it is not a consolation prize.</b> Every
     /// unseen instance in the corpus resolves to a tree the filter gating its suite already reaches: the
     /// Darling arm's land under the derived source entry for Lite's app tree, or under the
-    /// <c>Lite.Tests</c> tree that <see cref="DarlingTestsBackstopped"/> already exempts, and the Lite
+    /// <c>Lite.Tests</c> tree that <c>DarlingTestsBackstopped</c> (removed with the old CI jobs, #6656) already exempts, and the Lite
     /// arm's two land under the Viewer and Service trees the <c>lite</c> filter names outright. So as
     /// with #3063 and #3067 the gap is in what this guard can SAY, not in what CI runs — and what a
     /// fifth widening buys is a NAME for a coverage decision that is already correct.</para>
@@ -1616,33 +1284,6 @@ public class CrossAppGuardCiGateTests
                 }
             }
         }
-    }
-
-    /// <summary>Whether <c>build.yml</c> still runs the WHOLE <c>Darling.Tests</c> suite where the area
-    /// filters do not reach, which is the bound every entry in
-    /// <see cref="DarlingTestsBackstopped"/> rests on.
-    ///
-    /// <para>Read where the exemptions are HONOURED and not only by the pin below, so an exemption
-    /// cannot outlive the thing it rests on: narrow that job to a class filter, or lose its
-    /// <c>skipped</c> gate, and every entry turns back into a failure on the next run.</para>
-    ///
-    /// <para>Sliced from the consumer onward so the build job's own identical invocation cannot satisfy
-    /// it — the job that reads the outcome is the job that has to run the suite.</para></summary>
-    private static bool WholeTreeBackstopIsIntact(string yaml)
-    {
-        var consumer = yaml.IndexOf("needs.build.outputs.darling-tests", StringComparison.Ordinal);
-        if (consumer < 0)
-        {
-            return false;
-        }
-
-        var consumingJob = yaml[consumer..];
-
-        return consumingJob.Contains("= \"skipped\"", StringComparison.Ordinal)
-            && consumingJob.Split('\n')
-                .Any(line => line.Trim().Equals(BackstopRunLine, StringComparison.Ordinal))
-            && consumingJob.Split('\n')
-                .Any(line => line.Trim().Equals(BackstopGuardFilterLine, StringComparison.Ordinal));
     }
 
     /// <summary>Repo-relative paths naming a tree of <paramref name="other"/> that a test in
@@ -1953,7 +1594,7 @@ public class CrossAppGuardCiGateTests
     /// separately from anything about WHAT it returned.
     ///
     /// <para>This guard passes on an empty offender list, so an invocation that never ran produces the
-    /// same green as a clean tree. Read from <see cref="Check"/> as well as from the pins, so a floor
+    /// same green as a clean tree. Read from <c>Check</c> (removed with the old CI jobs, #6656) as well as from the pins, so a floor
     /// cannot hold in one and be missing from the other.</para></summary>
     private static void AssertInvocationSucceeded(in Evaluation evaluation)
     {
@@ -2616,16 +2257,6 @@ public class CrossAppGuardCiGateTests
         return Regex.IsMatch(path, rx.ToString());
     }
 
-    /// <summary>One job's text from build.yml: from its two-space-indented key to the next job's.</summary>
-    private static string JobBlock(string yaml, string jobKey)
-    {
-        var at = yaml.IndexOf("\n  " + jobKey + ":\n", StringComparison.Ordinal);
-        Assert.True(at >= 0, $"build.yml's '{jobKey}' job is gone — find where it moved before editing this test");
-        var rest = yaml[(at + 1)..];
-        var next = Regex.Match(rest[3..], "\n  [a-z][a-z0-9-]*:\n");
-        return next.Success ? rest[..(next.Index + 3)] : rest;
-    }
-
     /// <summary>One step's text inside a job block: from its <c>- name:</c> line to the next step's.</summary>
     internal static string StepBlock(string job, string stepName)
     {
@@ -2634,44 +2265,6 @@ public class CrossAppGuardCiGateTests
         var rest = job[at..];
         var next = rest.IndexOf("\n      - ", 1, StringComparison.Ordinal);
         return next < 0 ? rest : rest[..next];
-    }
-
-    /// <summary>
-    /// A pull request whose CI the gate declined (a draft, or one carrying the merge-train label) must not
-    /// read as passing: a skipped job counts as a pass for a required check. <c>build</c> still starts and
-    /// fails its first step, and both result jobs exit 1 on a pull request whose gate output is not true.
-    /// </summary>
-    [Fact]
-    public void ADeclinedRun_FailsBuildAndBothResultJobs_InsteadOfReadingAsGreen()
-    {
-        var yaml = ReadBuildYaml(RepoRoot());
-        const string message =
-            "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). "
-          + "It can be merged only by an admin override after a merge train covered it.";
-
-        foreach (var jobKey in new[] { "darling-pg-result", "lite-tests-result" })
-        {
-            var job = JobBlock(yaml, jobKey);
-            Assert.Contains("GATE_RUN: ${{ needs.gate.outputs.run }}", job, StringComparison.Ordinal);
-            Assert.Contains("EVENT_NAME: ${{ github.event_name }}", job, StringComparison.Ordinal);
-            Assert.Contains(
-                "if [ \"${EVENT_NAME}\" = \"pull_request\" ] && [ \"${GATE_RUN}\" != \"true\" ]; then\n"
-              + "            echo \"" + message + "\"\n            exit 1\n          fi\n",
-                job,
-                StringComparison.Ordinal);
-            Assert.Contains("needs: [gate, ", job, StringComparison.Ordinal);
-        }
-
-        /* `build` is a required check that would otherwise be merely skipped. It must start whatever the
-           gate said, and its first step must fail when the gate declined the run. */
-        var build = JobBlock(yaml, "build");
-        Assert.Contains("\n    if: ${{ !cancelled() }}\n", build, StringComparison.Ordinal);
-        var first = build[build.IndexOf("    steps:\n", StringComparison.Ordinal)..];
-        first = first[..first.IndexOf("\n      - uses: actions/checkout@v7", StringComparison.Ordinal)];
-        Assert.Contains("- name: Fail when CI did not run", first, StringComparison.Ordinal);
-        Assert.Contains("if: ${{ needs.gate.outputs.run != 'true' }}", first, StringComparison.Ordinal);
-        Assert.Contains(message, first, StringComparison.Ordinal);
-        Assert.Contains("exit 1", first, StringComparison.Ordinal);
     }
 
     private static string ReadBuildYaml(string repo) =>

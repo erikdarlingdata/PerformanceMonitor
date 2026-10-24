@@ -80,8 +80,7 @@ public sealed class CiShardCommandLineBudgetTests
         var step = ReadStep("Run Darling PG tests");
         Assert.Contains("TestResults/$ResultPrefix-${Shard}-$chunkNumber.trx", step);
 
-        // ...and each caller names its own prefix, so the PR legs and the nightly's legs never write the same file.
-        Assert.Contains("-ResultPrefix darling-pr ", ReadWorkflowStep("build.yml", "Run Darling PG tests"));
+        // ...and the nightly names its own prefix.
         Assert.Contains("-ResultPrefix darling-nightly ", ReadWorkflowStep("nightly.yml", "Run Darling PG tests"));
     }
 
