@@ -164,14 +164,14 @@ public sealed class ViewerTopProceduresDroppedDatabaseTests
     [Fact]
     public void LeftOutText_IsNullWhenNothingWasLeftOut()
     {
-        Assert.Null(ViewerServerTab.ProcedureLeftOutText(null, 5, null, 24));
-        Assert.Null(ViewerServerTab.ProcedureLeftOutText(Array.Empty<string>(), 0, null, 24));
+        Assert.Null(DatabasesLeftOut.ProcedureBanner(null, 5, null, 24));
+        Assert.Null(DatabasesLeftOut.ProcedureBanner(Array.Empty<string>(), 0, null, 24));
     }
 
     [Fact]
     public void LeftOutText_WithRows_NamesTheDatabasesAndSaysHowToReadThem()
     {
-        var text = ViewerServerTab.ProcedureLeftOutText(Dropped, 3, null, 24)!;
+        var text = DatabasesLeftOut.ProcedureBanner(Dropped, 3, null, 24)!;
         Assert.Contains("Left out: zz_a, zz_b.", text, StringComparison.Ordinal);
         Assert.Contains("left out of this read", text, StringComparison.Ordinal);
     }
@@ -180,7 +180,7 @@ public sealed class ViewerTopProceduresDroppedDatabaseTests
     public void LeftOutText_OnAnEmptyPage_SaysNoProcedureRanInADatabaseTheServerStillHas_AndHidesTheMcpKey()
     {
         var facts = new CollectorRunFacts(10, 4, DateTime.UtcNow, null);
-        var text = ViewerServerTab.ProcedureLeftOutText(Dropped, 0, facts, 24)!;
+        var text = DatabasesLeftOut.ProcedureBanner(Dropped, 0, facts, 24)!;
         Assert.Contains("No procedure ran in the last 24h in a database this server still has", text, StringComparison.Ordinal);
         Assert.Contains("2 database(s) the server no longer lists were left out of this read", text, StringComparison.Ordinal);
         Assert.DoesNotContain("databases_left_out", text, StringComparison.Ordinal);

@@ -9,7 +9,6 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
-using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -295,34 +294,9 @@ public partial class ViewerServerTab
             facts = await _dataService.GetProcedureStatsRunFactsAsync(_server.ServerId, startUtc, endUtc);
         }
 
-        var text = ProcedureLeftOutText(read.LeftOutDatabases, read.Rows.Count, facts, (int)Math.Max(1, Math.Round((endUtc - startUtc).TotalHours)));
+        var text = DatabasesLeftOut.ProcedureBanner(read.LeftOutDatabases, read.Rows.Count, facts, (int)Math.Max(1, Math.Round((endUtc - startUtc).TotalHours)));
         ProcStatsLeftOutBanner.Text = text ?? "";
         ProcStatsLeftOutBanner.Visibility = text is null ? Visibility.Collapsed : Visibility.Visible;
-    }
-
-    /// <summary>
-    /// #6651: the banner text for a Top Procedures read that left databases out, or null when it left none. With rows, the names and
-    /// the shared <see cref="DatabasesLeftOut.Note"/>. With none, the shared empty-page sentence
-    /// (<see cref="CollectorRunFacts.ProcedureStatsEmpty"/>, so the wording matches the web page and the MCP tool) followed by the names. The
-    /// shared sentence points at the MCP key <c>databases_left_out</c>; a person reading this window has the names in the same banner, so
-    /// that pointer is dropped.
-    /// </summary>
-    internal static string? ProcedureLeftOutText(IReadOnlyList<string>? leftOut, int rowCount, CollectorRunFacts? facts, int hoursBack)
-    {
-        if (leftOut is null || leftOut.Count == 0)
-        {
-            return null;
-        }
-
-        var named = DatabasesLeftOut.Named(leftOut)!;
-        var names = "Left out: " + string.Join(", ", named) + (leftOut.Count > named.Count ? string.Format(CultureInfo.InvariantCulture, " and {0} more", leftOut.Count - named.Count) : "") + ".";
-        if (rowCount == 0 && facts is not null)
-        {
-            var (_, message) = facts.ProcedureStatsEmpty(hoursBack, leftOut.Count);
-            return message.Replace(" (see databases_left_out)", "", StringComparison.Ordinal) + " " + names;
-        }
-
-        return DatabasesLeftOut.Note(leftOut) + " " + names;
     }
 
     private async Task LoadQueryStoreAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)

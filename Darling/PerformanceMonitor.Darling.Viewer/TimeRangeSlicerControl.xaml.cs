@@ -35,7 +35,7 @@ public partial class TimeRangeSlicerControl : UserControl
     private List<TimeSliceBucket> _data = new();
     private List<(int Start, int Count)> _runs = new();
 
-    /// <summary>The pieces the line and area are drawn in after the last LoadData (see <see cref="RunsOverFilledBuckets"/>).</summary>
+    /// <summary>The pieces the line and area are drawn in after the last LoadData (see <see cref="StripGaps.RunsOverFilledBuckets"/>).</summary>
     internal IReadOnlyList<(int Start, int Count)> DrawnRuns => _runs;
 
     private DateTime? _requestedStartUtc;
@@ -111,7 +111,7 @@ public partial class TimeRangeSlicerControl : UserControl
         _requestedStartUtc = requestedStartUtc;
         _requestedEndUtc = requestedEndUtc;
         _data = FillEmptyBuckets(data, requestedStartUtc, requestedEndUtc);
-        _runs = RunsOverFilledBuckets(_data.Select(d => d.BucketTime).ToList(), data.Select(d => d.BucketTime).ToList());
+        _runs = StripGaps.RunsOverFilledBuckets(_data.Select(d => d.BucketTime).ToList(), data.Select(d => d.BucketTime).ToList());
         _emptyText = null;
         _metricLabel = metricLabel;
 
@@ -252,95 +252,6 @@ public partial class TimeRangeSlicerControl : UserControl
         var span = DataEndUtc.Ticks - DataStartUtc.Ticks;
         if (span <= 0) return 0;
         return Math.Clamp((double)(utc.Ticks - DataStartUtc.Ticks) / span, 0, 1);
-    }
-
-    /* #6651 (#5644 W7): the strip's gap rule is the web strip's (chart-gaps.js gapThresholdMs): a jump between two neighbouring real
-       samples of more than three times the series' median spacing, never under five minutes, and a series with no steady cadence (the
-       75th percentile of the spacings over three times the 25th) or fewer than two spacings never breaks. */
-    private const int GapFactor = 3;
-    private static readonly long GapFloorTicks = TimeSpan.FromMinutes(5).Ticks;
-
-    /// <summary>The break threshold in ticks for ascending sample times, or null when nothing breaks (the web's Infinity).</summary>
-    private static long? GapThresholdTicks(IReadOnlyList<long> ticks)
-    {
-        var deltas = new List<long>();
-        for (var i = 1; i < ticks.Count; i++)
-        {
-            var d = ticks[i] - ticks[i - 1];
-            if (d > 0)
-            {
-                deltas.Add(d);
-            }
-        }
-
-        if (deltas.Count < 2)
-        {
-            return null;
-        }
-
-        deltas.Sort();
-        long Quantile(double p) => deltas[(int)Math.Round((deltas.Count - 1) * p, MidpointRounding.AwayFromZero)];
-        if (Quantile(0.75) > GapFactor * Quantile(0.25))
-        {
-            return null;
-        }
-
-        var mid = deltas.Count / 2;
-        var median = deltas.Count % 2 == 1 ? (double)deltas[mid] : (deltas[mid - 1] + deltas[mid]) / 2.0;
-        return Math.Max((long)(GapFactor * median), GapFloorTicks);
-    }
-
-    /// <summary>
-    /// #6651 (#5644 W7): the pieces the strip's line and area are drawn in, as (first index, count) into the filled buckets. The gap
-    /// decision is made on the REAL buckets (<paramref name="realTimes"/>, before <see cref="FillEmptyBuckets"/> gave every hour a
-    /// bucket, where no gap shows): where two neighbouring real buckets are further apart than the web rule's threshold, the filled
-    /// buckets between them are left out of the drawing and the line breaks across them. The fill still serves the bars and the axis.
-    /// A short hole (under the threshold) keeps its zero buckets in the line, as before.
-    /// </summary>
-    internal static List<(int Start, int Count)> RunsOverFilledBuckets(IReadOnlyList<DateTime> bucketTimes, IReadOnlyList<DateTime> realTimes)
-    {
-        var real = realTimes.Select(t => FloorToHour(t).Ticks).Distinct().OrderBy(t => t).ToList();
-        var threshold = GapThresholdTicks(real);
-        var gaps = new List<(long Lo, long Hi)>();
-        if (threshold.HasValue)
-        {
-            for (var i = 0; i + 1 < real.Count; i++)
-            {
-                if (real[i + 1] - real[i] > threshold.Value)
-                {
-                    gaps.Add((real[i], real[i + 1]));
-                }
-            }
-        }
-
-        var runs = new List<(int Start, int Count)>();
-        var start = -1;
-        var count = 0;
-        for (var i = 0; i < bucketTimes.Count; i++)
-        {
-            var t = FloorToHour(bucketTimes[i]).Ticks;
-            var missing = gaps.Exists(g => t > g.Lo && t < g.Hi);
-            if (!missing)
-            {
-                if (count == 0)
-                {
-                    start = i;
-                }
-
-                count++;
-            }
-
-            var breaksAfter = i + 1 < bucketTimes.Count
-                && gaps.Exists(g => t >= g.Lo && FloorToHour(bucketTimes[i + 1]).Ticks <= g.Hi);
-            if ((missing || breaksAfter || i + 1 == bucketTimes.Count) && count > 0)
-            {
-                runs.Add((start, count));
-                start = -1;
-                count = 0;
-            }
-        }
-
-        return runs;
     }
 
     // ── Drawing ──

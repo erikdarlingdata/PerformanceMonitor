@@ -23,7 +23,7 @@ namespace PerformanceMonitorLite.Tests;
 /// #6651 (#5633 item 4): Lite's Top Procedures grid ranks without the databases the server dropped, the way its own
 /// get_top_procedures_by_cpu tool does, and says what it left out. The grid reads the left-out set through
 /// <see cref="LocalDataService.GetDatabasesLeftOutOfRankingAsync"/> and hands it to <see cref="LocalDataService.GetTopProceduresByCpuAsync"/>,
-/// which is the path these tests run; the banner text is the pure <see cref="ServerTab.ProcedureLeftOutText"/>.
+/// which is the path these tests run; the banner text is the pure <see cref="DatabasesLeftOut.ProcedureBanner"/>.
 /// </summary>
 public sealed class TopProceduresGridDroppedDatabaseTests : IDisposable
 {
@@ -161,14 +161,14 @@ public sealed class TopProceduresGridDroppedDatabaseTests : IDisposable
     [Fact]
     public void Banner_IsAbsentWhenNothingWasLeftOut()
     {
-        Assert.Null(ServerTab.ProcedureLeftOutText(null, 3, null, 24));
-        Assert.Null(ServerTab.ProcedureLeftOutText(Array.Empty<string>(), 0, CollectorRunFacts.None, 24));
+        Assert.Null(DatabasesLeftOut.ProcedureBanner(null, 3, null, 24));
+        Assert.Null(DatabasesLeftOut.ProcedureBanner(Array.Empty<string>(), 0, CollectorRunFacts.None, 24));
     }
 
     [Fact]
     public void Banner_WithRows_NamesTheDatabasesAndCarriesTheSharedNote()
     {
-        var text = ServerTab.ProcedureLeftOutText(new[] { "A", "B" }, 5, null, 24);
+        var text = DatabasesLeftOut.ProcedureBanner(new[] { "A", "B" }, 5, null, 24);
         Assert.Equal(DatabasesLeftOut.Note(new[] { "A", "B" }) + " Left out: A, B.", text);
     }
 
@@ -176,7 +176,7 @@ public sealed class TopProceduresGridDroppedDatabaseTests : IDisposable
     public void Banner_OnAnEmptyPage_ClaimsOnlyTheDatabasesTheServerStillHas_AndDropsTheToolKeyPointer()
     {
         var facts = new CollectorRunFacts(5, 12, DateTime.UtcNow, null);
-        var text = ServerTab.ProcedureLeftOutText(new[] { "GoneDb" }, 0, facts, 24);
+        var text = DatabasesLeftOut.ProcedureBanner(new[] { "GoneDb" }, 0, facts, 24);
 
         Assert.StartsWith("No procedure ran in the last 24h in a database this server still has", text, StringComparison.Ordinal);
         Assert.DoesNotContain("databases_left_out", text, StringComparison.Ordinal);
@@ -187,7 +187,7 @@ public sealed class TopProceduresGridDroppedDatabaseTests : IDisposable
     public void Banner_ListsAtMostTheCap_AndCountsTheRest()
     {
         var many = Enumerable.Range(0, DatabasesLeftOut.MaxNamed + 5).Select(i => "Db" + i.ToString("D3", System.Globalization.CultureInfo.InvariantCulture)).ToArray();
-        var text = ServerTab.ProcedureLeftOutText(many, 3, null, 24);
+        var text = DatabasesLeftOut.ProcedureBanner(many, 3, null, 24);
 
         Assert.EndsWith(" and 5 more.", text, StringComparison.Ordinal);
         Assert.DoesNotContain(many[^1], text, StringComparison.Ordinal);
