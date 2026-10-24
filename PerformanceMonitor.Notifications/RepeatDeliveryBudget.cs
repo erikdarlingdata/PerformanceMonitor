@@ -567,7 +567,7 @@ public sealed class RepeatDeliveryBudget
         public DateTime LastUtc { get; set; }
 
         /// <summary>
-        /// One roster line: <c>SRV-A (1a2b3c4d5e6f, 4 occurrence(s))</c>. The server first because that is
+        /// One roster line: <c>SRV-A (1a2b3c4d5e6f, 4 occurrences)</c> ("1 occurrence" for one). The server first because that is
         /// what an operator acts on; the fingerprint truncated because it is a correlator here and not the
         /// record (see <see cref="FingerprintDisplayLength"/>); the occurrence gauge only when the incident
         /// carried one, so a zero never reads as "measured none".
@@ -585,7 +585,7 @@ public sealed class RepeatDeliveryBudget
 
             if (Occurrences > 0)
             {
-                parts.Add(string.Format(CultureInfo.InvariantCulture, "{0} occurrence(s)", Occurrences));
+                parts.Add(string.Format(CultureInfo.InvariantCulture, "{0} {1}", Occurrences, Occurrences == 1 ? "occurrence" : "occurrences"));
             }
 
             return parts.Count > 0
