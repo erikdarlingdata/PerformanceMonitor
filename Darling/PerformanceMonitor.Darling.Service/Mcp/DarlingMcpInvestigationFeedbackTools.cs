@@ -124,7 +124,8 @@ public sealed class DarlingMcpInvestigationFeedbackTools
             }
 
             var hasServer = !string.IsNullOrWhiteSpace(server_name);
-            if (InvestigationProfiles.Validate(hasServer ? 0 : null, tag_id, profile_text) is { } profileRefusal)
+            /* Any positive id stands for "a server is named" here: the real id is resolved below, and SaveProfileAsync checks it. */
+            if (InvestigationProfiles.Validate(hasServer ? 1 : null, tag_id, profile_text) is { } profileRefusal)
             {
                 return McpHelpers.Refusal(tag_id is { } tag && (hasServer || tag <= 0) ? "tag_id" : "profile_text", profileRefusal + " Nothing was changed.");
             }
