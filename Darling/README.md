@@ -604,8 +604,7 @@ All sections except `postgres` and `servers` are optional — omit a section (or
 | Keys | Where they live | Where to change them after the first start |
 |---|---|---|
 | `alerts` (every key), `analysis` (`enabled`, `intervalMinutes`, `notificationsEnabled`, `notifySeverity`) | First-run seed | The Viewer's Settings window, or the MCP tool `update_alert_settings` |
-| `smtp`, and in `webhooks` the Teams and Slack keys (`teamsUrl`, `teamsProxy`, `slackUrl`, `slackProxy`) | First-run seed | The Viewer's Settings > Notifications, or the MCP tool `update_notification_channels` |
-| `webhooks.genericUrl`, `genericHeaders`, `genericBodyTemplate`, `genericProxy`, the `pagerDuty*` keys, the `slackSendResolutions`, `teamsSendResolutions` and `genericSendResolutions` keys, and `smtp.emailSendResolutions` | Store only. The seed does not copy them, so a value in the file has no effect | The Viewer's Settings > Notifications, or `update_notification_channels` |
+| `smtp` (including `emailSendResolutions`), and `webhooks` (the Teams, Slack, generic and PagerDuty keys, including `slackSendResolutions`, `teamsSendResolutions` and `genericSendResolutions`) | First-run seed | The Viewer's Settings > Notifications, or the MCP tool `update_notification_channels`. The send-resolutions switches are also set by `update_alert_settings` |
 | `capturePlans`, `queryStoreBackfillEnabled`, `queryStoreTextBudgetMb` (default `64`), `queryStoreFetchTopN` (default `100`), `maxConcurrentSweeps` (default `4`) | First-run seed | The Viewer's Settings window, or the MCP tool `update_service_flags` |
 | `planContentRetentionDays` (default `21`), `composeStatementTimeoutSeconds` (default `60`), `planXmlCompression` (default `"gzip"`) | First-run seed | Neither the Viewer nor MCP edits them. Change the column in `config.config_service` (`plan_content_retention_days`, `compose_statement_timeout_seconds`, `plan_xml_compression`). The statement timeout reaches the `viewer` and `mcp` roles on the next service start |
 | `mcp.enabled`, `mcp.port`, `web.enabled`, `web.port` | First-run seed | The Viewer's Settings window, live and with no restart. On a box with no Viewer, `--enable-mcp` and `--enable-web` |
@@ -919,6 +918,7 @@ Email delivery is enabled when `host` and `from` are set — there is no separat
 | `from` | `""` | |
 | `to` | `""` | Comma-separated default recipients, for alerts no notification route covers; may be blank when routes name the recipients |
 | `emailCooldownMinutes` | `15` | Email/webhook channel cooldown (clamped 1–120) |
+| `emailSendResolutions` | `false` | Also send the email when an alert resolves |
 
 ### webhooks
 
@@ -930,6 +930,17 @@ A channel is enabled by a non-empty URL.
 | `teamsProxy` | `""` | Optional proxy address |
 | `slackUrl` | `""` | Slack incoming webhook |
 | `slackProxy` | `""` | Optional proxy address |
+| `slackSendResolutions` | `false` | Also post to Slack when an alert resolves |
+| `teamsSendResolutions` | `false` | Also post to Teams when an alert resolves |
+| `genericUrl` | `""` | Generic webhook endpoint, stored sealed |
+| `genericHeaders` | `""` | JSON object of request headers, stored sealed |
+| `genericBodyTemplate` | `""` | JSON body with `{{metric}}` and `{{server}}` placeholders, or empty for the shared default |
+| `genericProxy` | `""` | Optional proxy address |
+| `genericSendResolutions` | `false` | Also post to the generic webhook when an alert resolves |
+| `pagerDutyRoutingKey` | `""` | PagerDuty Events API v2 routing key, stored sealed |
+| `pagerDutyUseEuRegion` | `false` | Use the EU PagerDuty endpoint |
+| `pagerDutyProxy` | `""` | Optional proxy address |
+| `pagerDutyAutoResolve` | `false` | Close the PagerDuty incident when the alert resolves |
 
 Webhook and heartbeat posts do not connect to a link-local address (169.254.0.0/16, fe80::/10) or to the cloud instance addresses `fd00:ec2::254`, `168.63.129.16` and `100.100.100.200`; loopback and private addresses stay allowed. The address check applies to direct connections: when a channel posts through a proxy, Darling checks the address the URL itself spells out when it is saved (a trailing dot and the IPv4-mapped, NAT64 and IPv4-compatible forms included) but cannot see what the proxy connects to, so the proxy decides what it can reach.
 
