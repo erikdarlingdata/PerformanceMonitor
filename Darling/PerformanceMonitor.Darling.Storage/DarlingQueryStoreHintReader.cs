@@ -39,14 +39,25 @@ public sealed record QueryStoreHintFact(
 }
 
 /// <summary>The newest hint capture of one database inside the window.</summary>
+/// <param name="DatabaseName">The database.</param>
+/// <param name="NewestCapture">Its newest marker row in the window.</param>
+/// <param name="HintCount">Every hint in that capture (counted in SQL over the whole capture, so a hint the read cap cut still counts).</param>
 public sealed record QueryStoreHintCapture(string DatabaseName, DateTime NewestCapture, int HintCount);
 
 /// <summary>What <see cref="DarlingQueryStoreHintReader.ReadAsync"/> found.</summary>
-/// <param name="Hints">One entry per hint in its database's newest capture, failing ones first.</param>
+/// <param name="Hints">One entry per hint in its database's newest capture, failing ones first, at most <see cref="DarlingQueryStoreHintReader.MaxHints"/>.</param>
 /// <param name="Captures">Each database that has a marker row in the window, with its own newest capture and hint count.</param>
+/// <param name="TotalHints">Every hint in the newest captures, counted in SQL: more than <see cref="Hints"/> holds when the read was cut.</param>
+/// <param name="FailingHints">Every failing hint in the newest captures, counted in SQL.</param>
 public sealed record QueryStoreHintRead(
     IReadOnlyList<QueryStoreHintFact> Hints,
-    IReadOnlyList<QueryStoreHintCapture> Captures);
+    IReadOnlyList<QueryStoreHintCapture> Captures,
+    int TotalHints,
+    int FailingHints)
+{
+    /// <summary>The read hit <see cref="DarlingQueryStoreHintReader.MaxHints"/> and left hints out (all of them healthy ones, because failing hints sort first).</summary>
+    public bool ReadCapped => TotalHints > Hints.Count;
+}
 
 /// <summary>
 /// #6581: the Query Store hints in place, from <c>collect.query_store_hints</c> (V217): the collector's per-database marker row plus one
@@ -57,7 +68,11 @@ public sealed record QueryStoreHintRead(
 /// </summary>
 public static class DarlingQueryStoreHintReader
 {
-    /// <summary>The most hints one read holds. The collector ships at most 2000 per database per pass.</summary>
+    /// <summary>
+    /// The most hints one read holds, across every captured database together (the collector's own cap is 2000 per database per pass, so one
+    /// database at its cap fills the whole read). The cut falls on healthy hints only, because <see cref="HintsSql"/> sorts failing ones first,
+    /// and the answer counts the whole set in SQL (<see cref="CountsSql"/>) so a cut read says so.
+    /// </summary>
     public const int MaxHints = 2000;
 
     /// <summary>The most characters of a query's text one entry carries.</summary>
@@ -76,7 +91,33 @@ ORDER BY database_name";
     /// the marker row's collection_time (one pass stamps one time), so the join is on equality.
     /// </summary>
     public static string HintsSql(DatabaseFilter databases) => $@"
-WITH win AS (
+WITH {Ctes(databases)}
+SELECT h.database_name, h.query_id, h.query_hint_id, h.query_hint_text, h.last_query_hint_failure_reason, h.query_hint_failure_count,
+       h.source_desc, h.collection_time,
+       (SELECT MIN(x.collection_time) FROM hints AS x
+         WHERE x.database_name = h.database_name AND x.query_id = h.query_id AND x.query_hint_id = h.query_hint_id
+         AND (a.last_absent IS NULL OR x.collection_time > a.last_absent)) AS first_seen
+FROM hints AS h
+JOIN newest AS n ON n.database_name = h.database_name AND n.newest_capture = h.collection_time
+LEFT JOIN absent AS a ON a.database_name = h.database_name AND a.query_id = h.query_id AND a.query_hint_id = h.query_hint_id
+ORDER BY CASE WHEN {FailingPredicate} THEN 0 ELSE 1 END, h.database_name, h.query_id, h.query_hint_id
+LIMIT {MaxHints}";
+
+    /// <summary>The engine records a failure: a reason, or a count above zero (the SQL twin of <see cref="QueryStoreHintFact.Failing"/>).</summary>
+    private const string FailingPredicate = "(COALESCE(h.last_query_hint_failure_reason, '') <> '' OR COALESCE(h.query_hint_failure_count, 0) > 0)";
+
+    /// <summary>
+    /// How many hints each database's newest capture holds and how many of them fail, over the whole capture (no <see cref="MaxHints"/> cut).
+    /// Same parameters as <see cref="HintsSql"/>.
+    /// </summary>
+    public static string CountsSql(DatabaseFilter databases) => $@"
+WITH {Ctes(databases)}
+SELECT h.database_name, COUNT(*), COUNT(*) FILTER (WHERE {FailingPredicate})
+FROM hints AS h
+JOIN newest AS n ON n.database_name = h.database_name AND n.newest_capture = h.collection_time
+GROUP BY h.database_name";
+
+    private static string Ctes(DatabaseFilter databases) => $@"win AS (
     SELECT database_name, collection_time, query_hint_id, query_id, query_hint_text, last_query_hint_failure_reason,
            query_hint_failure_count, source_desc
     FROM collect.query_store_hints
@@ -92,17 +133,7 @@ absent AS (
                       AND x.collection_time = m.collection_time)
     GROUP BY p.database_name, p.query_id, p.query_hint_id),
 newest AS (
-    SELECT database_name, MAX(collection_time) AS newest_capture FROM win WHERE query_hint_id IS NULL GROUP BY database_name)
-SELECT h.database_name, h.query_id, h.query_hint_id, h.query_hint_text, h.last_query_hint_failure_reason, h.query_hint_failure_count,
-       h.source_desc, h.collection_time,
-       (SELECT MIN(x.collection_time) FROM hints AS x
-         WHERE x.database_name = h.database_name AND x.query_id = h.query_id AND x.query_hint_id = h.query_hint_id
-         AND (a.last_absent IS NULL OR x.collection_time > a.last_absent)) AS first_seen
-FROM hints AS h
-JOIN newest AS n ON n.database_name = h.database_name AND n.newest_capture = h.collection_time
-LEFT JOIN absent AS a ON a.database_name = h.database_name AND a.query_id = h.query_id AND a.query_hint_id = h.query_hint_id
-ORDER BY h.database_name, h.query_id, h.query_hint_id
-LIMIT {MaxHints}";
+    SELECT database_name, MAX(collection_time) AS newest_capture FROM win WHERE query_hint_id IS NULL GROUP BY database_name)";
 
     /// <summary>
     /// The text of each listed query. $1 server, $2 start, $3 end, then two parallel arrays (database, query_id). The text dimension first
@@ -142,8 +173,22 @@ FROM unnest($4::text[], $5::bigint[]) AS k(database_name, query_id)";
         }
 
         var hints = new List<QueryStoreHintFact>();
+        var counts = new Dictionary<string, (int Total, int Failing)>(StringComparer.Ordinal);
         if (captures.Count > 0)
         {
+            await using (var countCommand = postgres.CreateCommand(CountsSql(databases)))
+            {
+                countCommand.CommandTimeout = commandTimeoutSeconds;
+                countCommand.Parameters.AddWithValue(serverId);
+                countCommand.Parameters.AddWithValue(NpgsqlDbType.Timestamp, from);
+                countCommand.Parameters.AddWithValue(NpgsqlDbType.Timestamp, to);
+                countCommand.Parameters.Add(databases.Parameter());
+                countCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = queryId.HasValue ? queryId.Value : DBNull.Value });
+                await using var countReader = await countCommand.ExecuteReaderAsync(cancellationToken);
+                while (await countReader.ReadAsync(cancellationToken))
+                    counts[countReader.GetString(0)] = (checked((int)countReader.GetInt64(1)), checked((int)countReader.GetInt64(2)));
+            }
+
             await using var command = postgres.CreateCommand(HintsSql(databases));
             command.CommandTimeout = commandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
@@ -166,14 +211,13 @@ FROM unnest($4::text[], $5::bigint[]) AS k(database_name, query_id)";
             }
         }
 
-        var counts = hints.GroupBy(h => h.DatabaseName, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
         var captureNodes = captures
-            .Select(c => new QueryStoreHintCapture(c.Database, c.Newest, counts.TryGetValue(c.Database, out var n) ? n : 0))
+            .Select(c => new QueryStoreHintCapture(c.Database, c.Newest, counts.TryGetValue(c.Database, out var n) ? n.Total : 0))
             .ToList();
         var ordered = hints
             .OrderBy(h => h.Failing ? 0 : 1).ThenBy(h => h.DatabaseName, StringComparer.Ordinal).ThenBy(h => h.QueryId).ThenBy(h => h.HintId)
             .ToList();
-        return new QueryStoreHintRead(ordered, captureNodes);
+        return new QueryStoreHintRead(ordered, captureNodes, counts.Values.Sum(c => c.Total), counts.Values.Sum(c => c.Failing));
     }
 
     /// <summary>

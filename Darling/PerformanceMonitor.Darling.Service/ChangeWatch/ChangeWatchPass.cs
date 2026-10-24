@@ -157,7 +157,8 @@ WHERE after.hit IS NULL
        to compare and is never read as a clear, and a database whose previous capture is more than $4 minutes before this one is a NEW BASELINE (the same gap
        rule as the plan diff, from the hints collector's own frequency). A hint id new in this capture is 'set'; the same id with different text is
        'changed'; an id in the previous capture and not in this one is 'cleared'. The captures are a GROUP BY and not a SELECT DISTINCT for the reason the plan
-       diff's are (TimescaleDB's SkipScan rewrite of DISTINCT, #6234). Darling sets no hints, so no ledger explains a change away. */
+       diff's are (TimescaleDB's SkipScan rewrite of DISTINCT, #6234). Darling sets no hints, so no ledger explains a change away. (database, query_id, query_hint_id) identifies a hint, the key the reader
+       uses, and a row without a query_id is not a hint to compare (it would also fail the GetInt64 read of query_id), as in the plan diff. */
     internal const string HintSnapshotChangesSql = @"
 WITH fresh AS (
     SELECT m.t, m.database_name, p.prev_t
@@ -175,19 +176,19 @@ SELECT CASE WHEN before.query_hint_id IS NULL THEN 'set' ELSE 'changed' END AS c
        h.query_hint_text, before.query_hint_text AS previous_text
 FROM fresh AS n
 JOIN collect.query_store_hints AS h
-  ON h.server_id = $1 AND h.collection_time = n.t AND h.database_name = n.database_name AND h.query_hint_id IS NOT NULL
+  ON h.server_id = $1 AND h.collection_time = n.t AND h.database_name = n.database_name AND h.query_hint_id IS NOT NULL AND h.query_id IS NOT NULL
 LEFT JOIN LATERAL (SELECT p.query_hint_id, p.query_hint_text FROM collect.query_store_hints AS p
                    WHERE p.server_id = $1 AND p.collection_time = n.prev_t AND p.database_name = n.database_name
-                     AND p.query_hint_id = h.query_hint_id LIMIT 1) AS before ON true
+                     AND p.query_id = h.query_id AND p.query_hint_id = h.query_hint_id LIMIT 1) AS before ON true
 WHERE before.query_hint_id IS NULL OR before.query_hint_text IS DISTINCT FROM h.query_hint_text
 UNION ALL
 SELECT 'cleared', n.t, n.database_name, p.query_id, p.query_hint_id, p.query_hint_text, NULL
 FROM fresh AS n
 JOIN collect.query_store_hints AS p
-  ON p.server_id = $1 AND p.collection_time = n.prev_t AND p.database_name = n.database_name AND p.query_hint_id IS NOT NULL
+  ON p.server_id = $1 AND p.collection_time = n.prev_t AND p.database_name = n.database_name AND p.query_hint_id IS NOT NULL AND p.query_id IS NOT NULL
 LEFT JOIN LATERAL (SELECT 1 AS hit FROM collect.query_store_hints AS h
                    WHERE h.server_id = $1 AND h.collection_time = n.t AND h.database_name = n.database_name
-                     AND h.query_hint_id = p.query_hint_id LIMIT 1) AS after ON true
+                     AND h.query_id = p.query_id AND h.query_hint_id = p.query_hint_id LIMIT 1) AS after ON true
 WHERE after.hit IS NULL";
 
     /// <summary>#6551: the databases of <paramref name="serverId"/> that are readable-secondary copies, whose plan-snapshot changes are the primary's.

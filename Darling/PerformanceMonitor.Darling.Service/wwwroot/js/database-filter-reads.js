@@ -35,7 +35,7 @@ export const FILTERED = new Set([
 ]);
 
 /** Database-scoped reads that cannot take the filter yet, so they show every database and say so (the "All databases"
- *  chip). 35 database-scoped reads in all: this list shrank as FILTERED grew, and what is left is the three
+ *  chip). 36 database-scoped reads in all: this list shrank as FILTERED grew, and what is left is the three
  *  deadlock reads, which stay unfiltered on purpose (as on the desktop): a deadlock spans several databases, and they are
  *  inside each deadlock graph. The groups follow the page that moves each read into FILTERED. */
 export const UNFILTERED = new Set([

@@ -204,7 +204,8 @@ public sealed class DarlingMcpForcedPlanTools
         "query_text is the query's stored text cut to 1000 characters (query_text_truncated says when it was cut); it is null when the Query Store collector has not stored that query. " +
         "Status words: empty (databases were captured and none has a hint), unavailable (no capture in the window: the collector has not run in it, or Query Store is off, in error or a readable secondary in every database), " +
         "not_collected (the server is older than SQL Server 2022, which has no hints view, or is not a SQL Server). " +
-        "query_store_hints lists FAILING hints first, at most limit (default and most 200) per call: when has_more is true, call again with offset = next_offset. query_id narrows the read itself.")]
+        "query_store_hints lists FAILING hints first, at most limit (default and most 200) per call: when has_more is true, call again with offset = next_offset. query_id and database_name narrow the read itself, so a hint is found even on a server with more hints than one read holds (2000). " +
+        "total_hints and failing_hints count every hint in the newest captures (and captures[].hint_count every hint of that database); hints_returned is how many the read holds, at most 2000, failing ones first, and read_capped is true when the rest are not listed (truncated is then true too, with has_more false once the list's end is reached).")]
     public static async Task<string> GetQueryStoreHints(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -271,6 +272,7 @@ public sealed class DarlingMcpForcedPlanTools
 
             var listed = read.Hints.Skip(offset).Take(limit).ToList();
             var hasMore = offset + listed.Count < read.Hints.Count;
+            var readCapped = read.ReadCapped;
             var withText = await DarlingQueryStoreHintReader.WithQueryTextAsync(
                 postgres, resolved.ServerId, listed, start, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken);
             string? pageNote = null;
@@ -278,17 +280,22 @@ public sealed class DarlingMcpForcedPlanTools
                 pageNote = $"Listed {listed.Count} of {read.Hints.Count} hints from offset {offset}. Call again with offset {offset + listed.Count} for the next page, or filter by database_name or query_id.";
             else if (offset >= read.Hints.Count)
                 pageNote = $"offset {offset} is past the {read.Hints.Count} hints.";
+            if (readCapped)
+                pageNote = (pageNote is null ? "" : pageNote + " ") +
+                    $"The read holds at most {DarlingQueryStoreHintReader.MaxHints} hints, failing ones first, and this answer has {read.TotalHints}: the last {read.TotalHints - read.Hints.Count} (healthy ones, since failing hints sort first) are not listed. Filter by database_name or query_id to reach them.";
             return JsonSerializer.Serialize(new Dictionary<string, object?>
             {
                 ["server"] = resolved.DisplayName,
                 ["as_of"] = Format(windowEnd),
                 ["hours_back"] = hours_back,
-                ["total_hints"] = read.Hints.Count,
-                ["failing_hints"] = read.Hints.Count(h => h.Failing),
+                ["total_hints"] = read.TotalHints,
+                ["failing_hints"] = read.FailingHints,
+                ["hints_returned"] = read.Hints.Count,
+                ["read_capped"] = readCapped,
                 ["offset"] = offset,
                 ["limit"] = limit,
                 ["query_store_hints"] = withText.Select(HintNode),
-                ["truncated"] = hasMore,
+                ["truncated"] = hasMore || readCapped,
                 ["has_more"] = hasMore,
                 ["next_offset"] = hasMore ? offset + listed.Count : null,
                 ["page_note"] = pageNote,
@@ -302,8 +309,11 @@ public sealed class DarlingMcpForcedPlanTools
         }
     }
 
-    /// <summary>$1 server_id. The registry facts the hints collector's gate asks about: edition, SQL major, engine kind.</summary>
-    internal const string HintsTargetFactsSql = "SELECT sql_engine_edition, sql_major_version, engine_kind FROM servers WHERE server_id = $1";
+    /// <summary>
+    /// $1 server_id. The registry facts the hints collector's gate asks about: edition, SQL major, engine kind, and the PostgreSQL major
+    /// (EngineAwareVersionLabelTests: a SQL major of 0 on a PostgreSQL target or 12 on an Azure SQL Database must never be read without the engine).
+    /// </summary>
+    internal const string HintsTargetFactsSql = "SELECT sql_engine_edition, sql_major_version, engine_kind, postgres_major_version FROM servers WHERE server_id = $1";
 
     /// <summary>
     /// The <c>not_collected</c> envelope when the hints collector does not run on this server, or <c>null</c> when it does (or when the
@@ -328,14 +338,17 @@ public sealed class DarlingMcpForcedPlanTools
             var edition = reader.IsDBNull(0) ? 0 : reader.GetInt32(0);
             var major = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
             var kind = reader.IsDBNull(2) ? null : reader.GetString(2);
+            var postgresMajor = reader.IsDBNull(3) ? 0 : reader.GetInt32(3);
             var target = new CollectorTargetInfo
             {
                 Engine = MonitoredEngineKind.EngineOf(kind) ?? CollectorTargetEngine.SqlServer,
                 IsAzureSqlDb = edition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition,
                 IsAzureManagedInstance = edition == CollectorEngineCapability.AzureManagedInstanceEngineEdition,
                 SqlMajorVersion = major,
+                PostgresMajorVersion = postgresMajor,
             };
-            if (CollectorCatalog.AppliesTo(QueryStoreHintsCollector.Instance, target))
+            /* The SQL Server version floor says nothing about another engine: its reason is the engine one asked above, never "version too old". */
+            if (target.Engine != CollectorTargetEngine.SqlServer || CollectorCatalog.AppliesTo(QueryStoreHintsCollector.Instance, target))
                 return null;
 
             return McpHelpers.Status("not_collected",

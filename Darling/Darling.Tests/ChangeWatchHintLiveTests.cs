@@ -115,6 +115,29 @@ public sealed class ChangeWatchHintLiveTests
         });
     }
 
+    /* The plan diff skips a force without a query_id; a hint row with a hint id and no query_id is skipped the same way, and the other hints are still read. */
+    [Fact]
+    public async Task AHintRowWithoutAQueryId_IsNotAChange_AndTheOtherHintsAreStillRead()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var first = h.Now.AddMinutes(-50);
+            var second = h.Now.AddMinutes(-45);
+            await CaptureAsync(h.Connection, first, "Sales", ct);
+            await CaptureAsync(h.Connection, second, "Sales", ct, (1, 42, "OPTION (MAXDOP 1)"));
+            await SeedAsync(h.Connection, "query_store_hints", new Dictionary<string, object>
+            {
+                ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(second), ["database_name"] = "Sales",
+                ["query_hint_id"] = 9L, ["query_hint_text"] = "OPTION (RECOMPILE)", ["source_desc"] = "USER",
+            }, ct);
+
+            var found = (await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct)).Where(IsHint).ToList();
+
+            var change = Assert.Single(found);
+            Assert.Equal("query_store_hint:set:Sales:42:1:" + Stamp(second), change.Key);
+        });
+    }
+
     /* A capture with no marker row is not a complete capture: it is never the side of a diff, and the change it seems to hold is not read. */
     [Fact]
     public async Task ACaptureWithoutAMarkerRow_IsNotDiffed()

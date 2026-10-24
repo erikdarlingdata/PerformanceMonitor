@@ -60,6 +60,7 @@ public sealed class PgSchemaGeneratorTests
            fragment DDL generation. Dispatch is gated separately, by engine, in
            CollectorCatalog.AppliesTo(definition, target). */
         /* 73 since #5632: query_store_forced_plans (V195), also a plain table, so the hypertable count stays 71. */
+        /* 74 since #6581: query_store_hints (V217), also a plain table, so the hypertable count stays 71. */
         Assert.Equal(74, CollectorCatalog.All.Count);
 
         /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here

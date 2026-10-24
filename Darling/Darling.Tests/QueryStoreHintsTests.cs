@@ -185,11 +185,11 @@ public sealed class QueryStoreHintsReadLiveTests
         return await body(postgres, ct);
     }
 
-    private static Task InsertAsync(NpgsqlConnection connection, CancellationToken ct, DateTime at, long? hintId, long? queryId, string? text, string? reason, long? failures) =>
+    private static Task InsertAsync(NpgsqlConnection connection, CancellationToken ct, DateTime at, long? hintId, long? queryId, string? text, string? reason, long? failures, string? database = null) =>
         DarlingMcpTestData.ExecAsync(connection, ct, @"INSERT INTO collect.query_store_hints
 (collection_id, collection_time, server_id, server_name, database_name, query_hint_id, query_id, query_hint_text, last_query_hint_failure_reason, query_hint_failure_count, source_desc)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, ServerName, Db, hintId, queryId, text, reason, failures, hintId is null ? null : "USER");
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, ServerName, database ?? Db, hintId, queryId, text, reason, failures, hintId is null ? null : "USER");
 
     private static Task<string> Call(NpgsqlDataSource postgres, CancellationToken ct) =>
         DarlingMcpForcedPlanTools.GetQueryStoreHints(postgres, ServerName, 24, null, DatabaseFilter.All, ct);
@@ -243,6 +243,61 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
 
             Assert.DoesNotContain(hints, h => h.GetProperty("query_hint_id").GetInt64() == 3);
             Assert.Equal(2, root.GetProperty("captures")[0].GetProperty("hint_count").GetInt32());
+            Assert.False(root.GetProperty("read_capped").GetBoolean());
+            Assert.Equal(2, root.GetProperty("hints_returned").GetInt32());
+            return 0;
+        });
+    }
+
+    /// <summary>
+    /// The read holds at most <see cref="DarlingQueryStoreHintReader.MaxHints"/> hints across every database. Two databases hold 2101 between
+    /// them and the one FAILING hint is in the database that sorts last: the cut must not drop it, the answer must say it was cut, and every
+    /// count must be the whole-set figure (or named as a count of what was returned).
+    /// </summary>
+    [Fact]
+    public async Task AReadPastTheCap_KeepsTheFailingHint_SaysItWasCut_AndCountsTheWholeSet()
+    {
+        const int healthyInA = 1500;
+        const int healthyInZ = 600;
+        await WithStoreAsync(16, async (connection, ct) =>
+        {
+            var at = DateTime.UtcNow.AddMinutes(-5);
+            await InsertAsync(connection, ct, at, null, null, null, null, null, "HintDbA");
+            await InsertAsync(connection, ct, at, null, null, null, null, null, "HintDbZ");
+            foreach (var (database, count, idBase) in new[] { ("HintDbA", healthyInA, 0L), ("HintDbZ", healthyInZ, 100000L) })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO collect.query_store_hints
+(collection_id, collection_time, server_id, server_name, database_name, query_hint_id, query_id, query_hint_text, query_hint_failure_count, source_desc)
+SELECT -($6 + g), $1, $2, $3, $4, $6 + g, $6 + g, 'OPTION (MAXDOP 1)', 0, 'USER' FROM generate_series(1, $5::int) AS g",
+                    DarlingMcpTestData.Naive(at), ServerId, ServerName, database, count, idBase);
+            }
+            /* The only failing hint, in the database that sorts last. */
+            await InsertAsync(connection, ct, at, 999999, 999999, "OPTION (USE HINT ('NOPE'))", "UNSUPPORTED_HINT", 3, "HintDbZ");
+        }, async (postgres, ct) =>
+        {
+            var root = Parse(await Call(postgres, ct));
+            var wholeSet = healthyInA + healthyInZ + 1;
+
+            Assert.True(root.GetProperty("read_capped").GetBoolean());
+            Assert.True(root.GetProperty("truncated").GetBoolean());
+            Assert.Equal(DarlingQueryStoreHintReader.MaxHints, root.GetProperty("hints_returned").GetInt32());
+            Assert.Equal(wholeSet, root.GetProperty("total_hints").GetInt32());
+            Assert.Equal(1, root.GetProperty("failing_hints").GetInt32());
+            Assert.Contains("2000", root.GetProperty("page_note").GetString(), StringComparison.Ordinal);
+
+            /* The failing hint survives the cut and leads the list. */
+            var first = root.GetProperty("query_store_hints")[0];
+            Assert.Equal("FAILING", first.GetProperty("state").GetString());
+            Assert.Equal("HintDbZ", first.GetProperty("database_name").GetString());
+            Assert.Equal(999999, first.GetProperty("query_hint_id").GetInt64());
+
+            /* A database's hint_count is its whole capture, not what fit in the read. */
+            var counts = root.GetProperty("captures").EnumerateArray()
+                .ToDictionary(c => c.GetProperty("database_name").GetString()!, c => c.GetProperty("hint_count").GetInt32());
+            Assert.Equal(healthyInA, counts["HintDbA"]);
+            Assert.Equal(healthyInZ + 1, counts["HintDbZ"]);
+            Assert.Equal(wholeSet, counts.Values.Sum());
             return 0;
         });
     }
