@@ -131,7 +131,7 @@ public sealed class McpWriteToolUndoLiveTests
 
     private static async Task<CustomAlertRule> RuleAsync(NpgsqlDataSource source, long id, CancellationToken ct)
     {
-        var result = await new CustomAlertRuleStore(source).GetAsync(id, ct);
+        var result = await new CustomAlertRuleStore(source, StorageCommandDeadlines.McpReadSeconds).GetAsync(id, ct);
         return Assert.IsType<CustomAlertRuleResult.Ok>(result).Rule!;
     }
 
@@ -147,7 +147,7 @@ public sealed class McpWriteToolUndoLiveTests
 
         var undone = await ReplayAsync(source, created["undo"], ct);
         Assert.Equal("deleted", (string?)undone["status"]);
-        Assert.IsType<CustomAlertRuleResult.NotFound>(await new CustomAlertRuleStore(source).GetAsync(id, ct));
+        Assert.IsType<CustomAlertRuleResult.NotFound>(await new CustomAlertRuleStore(source, StorageCommandDeadlines.McpReadSeconds).GetAsync(id, ct));
     });
 
     [Fact]
@@ -200,7 +200,7 @@ public sealed class McpWriteToolUndoLiveTests
 
     private static async Task<CustomView> ViewAsync(NpgsqlDataSource source, long id, CancellationToken ct)
     {
-        var result = await new CustomViewStore(source).GetAsync(id, null, ct);
+        var result = await new CustomViewStore(source, StorageCommandDeadlines.McpReadSeconds).GetAsync(id, null, ct);
         return Assert.IsType<CustomViewResult.Ok>(result).View!;
     }
 
@@ -213,7 +213,7 @@ public sealed class McpWriteToolUndoLiveTests
         var id = (long)created["id"]!;
 
         Assert.Equal("deleted", (string?)(await ReplayAsync(source, created["undo"], ct))["status"]);
-        Assert.IsNotType<CustomViewResult.Ok>(await new CustomViewStore(source).GetAsync(id, null, ct));
+        Assert.IsNotType<CustomViewResult.Ok>(await new CustomViewStore(source, StorageCommandDeadlines.McpReadSeconds).GetAsync(id, null, ct));
     });
 
     [Fact]

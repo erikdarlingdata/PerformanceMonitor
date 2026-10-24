@@ -12,6 +12,7 @@ using System.Linq;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using Xunit;
 
@@ -56,7 +57,7 @@ public sealed class DarlingWorkerTests
         const string byo = "Host=localhost;Port=5432;Username=darling;Database=darling";
         Assert.Empty(new NpgsqlConnectionStringBuilder(byo).SearchPath ?? string.Empty);
 
-        var result = DarlingWorker.EnsureStoreSearchPath(byo);
+        var result = DarlingStoreConnection.EnsureStoreSearchPath(byo);
 
         var parsed = new NpgsqlConnectionStringBuilder(result);
         Assert.Equal("collect,config,public", parsed.SearchPath);
@@ -91,11 +92,11 @@ public sealed class DarlingWorkerTests
     {
         /* Managed-mode shape: already carries collect,config,public. */
         var managed = DarlingManagedPostgres.BuildConnectionString(5641, "pw123");
-        Assert.Equal(managed, DarlingWorker.EnsureStoreSearchPath(managed));
+        Assert.Equal(managed, DarlingStoreConnection.EnsureStoreSearchPath(managed));
 
         /* A BYO operator's own non-default choice is respected, not overwritten. */
         const string custom = "Host=pg.example.com;Database=metrics;Search Path=collect,config,reporting,public";
-        var result = DarlingWorker.EnsureStoreSearchPath(custom);
+        var result = DarlingStoreConnection.EnsureStoreSearchPath(custom);
         Assert.Equal("collect,config,reporting,public", new NpgsqlConnectionStringBuilder(result).SearchPath);
     }
 

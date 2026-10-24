@@ -1788,7 +1788,10 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                byte budget. This replaced the SQL-side NOT LIKE predicate, which was 75% of the read's
                elapsed time (full nvarchar(max) scan per row; the field A/B measured 4.3x without it).
                Reached on BOTH paths: on Azure our own per-database payload runs inside the very
-               database whose Query Store we are reading, so without this it would collect itself. */
+               database whose Query Store we are reading, so without this it would collect itself.
+               #6665: this tests row.QueryText, which is NULL on the separate-text-fetch path (FetchQueryTextSeparately nulls
+               query_sql_text, and Darling turns it on), so on that path the drop does not fire and the statement's stats rows are
+               stored. Darling hides it at READ time instead (QueryStoreSelfStatement); Lite keeps inline text and drops it here. */
             if (row.QueryText?.Contains(SelfQueryMarker, StringComparison.Ordinal) == true)
             {
                 continue;

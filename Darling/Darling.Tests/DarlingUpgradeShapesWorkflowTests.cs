@@ -19,13 +19,12 @@ namespace Darling.Tests;
 /// Pins the shape of <c>darling-upgrade-shapes.yml</c> (#5627): the check that runs this commit's install and
 /// upgrade scripts over installs that real releases made.
 ///
-/// <para><b>Why it is pinned.</b> The check only protects anyone while it runs. It runs when a pull request
-/// touches <c>Darling/tools/*.ps1</c> or the check itself, and in the nightly; a trigger edited away, a shape
-/// dropped from the matrix, one of the two Windows images lost, or the nightly job unwired leaves a workflow
-/// that still looks like a check and gates nothing. None of those turns a test red by itself, so this class
-/// reads the workflow text and says so.</para>
+/// <para><b>Why it is pinned.</b> The check only protects anyone while it runs. Since #6656 it runs in the nightly
+/// and by manual dispatch, not on pull requests; a trigger edited away, a shape dropped from the matrix, one of
+/// the two Windows images lost, or the nightly job unwired leaves a workflow that still looks like a check and
+/// gates nothing. None of those turns a test red by itself, so this class reads the workflow text and says so.</para>
 ///
-/// <para>The pull-request trigger must stay <c>pull_request</c>: the legs run the pull request's own scripts,
+/// <para>The workflow must not gain a <c>pull_request_target</c> trigger: the legs run the checked-out scripts,
 /// and <c>pull_request_target</c> would run them with a write token and the repository's secrets.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
@@ -73,20 +72,16 @@ public sealed class DarlingUpgradeShapesWorkflowTests
     }
 
     [Fact]
-    public void TheTriggers_AreThePullRequestPaths_TheNightlyCall_AndAManualRun()
+    public void TheTriggers_AreTheNightlyCall_AndAManualRun_AndNotPullRequests()
     {
         var code = Code(Workflow());
         var on = Block(code, "on");
 
-        Assert.Contains("\n  pull_request:\n", "\n" + on, StringComparison.Ordinal);
+        // #6656: pr.yml is the one per-PR CI system, so neither pull-request trigger may come back here.
+        Assert.DoesNotContain("pull_request", on, StringComparison.Ordinal);
         Assert.DoesNotContain("pull_request_target", code, StringComparison.Ordinal);
         Assert.Contains("\n  workflow_call:", "\n" + on, StringComparison.Ordinal);
         Assert.Contains("\n  workflow_dispatch:", "\n" + on, StringComparison.Ordinal);
-
-        var paths = Regex.Matches(on, @"(?m)^\s+-\s+'([^']+)'\s*$").Select(m => m.Groups[1].Value).ToList();
-        Assert.Contains("Darling/tools/*.ps1", paths);
-        Assert.Contains(WorkflowPath, paths);
-        Assert.Contains(ScriptPath, paths);
     }
 
     [Fact]

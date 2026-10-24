@@ -163,7 +163,9 @@ WHERE b.newest = 1
                   WHERE x.server_id = $1
                     AND x.database_name = b.database_name
                     AND x.query_id = b.query_id
-                    AND lower(x.query_sql_text) ~ '" + InternalStatements.LowerTextPattern + @"')
+                    AND (lower(x.query_sql_text) ~ '" + InternalStatements.LowerTextPattern + @"'
+                          -- #6665: or the monitor's own statement (its collector-side drop never fires on Darling)
+                          OR " + PerformanceMonitor.Darling.Storage.QueryStoreSelfStatement.SelfOfStoredText + @"))
 ORDER BY b.cpu_per_exec_us / g.cpu_per_exec_us DESC, b.database_name, b.query_id
 LIMIT $6";
 

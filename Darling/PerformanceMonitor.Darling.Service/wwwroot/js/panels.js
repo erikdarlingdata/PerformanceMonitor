@@ -31,6 +31,7 @@ import {
   noticeStrip,
   keptWindowStrip,
   windowFloorStrip,
+  leftOutStrip,
   readTool,
   readWithinKeptHistory,
   apiGet,
@@ -52,7 +53,7 @@ import {
   localizeAlertDetail,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
-import { plainText, plainTextNamed } from "./plain-text.js";
+import { plainText, plainTextNamed, plainTextCounts } from "./plain-text.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
 import {
   VALUE_LIST_MAX_LEN,
@@ -204,7 +205,7 @@ async function loadPanelBody(desc, body, signal) {
        window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a
        new server's empty week does not read as a quiet one. windowFloorStrip is null for a chart and for an envelope
        without the note. */
-    mount(body, [kept, windowFloorStrip(res.data, desc), emptyStrip(emptyHeadline(desc, res))]);
+    mount(body, [kept, windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), emptyStrip(emptyHeadline(desc, res))]);
     return;
   }
 
@@ -1317,9 +1318,11 @@ function cell(row, c) {
           ? "—"
           : c.plain === "named"
             ? plainTextNamed(String(raw))
-            : c.plain
-              ? plainText(String(raw))
-              : String(raw);
+            : c.plain === "counts"
+              ? plainTextCounts(String(raw))
+              : c.plain
+                ? plainText(String(raw))
+                : String(raw);
   /* #5644 W20: a column marked `localizeText` (a message or note: collection-health notes, collector errors) shows any ISO
      instant in its sentence in local time, like the grids beside it. Opt-in: query text, statement text, details and
      identifiers are data, and a literal such as '2026-01-01T00:00:00' inside them must show as written. */

@@ -350,14 +350,16 @@ public sealed class PhaseCStoreGrantLiveTests
         await ExecAsync(admin, "SELECT signing_key, previous_signing_key FROM config.config_notification_routes", ct);
 
         /* #6006: the signature merge is the one Phase C write. mcp adds a merge row (only the columns it supplies); admin stamps the
-           undo; nobody else writes, and mcp cannot rewrite or undo one. */
+           undo; nobody else writes, and mcp cannot rewrite one. #6401: undo_agent_change lets mcp stamp the undo too, on those two
+           columns only. */
         await using (var mcp = await LoginAsync(scratch, "mcp", mcpPassword, ct))
         {
             await ExecAsync(mcp, "INSERT INTO config.investigation_signature_merges (server_id, signature, merged_into, reason, merged_by) VALUES (1, 'dl1-a', 'dl1-b', 'same', 'agent:a')", ct);
+            await ExecAsync(mcp, "UPDATE config.investigation_signature_merges SET undone_at = now(), undone_by = 'agent:a'", ct);
             foreach (var denied in new[]
             {
-                "UPDATE config.investigation_signature_merges SET undone_at = now(), undone_by = 'x'",
                 "UPDATE config.investigation_signature_merges SET merged_into = 'dl1-z'",
+                "UPDATE config.investigation_signature_merges SET reason = 'other'",
                 "DELETE FROM config.investigation_signature_merges",
                 "INSERT INTO config.investigation_signature_days (server_id, signature, day, count) VALUES (1, 'dl1-a', current_date, 1)",
             })

@@ -158,7 +158,7 @@ public class DarlingRuntimePreflightTests
     }
 
     /// <summary>
-    /// #5651: each README quotes the CET message exactly (so a search finds the line) and gives the
+    /// #5651: each product's docs (Lite: docs/troubleshooting.md, #6419) quote the CET message exactly (so a search finds the line) and give the
     /// per-program opt-out and its undo for every exe that product ships. The exe names come from the project
     /// files, so renaming an assembly breaks this instead of leaving a command that names a dead exe.
     /// </summary>
@@ -167,7 +167,7 @@ public class DarlingRuntimePreflightTests
     [InlineData("Darling", "Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj", "Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj")]
     public void Readme_QuotesTheCetMessage_AndGivesTheOptOutAndItsUndoForEveryExe(string product, params string[] projects)
     {
-        var readme = ReadRepoFile(product, "README.md").ReplaceLineEndings("\n");
+        var readme = (product == "Lite" ? ReadRepoFile("docs", "troubleshooting.md") : ReadRepoFile(product, "README.md")).ReplaceLineEndings("\n");
         Assert.Contains(CetMessage, readme, StringComparison.Ordinal);
         Assert.Contains("0x80131506", readme, StringComparison.Ordinal);
         /* The undo is the registry way, proven on build 20348.5622; the cmdlet's own -Remove failed there. */

@@ -21,6 +21,7 @@ using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -366,7 +367,7 @@ public sealed class DarlingWebEndpointsTests
         Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse(McpHelpers.ParseSummaryDate("01/02/2026", out _)!));
 
         var (_, miss) = DarlingServerResolver.ResolveOrError(
-            new[] { new DarlingServerResolver.RegisteredServer(1, "SQL2022", null) }, "no-such-server", DarlingPeerDirectory.Snapshot.Empty);
+            new[] { new RegisteredServer(1, "SQL2022", null) }, "no-such-server", DarlingPeerDirectory.Snapshot.Empty);
         Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse(miss!));
 
         /* The write tools' own builder — same word, same bytes, same code. */

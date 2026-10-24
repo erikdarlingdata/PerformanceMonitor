@@ -855,9 +855,11 @@ public sealed class DarlingStoreLoginsTests
         /* #4277: every STORE data source pins its session timezone to UTC, so the resolved
            storeConnectionString is wrapped before it reaches Create rather than passed bare. #4479 adds a
            WithApplicationName(...) wrap inside that, naming the surface — set-if-absent, so a configured or
-           owner-fallback login that never ran through DarlingManagedPostgres still gets a name. */
+           owner-fallback login that never ran through DarlingManagedPostgres still gets a name. #6630: both wraps, and the
+           collect/config search path, now live in DarlingWorker.CreateHostStoreDataSource, which the hosts call; its live
+           test covers the path, the name and the pin. */
         Assert.Contains(
-            $"NpgsqlDataSource.Create(\r\n                DarlingStoreConnection.PinSessionTimeZoneUtc(\r\n                    DarlingStoreConnection.WithApplicationName(storeConnectionString, DarlingManagedPostgres.{applicationNameConstant})));",
+            $"DarlingWorker.CreateHostStoreDataSource(storeConnectionString, DarlingManagedPostgres.{applicationNameConstant});",
             start,
             StringComparison.Ordinal);
 

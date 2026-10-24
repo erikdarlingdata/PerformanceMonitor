@@ -562,7 +562,7 @@ public sealed class ExternalAlertDrainLiveTests
             _seed = seed;
             Ct = ct;
             DataSource = dataSource;
-            History = new PgAlertHistoryStore(dataSource, NullLogger.Instance);
+            History = new PgAlertHistoryStore(dataSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
             Store = new ExternalAlertStore(dataSource, 30);
             Drain = new ExternalAlertDrain(
                 Store,

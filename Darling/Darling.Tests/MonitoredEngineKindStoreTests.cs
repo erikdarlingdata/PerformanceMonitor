@@ -266,7 +266,7 @@ public sealed class MonitoredEngineKindStoreTests
     }
 
     /// <summary>
-    /// The serialized contract, which is what <c>docs/uat-onboarding.md</c> §3.4 named as the blocker: the
+    /// The serialized contract, which is what <c>docs/darling/web-dashboard.md</c> (then <c>docs/uat-onboarding.md</c> §3.4) named as the blocker: the
     /// card the browser and <c>get_fleet_overview</c> both receive carries the raw token, the two derived
     /// booleans, and the token's DESCRIPTION. Raw because a consumer may want the vocabulary itself; derived
     /// because a UI that CHOOSES a tab set should not have to know the vocabulary's spelling; described
