@@ -5515,6 +5515,8 @@ const COLLECTION_LOG_COLUMNS = [
   { key: "sql_store_ms", label: "Store (in SQL)", format: "ms" },
   { key: "store_duration_ms", label: "On Store", format: "ms" },
   { key: "rows_collected", label: "Rows", format: "int" },
+  { key: "bytes_received", label: "Received", format: "bytes", nullText: "not measured" },
+  { key: "bytes_sent", label: "Sent", format: "bytes", nullText: "not measured" },
   { key: "error_message", label: "Error", wrap: true, localizeText: true },
 ];
 
@@ -5590,6 +5592,9 @@ const COLLECTOR_COLUMNS = [
   { key: "failure_rate_pct", label: "Failure %", format: "num1" },
   { key: "avg_duration_ms", label: "Avg Dur", format: "ms" },
   { key: "p95_duration_ms", label: "p95 Dur", format: "ms" },
+  /* #6629: the network bytes the collector's SQL Server connections received and sent per day, over the last 7 days at most. */
+  { key: "bytes_received_per_day", label: "Received / day", format: "bytes", nullText: "not measured" },
+  { key: "bytes_sent_per_day", label: "Sent / day", format: "bytes", nullText: "not measured" },
   /* #3017: what the spend BOUGHT, in the columns right after what it cost. Every column to the left of
      these describes cost and none said whether any of it bought anything; the rows figure lived on
      get_collector_cost, a different read over a different (hourly, fleet-wide) series. Rows beside Runs

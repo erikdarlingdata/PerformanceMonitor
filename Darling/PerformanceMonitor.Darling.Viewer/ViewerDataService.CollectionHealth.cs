@@ -496,6 +496,7 @@ public sealed partial class ViewerDataService
 
         ApplyScheduledFrequencies(items, serverId, scheduleOverrides);
         await ApplyReadSourceAsync(items, serverId, cancellationToken);
+        await ApplyCollectionBytesAsync(items, serverId, cancellationToken);
         return items;
     }
 
@@ -598,6 +599,109 @@ LIMIT 1";
             if (string.Equals(row.CollectorName, "query_store", StringComparison.Ordinal))
             {
                 row.ReadSource = readSource;
+            }
+        }
+    }
+
+    /// <summary>The first store schema version whose collection log carries the bytes a run received and sent (V219, #6629).</summary>
+    public const int CollectionBytesStoreSchemaVersion = 219;
+
+    /// <summary>The days the Collection Health bytes columns are spread over: the grid's 7-day window, the longest the web reads too.</summary>
+    internal const double CollectionBytesWindowDays = 7;
+
+    /// <summary>True when a store probed at <paramref name="probedVersion"/> has the byte columns. An unanswered probe (null) fails open,
+    /// as the known-pattern gate does: the grids are never hidden by a probe hiccup, and the byte reads are wrapped so a store that lacks the
+    /// columns costs the columns alone.</summary>
+    public static bool CollectionBytesAvailable(int? probedVersion) =>
+        probedVersion is not int version || version >= CollectionBytesStoreSchemaVersion;
+
+    /// <summary>Whether this store has the byte columns, from the probed schema version (cached per instance, like the other gates).</summary>
+    public async Task<bool> CollectionBytesSupportedAsync(CancellationToken cancellationToken = default)
+    {
+        var storeVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+        return CollectionBytesAvailable(storeVersion);
+    }
+
+    /// <summary>A collection-log statement with <c>bytes_received</c> and <c>bytes_sent</c> added after its <c>read_source</c> column
+    /// (ordinals 10 and 11). Both statements select <c>read_source</c> once, last; anything else is a bug in the caller.</summary>
+    internal static string CollectionLogWithBytesSql(string sql)
+    {
+        const string anchor = "read_source";
+        var at = sql.IndexOf(anchor, StringComparison.Ordinal);
+        if (at < 0 || sql.IndexOf(anchor, at + anchor.Length, StringComparison.Ordinal) >= 0)
+        {
+            throw new InvalidOperationException("The collection log statement must name read_source exactly once.");
+        }
+
+        return sql.Insert(at + anchor.Length, ", bytes_received, bytes_sent");
+    }
+
+    /// <summary>
+    /// #6629: the bytes each collector received and sent on one server over the Collection Health window. $1 server_id, $2 window start
+    /// (naive UTC). The same rows the web's get_collection_health sums (its closed hours come from the hourly rollup of this column, which
+    /// adds up to the same figure). A collector with no measured run in the window has no row here, so it reads "not measured", never 0.
+    /// </summary>
+    public const string CollectionBytesSql = $"""
+        SELECT
+            collector_name,
+            SUM(bytes_received)::bigint,
+            SUM(bytes_sent)::bigint
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   bytes_received IS NOT NULL
+        AND   {CollectionCycleRow.NotCycleRowSql}
+        GROUP BY collector_name
+        """;
+
+    /// <summary>
+    /// #6629: stamps each health row with its bytes per day (<see cref="CollectionBytesSql"/>, spread over the 7-day window). Skipped on a
+    /// store below V219. A failed read leaves the rows unstamped ("not measured") and the grid answers without the columns' figures;
+    /// a cancellation is not swallowed.
+    /// </summary>
+    private async Task ApplyCollectionBytesAsync(List<CollectorHealthRow> rows, int serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!await CollectionBytesSupportedAsync(cancellationToken))
+            {
+                return;
+            }
+
+            var sums = new Dictionary<string, (long Received, long Sent)>(StringComparer.Ordinal);
+            await using var command = _dataSource.CreateCommand(CollectionBytesSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-CollectionBytesWindowDays), DateTimeKind.Unspecified),
+            });
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    sums[reader.GetString(0)] = (reader.GetInt64(1), reader.IsDBNull(2) ? 0 : reader.GetInt64(2));
+                }
+            }
+
+            ApplyBytesPerDay(rows, sums, CollectionBytesWindowDays);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            System.Diagnostics.Trace.TraceWarning($"#6629 collection health could not read the collector bytes for server {serverId}; they are shown as not measured: {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>#6629: puts each collector's window sums, spread over <paramref name="windowDays"/>, on its row. A row with no sums is left
+    /// null ("not measured"). Pure, so a test needs no store.</summary>
+    internal static void ApplyBytesPerDay(IEnumerable<CollectorHealthRow> rows, IReadOnlyDictionary<string, (long Received, long Sent)> sums, double windowDays)
+    {
+        foreach (var row in rows)
+        {
+            if (sums.TryGetValue(row.CollectorName, out var sum))
+            {
+                row.BytesReceivedPerDay = (long)Math.Round(sum.Received / windowDays);
+                row.BytesSentPerDay = (long)Math.Round(sum.Sent / windowDays);
             }
         }
     }
@@ -937,7 +1041,8 @@ LIMIT 1";
     /// </summary>
     public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, DateTime startUtc, DateTime endUtc, int maxRows = CollectionLogRowCap, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(RecentCollectionLogSql);
+        var withBytes = await CollectionBytesSupportedAsync(cancellationToken);
+        await using var command = _dataSource.CreateCommand(withBytes ? CollectionLogWithBytesSql(RecentCollectionLogSql) : RecentCollectionLogSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
@@ -950,7 +1055,7 @@ LIMIT 1";
         });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = maxRows });
 
-        return await ReadCollectionLogAsync(command, cancellationToken);
+        return await ReadCollectionLogAsync(command, withBytes, cancellationToken);
     }
 
     /// <summary>
@@ -1027,7 +1132,8 @@ LIMIT 1";
     /// </summary>
     public async Task<List<CollectionLogRow>> GetCollectionLogByCollectorAsync(int serverId, string collectorName, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(CollectionLogByCollectorSql);
+        var withBytes = await CollectionBytesSupportedAsync(cancellationToken);
+        await using var command = _dataSource.CreateCommand(withBytes ? CollectionLogWithBytesSql(CollectionLogByCollectorSql) : CollectionLogByCollectorSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
@@ -1040,7 +1146,7 @@ LIMIT 1";
             TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
         });
 
-        return await ReadCollectionLogAsync(command, cancellationToken);
+        return await ReadCollectionLogAsync(command, withBytes, cancellationToken);
     }
 
     /// <summary>
@@ -1098,7 +1204,7 @@ LIMIT 1";
     }
 
     /// <summary>Shared reader for the two collection-log projections (identical column list).</summary>
-    private static async Task<List<CollectionLogRow>> ReadCollectionLogAsync(NpgsqlCommand command, CancellationToken cancellationToken)
+    private static async Task<List<CollectionLogRow>> ReadCollectionLogAsync(NpgsqlCommand command, bool withBytes, CancellationToken cancellationToken)
     {
         var items = new List<CollectionLogRow>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1116,6 +1222,9 @@ LIMIT 1";
                 ErrorMessage = reader.IsDBNull(7) ? null : reader.GetString(7),
                 ServerName = reader.IsDBNull(8) ? null : reader.GetString(8),
                 ReadSource = reader.IsDBNull(9) ? null : reader.GetString(9),
+                /* #6629: ordinals 10 and 11, present only when the statement was built with the byte columns. */
+                BytesReceived = withBytes && !reader.IsDBNull(10) ? reader.GetInt64(10) : null,
+                BytesSent = withBytes && !reader.IsDBNull(11) ? reader.GetInt64(11) : null,
             });
         }
 
@@ -1184,6 +1293,17 @@ public class CollectionLogRow
     public string SqlDurationFormatted => SqlDurationMs.HasValue ? $"{SqlDurationMs.Value} ms" : "";
 
     public string DuckDbDurationFormatted => DuckDbDurationMs.HasValue ? $"{DuckDbDurationMs.Value} ms" : "";
+
+    /// <summary>#6629: the bytes this run's SQL Server connections received. Null when the run measured none (no SQL Server connection, or a run
+    /// from before V219): "not measured", never 0.</summary>
+    public long? BytesReceived { get; set; }
+
+    /// <summary>#6629: the bytes this run's SQL Server connections sent. Null when not measured.</summary>
+    public long? BytesSent { get; set; }
+
+    public string BytesReceivedFormatted => CollectorBytesText.Format(BytesReceived);
+
+    public string BytesSentFormatted => CollectorBytesText.Format(BytesSent);
 }
 
 /// <summary>
@@ -1363,6 +1483,17 @@ public class CollectorHealthRow
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
             HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote, TrailingSuccessRuns),
         RegressedFromProductive);
+
+    /// <summary>#6629: the bytes this collector's SQL Server connections received per day over the last 7 days. Null = not measured (no run in
+    /// the window had a SQL Server connection), never 0.</summary>
+    public long? BytesReceivedPerDay { get; set; }
+
+    /// <summary>#6629: the bytes sent per day over the same window. Null = not measured.</summary>
+    public long? BytesSentPerDay { get; set; }
+
+    public string BytesReceivedPerDayFormatted => CollectorBytesText.Format(BytesReceivedPerDay);
+
+    public string BytesSentPerDayFormatted => CollectorBytesText.Format(BytesSentPerDay);
 
     public string AvgDurationFormatted => AvgDurationMs < 1000
         ? $"{AvgDurationMs:F0} ms"

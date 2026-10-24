@@ -1306,10 +1306,13 @@ function cell(row, c) {
      "n/a (log service)" for the log file of a Hyperscale database). The server wrote the sentence; the page only
      shows it in place of the bare em dash. */
   const why = raw == null && c.nullKey ? getPath(row, c.nullKey) : null;
+  /* nullText is the column's own sentence for a missing value (#6629: a collector with no byte figure reads "not measured", never 0). */
   const shown =
     why != null && why !== ""
       ? String(why)
-      : typeof c.display === "function"
+      : raw == null && c.nullText
+        ? String(c.nullText)
+        : typeof c.display === "function"
         ? String(c.display(row) ?? "—")
         : c.format
         ? applyFormat(c.format, raw)

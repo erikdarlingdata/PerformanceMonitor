@@ -13,7 +13,7 @@
  * neither button: the server answers 403 to it anyway, so this is the affordance layer, never the enforcement.
  */
 
-import { el, mount, apiGet, apiGetFleet, apiWrite, readTool } from "../util.js";
+import { el, mount, apiGet, apiGetFleet, apiWrite, readTool, fmtBytes } from "../util.js";
 import { getSession, peekSession } from "../views-api.js";
 
 const POLL_MS = 2000;
@@ -151,13 +151,16 @@ async function newestRows(server, names) {
 }
 
 function resultTable(rows) {
-  const head = el("tr", {}, ["Collector", "When", "Status", "Rows", "Error"].map((h) => el("th", {}, [h])));
+  const head = el("tr", {}, ["Collector", "When", "Status", "Rows", "Received", "Sent", "Error"].map((h) => el("th", {}, [h])));
   const body = rows.map((run) =>
     el("tr", {}, [
       el("td", {}, [String(run.collector)]),
       el("td", {}, [run.collection_time ? new Date(run.collection_time).toLocaleString() : ""]),
       el("td", {}, [String(run.status || "")]),
       el("td", {}, [run.rows_collected == null ? "" : String(run.rows_collected)]),
+      /* #6629: a run with no SQL Server connection has no byte figure; it reads "not measured", never 0. */
+      el("td", {}, [run.bytes_received == null ? "not measured" : fmtBytes(run.bytes_received)]),
+      el("td", {}, [run.bytes_sent == null ? "not measured" : fmtBytes(run.bytes_sent)]),
       el("td", {}, [run.error_message ? String(run.error_message) : ""]),
     ])
   );
