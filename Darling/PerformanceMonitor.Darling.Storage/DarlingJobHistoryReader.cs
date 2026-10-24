@@ -48,9 +48,9 @@ public sealed record DarlingJobHistoryRow(
 /// instant: the SQL bounds the newest runs by it (widened by an hour, like the start) and the job stats exactly,
 /// and <see cref="DarlingJobHistoryReader.GetAsync"/> then cuts the runs exactly in C#.
 /// </summary>
-public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = null, string? Category = null, DateTime? UntilUtc = null)
+public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = null, string? Category = null, DateTime? UntilUtc = null, int? MinDurationSeconds = null)
 {
-    private int UntilParam(int firstParam) => firstParam + (JobName is null ? 0 : 1) + (RunStatus is null ? 0 : 1) + (Category is null ? 0 : 1);
+    private int UntilParam(int firstParam) => firstParam + (JobName is null ? 0 : 1) + (RunStatus is null ? 0 : 1) + (Category is null ? 0 : 1) + (MinDurationSeconds is null ? 0 : 1);
 
     /// <summary>The <c>AND</c> clauses for the set filters, numbering their parameters from <paramref name="firstParam"/>.</summary>
     public string Clauses(int firstParam)
@@ -70,6 +70,11 @@ public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = n
         if (Category is not null)
         {
             sql += $"\n        AND   lower(jh.category_name) = lower(${next++})";
+        }
+
+        if (MinDurationSeconds is not null)
+        {
+            sql += $"\n        AND   jh.run_duration_seconds >= ${next++}";
         }
 
         if (UntilUtc is not null)
@@ -103,6 +108,11 @@ public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = n
         if (Category is not null)
         {
             yield return new NpgsqlParameter<string> { TypedValue = Category };
+        }
+
+        if (MinDurationSeconds is not null)
+        {
+            yield return new NpgsqlParameter<int> { TypedValue = MinDurationSeconds.Value };
         }
 
         if (UntilUtc is not null)

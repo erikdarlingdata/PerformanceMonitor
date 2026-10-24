@@ -314,6 +314,22 @@ public sealed class InvestigationBriefComposerTests
         Assert.Contains("get_blocking", names);
     }
 
+    /// <summary>#6614: an I/O anomaly story names get_job_history for runs of 60 seconds or more, after the two file I/O reads.</summary>
+    [Theory]
+    [InlineData("ANOMALY_WRITE_LATENCY")]
+    [InlineData("ANOMALY_READ_LATENCY")]
+    [InlineData("ANOMALY_IO")]
+    public void AnIoAnomalyStory_NamesLongJobRuns_AfterTheFileIoReads(string rootFactKey)
+    {
+        var finding = Finding() with { RootFactKey = rootFactKey, NextTools = Array.Empty<InvestigationNextCall>() };
+        var calls = Brief(Sources(findings: new[] { finding }))["next_calls"]!.AsArray();
+        var names = calls.Select(c => (string?)c!["tool"]).ToList();
+        Assert.Equal("get_file_io_trend", names[0]);
+        Assert.Equal("get_file_io_stats", names[1]);
+        Assert.Equal("get_job_history", names[2]);
+        Assert.Equal("60", (string?)calls[2]!["arguments"]!["min_duration_seconds"]);
+    }
+
     [Fact]
     public void NextCalls_NameOnlyRegisteredTools_EachOnce_WithTheServer()
     {
