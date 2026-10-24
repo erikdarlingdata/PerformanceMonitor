@@ -21,7 +21,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #5640 (Lane E1): the Darling Viewer's Client Timeouts settings, the V179 twin of
-/// <c>RunnableQueueSettingsSurfaceTests</c>. The row carries the engine's defaults (OFF, 10, 60), compares and saves
+/// <c>RunnableQueueSettingsSurfaceTests</c>. The row carries the engine's defaults (ON, 10, 60), compares and saves
 /// all three columns through the engine's clamp, and the Settings window names the alert. V179 is the newest append, so
 /// this class owns the settings row's total width (76). The viewer needs no per-version gate for the columns: it refuses a
 /// store below <c>StorageVersion.SchemaVersion</c> at connect, as it did for V177's.
@@ -34,10 +34,10 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
     };
 
     [Fact]
-    public void TheRow_StartsAtTheEnginesDefaults_WithTheAlertOff()
+    public void TheRow_StartsAtTheEnginesDefaults_WithTheAlertOn()
     {
         var row = new AlertSettingsRow();
-        Assert.False(row.ClientTimeoutsEnabled);
+        Assert.True(row.ClientTimeoutsEnabled);
         Assert.Equal(AttentionEvaluator.DefaultWarningPerMinute, row.ClientTimeoutsWarningPerMinute);
         Assert.Equal(AttentionEvaluator.DefaultCriticalPerMinute, row.ClientTimeoutsCriticalPerMinute);
         Assert.Equal(10, row.ClientTimeoutsWarningPerMinute);
@@ -48,7 +48,7 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
     public void ValueEquals_NoticesEachOfTheThreeColumns()
     {
         Assert.True(new AlertSettingsRow().ValueEquals(new AlertSettingsRow()));
-        Assert.False(new AlertSettingsRow().ValueEquals(new AlertSettingsRow { ClientTimeoutsEnabled = true }));
+        Assert.False(new AlertSettingsRow().ValueEquals(new AlertSettingsRow { ClientTimeoutsEnabled = false }));
         Assert.False(new AlertSettingsRow().ValueEquals(new AlertSettingsRow { ClientTimeoutsWarningPerMinute = 11 }));
         Assert.False(new AlertSettingsRow().ValueEquals(new AlertSettingsRow { ClientTimeoutsCriticalPerMinute = 61 }));
     }
