@@ -192,7 +192,7 @@ public static partial class CustomViewValidation
         "get_finops"
     };
 
-    private static readonly IReadOnlySet<string> KnownReadSet = new HashSet<string>(KnownReadNames, StringComparer.Ordinal);
+    private static readonly HashSet<string> KnownReadSet = new HashSet<string>(KnownReadNames, StringComparer.Ordinal);
 
     private static string? TryGetString(JsonObject obj, string key) =>
         obj[key] is JsonValue value && value.TryGetValue<string>(out var s) ? s : null;
