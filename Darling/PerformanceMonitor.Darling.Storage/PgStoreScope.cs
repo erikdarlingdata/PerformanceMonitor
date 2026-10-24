@@ -11,7 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 
-namespace PerformanceMonitor.Darling.Service;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The connection (and transaction) a store method runs on (#5915). Standalone, it opens its own connection from the data

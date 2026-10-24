@@ -19,16 +19,15 @@ namespace Darling.Tests;
 /// job runs both suites by trait, every job that waits on it says so, the shards start on a pull request only
 /// after it succeeded, and the two result jobs turn every skip that was not planned into a failure.
 ///
-/// <para><b>What is pinned, and why each piece.</b> The guard job is not a required check, so the four required
-/// checks (<c>build</c>, <c>Darling PostgreSQL tests</c>, <c>Lite tests (result)</c> and the review guard, which
-/// lives in another workflow) are what show a guard failure. That only works while each of the first three lists
+/// <para><b>What is pinned, and why each piece.</b> The guard job is not a required check, so the required
+/// checks (<c>build</c>, <c>Darling PostgreSQL tests</c> and <c>Lite tests (result)</c>) are what show a guard failure. That only works while each of the first three lists
 /// the guard job in its <c>needs</c> and reads its result, so a rename of the job, or a result job that stops
 /// reading it, would let a skipped matrix read as green again. The exact <c>if:</c> of each shard job is pinned
 /// as the census of by-design skips: <c>darling-pg</c> and <c>darling-linux</c> are skipped only when the gate
 /// declined the run or the guards failed on a pull request, and <c>lite-tests</c> also on a release. A fourth
 /// reason would be an unplanned skip, and the result jobs' <c>skipped</c> arm is an error.</para>
 ///
-/// <para><b>Docs-only pull requests</b> still report success on all four required checks: the guard job's
+/// <para><b>Docs-only pull requests</b> still report success on every required check: the guard job's
 /// filter is a copy of the build job's docs entries and every step after its decision is gated on it, so the
 /// job succeeds having built nothing; the shards' own path filters are untouched.</para>
 /// </summary>

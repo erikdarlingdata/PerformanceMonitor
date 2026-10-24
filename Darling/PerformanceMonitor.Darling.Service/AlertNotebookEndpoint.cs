@@ -24,6 +24,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -735,7 +736,7 @@ internal static partial class AlertNotebookEndpoint
         var stopwatch = Stopwatch.StartNew();
         try
         {
-            var result = await new CustomAlertRuleStore(postgres).GetAsync(ruleId, ct);
+            var result = await new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds).GetAsync(ruleId, ct);
             return result switch
             {
                 CustomAlertRuleResult.Ok(CustomAlertRule rule) => new AuthoredContext(rule, false, null, false),
