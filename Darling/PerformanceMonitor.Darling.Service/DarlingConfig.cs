@@ -1901,6 +1901,15 @@ public sealed class WebConfig
     public bool AllowTokenlessLoopback { get; set; }
 
     /// <summary>
+    /// Default ON (#6600). On the managed store the dashboard signs in as the read-only <c>viewer</c> role, so its Admin writes were list-only.
+    /// On, the dashboard opens a second, small connection pool that signs in as the managed <c>admin</c> role (the Viewer's login) and uses it
+    /// only for those writes and their access checks, and only for a person signed in as an admin; every read stays on <c>viewer</c>. Off keeps
+    /// the dashboard list-only on the managed store. A store you bring yourself is unchanged either way. File-only and restart-only.
+    /// </summary>
+    [JsonPropertyName("allowAdminWrites")]
+    public bool AllowAdminWrites { get; set; } = true;
+
+    /// <summary>
     /// Opt-in network exposure for the web dashboard (darling-network-endpoints). Omit <c>listen</c> for the
     /// default = loopback-only HTTP; the block's token gates that listener too. Managed-mode only; ignored in BYO with a caller warning. Any missing
     /// precondition (token / valid allowFrom / managed) keeps the dashboard loopback-only + LogCritical —

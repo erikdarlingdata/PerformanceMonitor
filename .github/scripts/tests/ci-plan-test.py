@@ -57,22 +57,11 @@ jobs:
               - 'docs/**/*.{md,png}'
             all:
               - '**'
-  darling-tree-guards:
-    steps:
-      - uses: dorny/paths-filter
-        with:
-          filters: |
-            workflow:
-              - '.github/workflows/build.yml'
-            lite_tree:
-              - 'Lite/**/!(*.md)'
-  guard-build:
-    steps:
-      - uses: dorny/paths-filter
-        with:
-          filters: |
-            guard:
-              - 'Darling/**/!(*.md)'
+"""
+TREE_FILTER = """\nworkflow:
+  - '.github/workflows/build.yml'
+lite_tree:
+  - 'Lite/**/!(*.md)'
 """
 DARLING_FILTER = """\
 darling:
@@ -95,11 +84,11 @@ lite_linked_shard:
 """
 tmp = tempfile.mkdtemp()
 paths = {}
-for name, text in (("build.yml", WORKFLOW), ("darling.yml", DARLING_FILTER), ("lite.yml", LITE_FILTER)):
+for name, text in (("build.yml", WORKFLOW), ("darling.yml", DARLING_FILTER), ("lite.yml", LITE_FILTER), ("tree.yml", TREE_FILTER)):
     paths[name] = os.path.join(tmp, name)
     with open(paths[name], "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
-rules = cs.Rules(paths["build.yml"], paths["darling.yml"], paths["lite.yml"])
+rules = cs.Rules(paths["build.yml"], paths["darling.yml"], paths["lite.yml"], paths["tree.yml"])
 
 
 def classes(names, reads=None, guard=()):
@@ -216,6 +205,7 @@ check("legs: the PR maximum is 16", cp.MAX_LEGS, 16)
 check("legs: a push is a fixed 4, however small", cp.leg_count(0.02, "push"), 4)
 check("legs: a push is a fixed 4, however big", cp.leg_count(500, "push"), 4)
 check("legs: a push with no tests is 0", cp.leg_count(0, "push"), 0)
+
 r = run(["Darling/X.cs"], cat=big)
 check("big suite: capped legs", (r["legs"], r["legs_json"]), ("16", json.dumps(list(range(1, 17)), separators=(",", ":"))))
 full = {"classes": {"darling": classes([f"F{i}" for i in range(131)]), "lite": l_cls},

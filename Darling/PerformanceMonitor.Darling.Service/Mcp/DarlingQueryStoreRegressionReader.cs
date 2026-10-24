@@ -273,6 +273,19 @@ internal static class DarlingQueryStoreRegressionReader
             var plan = await QueryStoreRegressionBaseline.ResolveAsync(
                 connection, transaction, serverId, wide.ClampedStart, startUtc, McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken);
             var wideSql = plan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql;
+
+            /* #5506 step 2: the first_execution_time floors of the live arms reach PurgeEdgeMargin (26 hours) before their bound,
+               because an interval may span a day. When the server's own intervals are shorter, the floors shrink to what they need
+               (three hours at 60-minute intervals), so the day before the baseline start and the day before the window are not
+               read whole (#5882, the same lookup as get_query_store_top and the aborts read). A server with no trustworthy
+               measurement keeps the 26 hours. The lookup is one extra round trip, 5 to 9 ms warm. */
+            var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
+                connection, serverId, wide.ClampedStart, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
+            {
+                wideSql = QueryStoreIntervalWide.WithEdgeMargin(wideSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
+            }
+
             await using var command = new NpgsqlCommand(wideSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
             AddParameters(command, serverId, startUtc, endUtc, databases, limit, wide.ClampedStart, plan);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);

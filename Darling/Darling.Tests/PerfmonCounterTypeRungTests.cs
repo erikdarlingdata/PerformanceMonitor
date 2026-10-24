@@ -304,7 +304,7 @@ public sealed class PerfmonCounterTypeRungTests
     [Fact]
     public void TheComposeCatalog_StatesWhyThereIsNoTypeGuard()
     {
-        var catalog = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Compose", "MeasureCatalog.cs");
+        var catalog = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "MeasureCatalog.cs");
         Assert.DoesNotContain("cntr_type is not stored", catalog, StringComparison.Ordinal);
         Assert.Contains("No cntr_type row guard is compiled here, on purpose", catalog, StringComparison.Ordinal);
         Assert.Contains("perfmon_value_delta over a gauge aggregates only NULLs", catalog, StringComparison.Ordinal);
