@@ -313,7 +313,7 @@ Everything it can name provably came out of one of our own zips, because the man
 
 The service reports the set once per start with a count, a total and that command — informational while you are within retention, a warning past it. It never deletes one itself: it did not create them.
 
-**The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints the post-start checklist; work it about 10–15 minutes later against the store, and hold the upgrade unverified until every line passes.
+**The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints a post-start checklist. About 10–15 minutes after the start, work it in the Viewer or the web page: every monitored server shows Online, Collectors shows OK with none failing, and the service log has a `Postgres store ready (schema v<N>, ...)` line from this start. N is the store version this build expects. If you connect to the store, `SELECT MAX(version) FROM darling_schema_version` returns the same N. Hold the upgrade unverified until every check passes.
 
 ##### Rolling back to an older build
 
@@ -943,6 +943,68 @@ A channel is enabled by a non-empty URL.
 | `pagerDutyAutoResolve` | `false` | Close the PagerDuty incident when the alert resolves |
 
 Webhook and heartbeat posts do not connect to a link-local address (169.254.0.0/16, fe80::/10) or to the cloud instance addresses `fd00:ec2::254`, `168.63.129.16` and `100.100.100.200`; loopback and private addresses stay allowed. The address check applies to direct connections: when a channel posts through a proxy, Darling checks the address the URL itself spells out when it is saved (a trailing dot and the IPv4-mapped, NAT64 and IPv4-compatible forms included) but cannot see what the proxy connects to, so the proxy decides what it can reach.
+
+#### Generic webhook: status, one key per alert, and incident.io (#6718)
+
+The generic webhook posts the JSON in `genericBodyTemplate` to `genericUrl`, with `genericHeaders` added. Every `{{token}}` in the template is replaced as the body is built, and text tokens are JSON-escaped. The tokens are `{{metric}}`, `{{server}}`, `{{value}}`, `{{threshold}}`, `{{severity}}`, `{{context}}`, `{{detail}}`, `{{timestamp}}`, `{{status}}`, `{{dedup_key}}`, `{{resource_name}}`, `{{database}}`, `{{triage_url}}`, `{{context_json}}`, `{{incidents_json}}` and `{{investigation_json}}`. The last three are raw JSON, so use them unquoted.
+
+- `{{status}}` is `firing` on an alert and `resolved` on a resolution. The Settings window's test send says `firing`. Resolutions go out only when `genericSendResolutions` is on (see "Send resolutions" below).
+- `{{dedup_key}}` is the same for an alert and its resolution. A resolution renders the key the alert's own post rendered, so a receiver that matches on a key can close what the alert opened. The key is the first incident's own key, or `<server id>:<metric>` when the alert has no incident. A restart between the alert and its resolution does not change this.
+- `{{metric}}` on a resolution is the resolution's title, such as `CPU Resolved`, and not the alert's name. A template that needs the alert's name on a resolution can build it from `{{server}}` and `{{dedup_key}}`. The resolution's `{{detail}}` text also names the alert (`Alert: ...`).
+- `{{value}}` on a resolution is the word `resolved`, and `{{threshold}}` is empty.
+- A recovery notice that is its own alert, such as "Server Restored" or "AG Replica Reconnected", is sent as an alert and not as a resolution, so its `{{status}}` is `firing` and its key is its own.
+
+**Example: open and close an alert in incident.io.** Create an HTTP alert source in incident.io. It gives you a source config ID and a token.
+
+| Key | Value |
+|---|---|
+| `genericUrl` | `https://api.incident.io/v2/alert_events/http/<ALERT_SOURCE_CONFIG_ID>` |
+| `genericHeaders` | `{"Authorization": "Bearer <ALERT_SOURCE_TOKEN>"}` |
+| `genericSendResolutions` | `true`. Without it incident.io never gets a `resolved` event and the alert stays open. |
+
+```json
+{
+  "title": "{{metric}} on {{server}}",
+  "status": "{{status}}",
+  "deduplication_key": "{{dedup_key}}",
+  "description": "{{detail}}",
+  "source_url": "{{triage_url}}",
+  "metadata": {
+    "severity": "{{severity}}",
+    "server": "{{server}}",
+    "database": "{{database}}",
+    "resource": "{{resource_name}}",
+    "context": {{context_json}}
+  }
+}
+```
+
+Use that as `genericBodyTemplate`. incident.io's alert event takes `title`, `status` (`firing` or `resolved`), `deduplication_key`, `description`, `source_url` and `metadata`, and has no priority field. To set a priority, see the next paragraph.
+
+**Set the alert's priority from `{{severity}}`.** `{{severity}}` is one of Darling's own words: `CRITICAL`, `WARNING`, `INFO` or `ALERT`. incident.io maps it to a priority. On the alert source, set Priority to a dynamic value and add a Query expression on Payload. Give it a step that extracts fields from JSON:
+
+```
+$.metadata.severity == "CRITICAL" ? "<URGENT_PRIORITY_ID>" : "<OTHER_PRIORITY_ID>"
+```
+
+Parse the result into Alert Priority. Use each priority's ID or slug, not its display name, because a display name parses to nothing. The editor's preview shows the priority each value resolves to.
+
+What to know about incident.io:
+
+- incident.io allows 120 events a minute for each alert source. A request over that gets a 429 and incident.io drops the event. Darling makes one attempt and does not retry a 429, so the channel records a failed send.
+- Tested on 2026-10-24 against one incident.io HTTP alert source, with the template above and Darling's own alert and resolution sends:
+  - The alert and its resolution carried the same `{{dedup_key}}`, and the resolution closed the alert.
+  - The alert kept the title from its first event. The resolution's title did not replace it.
+  - A key with spaces and colons, such as `3:High CPU`, was accepted.
+  - An empty `source_url` was accepted. `{{triage_url}}` is empty when Darling has no triage link, and the alert then has no link.
+  - Nested objects in `metadata` were accepted. Whether a Priority or attribute expression can read a nested path was not tested.
+  - A `resolved` event with a key that matches no open alert got a 202 and changed nothing.
+  - A new alert with the same key after a resolution opened a new alert in incident.io.
+  - An event with no `status` got a 422.
+  - With no Priority expression, the alerts got a default priority. Add the expression if your alert routes use priority.
+- Not confirmed: any limit on the key's length, and the largest body incident.io accepts.
+
+Another receiver that matches on a key and takes a status works the same way. Darling has no native incident.io channel.
 
 #### Notification routes — sending alert families to different channels
 

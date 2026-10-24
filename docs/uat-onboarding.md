@@ -1,5 +1,7 @@
 # Darling install guide (moved)
 
+Audience: operators. This page only points to the moved Darling install guide.
+
 This guide moved to the [Darling docs folder](darling/README.md). The links below keep old section links working.
 
 - <a id="part-0--two-facts-that-explain-most-of-the-surprises"></a>Part 0, two facts that explain most of the surprises: [Install Darling](darling/install.md#two-facts-that-explain-most-of-the-surprises)

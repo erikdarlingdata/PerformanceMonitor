@@ -1,5 +1,7 @@
 # Quick Start — Lite
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 1. Download **[`PerformanceMonitorLite-lite-Setup.exe`](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** — a self-contained build, so there is **no .NET runtime to install first**.

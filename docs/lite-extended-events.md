@@ -1,5 +1,7 @@
 # The Extended Events Sessions Lite Creates
 
+Audience: operators.
+
 Part of the [Lite guide](lite-guide.md) and the [Performance Monitor documentation](../README.md#documentation).
 
 Each Lite install has an eight-character id. Lite makes it at the first start and keeps it in `install-id.json`, in the data folder `%LOCALAPPDATA%\PerformanceMonitorLite-Data\`. The id appears in the name of each session that belongs to this install alone. Two installs that monitor one server never share such a session, so one install cannot drop or stop the other's.

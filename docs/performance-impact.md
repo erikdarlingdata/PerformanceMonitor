@@ -1,5 +1,7 @@
 # Performance Impact
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 ### On Monitored Servers

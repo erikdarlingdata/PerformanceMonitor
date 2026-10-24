@@ -1,5 +1,7 @@
 # Choosing an edition
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 ## Editions
