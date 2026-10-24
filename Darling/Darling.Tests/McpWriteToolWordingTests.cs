@@ -95,7 +95,7 @@ public sealed class McpWriteToolWordingTests
     public void ADryRunRefusedForWantOfTheClaim_AddsTheSwitchState_AndAWriteOrAnotherReasonDoesNot()
     {
         var refusal = new AgentActionRefusal(AgentActionCodes.Required, "agent_action is required.");
-        const string note = "For reference, Force plan on srv is currently off, so the real call would be refused as actions_off until it is turned on.";
+        var note = $"For reference, Force plan on srv is currently off, so the real call would be refused as {AgentActionCodes.SwitchOff} until it is turned on.";
 
         var dry = JsonDocument.Parse(DarlingMcpPlanForceTools.GateRefusalAnswer(refusal, dryRun: true, note)).RootElement;
         var write = JsonDocument.Parse(DarlingMcpPlanForceTools.GateRefusalAnswer(refusal, dryRun: false, note)).RootElement;
@@ -106,5 +106,21 @@ public sealed class McpWriteToolWordingTests
         Assert.EndsWith(note, dry.GetProperty("message").GetString(), StringComparison.Ordinal);
         Assert.Equal("agent_action is required.", write.GetProperty("message").GetString());
         Assert.Equal("off.", other.GetProperty("message").GetString());
+    }
+
+    [Fact]
+    public async Task ADryRunWhoseSwitchReadFails_FallsBackToTheBareRefusal_NotAnError()
+    {
+        /* #6455: nothing listens on port 1, so the switch read throws. The note is left out and the refusal still goes out. */
+        await using var unreachable = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=nobody;Database=nowhere;Timeout=3;Pooling=false");
+
+        var note = await DarlingMcpPlanForceTools.ReadSwitchStateAsync(unreachable, null, 1, "srv", "force_plan", TestContext.Current.CancellationToken);
+        Assert.Null(note);
+
+        var refusal = new AgentActionRefusal(AgentActionCodes.Required, "agent_action is required.");
+        var answer = JsonDocument.Parse(DarlingMcpPlanForceTools.GateRefusalAnswer(refusal, dryRun: true, note)).RootElement;
+        Assert.Equal("refused", answer.GetProperty("status").GetString());
+        Assert.Equal("agent_action_required", answer.GetProperty("reason").GetString());
+        Assert.DoesNotContain("For reference", answer.GetProperty("message").GetString(), StringComparison.Ordinal);
     }
 }

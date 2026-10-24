@@ -188,7 +188,7 @@ public sealed class DarlingMcpPlanForceTools
             if (state is null)
                 return null;
             return $"For reference, {ServerActionNames.Label(serverAction)} on {serverName} is currently {(state.Enabled ? "on" : "off")}"
-                + (state.Enabled ? "." : ", so the real call would be refused as actions_off until it is turned on.");
+                + (state.Enabled ? "." : $", so the real call would be refused as {AgentActionCodes.SwitchOff} until it is turned on.");
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
