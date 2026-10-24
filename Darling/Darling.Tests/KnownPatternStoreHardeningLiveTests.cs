@@ -159,8 +159,7 @@ public sealed class KnownPatternStoreHardeningLiveTests
 
             var refused = await Assert.ThrowsAsync<ArgumentException>(() =>
                 store.InsertAsync(new KnownPatternInput(null, null, null, null, null, "the 501st", null), "erik", ct));
-            Assert.Contains("500 entries and 500 exist", refused.Message, StringComparison.Ordinal);
-            Assert.Contains("Delete", refused.Message, StringComparison.Ordinal);
+            Assert.Equal("Known patterns are capped at 500 entries and 500 exist. Delete entries you no longer need to make room.", refused.Message);
             var direct = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(viewer, InsertCall(), ct));
             Assert.Equal("DL409", direct.SqlState);
             Assert.Equal(KnownPatternMatcher.MaxEntries, await CountAsync(owner, ct));

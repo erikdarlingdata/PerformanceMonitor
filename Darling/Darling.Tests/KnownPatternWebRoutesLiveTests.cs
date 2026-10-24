@@ -206,12 +206,14 @@ public sealed class KnownPatternWebRoutesLiveTests
             Assert.Equal(HttpStatusCode.BadRequest, added.Status);
             Assert.Equal("invalid", added.Body.GetProperty("status").GetString());
             Assert.Contains(expected, added.Body.GetProperty("error").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("(Parameter", added.Body.GetProperty("error").GetString(), StringComparison.Ordinal);
             Assert.Empty(await store.LoadAllAsync(ct));
 
             var seeded = await store.InsertAsync(new PerformanceMonitor.Common.KnownPatterns.KnownPatternInput(null, null, null, null, null, "Keep me.", null), "seed", ct);
             var edited = await SendAsync(client, HttpMethod.Put, $"/api/known-patterns/{seeded}", body);
             Assert.Equal(HttpStatusCode.BadRequest, edited.Status);
             Assert.Contains(expected, edited.Body.GetProperty("error").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("(Parameter", edited.Body.GetProperty("error").GetString(), StringComparison.Ordinal);
             Assert.Equal("Keep me.", Assert.Single(await store.LoadAllAsync(ct)).Note);
         });
     }

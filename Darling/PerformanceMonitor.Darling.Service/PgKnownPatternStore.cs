@@ -175,7 +175,7 @@ public sealed class PgKnownPatternStore
         catch (PostgresException ex) when (ex.SqlState is "DL404" or "DL409")
         {
             /* DL409: the table already holds KnownPatternMatcher.MaxEntries entries (#6398). */
-            throw new ArgumentException(ex.MessageText, nameof(input));
+            throw new ArgumentException(ex.MessageText);
         }
     }
 
@@ -197,7 +197,7 @@ public sealed class PgKnownPatternStore
         }
         catch (PostgresException ex) when (ex.SqlState == "DL404")
         {
-            throw new ArgumentException(ex.MessageText, nameof(input));
+            throw new ArgumentException(ex.MessageText);
         }
     }
 
@@ -216,7 +216,7 @@ public sealed class PgKnownPatternStore
         var refusal = input.Validate();
         if (refusal is not null)
         {
-            throw new ArgumentException(refusal, nameof(input));
+            throw new ArgumentException(refusal);
         }
 
         return input.Normalize();

@@ -162,9 +162,8 @@ public sealed class DarlingMcpKnownPatternWriteToolsLiveTests
             var refused = Parse(await DarlingMcpKnownPatternWriteTools.CreateKnownPattern(mcp, "the 501st", cancellationToken: ct));
             Assert.Equal("invalid", (string)refused["status"]!);
             var message = (string)refused["message"]!;
-            Assert.Contains("500 entries and 500 exist", message, StringComparison.Ordinal);
-            Assert.Contains("Delete", message, StringComparison.Ordinal);
-            Assert.Contains("Nothing was changed", message, StringComparison.Ordinal);
+            /* The store's whole sentence plus the tool's tail: no ".NET (Parameter 'input')" wedged between them. */
+            Assert.Equal("Known patterns are capped at 500 entries and 500 exist. Delete entries you no longer need to make room. Nothing was changed.", message);
             Assert.Equal(cap.ToString(System.Globalization.CultureInfo.InvariantCulture), await ScalarAsync(owner, "SELECT count(*) FROM config.config_known_patterns", ct));
 
             /* Edit and delete still work at the cap, and the delete makes room for one create. */
