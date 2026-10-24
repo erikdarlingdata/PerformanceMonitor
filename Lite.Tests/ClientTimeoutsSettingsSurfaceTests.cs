@@ -113,8 +113,8 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
         {
             if (key == "alert_client_timeouts_enabled")
             {
-                /* #5736: the switch is written beside its marker, by App.WriteClientTimeoutsSwitch. */
-                Assert.Contains("App.WriteClientTimeoutsSwitch(root);", window, StringComparison.Ordinal);
+                /* #5736: the switch is written beside its marker, by App.WriteClientTimeoutsSwitch, and
+                   ClientTimeoutsOnByDefaultSettingsTests round-trips that write through the loader. */
                 Assert.Contains($"root[\"{key}\"]", app, StringComparison.Ordinal);
             }
             else
