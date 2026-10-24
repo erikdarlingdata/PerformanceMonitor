@@ -232,6 +232,146 @@ public sealed class McpRouteAgentFieldsLiveTests
         });
     }
 
+    /// <summary>L5 of the #6593 review: an operator token puts a level 2 route back to Inherit with clear_agent_level. The stored level is NULL,
+    /// the limits are kept (the Viewer's Inherit keeps them), the journal row has before 2 and after null, and previous shows level 2.</summary>
+    [Fact]
+    public async Task AnOperatorToken_ClearsALevel2Route_BackToInherit_AndTheJournalShowsBefore2AfterNull()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var routeId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(
+                asMcp, "Blocking", agent_level: 2, agent_max_per_hour: 7, served: OperatorPolicy(), cancellationToken: ct));
+
+            var cleared = await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, routeId, clear_agent_level: true, served: OperatorPolicy(), cancellationToken: ct);
+            Assert.Equal("updated", Status(cleared));
+            var doc = JsonDocument.Parse(cleared).RootElement;
+            Assert.Equal(2, doc.GetProperty("previous").GetProperty("agent_level").GetInt32());
+            Assert.Equal(JsonValueKind.Null, doc.GetProperty("route").GetProperty("agent_level").ValueKind);
+
+            Assert.Equal("null|7", await ScalarAsync(owner,
+                $"SELECT coalesce(agent_level::text, 'null') || '|' || agent_max_per_hour::text FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+            Assert.Equal("1", await ScalarAsync(owner,
+                $"SELECT count(*) FROM config.investigation_journal WHERE route_id = {routeId} AND event = 'route_agent_changed' " +
+                $"AND actor = 'operator:{Operator}' AND reason = 'changed agent_level' AND (detail -> 'before' ->> 'agent_level') = '2' " +
+                "AND detail -> 'after' -> 'agent_level' = 'null'::jsonb", ct));
+
+            /* The undo of the clear puts level 2 back. */
+            Assert.Equal(2, doc.GetProperty("undo").GetProperty("arguments").GetProperty("agent_level").GetInt32());
+        });
+    }
+
+    /// <summary>L5 of the #6593 review: the undo of an operator token's change to the agent fields puts the level and the four limits back.</summary>
+    [Fact]
+    public async Task TheUndo_OfAnAgentFieldChange_RestoresTheLevelAndTheLimits()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var routeId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(
+                asMcp, "Blocking", agent_level: 1, agent_max_per_hour: 5, agent_max_per_day: 40, agent_lease_minutes: 20, agent_expiry_minutes: 60,
+                served: OperatorPolicy(), cancellationToken: ct));
+            const string Fields = "SELECT coalesce(agent_level::text, 'null') || '|' || agent_max_per_hour::text || '|' || agent_max_per_day::text || '|' " +
+                "|| agent_lease_minutes::text || '|' || agent_expiry_minutes::text FROM config.config_notification_routes WHERE route_id = ";
+            var original = await ScalarAsync(owner, Fields + routeId, ct);
+            Assert.Equal("1|5|40|20|60", original);
+
+            var changed = await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, routeId, agent_level: 3, agent_max_per_hour: 30, agent_max_per_day: 200, agent_lease_minutes: 60, agent_expiry_minutes: 600,
+                served: OperatorPolicy(), cancellationToken: ct);
+            Assert.Equal("updated", Status(changed));
+            Assert.Equal("3|30|200|60|600", await ScalarAsync(owner, Fields + routeId, ct));
+
+            Assert.Equal("updated", Status(await RunUndoAsync(asMcp, changed, ct)));
+            Assert.Equal(original, await ScalarAsync(owner, Fields + routeId, ct));
+
+            /* set_notification_route_enabled hands an operator token's change to an agent route to update_notification_route, so its answer's
+               previous and undo carry the agent fields too, and the undo puts the route back on with them unchanged. */
+            var off = await DarlingMcpAlertTools.SetNotificationRouteEnabled(asMcp, routeId, false, served: OperatorPolicy(), cancellationToken: ct);
+            Assert.Equal("updated", Status(off));
+            var offDoc = JsonDocument.Parse(off).RootElement;
+            Assert.Equal(1, offDoc.GetProperty("previous").GetProperty("agent_level").GetInt32());
+            Assert.Equal(1, offDoc.GetProperty("undo").GetProperty("arguments").GetProperty("agent_level").GetInt32());
+            Assert.Equal("updated", Status(await RunUndoAsync(asMcp, off, ct)));
+            Assert.Equal("true", await ScalarAsync(owner, $"SELECT enabled::text FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+            Assert.Equal(original, await ScalarAsync(owner, Fields + routeId, ct));
+        });
+    }
+
+    /// <summary>L5 of the #6593 review: the undo of a change made from Inherit carries clear_agent_level true, and running it puts the level back to NULL.</summary>
+    [Fact]
+    public async Task TheUndo_OfAChangeMadeFromInherit_PutsInheritBack()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var routeId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(
+                asMcp, "Blocking", served: OperatorPolicy(), cancellationToken: ct));
+
+            var changed = await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, routeId, agent_level: 2, served: OperatorPolicy(), cancellationToken: ct);
+            Assert.Equal("updated", Status(changed));
+            var undo = JsonDocument.Parse(changed).RootElement.GetProperty("undo").GetProperty("arguments");
+            Assert.True(undo.GetProperty("clear_agent_level").GetBoolean());
+            Assert.False(undo.TryGetProperty("agent_level", out _));
+            Assert.Equal("2", await ScalarAsync(owner, $"SELECT agent_level::text FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+
+            Assert.Equal("updated", Status(await RunUndoAsync(asMcp, changed, ct)));
+            Assert.Equal("null", await ScalarAsync(owner,
+                $"SELECT coalesce(agent_level::text, 'null') FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+        });
+    }
+
+    /// <summary>L5 of the #6593 review: agent_level and clear_agent_level together are invalid, and a caller that is not operator-class (an
+    /// agent-class token, an investigations-only token) still cannot clear the level. Nothing changes.</summary>
+    [Fact]
+    public async Task ClearAgentLevel_WithAgentLevel_IsInvalid_AndANonOperatorTokenCannotClearIt()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var routeId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(
+                asMcp, "Blocking", agent_level: 2, served: OperatorPolicy(), cancellationToken: ct));
+
+            Assert.Equal("invalid", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, routeId, agent_level: 1, clear_agent_level: true, served: OperatorPolicy(), cancellationToken: ct)));
+
+            var agentToken = new DarlingMcpServedPolicy(new DarlingMcpWritePolicy.Effective(false, false, Investigations: true, TokenName: "triage-bot"));
+            var investigations = new DarlingMcpServedPolicy(new DarlingMcpWritePolicy.Effective(false, false, Investigations: true));
+            foreach (var policy in new[] { agentToken, investigations })
+            {
+                Assert.Equal("refused", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+                    asMcp, routeId, clear_agent_level: true, served: policy, cancellationToken: ct)));
+            }
+
+            /* A route with no agent setting yet: the refusal for agent fields, not the agent-route one, still holds. */
+            var plainId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(
+                asMcp, "Deadlocks", agent_level: 0, served: OperatorPolicy(), cancellationToken: ct));
+            Assert.Equal("refused", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, plainId, clear_agent_level: true, served: agentToken, cancellationToken: ct)));
+
+            Assert.Equal("2", await ScalarAsync(owner, $"SELECT agent_level::text FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+            Assert.Equal("0", await ScalarAsync(owner, $"SELECT agent_level::text FROM config.config_notification_routes WHERE route_id = {plainId}", ct));
+            Assert.Equal("0", await ScalarAsync(owner,
+                $"SELECT count(*) FROM config.investigation_journal WHERE route_id IN ({routeId}, {plainId}) AND reason = 'changed agent_level'", ct));
+        });
+    }
+
+    /// <summary>Runs an answer's undo, an update_notification_route call, as the operator token, with the arguments it carries.</summary>
+    private static Task<string> RunUndoAsync(NpgsqlDataSource asMcp, string answer, CancellationToken ct)
+    {
+        var undo = JsonDocument.Parse(answer).RootElement.GetProperty("undo");
+        Assert.Equal("update_notification_route", undo.GetProperty("tool").GetString());
+        var a = undo.GetProperty("arguments");
+        int? Int(string name) => a.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : null;
+        bool? Bool(string name) => a.TryGetProperty(name, out var v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False ? v.GetBoolean() : null;
+        string? Text(string name) => a.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        return DarlingMcpAlertTools.UpdateNotificationRoute(
+            asMcp, a.GetProperty("route_id").GetInt32(), metric_match: Text("metric_match"), enabled: Bool("enabled"),
+            scope_server_id: Int("scope_server_id"), scope_tag_id: Int("scope_tag_id"), fleet_wide: Bool("fleet_wide"),
+            send_resolutions: Text("send_resolutions"), fallback_route_id: Int("fallback_route_id"), clear_fallback: Bool("clear_fallback"),
+            email_recipients: Text("email_recipients"), agent_level: Int("agent_level"), agent_max_per_hour: Int("agent_max_per_hour"),
+            agent_max_per_day: Int("agent_max_per_day"), agent_lease_minutes: Int("agent_lease_minutes"), agent_expiry_minutes: Int("agent_expiry_minutes"),
+            clear_agent_level: Bool("clear_agent_level"), served: OperatorPolicy(), cancellationToken: ct);
+    }
+
     private static async Task WithMcpRoleAsync(Func<NpgsqlDataSource, NpgsqlDataSource, CancellationToken, Task> body)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");

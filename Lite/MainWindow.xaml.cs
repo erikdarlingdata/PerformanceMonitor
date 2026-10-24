@@ -175,7 +175,9 @@ public partial class MainWindow : Window
             _webhookAlertService,
             new AppLoggerAdapter<EmailAlertService>(),
             new InvestigationDispatchCore(
-                investigationStore.OpenOrJoinAsync, _alertSettings, new AppLoggerAdapter<InvestigationDispatchCore>(), opened: null, keys: _pseudonymKeys),
+                investigationStore.OpenOrJoinAsync, _alertSettings, new AppLoggerAdapter<InvestigationDispatchCore>(), opened: null, keys: _pseudonymKeys,
+                /* #6596: an alert whose story is recurring at this hour opens no request; the skip is journaled. */
+                recurringSkipped: duckInvestigationStore.RecordRecurringSkipAsync),
             (requestId, token) => investigationStore.ReadRequestAsync(requestId, token),
             () => _mcpDataDetail);
         _muteRuleService = new MuteRuleService(

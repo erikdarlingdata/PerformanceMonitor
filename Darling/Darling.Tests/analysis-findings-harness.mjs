@@ -103,6 +103,17 @@ try {
       await settle();
       return { pre: pre.map((p) => p.textContent), preChildren: pre.map((p) => p.children.length), clipboard, label: copy.textContent, buttons: byTag(root, "button").length };
     },
+    askAi: async () => {
+      const root = await run("srv-a");
+      body = JSON.stringify({ prompt: "THE PROMPT" });
+      fetches.length = 0;
+      clipboard.length = 0;
+      const ask = byTag(root, "button").find((b) => b.textContent === "Ask AI");
+      ask.handlers.click();
+      await settle();
+      const u = new URL(fetches[0], "http://x.test");
+      return { path: u.pathname, params: Object.fromEntries(u.searchParams), clipboard, label: ask.textContent, buttons: byTag(root, "button").filter((b) => b.textContent === "Ask AI" || b.textContent === "AI prompt copied").length };
+    },
     link: async () => {
       const root = await run("srv-a");
       return byTag(root, "a").map((a) => a.attrs.href);
