@@ -854,7 +854,7 @@ public sealed class WebDataStartNoteTests
 
         /* #4966: the empty envelope carries the note too, drawn above its message, and a read's answer is composed in the
            browser's zone for the envelope as it is for rows. */
-        Assert.Contains("mount(body, [kept, windowFloorStrip(res.data, desc), emptyStrip(emptyHeadline(desc, res))]);", panels, StringComparison.Ordinal);
+        Assert.Contains("mount(body, [kept, windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), emptyStrip(emptyHeadline(desc, res))]);", panels, StringComparison.Ordinal);
         Assert.Contains("res.kind !== \"data\" && res.kind !== \"empty\"", util, StringComparison.Ordinal);
 
         Assert.Contains("windowFloorStrip(res.data, spec)", tabs, StringComparison.Ordinal);

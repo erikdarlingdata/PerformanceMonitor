@@ -2135,7 +2135,8 @@ export const SERVER_TABS = [
         ctx.label,
         "No query regressed against its baseline in this window. A server with no earlier history has nothing to compare against.",
         2,
-        null,
+        /* #6654: the read leaves out databases the server dropped; the note names them (drawn on an empty answer too, panels.js). */
+        "databases_left_out_note",
         null,
         QUERY_STORE_REGRESSION_GROUPS
       ),

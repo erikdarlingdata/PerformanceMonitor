@@ -1750,6 +1750,7 @@
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Margin="8,4,0,4" FontSize="11"
@@ -1761,7 +1762,12 @@
                                        Padding="8,4" FontWeight="Bold"
                                        Foreground="{DynamicResource ForegroundBrush}"
                                        Background="#22FFAA00"/>
-                            <DataGrid Grid.Row="2" x:Name="QueryStoreRegressionsGrid" Style="{StaticResource DarkGrid}"
+                            <!-- Databases the read left out (#6654): the dropped ones, named so an empty grid is not read as "nothing regressed". -->
+                            <TextBlock Grid.Row="2" x:Name="QueryStoreRegressionsLeftOutBanner" Visibility="Collapsed"
+                                       Padding="8,4" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <DataGrid Grid.Row="3" x:Name="QueryStoreRegressionsGrid" Style="{StaticResource DarkGrid}"
                                       RowStyle="{StaticResource QueryStorePlanGridRowStyle}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
