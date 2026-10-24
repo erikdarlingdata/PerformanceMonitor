@@ -143,9 +143,8 @@ FROM
     /// Returns null on any fault other than cancellation, so a lookup that cannot answer never refuses a panel.
     /// </summary>
     internal static async Task<Estimate?> EstimateAsync(
-        NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, ILogger? logger, CancellationToken cancellationToken,
-        IReadOnlyList<int>? excludedServerIds = null, DateTime? windowStart = null, DateTime? windowEnd = null,
-        int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds)
+        NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, ILogger? logger,
+        int commandTimeoutSeconds, CancellationToken cancellationToken, IReadOnlyList<int>? excludedServerIds = null, DateTime? windowStart = null, DateTime? windowEnd = null)
     {
         try
         {
@@ -241,8 +240,8 @@ WHERE b.daily_rows IS NOT NULL
     /// </summary>
     internal static async Task<RawEstimate?> EstimateRawAsync(
         NpgsqlDataSource postgres, NpgsqlConnection? snapshotConnection, IReadOnlyList<string>? serverScope, string collector,
-        DateTime countedStart, DateTime countedEnd, ILogger? logger, CancellationToken cancellationToken, IReadOnlyList<int>? onlyServerIds = null,
-        int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds)
+        DateTime countedStart, DateTime countedEnd, ILogger? logger, int commandTimeoutSeconds, CancellationToken cancellationToken,
+        IReadOnlyList<int>? onlyServerIds = null)
     {
         /* The savepoint is inside the try: a snapshot connection the store dropped since the snapshot's last statement (a restart, a
            failover, a pooler reset, idle_in_transaction_session_timeout) fails here, and that is a lookup that cannot answer, not a
@@ -309,10 +308,10 @@ WHERE b.daily_rows IS NOT NULL
     /// <summary>The raw-route guard end to end (#5811): estimate, then refuse. Null means the panel runs.</summary>
     internal static async Task<string?> CheckRawAsync(
         NpgsqlDataSource postgres, NpgsqlConnection? snapshotConnection, IReadOnlyList<string>? serverScope, string collector,
-        DateTime countedStart, DateTime countedEnd, ILogger? logger, CancellationToken cancellationToken,
-        int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds) =>
+        DateTime countedStart, DateTime countedEnd, ILogger? logger,
+        int commandTimeoutSeconds, CancellationToken cancellationToken) =>
         RawRefusal(
-            await EstimateRawAsync(postgres, snapshotConnection, serverScope, collector, countedStart, countedEnd, logger, cancellationToken, commandTimeoutSeconds: commandTimeoutSeconds),
+            await EstimateRawAsync(postgres, snapshotConnection, serverScope, collector, countedStart, countedEnd, logger, commandTimeoutSeconds, cancellationToken),
             collector, countedStart, countedEnd, RawLimitFor(collector));
 
     /// <summary>The Query Store estimate's reader: $1 the scoped names (or NULL).</summary>
@@ -425,10 +424,9 @@ WHERE b.daily_rows IS NOT NULL
     /// <summary>The guard end to end: estimate, then refuse. Null means the panel runs.</summary>
     internal static async Task<string?> CheckAsync(
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime countedStart, DateTime countedEnd,
-        ILogger? logger, CancellationToken cancellationToken, long limit = ComposeLimits.MaxQueryStoreWideRows,
-        DateTime? stampThrough = null, IReadOnlyList<int>? excludedServerIds = null, DateTime? rawCountedStart = null,
-        int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds) =>
-        Refusal(await EstimateSplitAsync(postgres, serverScope, countedEnd, logger, excludedServerIds, rawCountedStart ?? countedStart, cancellationToken, countedStart, commandTimeoutSeconds), countedStart, countedEnd, limit, stampThrough);
+        ILogger? logger, int commandTimeoutSeconds, CancellationToken cancellationToken, long limit = ComposeLimits.MaxQueryStoreWideRows,
+        DateTime? stampThrough = null, IReadOnlyList<int>? excludedServerIds = null, DateTime? rawCountedStart = null) =>
+        Refusal(await EstimateSplitAsync(postgres, serverScope, countedEnd, logger, excludedServerIds, rawCountedStart ?? countedStart, commandTimeoutSeconds, cancellationToken, countedStart), countedStart, countedEnd, limit, stampThrough);
 
     /// <summary>The collector the Query Store raw half of a split panel is counted under in the collection log (#6115): the Query Store
     /// collector's own name, whose <c>rows_collected</c> is what it stored into <c>collect.query_store_stats</c>.</summary>
@@ -441,16 +439,16 @@ WHERE b.daily_rows IS NOT NULL
     /// </summary>
     internal static async Task<Estimate?> EstimateSplitAsync(
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime countedEnd, ILogger? logger,
-        IReadOnlyList<int>? rawServerIds, DateTime rawCountedStart, CancellationToken cancellationToken, DateTime? wideCountedStart = null,
-        int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds)
+        IReadOnlyList<int>? rawServerIds, DateTime rawCountedStart, int commandTimeoutSeconds, CancellationToken cancellationToken,
+        DateTime? wideCountedStart = null)
     {
-        var wide = await EstimateAsync(postgres, serverScope, logger, cancellationToken, rawServerIds, wideCountedStart, wideCountedStart is null ? null : countedEnd, commandTimeoutSeconds);
+        var wide = await EstimateAsync(postgres, serverScope, logger, commandTimeoutSeconds, cancellationToken, rawServerIds, wideCountedStart, wideCountedStart is null ? null : countedEnd);
         if (wide is not { } found || rawServerIds is not { Count: > 0 })
         {
             return wide;
         }
 
-        var raw = await EstimateRawAsync(postgres, null, serverScope, QueryStoreRawCollector, rawCountedStart, countedEnd, logger, cancellationToken, rawServerIds, commandTimeoutSeconds);
+        var raw = await EstimateRawAsync(postgres, null, serverScope, QueryStoreRawCollector, rawCountedStart, countedEnd, logger, commandTimeoutSeconds, cancellationToken, rawServerIds);
         return raw is { } rawFound ? found with { RawRows = rawFound.Rows, RawServers = rawFound.Servers } : found;
     }
 

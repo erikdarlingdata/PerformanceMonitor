@@ -305,14 +305,21 @@ LIMIT 6";
        deadlock_time), so the spike counts the events the grids show; $4 is the EventWindowFloor for $2, the
        partition-column bound with no upper side. The DMV snapshot arm stays on collection_time because a
        snapshot's event_time IS its collection time. The BASELINE this count is judged against comes from the
-       continuous aggregates, which bucket the hypertable's own column (collection_time) by design. */
-    public const string BlockingWindowSql = @"
+       continuous aggregates, which bucket the hypertable's own column (collection_time) by design.
+
+       #6645: this CURRENT count leaves out a parallel query's self-waits, and so does the BASELINE aggregate
+       (collect.blocked_process_baseline, #6690: its select carries the same BlockingWaits.NotSelfWaitSql), so the
+       ratio compares like with like. A store that built the aggregate earlier is rebuilt on start. */
+    public const string BlockingWindowSql = $@"
+/* #6645: a row whose blocked and blocking spid are the same is a parallel query waiting on itself, not blocking. */
 SELECT
     COALESCE(NULLIF(
         (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4), 0),
+         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4
+         AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3)) AS current_blocking,
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+         AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql})) AS current_blocking,
     (SELECT COUNT(*) FROM v_deadlocks
      WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3 AND collection_time >= $4) AS current_deadlocks";
 
@@ -320,14 +327,16 @@ SELECT
        own targets, skipped on both arms, a NULL database still counting; $5 = the event-window floor, which takes
        the number after the list so the scoped read keeps the list where it was). The deadlock count comes from DeadlockGraphsCountSql through the every-process
        rule, so this read carries no deadlock column. */
-    public const string BlockingSkippingSeparateCountSql = @"
+    public const string BlockingSkippingSeparateCountSql = $@"
 SELECT
     COALESCE(NULLIF(
         (SELECT COUNT(*) FROM v_blocked_process_reports
          WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $5
+         AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
          AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
          WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+         AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
          AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))))) AS current_blocking,
     0::bigint AS current_deadlocks";
 
@@ -1156,14 +1165,17 @@ ORDER BY ms_delta DESC LIMIT 1";
             }
 
             // Write latency anomaly — its own tile list, its own map lookup (each gate scores independently).
+            // #6696: scored against the WRITE-latency baseline (IoWriteLatency), not the read series.
             var writeMap = await _baselineProvider.GetBucketMapAsync(
-                context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
+                context.ServerId, MetricNames.IoWriteLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
+            var writeThreshold = GetDeviationThreshold(MetricNames.IoWriteLatency);
+            var writeModifiedZThreshold = ModifiedZThresholdFor(MetricNames.IoWriteLatency, writeThreshold);
             var wholeWrite = WindowTiles.WholeWindow(writeTiles);
             if (wholeWrite.Samples > 0)
             {
                 var writeTv = AnomalyGate.EvaluateTiles(
                     writeTiles, writeMap,
-                    ioThreshold, modifiedZThreshold, WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                    writeThreshold, writeModifiedZThreshold, WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
                     window);
 
                 AnomalyGate.ZDecision writeDecision;
@@ -1182,14 +1194,14 @@ ORDER BY ms_delta DESC LIMIT 1";
                 else
                 {
                     writeBaseline = await _baselineProvider.GetBaselineAsync(
-                        context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.CancellationToken);
+                        context.ServerId, MetricNames.IoWriteLatency, context.TimeRangeStart, context.CancellationToken);
                     peakWriteLat = wholeWrite.Peak;
                     avgWriteLat = wholeWrite.Mean;
                     writeDecision = writeBaseline.SampleCount == 0
                         ? default
                         : AnomalyGate.EvaluateZScore(
                             writeBaseline, peakWriteLat, avgWriteLat,
-                            ioThreshold, modifiedZThreshold, WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                            writeThreshold, writeModifiedZThreshold, WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
                             window: window);
                 }
 

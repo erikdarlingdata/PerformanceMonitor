@@ -23,7 +23,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// public</c> resolves <c>custom_alert_rules</c> to <c>config.custom_alert_rules</c>). The CRUD callers (the
 /// web editor + MCP tools) connect on the least-privilege viewer/mcp pool, which carries the single narrow
 /// <c>INSERT/UPDATE/DELETE ON config.custom_alert_rules</c> grant (see <c>DarlingManagedRoles</c>); the
-/// <see cref="CustomAlertEvaluator"/> instead instantiates this store on the worker's owner pool to
+/// <c>CustomAlertEvaluator</c> instead instantiates this store on the worker's owner pool to
 /// <see cref="ListEnabledAsync"/> each sweep.
 ///
 /// <para>Adds one column beyond the <c>custom_views</c> shape: <c>enabled</c>, which the evaluator filters on
@@ -79,7 +79,7 @@ public sealed class CustomAlertRuleStore
     /// <summary>
     /// The lightweight list read: the (potentially large) <c>definition</c> body is never selected. LEFT JOINs
     /// each rule to when it LAST FIRED (#3360) — <c>MAX(alert_time)</c> over the <c>config_alert_log</c> rows keyed
-    /// on the rule's IMMUTABLE fire key <c>'Custom:' || id</c> (<see cref="CustomAlertEvaluator.MetricNameFor"/>).
+    /// on the rule's IMMUTABLE fire key <c>'Custom:' || id</c> (<c>CustomAlertEvaluator.MetricNameFor</c>).
     ///
     /// <para>The correlation is that EXACT fire key only. A resolve / teardown row is written under a DIFFERENT
     /// <c>metric_name</c> — <c>'&lt;display name&gt; Resolved'</c> (<c>CustomAlertEvaluator.DeliverResolveAsync</c> /
@@ -307,7 +307,6 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     internal async Task<string?> LockDefinitionAsync(long id, CancellationToken cancellationToken = default)
     {
         await using var command = NewCommand("SELECT definition::text FROM custom_alert_rules WHERE id = $1 FOR UPDATE");
-        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = id });
         return await command.ExecuteScalarAsync(cancellationToken) as string;
     }
@@ -316,7 +315,6 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     internal async Task<string?> StorageServerNameAsync(int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = NewCommand("SELECT server_name FROM servers WHERE server_id = $1");
-        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = serverId });
         return await command.ExecuteScalarAsync(cancellationToken) as string;
     }
@@ -326,7 +324,6 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     {
         var results = new List<CustomAlertRuleSummary>();
         await using var command = NewCommand(ListSql);
-        command.CommandTimeout = _commandTimeoutSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -351,7 +348,6 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     {
         var results = new List<CustomAlertRule>();
         await using var command = NewCommand(ListEnabledSql);
-        command.CommandTimeout = _commandTimeoutSeconds;
         // Read one beyond the cap: the evaluator's ceiling trims to the cap and warns if this extra row is present.
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = EnabledRuleCap + 1 });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -385,7 +381,6 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
 
         var byTag = new Dictionary<int, HashSet<int>>();
         await using var command = NewCommand(ListTagMembersSql);
-        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = System.Linq.Enumerable.ToArray(tagIds) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -414,7 +409,6 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     public async Task<CustomAlertRuleResult> GetAsync(long id, CancellationToken cancellationToken = default)
     {
         await using var command = NewCommand(GetSql);
-        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -507,7 +501,6 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
         string name, string? description, string definitionJson, string? updatedBy, DateTime? expiresAtUtc, CancellationToken cancellationToken)
     {
         await using var command = NewCommand(InsertSql);
-        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });                                 // $1
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Jsonb, Value = definitionJson }); // $2
         AddNullableText(command, description);                                                                      // $3
@@ -609,7 +602,6 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
         DateTime? expiresAtUtc, CancellationToken cancellationToken)
     {
         await using var command = NewCommand(UpdateSql);
-        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });                                     // $1
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });                                 // $2
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Jsonb, Value = definitionJson }); // $3
@@ -699,7 +691,6 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     public async Task<CustomAlertRuleResult> DeleteAsync(long id, CancellationToken cancellationToken = default)
     {
         await using var command = NewCommand(DeleteSql);
-        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
         var affected = await command.ExecuteNonQueryAsync(cancellationToken);
         return affected > 0 ? new CustomAlertRuleResult.Ok(null) : new CustomAlertRuleResult.NotFound();
@@ -708,7 +699,6 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     private async Task<CustomAlertRuleResult> ClassifyMissedUpdateAsync(long id, CancellationToken cancellationToken)
     {
         await using var command = NewCommand(VersionProbeSql);
-        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
         var current = await command.ExecuteScalarAsync(cancellationToken);
         if (current is null or DBNull)

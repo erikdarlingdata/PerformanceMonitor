@@ -68,7 +68,7 @@ public sealed class ComposeQueryStoreWideStartLiveTests
             $"SELECT drop_chunks('collect.query_store_stats', older_than => TIMESTAMP '{S.AddDays(1):yyyy-MM-dd HH:mm:ss}')", ct);
 
         /* The runner's own eligibility step, through the product path. */
-        var resolution = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(postgres, null, S, end, end, ct);
+        var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(postgres, null, S, end, end, ct);
         Assert.True(resolution.Eligible);
         Assert.Equal(S.AddHours(12), resolution.WideStart);
         Assert.Equal(QueryStoreIntervalWide.WideStartBound.FilledSince, resolution.Bound);
@@ -91,7 +91,7 @@ public sealed class ComposeQueryStoreWideStartLiveTests
 
         Assert.Equal(S.AddHours(12), resolution.WideStart);
         Assert.Equal(ServerName, resolution.SettingServer);
-        var note = DarlingWebEndpoints.QueryStoreHistoryNote(resolution.WideStart!.Value, resolution.Bound, resolution.SettingServer);
+        var note = ComposePanelRunner.QueryStoreHistoryNote(resolution.WideStart!.Value, resolution.Bound, resolution.SettingServer);
         Assert.Contains("interval table began keeping complete history for " + ServerName, note, StringComparison.Ordinal);
     }
 

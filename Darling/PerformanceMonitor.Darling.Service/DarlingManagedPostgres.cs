@@ -161,7 +161,7 @@ public sealed class DarlingManagedPostgres
     /// <c>PgSchemaGenerator.SearchPath</c> the V8 split writes as the database default — the
     /// connection-string form omits spaces; a test pins the order against the SQL form.
     /// </summary>
-    public const string SearchPath = "collect,config,public";
+    public const string SearchPath = DarlingStoreConnection.StoreSearchPath;
 
     /// <summary>The server log pg_ctl appends to, beside (not inside) the data directory.</summary>
     public const string ServerLogFileName = "pg.log";

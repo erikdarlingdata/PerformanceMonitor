@@ -84,7 +84,7 @@ public static class FinOpsUtilizationFigures
             var azureSqlDb = ServerHardwareScope.HardwareIsTheHosts(d.EngineEdition);
             return d.ProvisioningStatus switch
             {
-                "RIGHT_SIZED" => ServerHardwareScope.RightSizedExplanation(d.AvgCpuPct, d.P95CpuPct, bpPct, azureSqlDb),
+                "RIGHT_SIZED" => ServerHardwareScope.RightSizedExplanation(d.AvgCpuPct, d.P95CpuPct, d.MaxCpuPct, d.GrantUtilizationPct, bpPct, azureSqlDb),
                 "OVER_PROVISIONED" => ServerHardwareScope.OverProvisionedExplanation(d.AvgCpuPct, d.MaxCpuPct, bpPct, azureSqlDb),
                 /* The reason comes from the same place as the verdict, so a server flagged for grant pressure or
                    worker saturation is not explained as a memory ratio that no longer decides anything (#2246). */

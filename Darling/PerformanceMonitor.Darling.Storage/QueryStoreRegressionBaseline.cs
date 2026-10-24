@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -233,10 +234,15 @@ public static class QueryStoreRegressionBaseline
     /// <summary>The row cap: <c>$5</c> in the MCP read (a parameter), the literal 50 in the viewer's (#5506).</summary>
     public const string LimitToken = "@@LIMIT";
 
+    /// <summary>The databases to leave out (#6654): a <c>text[]</c> parameter, NULL when none, bound by the twin
+    /// (<c>DatabaseFilter.ExcludeParameter</c>) as <c>$10</c> in the MCP read and <c>$9</c> in the viewer's.</summary>
+    public const string ExcludeToken = "@@X";
+
     /// <summary>The statement with its tokens bound to the twin's parameter numbers, for example <c>$6</c>, <c>$7</c>,
     /// <c>$8</c>, <c>$9</c>.</summary>
-    public static string Bind(string sql, string baselineStart, string runDays, string lowEnd, string highStart, string limit) =>
+    public static string Bind(string sql, string baselineStart, string runDays, string lowEnd, string highStart, string limit, string exclude) =>
         sql.Replace(LimitToken, limit, StringComparison.Ordinal)
+           .Replace(ExcludeToken, exclude, StringComparison.Ordinal)
            .Replace(BaselineStartToken, baselineStart, StringComparison.Ordinal)
            .Replace(RunDaysToken, "(" + runDays + "::date[])", StringComparison.Ordinal)
            .Replace(LowEndToken, "(" + lowEnd + "::timestamp)", StringComparison.Ordinal)
@@ -565,7 +571,13 @@ public static class QueryStoreRegressionBaseline
                          ELSE 2 END) AS failure_rank,
                 (f.recent_dur_ms - f.base_dur_ms) * f.recent_execs AS additional_duration_ms
             FROM flagged AS f
-            WHERE f.is_cost OR f.is_timeouts OR f.is_errors
+            WHERE (f.is_cost OR f.is_timeouts OR f.is_errors)
+            /* #6654: a dropped database's queries are left out here, before the rank and the cap, so they cannot fill the page. */
+           {{DatabaseFilter.ExcludeClause("f.database_name", ExcludeToken)}}
+            /* #6654: the monitor's own statement is left out before the cap too. The collector's drop of it never fires on Darling
+               (the text arrives separately, so the row it tests is empty), so the stored statement is found by the shared read-side
+               predicate: the marker against the text in query_store_text, with the MAX(query_text) sample as its fallback. */
+            AND   {{QueryStoreSelfStatement.NotSelfOfKeyedText("$1", "f.database_name", "f.query_id", "f.query_text_sample")}}
         ),
         ranked AS (
             SELECT

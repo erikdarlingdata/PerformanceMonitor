@@ -19,7 +19,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4605: <see cref="DarlingWebEndpoints.ResolveHourlyEdgesVerdictAsync"/> over the hour ledger, against a real store and in
+/// #4605: <see cref="ComposePanelRunner.ResolveHourlyEdgesVerdictAsync"/> over the hour ledger, against a real store and in
 /// the run's own transaction shape (REPEATABLE READ, then READ ONLY). Two states the count guard meets that are not a count:
 /// <list type="bullet">
 /// <item>A ledger that does not cover the window (its <c>counted_since</c> is after the window start): the guard answers -1,
@@ -67,7 +67,7 @@ public sealed class ComposeHourlyEdgesLedgerGuardLiveTests
             {
                 var logger = new CapturingTestLogger();
                 using var scope = ReadScope.Open(logger);
-                var verdict = await DarlingWebEndpoints.ResolveHourlyEdgesVerdictAsync(connection, Candidate, null, 30, ct);
+                var verdict = await ComposePanelRunner.ResolveHourlyEdgesVerdictAsync(connection, Candidate, null, 30, ct);
 
                 Assert.NotNull(verdict);
                 Assert.Equal("query_stats", verdict!.SourceTable);
@@ -81,7 +81,7 @@ public sealed class ComposeHourlyEdgesLedgerGuardLiveTests
             {
                 var logger = new CapturingTestLogger();
                 using var scope = ReadScope.Open(logger);
-                var verdict = await DarlingWebEndpoints.ResolveHourlyEdgesVerdictAsync(connection, Candidate, null, 30, ct);
+                var verdict = await ComposePanelRunner.ResolveHourlyEdgesVerdictAsync(connection, Candidate, null, 30, ct);
 
                 Assert.Null(verdict);
                 Assert.Equal(ReadFallback.LedgerUncovered, scope.Fallback);
@@ -126,7 +126,7 @@ public sealed class ComposeHourlyEdgesLedgerGuardLiveTests
             await using var snapshot = await BeginSnapshotAsync(connection, ct);
             var logger = new CapturingTestLogger();
             using var scope = ReadScope.Open(logger);
-            var verdict = await DarlingWebEndpoints.ResolveHourlyEdgesVerdictAsync(connection, Candidate, null, 30, ct);
+            var verdict = await ComposePanelRunner.ResolveHourlyEdgesVerdictAsync(connection, Candidate, null, 30, ct);
 
             Assert.Null(verdict);
             Assert.Equal(ReadFallback.GateFailed, scope.Fallback);
@@ -169,7 +169,7 @@ public sealed class ComposeHourlyEdgesLedgerGuardLiveTests
             await using var snapshot = await BeginSnapshotAsync(connection, ct);
             var logger = new CapturingTestLogger();
             using var scope = ReadScope.Open(logger);
-            var verdict = await DarlingWebEndpoints.ResolveHourlyEdgesVerdictAsync(connection, Candidate, null, 30, ct);
+            var verdict = await ComposePanelRunner.ResolveHourlyEdgesVerdictAsync(connection, Candidate, null, 30, ct);
 
             Assert.Null(verdict);
             Assert.Equal(ReadFallback.GateFailed, scope.Fallback);

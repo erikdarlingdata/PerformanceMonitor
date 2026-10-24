@@ -1,0 +1,192 @@
+<UserControl x:Class="PerformanceMonitor.Darling.Viewer.FleetSweepsTab"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:ui="clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui"
+             mc:Ignorable="d"
+             d:DesignHeight="700" d:DesignWidth="1000">
+    <!-- Fleet Sweeps (#6390): the fleet sweep engine's record, read only, the same runs, watch items and
+         timeline the web's Fleet Sweeps page shows (both read FleetSweepStore and build their rows with
+         FleetSweepPresentation). Top: the sweeps swept inside the picked span, newest first (the web's
+         Timeline). Middle: the selected sweep in full (the newest when none is selected, as on the web).
+         Bottom: the watch-item worklist. The wording is the web page's. -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*" MinHeight="120"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="2.2*" MinHeight="160"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*" MinHeight="120"/>
+        </Grid.RowDefinitions>
+
+        <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" MinHeight="36">
+            <TextBlock Text="Fleet Sweeps" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14"
+                       Foreground="{DynamicResource ForegroundBrush}"/>
+            <TextBlock Text="Timeline span:" VerticalAlignment="Center" Margin="5,0,4,0"
+                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+            <ui:TimeRangePicker x:Name="TimeRangePickerControl" Compact="True" VerticalAlignment="Center"
+                                RangeChanged="TimeRangePicker_RangeChanged"/>
+            <Button Content="Refresh" Click="RefreshButton_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
+            <TextBlock x:Name="LastRefreshedIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
+                       FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+            <TextBlock x:Name="CadenceIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
+                       FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+        </WrapPanel>
+
+        <!-- Timeline: one row per sweep. Selecting a row loads that sweep below. -->
+        <Grid Grid.Row="1" Margin="10,0,10,0">
+            <DataGrid x:Name="RunsDataGrid"
+                      AutoGenerateColumns="False"
+                      IsReadOnly="True"
+                      CanUserSortColumns="False"
+                      GridLinesVisibility="Horizontal"
+                      HeadersVisibility="Column"
+                      SelectionMode="Single"
+                      SelectionChanged="RunsDataGrid_SelectionChanged">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Swept at" Binding="{Binding SweptAtLocal}" SortMemberPath="SweptAtUtc" Width="150"/>
+                    <DataGridTextColumn Header="Flags" Binding="{Binding Flags}" Width="170"/>
+                    <DataGridTextColumn Header="Servers" Binding="{Binding ServersText}" Width="120"/>
+                    <DataGridTextColumn Header="Bands" Binding="{Binding BandsText}" Width="*" MinWidth="160"/>
+                    <DataGridTextColumn Header="Watch" Binding="{Binding WatchText}" Width="110"/>
+                    <DataGridTextColumn Header="Would have paged" Binding="{Binding WouldHavePagedText}" Width="130"/>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="NoRunsMessage" TextWrapping="Wrap" TextAlignment="Center"
+                       FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Margin="20"
+                       Visibility="Collapsed"/>
+            <TextBlock x:Name="LoadingMessage" Text="Loading timeline…"
+                       FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       Visibility="Collapsed"/>
+        </Grid>
+
+        <GridSplitter Grid.Row="2" Height="5" HorizontalAlignment="Stretch" VerticalAlignment="Center" Margin="10,2"/>
+
+        <!-- The selected sweep in full. -->
+        <Grid Grid.Row="3" Margin="10,0,10,0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <StackPanel x:Name="DetailHeaderPanel" Grid.Row="0" Visibility="Collapsed">
+                <TextBlock x:Name="DetailTitle" FontWeight="Bold" FontSize="13" Foreground="{DynamicResource ForegroundBrush}"/>
+                <TextBlock x:Name="DetailSummary" Margin="0,2,0,4" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <TextBlock x:Name="MutedBanner" Visibility="Collapsed" TextWrapping="Wrap" Padding="8,4" Margin="0,0,0,4"
+                           Background="#33EAB308" Foreground="{DynamicResource ForegroundBrush}"
+                           Text="⊘ Alert delivery was OFF for this sweep (master switch). The would-have-paged ledger records what would have reached the channel."/>
+                <TextBlock x:Name="DeadBanner" Visibility="Collapsed" TextWrapping="Wrap" Padding="8,4" Margin="0,0,0,4" FontWeight="SemiBold"
+                           Background="#33DC2626" Foreground="{DynamicResource ForegroundBrush}"
+                           Text="✕ Instruments dead: this sweep could not prove its data sources were alive, so its quiet is unproven, not clean. The liveness tab names the dead instrument."/>
+                <TextBlock x:Name="RestartNotice" Visibility="Collapsed" TextWrapping="Wrap" Padding="8,4" Margin="0,0,0,4"
+                           Background="#22FFAA00" Foreground="{DynamicResource ForegroundBrush}"
+                           Text="This sweep ran inside the post-restart settle window — fleet staleness here is classified startup-transient, not an outage, except for a server that was already offline before the restart, which stays offline."/>
+            </StackPanel>
+            <TextBlock x:Name="NoDetailMessage" Grid.Row="0" Grid.RowSpan="2" TextWrapping="Wrap" TextAlignment="Center"
+                       FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Margin="20"
+                       Visibility="Collapsed"/>
+            <TabControl x:Name="DetailTabs" Grid.Row="1" Visibility="Collapsed">
+                <TabItem Header="Changes since previous sweep">
+                    <Grid>
+                        <DataGrid x:Name="TransitionsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                                  GridLinesVisibility="Horizontal" HeadersVisibility="Column">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="160"/>
+                                <DataGridTextColumn Header="From" Binding="{Binding From}" Width="90"/>
+                                <DataGridTextColumn Header="To" Binding="{Binding To}" Width="90"/>
+                                <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="*" MinWidth="200"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <TextBlock x:Name="ChangesNote" TextWrapping="Wrap" Margin="8" VerticalAlignment="Bottom"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    </Grid>
+                </TabItem>
+                <TabItem x:Name="WouldHavePagedTabItem" Header="Would have paged (master switch off)">
+                    <Grid>
+                        <DataGrid x:Name="WouldHavePagedDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                                  GridLinesVisibility="Horizontal" HeadersVisibility="Column">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="160"/>
+                                <DataGridTextColumn Header="Family" Binding="{Binding Family}" Width="160"/>
+                                <DataGridTextColumn Header="Evidence" Binding="{Binding Evidence}" Width="*" MinWidth="200"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <TextBlock x:Name="WouldHavePagedEmpty" TextWrapping="Wrap" TextAlignment="Center"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" Margin="20"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}"
+                                   Text="Muted, and nothing crossed a critical trigger in this span — the mute cost nothing this sweep."/>
+                    </Grid>
+                </TabItem>
+                <TabItem Header="Per-server verdicts">
+                    <Grid>
+                        <DataGrid x:Name="VerdictsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                                  GridLinesVisibility="Horizontal" HeadersVisibility="Column">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="160"/>
+                                <DataGridTextColumn Header="Previous" Binding="{Binding Previous}" Width="90"/>
+                                <DataGridTextColumn Header="Band" Binding="{Binding Band}" Width="90"/>
+                                <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="*" MinWidth="200"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <TextBlock x:Name="VerdictsEmpty" TextWrapping="Wrap" TextAlignment="Center"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" Margin="20"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}"
+                                   Text="This sweep carries no per-server verdicts."/>
+                    </Grid>
+                </TabItem>
+                <TabItem Header="Instrument liveness">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <TextBox x:Name="LivenessText" IsReadOnly="True" BorderThickness="0" TextWrapping="Wrap" Margin="8"
+                                 Background="Transparent" Foreground="{DynamicResource ForegroundBrush}"/>
+                    </ScrollViewer>
+                </TabItem>
+            </TabControl>
+        </Grid>
+
+        <GridSplitter Grid.Row="4" Height="5" HorizontalAlignment="Stretch" VerticalAlignment="Center" Margin="10,2"/>
+
+        <!-- The watch-item worklist: open + carried by default, closed (the episode history) on request. -->
+        <Grid Grid.Row="5" Margin="10,0,10,10">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <DockPanel Grid.Row="0" Margin="0,0,0,4">
+                <CheckBox x:Name="ShowClosedCheckBox" DockPanel.Dock="Right" Content="Show closed" VerticalAlignment="Center"
+                          ToolTip="Show closed watch items (the episode history) instead of the open + carried worklist."
+                          Checked="ShowClosedCheckBox_Changed" Unchecked="ShowClosedCheckBox_Changed"/>
+                <TextBlock x:Name="WatchLabel" Text="Watch items" FontWeight="Bold" VerticalAlignment="Center"
+                           Foreground="{DynamicResource ForegroundBrush}"/>
+            </DockPanel>
+            <Grid Grid.Row="1">
+                <DataGrid x:Name="WatchItemsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                          GridLinesVisibility="Horizontal" HeadersVisibility="Column">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="150"/>
+                        <DataGridTextColumn Header="Item" Binding="{Binding Item}" Width="180"/>
+                        <DataGridTextColumn Header="State" Binding="{Binding State}" Width="80"/>
+                        <DataGridTextColumn Header="Position" Binding="{Binding Position}" Width="170"/>
+                        <DataGridTextColumn Header="First seen" Binding="{Binding FirstSeen}" SortMemberPath="FirstSeenUtc" Width="140"/>
+                        <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeen}" SortMemberPath="LastSeenUtc" Width="140"/>
+                        <DataGridTextColumn Header="Condition / evidence" Binding="{Binding Condition}" Width="*" MinWidth="200">
+                            <DataGridTextColumn.ElementStyle>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                    <Setter Property="ToolTip" Value="{Binding ConditionTooltip}"/>
+                                </Style>
+                            </DataGridTextColumn.ElementStyle>
+                        </DataGridTextColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+                <TextBlock x:Name="NoWatchMessage" TextWrapping="Wrap" TextAlignment="Center"
+                           FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           HorizontalAlignment="Center" VerticalAlignment="Center" Margin="20"
+                           Visibility="Collapsed"/>
+            </Grid>
+        </Grid>
+    </Grid>
+</UserControl>

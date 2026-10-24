@@ -864,9 +864,9 @@ public sealed class DarlingWebHostService : BackgroundService
                WebApplicationName, but a CONFIGURED (postgres.webConnectionString) or owner-fallback login
                never runs through that builder — set-if-absent here so every path this string can take still
                names the surface. */
-            var postgres = NpgsqlDataSource.Create(
-                DarlingStoreConnection.PinSessionTimeZoneUtc(
-                    DarlingStoreConnection.WithApplicationName(storeConnectionString, DarlingManagedPostgres.WebApplicationName)));
+            /* #6630: a store the operator brings gets the worker's collect/config search path the same way (set-if-absent), because the
+               bare names the reads use (servers, config_service, ...) only resolve through it, and the database default is best effort. */
+            var postgres = DarlingWorker.CreateHostStoreDataSource(storeConnectionString, DarlingManagedPostgres.WebApplicationName);
             _appDataSource = postgres;
 
             /* #6600: on the managed store, a signed-in admin's Admin writes use a second, small pool on the stored admin login. It opens

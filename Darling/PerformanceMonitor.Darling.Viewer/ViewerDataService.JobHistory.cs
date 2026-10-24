@@ -129,11 +129,6 @@ public sealed class ViewerJobHistoryRow
     /// reads in the viewer's local time (<see cref="MultiServerTime"/>).</summary>
     public bool MixedServers { get; set; }
 
-    /// <summary><see cref="LastSuccessfulRunUtc"/> as the plain wall time, for the reason <see cref="RunTimeLocal"/> gives.</summary>
-    public string LastSuccessfulRunLocal => LastSuccessfulRunUtc is { } t
-        ? ForRowDisplay(t).ToString("yyyy-MM-dd HH:mm:ss")
-        : "Never";
-
     public string DurationFormatted => FormatDuration(RunDurationSeconds);
 
     public string StepDisplay => StepId == 0 ? "(Job outcome)" : $"{StepId}: {StepName}";
