@@ -31,6 +31,7 @@ import {
   noticeStrip,
   keptWindowStrip,
   windowFloorStrip,
+  leftOutStrip,
   readTool,
   readWithinKeptHistory,
   apiGet,
@@ -204,7 +205,7 @@ async function loadPanelBody(desc, body, signal) {
        window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a
        new server's empty week does not read as a quiet one. windowFloorStrip is null for a chart and for an envelope
        without the note. */
-    mount(body, [kept, windowFloorStrip(res.data, desc), emptyStrip(emptyHeadline(desc, res))]);
+    mount(body, [kept, windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), emptyStrip(emptyHeadline(desc, res))]);
     return;
   }
 

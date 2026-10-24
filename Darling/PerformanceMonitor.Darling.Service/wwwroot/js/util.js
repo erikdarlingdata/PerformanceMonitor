@@ -391,6 +391,20 @@ export function keptWindowStrip(res) {
 }
 
 /**
+ * #6654: the strip over a grid that names `databases_left_out_note` as its `noteKey` (or in `moreNoteKeys`), drawn on an EMPTY answer too. The
+ * populated path already draws a named note; the empty path draws only the read's message, and "no regressions" over a read that left
+ * out a dropped database is not the same statement as "nothing regressed". Null for any other panel, so a note that is not about
+ * omitted databases is not pulled onto an empty answer by this.
+ */
+export function leftOutStrip(data, desc) {
+  if (!desc || !data) return null;
+  const key = "databases_left_out_note";
+  if (desc.noteKey !== key && !(desc.moreNoteKeys || []).includes(key)) return null;
+  const note = data[key];
+  return typeof note === "string" && note.trim() ? noticeStrip(note) : null;
+}
+
+/**
  * The notice for a grid whose table starts covering the server after the window does (#4966): the response says so with
  * `window_truncated: true` and a `truncation_note` naming where the data starts (in the browser's zone by the time a
  * read reaches here: readTool composes it with windowNoteText). Null for any other response,

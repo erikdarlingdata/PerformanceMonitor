@@ -45,7 +45,7 @@ public readonly record struct DatabaseFilter
     private readonly string[]? _names;
 
     /// <summary>#5633 review L2 leftover: names a read must NOT cover, set only by <see cref="Excluding"/> on an <see cref="All"/>
-    /// filter. Null when nothing is excluded. Only the readers that carry <see cref="ExcludeClause"/> apply it.</summary>
+    /// filter. Null when nothing is excluded. Only the readers that carry <see cref="ExcludeClause(string, int)"/> apply it.</summary>
     private readonly string[]? _excluded;
 
     private DatabaseFilter(string[] names) => _names = names;
@@ -90,8 +90,9 @@ public readonly record struct DatabaseFilter
     /// <summary>
     /// #5633 review: every database EXCEPT <paramref name="excluded"/> (blank names dropped, repeats kept once). It is still
     /// <see cref="IsAll"/> (no database is chosen), so a caller that does not apply the exclusion reads every database as before.
-    /// A list with no name left is plain <see cref="All"/>. Only the top-procedures ranking applies it today (see
-    /// <see cref="ExcludeClause"/>); <c>CurrentDatabaseScope.NarrowAsync</c> is its one producer.
+    /// A list with no name left is plain <see cref="All"/>. The top-procedures ranking and the Query Store regressions read
+    /// (the MCP tool and the Viewer grid, #6654) apply it (see <see cref="ExcludeClause(string, int)"/>); <c>CurrentDatabaseScope.NarrowAsync</c> is
+    /// its one producer.
     /// </summary>
     public static DatabaseFilter Excluding(IEnumerable<string?>? excluded)
     {
@@ -112,7 +113,7 @@ public readonly record struct DatabaseFilter
     public IReadOnlyList<string> ExcludedNames => _excluded is null ? Array.Empty<string>() : Array.AsReadOnly(_excluded);
 
     /// <summary>
-    /// The exclusion's <c>text[]</c> parameter for a statement carrying <see cref="ExcludeClause"/>: SQL NULL when nothing is
+    /// The exclusion's <c>text[]</c> parameter for a statement carrying <see cref="ExcludeClause(string, int)"/>: SQL NULL when nothing is
     /// excluded. A new parameter on every call.
     /// </summary>
     public NpgsqlParameter ExcludeParameter() =>
@@ -127,8 +128,15 @@ public readonly record struct DatabaseFilter
     /// column: a row with no database name is not a dropped database, so it stays. Independent of the selection, like
     /// <see cref="Clause"/>.
     /// </summary>
-    public static string ExcludeClause(string column, int index) =>
-        $" AND (${index}::text[] IS NULL OR {column} IS NULL OR {column} <> ALL(${index}))";
+    public static string ExcludeClause(string column, int index) => ExcludeClause(column, "$" + index.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// <see cref="ExcludeClause(string, int)"/> with the parameter written as <paramref name="parameter"/> (a <c>$n</c> token or a
+    /// placeholder a shared statement binds later, such as <c>QueryStoreRegressionBaseline.ExcludeToken</c>): the one definition of the
+    /// predicate, so a NULL-handling change reaches every statement that carries it (#6654 review).
+    /// </summary>
+    public static string ExcludeClause(string column, string parameter) =>
+        $" AND ({parameter}::text[] IS NULL OR {column} IS NULL OR {column} <> ALL({parameter}))";
 
     /// <summary>True when no database is named, so the read covers every database.</summary>
     public bool IsAll => _names is null;
