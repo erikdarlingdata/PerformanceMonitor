@@ -265,9 +265,11 @@ jobs:
           global-json-file: global.json
 
       # Same cache key as build.yml and nightly.yml (the fetch script's own content hash), so a warm cache from any of
-      # them means no ~340MB download here. Only the legs that run the Darling live classes need the runtime.
+      # them means no ~340MB download here. Every leg that runs any Darling class needs the runtime: a 'full' scope runs
+      # all of them, and 'reads-lite' (a Lite-only change) still runs the Stage=Guard and Lite-reads classes, some of which
+      # are live PostgreSQL classes (#6656).
       - name: Cache Darling pg-runtime.zip
-        if: needs.plan.outputs.darling_scope == 'full'
+        if: needs.plan.outputs.darling_scope != 'none'
         id: cache-pg-runtime
         uses: actions/cache@v6
         with:
@@ -275,12 +277,12 @@ jobs:
           key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
 
       - name: Build Darling pg-runtime.zip (cache miss only)
-        if: needs.plan.outputs.darling_scope == 'full' && steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        if: needs.plan.outputs.darling_scope != 'none' && steps.cache-pg-runtime.outputs.cache-hit != 'true'
         shell: pwsh
         run: ./Darling/tools/fetch-pg-runtime.ps1
 
       - name: Extract pg-runtime
-        if: needs.plan.outputs.darling_scope == 'full'
+        if: needs.plan.outputs.darling_scope != 'none'
         shell: pwsh
         run: |
           $zip  = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime.zip"
@@ -291,7 +293,7 @@ jobs:
           if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
 
       - name: Start PostgreSQL
-        if: needs.plan.outputs.darling_scope == 'full'
+        if: needs.plan.outputs.darling_scope != 'none'
         shell: pwsh
         run: ./.github/scripts/start-test-pg.ps1 -Mode Start
 
@@ -309,7 +311,7 @@ jobs:
         run: ./.github/scripts/run-ci-leg.ps1 -Leg $env:LEG -LegCount $env:LEG_COUNT -Areas $env:AREAS -NoTreeGuards
 
       - name: Stop PostgreSQL
-        if: always() && needs.plan.outputs.darling_scope == 'full'
+        if: always() && needs.plan.outputs.darling_scope != 'none'
         shell: pwsh
         run: ./.github/scripts/start-test-pg.ps1 -Mode Stop
 
