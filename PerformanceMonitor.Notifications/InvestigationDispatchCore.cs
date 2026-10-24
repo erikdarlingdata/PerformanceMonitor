@@ -289,7 +289,7 @@ public sealed class InvestigationDispatchCore
         string serverId, string serverName, string metricName, bool muted, DateTime alertTimeUtc, AlertContext? context,
         string? storyPathHash, InvestigationAlertFacts? facts,
         Func<Guid, CancellationToken, Task<(InvestigationRequestRow Row, string? Brief)?>>? readRequest,
-        McpDataDetail dataDetail, bool recurringAtThisHour, CancellationToken cancellationToken)
+        McpDataDetail dataDetail, bool recurringAtThisHour = false, CancellationToken cancellationToken = default)
     {
         var result = await OpenOrJoinAsync(
             serverId, serverName, metricName, muted, alertTimeUtc, context, storyPathHash, facts, cancellationToken,
