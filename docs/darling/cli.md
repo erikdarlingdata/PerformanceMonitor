@@ -1,5 +1,7 @@
 # Command line reference
 
+Audience: operators.
+
 This page lists every command line verb that the Darling service exe accepts. A verb is the first argument, for example `--check-settings`. The exe is `PerformanceMonitor.Darling.Service.exe` on Windows. On Linux, and anywhere the service runs as a .NET app, type `dotnet PerformanceMonitor.Darling.Service.dll` in its place.
 
 Run the exe with `--help` to print the same list in short form. With no arguments, the exe runs the service. With an argument that is not on this page, the exe prints `Unknown option` and the help text, exits `1`, and does not start the service.

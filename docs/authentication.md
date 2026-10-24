@@ -1,5 +1,7 @@
 # Authentication
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 `PerformanceMonitor.Common.AuthenticationTypes` supports seven authentication types, defined once there and named the same way in every edition. **Not every edition connects with all seven**, so the table says which does what: Lite offers all of them. The Darling service and its Viewer connect with four: Windows, SQL Server, Service Principal and Managed Identity (`auth` set to `integrated`, `sql`, `serviceprincipal` or `managedidentity` in `darling.json`). The service runs headless, so it refuses the other three, which need a person at the machine or their own sign-in on it.
