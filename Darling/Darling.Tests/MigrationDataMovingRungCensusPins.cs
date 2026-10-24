@@ -339,6 +339,13 @@ public sealed class MigrationDataMovingRungCensusPins
             + "of requests at a production store's rate (73,000 rows) and a production store holds hundreds today, so each build "
             + "reads the table once and takes milliseconds. A different class from V104's collected hypertable. It does not move the "
             + "lock-wait floor, so the multiple stays 5."),
+        new(
+            216,
+            SetsTheFloor: false,
+            "ALTER COLUMN ... SET DEFAULT plus a narrow-predicate UPDATE on config.config_alert_settings (created V17), the one-row settings "
+            + "singleton (id = 1): turns the Client Timeouts alert on by default (#5736). V147's shape on the same kind of table. The "
+            + "UPDATE's WHERE client_timeouts_enabled = FALSE touches at most one row, the SET DEFAULT is catalog-only, and neither reads "
+            + "any collected data, so the rung spends none of the lock-wait budget and the multiple stays 5."),
     ];
 
     /// <summary>
