@@ -10,7 +10,7 @@ using System;
 using System.Net.Sockets;
 using Npgsql;
 
-namespace PerformanceMonitor.Darling.Service;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The one test for "this store open ran out of time" (#5016), so every place that words an open failure asks

@@ -134,7 +134,7 @@ public static class ComposeLimits
     /// The per-session <c>statement_timeout</c> applied to the <c>viewer</c>/<c>mcp</c> roles (the compose
     /// surface's DB identities) — the hard backstop a composed query can never exceed, whatever the compile-time
     /// window/bucket caps reason around (a <c>LIMIT</c> bounds OUTPUT, a group-by scans+sorts before it). Applied
-    /// in the role PROVISIONING DDL (<see cref="DarlingManagedRoles"/> + <c>tools/provision-roles.sql</c>), NOT a
+    /// in the role PROVISIONING DDL (<c>DarlingManagedRoles</c> + <c>tools/provision-roles.sql</c>), NOT a
     /// versioned migration: a role's statement_timeout has no probeable schema footprint, so tying it to
     /// <see cref="!:StorageVersion.SchemaVersion"/> would break the viewer's connect-time version gate. A Postgres
     /// interval literal.
@@ -148,7 +148,7 @@ public static class ComposeLimits
     /// that outgrew work_mem) is cancelled by the store itself with SQLSTATE 53400 rather than running to the
     /// statement_timeout while writing gigabytes to the store's own volume and starving the collector's
     /// writes. Rendered by the SAME single renderer as <see cref="StatementTimeout"/>
-    /// (<see cref="DarlingManagedRoles.BuildComposeStatementTimeoutSql"/> + <c>tools/provision-roles.sql</c>),
+    /// (<c>DarlingManagedRoles.BuildComposeStatementTimeoutSql</c> + <c>tools/provision-roles.sql</c>),
     /// for the same reason: one renderer for both role settings so provisioning and the control-plane reload
     /// can never disagree about either ceiling. A Postgres size literal; superuser-only
     /// (<c>PGC_SUSET</c>), like <c>log_min_duration_statement</c> and <c>log_parameter_max_length</c> already

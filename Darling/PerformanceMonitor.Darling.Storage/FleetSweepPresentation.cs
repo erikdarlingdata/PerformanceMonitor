@@ -11,9 +11,8 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using PerformanceMonitor.Darling.Storage;
 
-namespace PerformanceMonitor.Darling.Service;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The fleet sweep's ONE wire shape (#3466, lane 3 of 4): the builders that turn

@@ -89,8 +89,8 @@ public sealed class QueryStoreGroupMembersTests
         var quiet = new CapturingTestLogger();
         using (ReadScope.Open(quiet))
         {
-            Assert.Equal(43L, await QueryStoreGroupMembers.ResolveAsync(null!, QueryStoreRankedHarness.Parse(Panel("server")), 43, ct, ReadScope.Current?.Logger));
-            Assert.Null(await QueryStoreGroupMembers.ResolveAsync(null!, QueryStoreRankedHarness.Parse(Panel("query_hash")), 43, ct, ReadScope.Current?.Logger));
+            Assert.Equal(43L, await QueryStoreGroupMembers.ResolveAsync(null!, QueryStoreRankedHarness.Parse(Panel("server")), 43, StorageCommandDeadlines.McpReadSeconds, ct, ReadScope.Current?.Logger));
+            Assert.Null(await QueryStoreGroupMembers.ResolveAsync(null!, QueryStoreRankedHarness.Parse(Panel("query_hash")), 43, StorageCommandDeadlines.McpReadSeconds, ct, ReadScope.Current?.Logger));
         }
 
         Assert.True(quiet.Lines.Count == 0, "the resolver swallowed a fault, so it touched the store: " + quiet.Joined);
@@ -99,7 +99,7 @@ public sealed class QueryStoreGroupMembersTests
         var loud = new CapturingTestLogger();
         using (ReadScope.Open(loud))
         {
-            Assert.Null(await QueryStoreGroupMembers.ResolveAsync(null!, QueryStoreRankedHarness.Parse(Panel("database_name")), 43, ct, ReadScope.Current?.Logger));
+            Assert.Null(await QueryStoreGroupMembers.ResolveAsync(null!, QueryStoreRankedHarness.Parse(Panel("database_name")), 43, StorageCommandDeadlines.McpReadSeconds, ct, ReadScope.Current?.Logger));
         }
 
         Assert.Equal(1, loud.CountAtLevel(LogLevel.Debug));

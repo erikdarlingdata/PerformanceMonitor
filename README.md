@@ -49,7 +49,7 @@ Before you upgrade an older install with `Setup.exe`, read the warning in the [L
 3. Run the service, in a console for a trial or as a Windows service.
 4. Start the **Darling Viewer** from the `viewer\` folder in the same zip.
 
-These steps are for Windows. For Linux, the full steps, and the web dashboard, read the [Darling quick start](docs/darling-quick-start.md). If you have not done this before, [docs/uat-onboarding.md](docs/uat-onboarding.md) is the ordered path from the zip to a working install. The [Darling operator guide](Darling/README.md) is the configuration reference.
+These steps are for Windows. For Linux, the full steps, and the web dashboard, read the [Darling quick start](docs/darling-quick-start.md). If you have not done this before, [docs/darling/install.md](docs/darling/install.md) is the ordered path from the zip to a working install. The [Darling operator guide](Darling/README.md) is the configuration reference.
 
 ## Documentation
 

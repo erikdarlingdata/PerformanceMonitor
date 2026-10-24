@@ -94,7 +94,7 @@ public sealed class HoldEarnedByDeliveryTests
         var bodySucceeded = false;
         try
         {
-            await body(new PgAlertHistoryStore(postgres), connection);
+            await body(new PgAlertHistoryStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds), connection);
             bodySucceeded = true;
         }
         finally

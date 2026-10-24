@@ -28,12 +28,12 @@ namespace Darling.Tests;
 /// the SAME panel twice through the real <see cref="ComposeCompiler"/> — once with the context forced to raw
 /// (<c>QueryStoreWideEligible: false</c>) and once with it forced to the wide table (<c>true</c>) — and asserts
 /// the rows are IDENTICAL, values compared exactly (no tolerance). "Forced" rather than routed through
-/// <see cref="DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync"/> because that method decides eligibility
+/// <see cref="ComposePanelRunner.ResolveQueryStoreWideEligibleAsync"/> because that method decides eligibility
 /// from wall-clock coverage state a historical seed cannot honestly satisfy; this test proves the COMPILED SQL
 /// on each side reads the same answer, which is the thing eligibility gates access to. The wiring that decides
 /// which side a real run takes is covered separately by the compile-level pins in
 /// <c>DarlingComposeTests.Compile_QueryStoreWideEligible_*</c> and by reading
-/// <see cref="DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync"/>'s call to
+/// <see cref="ComposePanelRunner.ResolveQueryStoreWideEligibleAsync"/>'s call to
 /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/> against the same server-scope contract this test's
 /// eligibility case below (a pending batch) exercises directly.
 /// </summary>
