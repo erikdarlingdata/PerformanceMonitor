@@ -378,8 +378,11 @@ export function plainText(text) {
     /Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end\./g,
     "Here the window starts before the baseline period, so the baseline holds only the part the store has.",
   );
-  /* The Queries tab's memory clerk column is "Latest MB". */
+  /* The memory clerk note has four arms (memory_clerk.note): two name latest_memory_mb, the Queries tab's "Latest MB" column,
+     and two name the collector's own relation, memory_clerks. */
   t = t.replace(/\blatest_memory_mb\b/g, "Latest MB");
+  t = t.replace(/\bmemory_clerks capture\b/g, "memory clerk capture");
+  t = t.replace(/\bmemory_clerks stores\b/g, "The memory clerks collector stores");
   /* The system-health "events were captured, none qualified" closing. */
   t = t.replace(/so this is the healthy answer for this read rather than missing data/g, "so this is a normal result, not missing data");
 

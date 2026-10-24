@@ -12,6 +12,8 @@ using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -98,28 +100,36 @@ public sealed class WebPlainTextTests
         Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[0]);
     }
 
-    /* #6649: the left-out databases pointer, the baseline window sentence and the memory clerk column name reached the page
-       with the MCP answer's field names in them. */
+    /* #6649: the left-out databases pointer, the baseline window sentence and the memory clerk note's four arms reached the page
+       with the MCP answer's field names in them. The baseline sentence and the clerk notes are read from the C# that owns them
+       (QueryStoreRegressionRules.BaselineWindowTail, DarlingMcpQueryStoreClutterTools.ClerkNote*), so a reword there breaks this
+       test instead of leaving a field name on the page (#3684). The left-out pointer is a generic suffix strip, so its one
+       sentence is typed here. */
     [Fact]
     public void FieldNamesInTheServicesOwnSentences_ReadAsThePagesWords()
     {
         var o = Run(
         [
             "No Query Store rows in the 24-hour window for a database this server still has. 29 database(s) the server no longer lists were left out of this read (see databases_left_out).",
-            "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.",
-            "The clerk is in the newest capture's top 25; latest_memory_mb is its current footprint.",
-            "The clerk appeared earlier in the window and has since dropped out of the collector's top 25; latest_memory_mb is its last observed footprint, not its current one.",
+            QueryStoreRegressionRules.BaselineWindowTail,
+            DarlingMcpQueryStoreClutterTools.ClerkNoteInNewestCapture,
+            DarlingMcpQueryStoreClutterTools.ClerkNoteDroppedOut,
+            DarlingMcpQueryStoreClutterTools.ClerkNoteNoCapture,
+            DarlingMcpQueryStoreClutterTools.ClerkNoteNeverAppeared,
         ], out _);
         Assert.Equal("No Query Store rows in the 24-hour window for a database this server still has. 29 databases the server no longer lists were left out of this read.", o[0]);
         Assert.Equal("Here the window starts before the baseline period, so the baseline holds only the part the store has.", o[1]);
         Assert.Equal("The clerk is in the newest capture's top 25; Latest MB is its current footprint.", o[2]);
         Assert.Contains("Latest MB is its last observed footprint", o[3]);
+        Assert.StartsWith("No memory clerk capture in the window: the collector wrote nothing", o[4]);
+        Assert.Contains("The memory clerks collector stores the top 25 clerks over 1 MB per capture", o[5]);
         foreach (var line in o)
         {
             Assert.DoesNotContain("_left_out", line);
             Assert.DoesNotContain("baseline_start", line);
             Assert.DoesNotContain("effective_start", line);
             Assert.DoesNotContain("_mb is", line);
+            Assert.DoesNotContain("memory_clerks", line);
             Assert.DoesNotContain("(s)", line);
         }
     }

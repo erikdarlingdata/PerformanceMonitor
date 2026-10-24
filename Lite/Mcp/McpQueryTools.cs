@@ -639,7 +639,7 @@ public sealed class McpQueryTools
             var notice = await WindowNoticeAsync(
                 () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, baselineStart, windowEnd),
                 baselineStart, windowEnd, "query_store_stats",
-                "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.",
+                QueryStoreRegressionRules.BaselineWindowTail,
                 emptyAnswer: rows.Count == 0);
 
             if (rows.Count == 0)

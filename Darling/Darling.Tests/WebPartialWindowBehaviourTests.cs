@@ -7,9 +7,12 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Linq;
 using System.Text.Json;
+using PerformanceMonitor.Darling.Service;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -22,11 +25,12 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class WebPartialWindowBehaviourTests
 {
-    private static JsonElement Run()
+    private static JsonElement Run(string? auditBody = null)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-partial-window-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
+        if (auditBody is not null) psi.ArgumentList.Add(auditBody);
 
         Process proc;
         try
@@ -166,13 +170,28 @@ public sealed class WebPartialWindowBehaviourTests
     }
 
     [Fact]
-    public void TheCollectionHistoryAuditAlert_AgreesItsSourceCount_AndLeavesAStatementLineAlone()
+    public void TheCollectionHistoryAuditAlert_AgreesItsSourceCount_AndKeepsEveryOtherClauseAsWritten()
     {
-        // #6649: Alert History printed "in 1 source(s)"; the statement line under it is data and prints as stored.
-        var body = Run().GetProperty("h2").GetProperty("auditBody").GetString()!;
-        Assert.Contains("in 1 source, where usual", body);
-        Assert.DoesNotContain("source(s)", body);
-        Assert.Contains("note = '3 file(s)'", body);
+        // #6649: Alert History printed "in 1 source(s)". The body is CollectionHistoryAudit.Render's own output: ONE line of
+        // ". "-joined clauses (one flagged source, every other real hourly source unread), so only its first sentence may change.
+        var sources = CollectionHistoryAudit.Rollups;
+        var rendered = CollectionHistoryAudit.Render(
+            new DateTime(2026, 10, 20, 0, 0, 0, DateTimeKind.Utc),
+            new (CollectionHistoryAudit.Rollup, IReadOnlyList<CollectionHistoryAudit.FlaggedRange>)[]
+            {
+                (sources[0], new[] { new CollectionHistoryAudit.FlaggedRange(18, 21, 0, 40, 0, 0) }),
+            },
+            sources.Skip(1).ToList());
+        Assert.DoesNotContain('\n', rendered);
+        Assert.Contains("in 1 source(s), where usual", rendered);
+
+        var h2 = Run(rendered).GetProperty("h2");
+        var body = h2.GetProperty("auditBody").GetString()!;
+        Assert.Equal(rendered.Replace("in 1 source(s), where usual", "in 1 source, where usual", StringComparison.Ordinal), body);
+
+        // The match ends at its own sentence: a later clause that the full plain-text pass would rewrite prints as written.
+        var probe = h2.GetProperty("auditBodyWithProbe").GetString()!;
+        Assert.Contains("Probe: 29 database(s) were left out (see databases_left_out).", probe);
     }
 
     [Fact]
