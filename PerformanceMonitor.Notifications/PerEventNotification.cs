@@ -85,7 +85,7 @@ public static class PerEventNotification
             ctx.Incidents = new List<AlertIncident>(overflow);
             for (int n = 0; n < overflow.Count; n++)
                 ctx.Details.Add(AlertIncidentRenderer.BuildItem(overflow[n], $"Incident {n + 1} of {overflow.Count}", includeDetailFields: true));
-            messages.Add(new Message(ctx, $"+{overflow.Count} more incident(s) this cycle", IsOverflow: true, NumericValue: overflow.Count));
+            messages.Add(new Message(ctx, $"+{overflow.Count} more {(overflow.Count == 1 ? "incident" : "incidents")} this cycle", IsOverflow: true, NumericValue: overflow.Count));
         }
 
         return messages;

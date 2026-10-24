@@ -912,7 +912,7 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Equal("checkpointer", fired.ServerKey);
         Assert.Equal(25_200, fired.NumericCurrentValue);
         Assert.Equal(10_000, fired.NumericThresholdValue);
-        Assert.Equal("average sync 25.2s per checkpoint over 1 checkpoint(s) in 60.0 min", fired.CurrentValue);
+        Assert.Equal("average sync 25.2s per checkpoint over 1 checkpoint in 60.0 min", fired.CurrentValue);
         Assert.Equal("average sync > 10s per checkpoint, or any requested checkpoint", fired.ThresholdValue);
         Assert.Contains("25.2 s and 14.0 s sync phases", fired.DetailText!, StringComparison.Ordinal);
 
@@ -923,7 +923,7 @@ public sealed class StoreToastAndCheckpointerTests
         var forced = new Harness();
         await forced.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 800, requested: 1, timed: 1), Ct);
         var forcedFire = Assert.Single(forced.Deliverer.Outcomes);
-        Assert.Contains("1 requested checkpoint(s)", forcedFire.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("1 requested checkpoint", forcedFire.CurrentValue, StringComparison.Ordinal);
         Assert.DoesNotContain("WAL-forced", forcedFire.CurrentValue, StringComparison.Ordinal);
         Assert.DoesNotContain("WAL-forced", forcedFire.ShortMessage!, StringComparison.Ordinal);
         Assert.Contains("WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement", forcedFire.DetailText!, StringComparison.Ordinal);
@@ -1004,7 +1004,7 @@ public sealed class StoreToastAndCheckpointerTests
         await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 1_200, requested: 0), Ct);
         var recovered = Assert.Single(h.History.Records);
         Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureRecoveredMetric, recovered.MetricName);
-        Assert.Contains("average sync per checkpoint and 0 requested checkpoint(s)", recovered.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("average sync per checkpoint and 0 requested checkpoints", recovered.DetailText!, StringComparison.Ordinal);
         Assert.StartsWith(DarlingSelfAlertEvaluator.StoreServerLabel + ": ", recovered.DetailText!, StringComparison.Ordinal);
 
         /* Quiet stays quiet. */
@@ -1043,7 +1043,7 @@ public sealed class StoreToastAndCheckpointerTests
         await h.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 800, requested: 2, restarted: false, timed: 1), Ct);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, fired.MetricName);
-        Assert.Contains("2 requested checkpoint(s)", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("2 requested checkpoints", fired.CurrentValue, StringComparison.Ordinal);
         Assert.DoesNotContain("restart", fired.ShortMessage!, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("RESTARTED", fired.DetailText!, StringComparison.Ordinal);
     }
@@ -1070,7 +1070,7 @@ public sealed class StoreToastAndCheckpointerTests
         await h.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 1, restarted: false, timed: 1), Ct);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Contains("average sync", fired.CurrentValue, StringComparison.Ordinal);
-        Assert.Contains("1 requested checkpoint(s)", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("1 requested checkpoint", fired.CurrentValue, StringComparison.Ordinal);
         Assert.DoesNotContain("restart", fired.ShortMessage!, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -1149,7 +1149,7 @@ public sealed class StoreToastAndCheckpointerTests
             Assert.Contains("12:41 UTC", text, StringComparison.Ordinal);
         }
 
-        Assert.Contains("over 4 checkpoint(s) in 60.0 min", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("over 4 checkpoints in 60.0 min", fired.CurrentValue, StringComparison.Ordinal);
         Assert.DoesNotContain("requested", fired.CurrentValue, StringComparison.Ordinal);
         Assert.Contains("single checkpoint sync > 10s", fired.ThresholdValue, StringComparison.Ordinal);
     }
@@ -1237,7 +1237,7 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Contains("average sync 15.0s per checkpoint", fired.CurrentValue, StringComparison.Ordinal);
         Assert.Contains("23.5s", fired.CurrentValue, StringComparison.Ordinal);
         Assert.Contains("12:41 UTC", fired.CurrentValue, StringComparison.Ordinal);
-        Assert.Contains("1 requested checkpoint(s)", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("1 requested checkpoint", fired.CurrentValue, StringComparison.Ordinal);
         Assert.Equal(23_542, fired.NumericCurrentValue);
     }
 

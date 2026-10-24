@@ -730,6 +730,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("Capture Down", fired.MetricName);
         Assert.Equal("Blocking and Deadlock", fired.CurrentValue);
         Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Contains("The Blocking and Deadlock Extended Events sessions are missing", fired.DetailText, StringComparison.Ordinal);
 
         /* Still down a minute later: a state alert (#5493) sends once per occurrence, no re-fire. */
         h.Now = h.Now.AddMinutes(1);
@@ -752,6 +753,18 @@ public sealed class DarlingSelfAlertTests
 
         await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking" }, Ct);
         Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task CaptureDown_OneMissingSession_ReadsInTheSingular()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking" }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("The Blocking Extended Events session is missing", fired.DetailText, StringComparison.Ordinal);
     }
 
     /* ---------------- agent-not-running edge (#1433 Phase 2) ---------------- */
@@ -1321,10 +1334,23 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("customalerts", fired.ServerKey);      // fleet sentinel key, not a real server_id
         Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
         Assert.Equal("3", fired.CurrentValue);              // the count of unhealthy rules
+        Assert.StartsWith("3 custom alert rules need attention:", fired.ShortMessage, StringComparison.Ordinal);
         Assert.Contains("Rule 1", fired.DetailText);
         Assert.Contains("Rule 3", fired.DetailText);
         // The detail carries the rule id/name + reason, NEVER the compiled SQL.
         Assert.DoesNotContain("SELECT", fired.DetailText!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CustomRuleHealth_OneRule_ReadsInTheSingular()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(broken: 1, neverFiring: 0), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.StartsWith("1 custom alert rule needs attention:", fired.ShortMessage, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1457,6 +1483,19 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);   // scoped rule: one signal hidden
         Assert.Contains("Rule rule-a", fired.DetailText);
         Assert.Contains("never expires", fired.DetailText);
+        Assert.StartsWith("1 mute rule has been suppressing", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task StaleMute_TwoRules_ReadInThePlural()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1), Mute(StaleDays + 2, id: "rule-b") }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.StartsWith("2 mute rules have been suppressing", fired.ShortMessage, StringComparison.Ordinal);
     }
 
     /* ---------------- managed store settings needing attention (#4215) ---------------- */
@@ -4542,7 +4581,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("Store Job Failing", fired.MetricName);
         Assert.Equal("jobfailing:7001", fired.ServerKey);
         Assert.Null(fired.Severity);  /* no override: the DECLARED INFO arm in AlertSeverity.ForMetric decides */
-        Assert.Contains("2 new failure(s), 14 total", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("2 new failures, 14 total", fired.CurrentValue, StringComparison.Ordinal);
         Assert.Contains("refresh job 7001 on wait_stats_hourly", fired.ShortMessage, StringComparison.Ordinal);
 
         /* Pass 3 — the counter did NOT grow, and last_run_status is still 'Failed' (it says Failed until the
@@ -6617,6 +6656,64 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Equal(DarlingSelfAlertEvaluator.RawPurgeOverHorizonClearedMetric, resolved.MetricName);
     }
 
+    [Fact]
+    public async Task ComposeHoursStuck_TwoHours_ReadInThePlural()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyComposeHoursStuckAsync(new[]
+        {
+            ComposeFailure(2, inBackoff: true),
+            ComposeFailure(3, inBackoff: true) with { Hour = new DateTime(2026, 10, 15, 9, 0, 0) },
+        }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("2 hours", fired.CurrentValue);
+        Assert.Contains("2 hours of the Query Store compose rollup", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("and are now retried once a day", fired.DetailText, StringComparison.Ordinal);
+        Assert.StartsWith("2 Query Store compose hours retried once a day", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ComposeHoursStuck_OneHourWithOneFailure_ReadsInTheSingular()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyComposeHoursStuckAsync(new[] { ComposeFailure(1, inBackoff: true) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("1 hour", fired.CurrentValue);
+        Assert.Contains("and is now retried once a day", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("2026-10-07 15:00 UTC: 1 failure, last reason", fired.DetailText, StringComparison.Ordinal);
+        Assert.StartsWith("1 Query Store compose hour retried once a day", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PolicyJobFailing_OneNewFailure_ReadsInTheSingular()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        StorePolicyJobHealth Pass(long failures) => new(
+            Array.Empty<StuckPolicyJob>(),
+            new[]
+            {
+                new PolicyJobRunReading(
+                    7001, TimescaleSupport.StorePolicyJobFamily.Refresh, "wait_stats_hourly", false, "Failed", failures),
+            });
+
+        await e.ApplyPolicyJobsStuckAsync(Pass(12), rearm.Delegate, Ct);
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Pass(13), rearm.Delegate, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("1 new failure, 13 total", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("failed 1 more time since the last sample", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
     private static QueryStoreComposeStamp.HourFailure ComposeFailure(int failures, bool inBackoff) =>
         new(new DateTime(2026, 10, 7, 15, 0, 0), failures, "57014", "canceling statement due to statement timeout", 240,
             new DateTime(2026, 10, 15, 14, 5, 0), new DateTime(2026, 10, 15, 16, 5, 0), new DateTime(2026, 10, 16, 16, 5, 0), inBackoff);
@@ -6635,8 +6732,8 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         await e.ApplyComposeHoursStuckAsync(new[] { ComposeFailure(2, inBackoff: true), ComposeFailure(1, inBackoff: false) with { Hour = new DateTime(2026, 10, 15, 9, 0, 0) } }, Ct);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal(DarlingSelfAlertEvaluator.ComposeHoursStuckMetric, fired.MetricName);
-        Assert.Contains("1 hour(s) of the Query Store compose rollup", fired.DetailText, StringComparison.Ordinal);
-        Assert.Contains("2026-10-07 15:00 UTC: 2 failure(s), last reason 57014: canceling statement due to statement timeout", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("1 hour of the Query Store compose rollup", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("2026-10-07 15:00 UTC: 2 failures, last reason 57014: canceling statement due to statement timeout", fired.DetailText, StringComparison.Ordinal);
 
         await e.ApplyComposeHoursStuckAsync(Array.Empty<QueryStoreComposeStamp.HourFailure>(), Ct);
         var resolved = Assert.Single(h.History.Records);

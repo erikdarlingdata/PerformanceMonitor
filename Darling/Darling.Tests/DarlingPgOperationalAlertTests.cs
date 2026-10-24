@@ -92,7 +92,20 @@ public sealed class DarlingPgOperationalAlertTests
         var incident = DarlingWorker.BuildPgDeadlockIncident(
             DeadlockRow("hash-2", victimStatement: null, victimPid: 555, participantCount: 3));
 
-        Assert.Equal("victim pid 555, 3 participant(s)", incident.InvolvedObjects[0]);
+        Assert.Equal("victim pid 555, 3 participants", incident.InvolvedObjects[0]);
+    }
+
+    [Fact]
+    public void BuildPgIncidents_WithACountOfOne_ReadInTheSingular()
+    {
+        /* #6703: "1 participant" and "blocking 1 session", where the counts above read in the plural. */
+        var deadlock = DarlingWorker.BuildPgDeadlockIncident(
+            DeadlockRow("hash-2", victimStatement: null, victimPid: 555, participantCount: 1));
+        Assert.Equal("victim pid 555, 1 participant", deadlock.InvolvedObjects[0]);
+
+        var blocking = DarlingWorker.BuildPgBlockingIncident(
+            BlockingRow(rootBackendId: 1, rootPid: 42, totalVictims: 1, databases: Array.Empty<string>(), rootQuery: null));
+        Assert.Equal("root pid 42 blocking 1 session", blocking.InvolvedObjects[0]);
     }
 
     [Fact]
@@ -229,7 +242,7 @@ public sealed class DarlingPgOperationalAlertTests
         var incident = DarlingWorker.BuildPgBlockingIncident(
             BlockingRow(rootBackendId: 1, rootPid: 42, totalVictims: 5, databases: new[] { "sales" }, rootQuery: "SELECT * FROM x"));
 
-        Assert.Equal("root pid 42 blocking 5 session(s) in [sales]: SELECT * FROM x", incident.InvolvedObjects[0]);
+        Assert.Equal("root pid 42 blocking 5 sessions in [sales]: SELECT * FROM x", incident.InvolvedObjects[0]);
         Assert.Equal("sales", incident.Database);
     }
 
@@ -239,7 +252,7 @@ public sealed class DarlingPgOperationalAlertTests
         var incident = DarlingWorker.BuildPgBlockingIncident(
             BlockingRow(rootBackendId: 1, rootPid: 42, totalVictims: 2, databases: new[] { "sales" }, rootQuery: null));
 
-        Assert.Equal("root pid 42 blocking 2 session(s) in [sales]", incident.InvolvedObjects[0]);
+        Assert.Equal("root pid 42 blocking 2 sessions in [sales]", incident.InvolvedObjects[0]);
     }
 
     [Fact]
@@ -272,7 +285,7 @@ public sealed class DarlingPgOperationalAlertTests
         var incident = DarlingWorker.BuildPgBlockingIncident(
             BlockingRow(rootBackendId: 1, rootPid: 42, totalVictims: 2, databases: Array.Empty<string>(), rootQuery: null));
 
-        Assert.Equal("root pid 42 blocking 2 session(s)", incident.InvolvedObjects[0]);
+        Assert.Equal("root pid 42 blocking 2 sessions", incident.InvolvedObjects[0]);
         Assert.Null(incident.Database);
     }
 
@@ -491,7 +504,7 @@ public sealed class DarlingPgOperationalAlertTests
                 },
                 DetailText: null, NumericCurrentValue: 3, NumericThresholdValue: 1, Muted: false,
                 Severity: AlertEngine.GradeDeadlockFire(3, settings.DeadlockRateThresholds),
-                ShortMessage: "3 deadlock(s) in the last hour"),
+                ShortMessage: "3 deadlocks in the last hour"),
             TestContext.Current.CancellationToken);
 
         /* The CPU arm's shape: no context at all, the grade on the outcome. */
