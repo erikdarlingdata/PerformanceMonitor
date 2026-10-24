@@ -163,7 +163,7 @@ Only Darling monitors PostgreSQL servers. Lite does not. The SQL Server grants a
 - `pg_read_server_files` and `EXECUTE` on `pg_read_file`, on self-hosted targets only. Three collectors read the server log with them.
 - The `pg_stat_statements` extension, for the `pg_statement_stats` collector.
 
-The exact statements are in the Darling operator guide, in [Permissions on a PostgreSQL target](../Darling/README.md#permissions-on-a-postgresql-target).
+The exact statements are in the Darling operator guide, in [Permissions on a PostgreSQL target](darling/postgresql-targets.md#permissions-on-a-postgresql-target).
 
 ### Optional Darling logins
 

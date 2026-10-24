@@ -20,7 +20,7 @@ Run the command line verbs on the service host, from the folder that holds `Perf
 
 ## Add a server
 
-1. Make sure the monitoring login exists on the target server. To print the T-SQL that creates it, run `.\PerformanceMonitor.Darling.Service.exe --grant-script --host <host>`. See [Permissions on monitored servers](../../Darling/README.md#permissions-on-monitored-servers).
+1. Make sure the monitoring login exists on the target server. To print the T-SQL that creates it, run `.\PerformanceMonitor.Darling.Service.exe --grant-script --host <host>`. See [Permissions on monitored servers](monitored-servers.md#permissions-on-monitored-servers).
 2. Add the server in one of these ways:
    - In the Viewer, click **Add Server** in the sidebar, fill in the dialog and save.
    - On the command line, for a Windows-authentication server, run `.\PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --auth windows`.
@@ -123,7 +123,83 @@ The script refuses to run from the install folder itself. It never kills a proce
 
 If you installed with the MSI, do not use this script. Run the newer MSI instead. It upgrades in place and keeps `darling.json` and the store.
 
-For more, see [Upgrading an existing install](../../Darling/README.md#upgrading-an-existing-install) and [Rolling back to an older build](../../Darling/README.md#rolling-back-to-an-older-build).
+For more, see [Upgrading an existing install](#upgrading-an-existing-install) and [Rolling back to an older build](#rolling-back-to-an-older-build).
+
+### Upgrading an existing install
+
+`install-darling.ps1` registers a service; it does not lay a new build over an old one. That step — stop, back up, copy, start, verify — is `upgrade-darling.ps1`, shipped in the same zip.
+
+> **`upgrade-darling.ps1` does not exist in 3.5.0 or earlier.** It was added after 3.5.0 was tagged, so a build up to and including 3.5.0 does not contain it and neither does its zip. If you upgrade from one of those, use the short manual procedure in [upgrading from a build that predates the script](#upgrading-from-a-build-that-predates-the-script) once. The steps in this section describe a script that those builds do not have.
+
+In the examples below, replace `<version>` with the release number you downloaded. Extract the new zip to a **staging** folder only an administrator can write to, from an **elevated** PowerShell, and run *its* copy (#4043): the folder you run the script from is the trust root, and anyone who can write to it can replace the script itself, so a folder under `C:\Program Files\` is required, not a folder made directly under `C:\`. (Windows UAC's split token is not a security boundary here: trusting the installing admin's account also trusts that same admin's non-elevated session, since both are the same account.)
+
+```powershell
+Expand-Archive PerformanceMonitorDarling-<version>.zip -DestinationPath "C:\Program Files\PerformanceMonitorDarling-staging\<version>"
+& "C:\Program Files\PerformanceMonitorDarling-staging\<version>\upgrade-darling.ps1" -Source "C:\Program Files\PerformanceMonitorDarling-staging\<version>"
+```
+
+To verify the zip's SHA256 as part of the same run, point `-Source` at the downloaded zip itself instead of the extracted folder, with the hash from the release page — the script copies that zip into its own protected staging folder, hashes the copy, and extracts from it:
+
+```powershell
+& "C:\Program Files\PerformanceMonitorDarling-staging\<version>\upgrade-darling.ps1" -Source C:\Users\you\Downloads\PerformanceMonitorDarling-<version>.zip -Sha256 <hash-from-the-release-page>
+```
+
+It resolves the install directory from the registered service, verifies the zip's SHA256 when you point it at one (checked against `-Sha256` or a `SHA256SUMS.txt` beside it, itself only trusted from a folder that passes the same writability check), backs the install root's files up to `_rollback_manual_<stamp>`, prunes the backups past the newest `-KeepRollbacks` (3), lays the new build down, confirms `darling.json` is byte-identical, and starts the service. Re-running after a failure is safe and is the intended recovery: a backup taken in the last `-BackupWindowMinutes` (60) is reused rather than replaced, so a re-run cannot overwrite the good pre-upgrade copy with a copy of a half-upgraded tree.
+
+**It never kills a process**, and it checks for them twice. Before stopping anything it names processes running out of the install tree that a service stop will *not* close — your own `psql.exe`, a shell sitting in the folder, a Darling Viewer you left open — and refuses, costing nothing but a re-run. After the service is down it checks again with no exclusions; anything still there is usually a postmaster that outlived the stop, and that is exactly what must not be killed (the bundled PostgreSQL lives under `pg-runtime` and killing it takes the store down). Give it a few seconds and re-run.
+
+**A rollback backup holds the install root's *files*, not `viewer\`, `wwwroot\`, `runtimes\` or `pg-runtime\`** — that is what keeps one to ~120 MB instead of ~1 GB. It matters in one case: if a copy dies partway, those subdirectories can be left mixed old-and-new, and a full revert is the *previous version's zip re-extracted* followed by the backup's files over the top. The script says so at the point of failure.
+
+It **refuses to run from the install directory itself** — the copy would overwrite the script PowerShell is reading — which is why the staging folder above is not optional.
+
+**Files the new build no longer ships.** The copy is an *overlay*: it writes what the new build ships and deletes nothing else, so a dependency that went away, an assembly that changed name, or a whole `runtimes\<rid>\lib\<tfm>\` subtree stranded by a target-framework move stays in the tree forever — and those are directories .NET probes for assemblies ([#2529](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2529)). It has happened: the Lite package dropped 44 shipped files across twelve consecutive releases, 43 of them in one step. After every successful copy the script writes `darling-install-manifest.txt` into the install root recording the files that copy laid down, and the next upgrade diffs its own payload against it and **names** whatever an earlier build shipped and this one does not. Add `-RemoveStaleFiles` to delete them rather than only list them — off by default for now, so you can see the answer on your own boxes before anything acts on it.
+
+Everything it can name provably came out of one of our own zips, because the manifest is DERIVED from the payload rather than maintained by hand: `darling.json`, its `.bak-*` copies, the DPAPI credential blobs, the `_rollback_manual_*` backups and `pg-runtime\` were never in a payload, so they are never in the manifest and can never be nominated. When it cannot tell — no manifest yet, one it cannot parse, a source it cannot read — it removes nothing and says so on its own line. Deleting `darling-install-manifest.txt` is safe: the next upgrade reports that it cannot tell, removes nothing, and writes a fresh one.
+
+**Backups pile up, and nothing used to remove them.** A dogfood box was found carrying 46 of them, 5.48 GB, the oldest three weeks old, with the service naming every one on every start ([#2525](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2525)). Retention above fixes new deploys; boxes that already have a backlog clear it with the installed copy, which needs no staging folder and does not stop the service:
+
+```powershell
+& "C:\Program Files\PerformanceMonitorDarling\upgrade-darling.ps1" -ListRollbacks   # show what would go
+& "C:\Program Files\PerformanceMonitorDarling\upgrade-darling.ps1" -PruneOnly       # remove all but the newest 3
+```
+
+The service reports the set once per start with a count, a total and that command — informational while you are within retention, a warning past it. It never deletes one itself: it did not create them.
+
+**The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints a post-start checklist. About 10–15 minutes after the start, work it in the Viewer or the web page: every monitored server shows Online, Collectors shows OK with none failing, and the service log has a `Postgres store ready (schema v<N>, ...)` line from this start. N is the store version this build expects. If you connect to the store, `SELECT MAX(version) FROM darling_schema_version` returns the same N. Hold the upgrade unverified until every check passes.
+
+#### Rolling back to an older build
+
+A rollback restores the install files, not the store ([#5773](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5773)). The store keeps every migration the newer build applied, and the older build runs against it: migrations are additive, so it starts and collects. When it starts, the service logs one warning that names the migrations it does not know, for example: *"The store is at V183; this build knows up to V180, so V181-V183 are unknown to it."*
+
+An older build ignores what those migrations added, so it can read some newer data differently. The list below names each migration that changes what an older build reads, and what to do before you roll back past it. A migration not listed here has no known effect on what an older build reads.
+
+- **V181**: an older build reads a notification route scoped to a server or a tag ([#5750](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5750)) as fleet-wide. A route meant for one server then sends the alerts of every server. A scoped route for every metric (`*`) matches nothing, so its alerts go to the default destinations. Disable or delete every scoped route in the Notification Routes window before you roll back to a build older than V181.
+- **V182**: an older build cannot write its hourly read-latency rows ([#5506](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5506)). V182 adds the window band to the table's key, and the older build's write names the old key, so each hour's write fails with a warning in the service log and that hour's read latency is not recorded. Collection and every other read are not affected. Nothing needs to be done before you roll back; recording resumes when a build at V182 or later runs again.
+- **V200**: an older build does not know the excluded-volumes list ([#6098](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6098)), so it ignores the `excluded_volumes` column and the Volume Free Space alert evaluates every volume again. A volume you excluded then alerts once more. Nothing needs to be done before you roll back; the list is kept in the store and applies again when a build at V200 or later runs.
+- **V204**: an older build does not know the folders, personal views and owner of the custom views (the `folder`, `personal`, `created_by` and `owner_key` columns) ([#6214](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6214)). It lists every view in one flat list by name, including each person's personal views, and lets anyone change or delete any view. Two views in different folders can share a name, and the older build then shows both under the same name. Nothing needs to be done before you roll back, but a personal view becomes visible and editable to everyone: delete any you do not want shared first. The older build never reads or writes `owner_key` (the stable key that decides who owns a personal view), so it also cannot hold a view you made personal to its owner: there is no database guard against that, by choice.
+- **V205**: an older build does not know the expiry of a custom alert rule (the `expires_at_utc` column) ([#6235](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6235)). It ignores the column, so a rule that has passed its expiry is evaluated and fires again. Nothing needs to be done before you roll back, but disable or delete any rule you set an expiry on and no longer want firing; the expiry is kept in the store and applies again when a build that knows it runs.
+- **V206**: an older build reads a collector schedule's enabled flag as a plain true or false and fails on a NULL ([#6227](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6227)). The schedule tools store NULL ("inherit") on a row that sets only a frequency or a retention, and `inherit: true` stores it on purpose. Before you roll back, give every NULL the value it inherits: the fleet-wide row's value for that collector, else the collector's shipped default (off for `long_query_completions`, on for every other collector). `UPDATE config.config_collector_schedules AS s SET enabled = COALESCE((SELECT f.enabled FROM config.config_collector_schedules AS f WHERE s.server_id IS NOT NULL AND f.server_id IS NULL AND lower(f.collector_name) = lower(s.collector_name) LIMIT 1), lower(s.collector_name) <> 'long_query_completions') WHERE s.enabled IS NULL;` The statement reads the rows as they were before it ran, so a server's row takes its fleet-wide row's value even when that row is set to false. Deleting those rows works too. If you skip this step the older build cannot read the store's configuration at all: every reload fails on the NULL, so it runs on darling.json alone, servers added after the store was seeded are not collected, and the store's paused flag, alert and notification settings and the MCP and web enable flags are ignored (an endpoint switched off in the store comes back up when darling.json still turns it on). The schedule tools' write grants on the `mcp` role are not removed by an older build's role provisioning either, so revoke them: `REVOKE INSERT, UPDATE ON config.config_collector_schedules FROM mcp; REVOKE INSERT, UPDATE, DELETE ON config.config_collector_run_times FROM mcp;`
+- **V207**: an older build does not know the change watches ([#6234](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6234)). A change watch opens an investigation request marked `change_watch` (the `trigger_kind` column), and the older build's alert grouping does not check that column. While a newer and an older instance share one store, an alert on the older instance can join a change-watch request that is still open, within the usual grouping window, and its alert is then carried on that request instead of opening its own. The newer build never joins an alert to a change-watch request. Stop the newer instance before you let an older instance alert against the same store. The watch tables and the column stay in the store and apply again when a newer build runs.
+- **V208**: an older build does not know a mute rule's start time ([#6231](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6231)), so it ignores the `starts_at_utc` column and applies a quiet window or mute rule that is set ahead of its start as soon as it is stored. Before you roll back past V208, clear or end any quiet window whose start is still ahead (`get_mute_rules` shows it as `state: upcoming`), or it mutes early on the older build.
+- **V210**: an older build does not know the guard on the MCP tag writes ([#6281](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6281)). Rolling back leaves the guard's trigger and function in the store, where they keep refusing: the older build's tag tools then get a refusal naming the route when they would change which servers an agent route covers (and its remove_server answers an error, not a refusal, for a server mapped under such a route). Nothing is read differently, so nothing needs doing before rolling back; to lift the refusal, drop `trg_agent_route_tag_guard` on `config.server_tags` and `config.server_tag_map`.
+- **V212**: an older build does not know the machine identity on the server registry ([#6285](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6285)). Rolling back leaves `collect.servers.machine_identity` in place and nothing reads it differently, so nothing needs doing first. The older build does not refresh it on a connect, so a registration re-pointed while rolled back keeps its old identity until the newer build connects to it again. Registrations removed before this version, and ones that have not connected since the upgrade, have no stored identity, so only the host-name match checks them when an add or edit would register the same machine again; so do Aurora clusters and PostgreSQL logins that may not call `pg_control_system()`.
+- **V213**: an older build does not know the Query Store replica ([#6254](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6254)). Rolling back leaves `config_monitored_servers.query_store_replica` and `collect.collection_log.read_source` in place, and the older build ignores both: it reads Query Store from the monitored server itself, not from the replica, so the primary carries that load again, and it does not record which host a run read from. Before you roll back past V213, clear the replica on each server that has one (`edit_server` or the Edit Server dialog), or note that the primary is read again; nothing else needs doing first.
+- **V214**: an older build does not know the known patterns ([#6334](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6334)). Rolling back leaves `config.config_known_patterns` and its three write functions in place. The older build never reads them, so nothing needs doing first. The notes you wrote stay in the store and show beside their alerts again when you upgrade.
+- **V216**: an older build does not know that the Client Timeouts alert is on by default ([#5736](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5736)). Rolling back leaves `config_alert_settings.client_timeouts_enabled` as it is: the older build reads the same column, so the alert stays on until you switch it off in the Settings window. The older build's own default for a new store is off. Nothing needs doing first.
+
+### Upgrading from a build that predates the script
+
+This is a note for very old builds. `upgrade-darling.ps1` was added after 3.5.0, so a build from 3.5.0 or earlier needs this manual procedure once ([#2593](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2593)). It is the same sequence the script automates.
+
+Nothing that you must keep lives in the install directory. The managed store, the DPAPI credential blobs and the logs are under `C:\ProgramData\PerformanceMonitorDarling`. The only file that has to travel is `darling.json`. Renaming the install folder does not back up your data. For a data rollback point, snapshot the volume, or stop the service and copy the ProgramData folder.
+
+1. Verify the download. Run `Get-FileHash <zip> -Algorithm SHA256` and compare it with `SHA256SUMS.txt` from the same release page. If you skip this step, you cannot recover from it.
+2. Run `Stop-Service 'PerformanceMonitor Darling' -Force`. Poll until `Status` is `Stopped`. A stop request is not a stopped service.
+3. Rename the current install folder (for example, add `_old`). This is your rollback.
+4. Extract the new zip to the original folder name.
+5. Copy `darling.json` from the renamed folder into the new one. Hash it on both sides and confirm the hashes match.
+6. Run `.\install-darling.ps1` from the new folder. For an existing install, it re-points the service's binPath and keeps the config, the store and the credentials.
+7. Start the service, then verify with the post-start checklist. Reaching `Running` means the process started, not that it collects.
 
 ## Uninstall
 
@@ -164,3 +240,16 @@ For a script run that cannot answer a question, add `-ConfirmPurge` to `-PurgeDa
 | Viewer preferences | A small JSON file in `%APPDATA%\PerformanceMonitorDarling` |
 
 Back up `darling.json` and the password key file. Nothing else in the install folder has to travel with them. See [Install Darling](install.md) for the install procedure.
+
+## How It Runs (Reference)
+
+Fixed cadences, hardcoded on purpose:
+
+| What | Cadence |
+|---|---|
+| Collector sweep loop | Every 15 seconds (each collector runs when its own shared schedule is due — most every 1 minute, some every 5, sizes hourly, index stats daily) |
+| Alert evaluation | Every 30 seconds per connected server (Lite's overview cadence) |
+| Scheduled analysis | Every 30 minutes per server, 120-second budget, analyzing the last 4 hours; findings persist to `analysis_findings` and high-severity ones notify through the configured channels |
+| Retention purge | First sweep after startup, then daily |
+| Store background-job health (policy-job self-heal across compression, rollup refresh and retention; job cadence; Retention Held), the TimescaleDB availability re-probe, the retention coverage re-evaluation and the store-object convergence pass | First sweep after startup, then hourly at :30 past the minute; the availability re-probe runs first and outside the TimescaleDB gate, so a service that fell back to plain-PostgreSQL mode at startup recovers on its own (#3815); a held retention policy arms itself on the first hourly pass after its rollups cover raw, no restart needed (#3812); every pass writes one `Store job health:` line naming what it read, per family (#3816); the store-object convergence pass runs last and re-ensures every store object the start path builds — hypertables, compression policies, continuous aggregates and their refresh windows, the baseline relations, the store's statement statistics, the composer's covering indexes — so one ensure that failed at startup heals within the hour instead of at the next restart (on a store without TimescaleDB, the steps that do not need it run every hour too, #3913), and writes one `Store object convergence:` line naming what it changed and what failed even when that is nothing (#3817) |
+| Reconnect attempts | Every 60 seconds while a server is unreachable |
