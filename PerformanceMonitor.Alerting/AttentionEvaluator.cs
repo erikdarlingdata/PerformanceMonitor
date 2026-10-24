@@ -135,7 +135,7 @@ public sealed record AttentionReading(
 /// the server's own p99.9 of its 3-minute average attention rate over the trailing <see cref="AttentionBaselineMath.LookbackDays"/> days
 /// (<see cref="AttentionBaselineMath"/>). The floors are the settings the alert shipped with, Warning 10 and Critical 60 per minute, and
 /// the multiples default to 3 and 10. A server with under a day of capture has no baseline and is graded on the floors alone, and the alert
-/// says so. OFF by default.</para>
+/// says so. ON by default (V216 on Darling).</para>
 /// </summary>
 public static class AttentionEvaluator
 {

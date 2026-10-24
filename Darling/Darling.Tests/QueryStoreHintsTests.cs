@@ -24,7 +24,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #6581 slice 1: the Query Store hints collector (<c>query_store_hints</c>, SQL Server 2022 and later). Its SQL, its version gate,
-/// the marker row that makes a hint-free database a complete capture, and its V215 table.
+/// the marker row that makes a hint-free database a complete capture, and its V217 table.
 /// </summary>
 public sealed class QueryStoreHintsCollectorTests
 {
@@ -141,9 +141,9 @@ public sealed class QueryStoreHintsCollectorTests
     }
 
     [Fact]
-    public void TheV215Table_IsTheGeneratorsOutputForTheCatalogEntry_AndAddsTheMarkerIndex()
+    public void TheV217Table_IsTheGeneratorsOutputForTheCatalogEntry_AndAddsTheMarkerIndex()
     {
-        var rung = PgMigrations.Scripts.Single(m => m.Version == 215).Sql.Replace("collect.", "", StringComparison.Ordinal);
+        var rung = PgMigrations.Scripts.Single(m => m.Version == 217).Sql.Replace("collect.", "", StringComparison.Ordinal);
         var generated = PgSchemaGenerator.CreateTable(QueryStoreHintsCollector.Instance) + "\n\n" + PgSchemaGenerator.CreateIndex(QueryStoreHintsCollector.Instance);
 
         static string Norm(string s) => string.Join(' ', s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));

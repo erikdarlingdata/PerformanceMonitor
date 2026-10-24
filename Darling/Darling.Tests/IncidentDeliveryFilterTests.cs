@@ -42,7 +42,7 @@ public sealed class IncidentDeliveryFilterTests
     private const string Stale = "bf7e29b4cooldowninwindow";
     private const string Fresh = "9d5ead0aoutsideitswindow";
 
-    private const string Footer = "1 other incident(s) still open (already reported)";
+    private const string Footer = "1 other incident still open (already reported)";
 
     private static readonly AlertBranding Branding = new("Test Edition", null);
 
@@ -105,6 +105,26 @@ public sealed class IncidentDeliveryFilterTests
         Assert.Equal(0, render.SuppressedIncidentCount);
         Assert.DoesNotContain(
             render.Context!.Details, d => d.Heading == IncidentDeliveryFilter.OtherIncidentsHeading);
+    }
+
+    /// <summary>#6703: the footer's noun agrees with the held-back count; the one-incident form is <c>Footer</c>.</summary>
+    [Fact]
+    public void TwoHeldBackIncidents_AreFootnotedInThePlural()
+    {
+        var context = new AlertContext();
+        AlertIncidentRenderer.Apply(context, new[]
+        {
+            new AlertIncident(Stale, new[] { "SalesDb.dbo.Orders" }, TotalOccurrences: 1),
+            new AlertIncident(Fresh, new[] { "SalesDb.dbo.Shipments" }, TotalOccurrences: 1),
+            new AlertIncident("c3d4e5f6thirdincidentinwindow", new[] { "SalesDb.dbo.Items" }, TotalOccurrences: 1),
+        });
+
+        var render = IncidentDeliveryFilter.ForDelivery(context, null, new[] { Fresh });
+
+        Assert.Equal(2, render.SuppressedIncidentCount);
+        var footer = Assert.Single(
+            render.Context!.Details, d => d.Heading == IncidentDeliveryFilter.OtherIncidentsHeading);
+        Assert.Contains(footer.Fields, f => f.Value == "2 other incidents still open (already reported)");
     }
 
     /// <summary>

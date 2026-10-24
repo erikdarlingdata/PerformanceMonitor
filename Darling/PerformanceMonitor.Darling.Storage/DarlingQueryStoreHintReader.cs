@@ -49,7 +49,7 @@ public sealed record QueryStoreHintRead(
     IReadOnlyList<QueryStoreHintCapture> Captures);
 
 /// <summary>
-/// #6581: the Query Store hints in place, from <c>collect.query_store_hints</c> (V215): the collector's per-database marker row plus one
+/// #6581: the Query Store hints in place, from <c>collect.query_store_hints</c> (V217): the collector's per-database marker row plus one
 /// row per hint, every pass. A database is judged by its own newest marker row inside the window, so a database whose last capture is
 /// older than another's is not judged against the other's. A hint that is not in a captured database's newest capture is cleared and is
 /// not listed. Both reads are bounded by <c>server_id</c> and the window on <c>collection_time</c>

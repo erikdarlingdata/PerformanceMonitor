@@ -85,6 +85,24 @@ public sealed class DarlingUnknownNetworkKeyTests
     }
 
     [Fact]
+    public void ADirectWebKey_IsReportedWhenMisspelled_AndEveryRealWebKeyIsKnown()
+    {
+        // #6600: "allowAdminWrite" (no s) would otherwise silently leave the default on.
+        var warning = Assert.Single(WarningsFor("""{ "web": { "enabled": true, "allowAdminWrite": false } }"""));
+        Assert.Contains("'web.allowAdminWrite'", warning, StringComparison.Ordinal);
+
+        // Every key WebConfig itself serializes (so each real one is present, with a valid value), upper-cased: none is reported.
+        var allReal = new System.Text.Json.Nodes.JsonObject();
+        foreach (var pair in JsonSerializer.SerializeToNode(new WebConfig())!.AsObject())
+        {
+            allReal[pair.Key.ToUpperInvariant()] = pair.Value?.DeepClone();
+        }
+
+        Assert.True(allReal.Count >= 5);
+        Assert.Empty(WarningsFor(new System.Text.Json.Nodes.JsonObject { ["web"] = allReal }.ToJsonString()));
+    }
+
+    [Fact]
     public void TheWarningsAndADiagnosticsBundleBuiltFromThatConfig_NeverCarryTheKeysValue()
     {
         var config = DarlingConfig.Parse("""

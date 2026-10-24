@@ -301,6 +301,13 @@ public static class StoreLogClassifier
         new("shared_memory_reservation_retry", Log, MatchKind.StartsWith, "could not reserve shared memory region", false,
             "the Windows fork-emulation ASLR retry - PostgreSQL retries it itself, and it is benign"),
 
+        /* Retained (#6647) - TimescaleDB's WARNING when a chunk compressed to a LARGER size than it started: a tiny chunk
+           (48 KB before, 64 KB after) pays the compressed format's fixed overhead. Benign, and the one to read for what it
+           names: its HINT carries the hypertable, so the text is kept rather than counted. WARNING-scoped and anchored at
+           the start of the message, so an ERROR that mentions compression is not filed here. */
+        new("compression_ratio_warning", ["WARNING"], MatchKind.StartsWith, "poor compression ratio detected for chunk", true,
+            "TimescaleDB compressed a chunk to a larger size than it started - usually a tiny chunk, benign; the HINT names the hypertable"),
+
         /* Retained, severity alone. Anything that panicked and did not name a storage problem above. */
         new("panic", Panic, MatchKind.SeverityOnly, "", true,
             "the store panicked and restarted every backend"),

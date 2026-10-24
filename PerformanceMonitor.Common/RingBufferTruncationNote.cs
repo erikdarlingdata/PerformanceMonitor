@@ -108,15 +108,35 @@ public static class RingBufferTruncationNote
     /// The health-parser reads' answer (Lite and Darling, one string) when a category came back empty and the newest
     /// system_health collection run says the ring buffer was truncated. Without it those reads called the window
     /// "genuinely quiet" or "the healthy answer" while the newest events sat on the server unread (#6441).
+    /// <para>#6650: when the read did count events of the type (<paramref name="eventsRead"/> above 0) the first clause
+    /// says so, with the filter that left none (<paramref name="noneQualifiedBecause"/>), instead of "No ... events were
+    /// found" over a count of hundreds. At 0 it keeps that wording.</para>
     /// </summary>
-    public static string HealthParserMessage(string eventType, string serverName, int hoursBack, string truncation) =>
-        string.Format(
+    public static string HealthParserMessage(
+        string eventType, string serverName, int hoursBack, string truncation,
+        int eventsRead = 0, string? noneQualifiedBecause = null)
+    {
+        var first = eventsRead > 0
+            ? string.Format(
+                CultureInfo.InvariantCulture,
+                "{0} {1} event(s) were read for {2} in the last {3} hour(s), and {4}",
+                eventsRead,
+                eventType,
+                serverName,
+                hoursBack,
+                noneQualifiedBecause ?? "none qualified")
+            : string.Format(
+                CultureInfo.InvariantCulture,
+                "No {0} events were found for {1} in the last {2} hour(s)",
+                eventType,
+                serverName,
+                hoursBack);
+
+        return first + string.Format(
             CultureInfo.InvariantCulture,
-            "No {0} events were found for {1} in the last {2} hour(s), and this is NOT an all-clear: the newest system_health collection run reported that {3}. Events of this type may exist on the server and not be stored here. Restarting the system_health session empties its ring buffer, and collection resumes until the buffer fills again.",
-            eventType,
-            serverName,
-            hoursBack,
+            ", and this is NOT an all-clear: the newest system_health collection run reported that {0}. Events of this type may exist on the server and not be stored here. Restarting the system_health session empties its ring buffer, and collection resumes until the buffer fills again.",
             truncation);
+    }
 
     /// <summary>An age in seconds as <c>5 h 23 min</c>, <c>20 min</c> or <c>45 s</c>.</summary>
     public static string FormatAge(long seconds)

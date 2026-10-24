@@ -2286,7 +2286,62 @@ CREATE TRIGGER trg_bump_known_patterns
     FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
 
     /// <summary>
-    /// V215 (#6581) - <c>collect.query_store_hints</c>: the Query Store hints in place, read from <c>sys.query_store_query_hints</c> by
+    /// V215: six indexes on the investigation ("agent") tables. A restored store copy loaded with one synthetic year of requests at a
+    /// production store's measured rate (73,000 requests) timed every hot read of these tables. Most stayed under 1 ms. These did not, and
+    /// each index below took its read to well under 10 ms: the follow-up module read (<c>ProcedureStatsModuleDates.WatchedSql</c>, about
+    /// 60,000 calls a day) 127 ms to 5.5 ms with the first two, the due follow-ups read 35 ms to 0.7 ms with the third and second,
+    /// <c>PendingFollowUpsSql</c> 25 ms to 5 ms with the second, the MCP request list and the reports 30-day read 25-53 ms to under
+    /// 0.3 ms with the fourth, the brief's earlier-report and prior-links lookups and the live-practice hider 12-24 ms to under 0.25 ms
+    /// with the fifth, and the retention delete of requests (the <c>fk_investigation_reports_family</c> check scanned every report per
+    /// deleted request) 310 ms for 8 rows to 0.5 ms with the sixth.
+    ///
+    /// <para>Each partial predicate is implied by the WHERE clause of the read it serves, so the planner can use it: an equality on
+    /// <c>follow_up_of</c>, <c>practice_of</c> or <c>family_of</c> implies NOT NULL, and the follow-up reads state
+    /// <c>state = 'reported'</c> and the NOT NULL columns themselves. Plain <c>CREATE INDEX IF NOT EXISTS</c>, not CONCURRENTLY: the tables
+    /// hold hundreds of rows on a production store today, so each build is instant and takes no noticeable lock. The shipped V184 text
+    /// (<c>InvestigationTables.CreateSql</c>) is not edited, and a fresh store runs every rung, so it gets these too. Additive: an older build
+    /// never reads the indexes, and no GRANT is needed for an index.</para>
+    /// </summary>
+    private const string V215Sql = @"
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_reported_condition
+    ON config.investigation_requests (server_id) WHERE state = 'reported' AND follow_up_condition IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_follow_up_of
+    ON config.investigation_requests (follow_up_of) WHERE follow_up_of IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_follow_up_at
+    ON config.investigation_requests (follow_up_at) WHERE state = 'reported' AND follow_up_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_opened_at
+    ON config.investigation_requests (opened_at);
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_practice_of
+    ON config.investigation_requests (practice_of) WHERE practice_of IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_investigation_reports_family_of
+    ON config.investigation_reports (family_of) WHERE family_of IS NOT NULL;";
+
+    /// <summary>
+    /// V216 (#5736): the Client Timeouts alert ships ON. V179 added <c>config.config_alert_settings.client_timeouts_enabled</c> with
+    /// <c>DEFAULT FALSE</c> so the alert was off until its bars could be checked against captured data. #5736 made the bars relative to each
+    /// server's own baseline, and a 7-day replay of the new bars over one production store of 42 SQL Servers would have paged twice, both at
+    /// Warning, with 40 of the 42 servers never crossing a bar. Two statements. The column default becomes TRUE, so a store that has no row yet
+    /// (or a new one) starts with the alert on. And the one row a store has is moved from FALSE to TRUE.
+    ///
+    /// <para><b>Why moving the row is right.</b> Nothing RECORDED "off" as a choice distinct from the default until now. Both Settings windows and <c>update_alert_settings</c> have offered the checkbox since #5640, but the column stores a boolean with no provenance. A stored FALSE is the
+    /// old default, written by V179 or by a Settings save that sent the whole row back, and a store cannot tell it from an operator's choice. The
+    /// rung says so rather than guessing: an operator who turned the alert off on purpose switches it off again, once. The repo has no
+    /// settings-change journal to write to, so the reason is stated here, in the Darling README's V216 rollback note, in docs/alerts.md
+    /// for both editions, and in this change's CHANGELOG entry, which joins the release notes at the release cut.</para>
+    ///
+    /// <para><b>Cost.</b> <c>config_alert_settings</c> is the one-row singleton (<c>id = 1</c>), so the UPDATE touches at most one row and the
+    /// SET DEFAULT is catalog-only. Neither is given a <c>lock_timeout</c>, the shape V147 and V211 used on the same kind of table: the only thing
+    /// the ALTER can wait on is a transaction holding this one-row table, which is a millisecond read, and the applier's command timeout is the
+    /// backstop. The UPDATE fires V17's statement trigger, which bumps <c>config_version</c>, so a running service reloads the setting at once.
+    /// Re-running changes nothing: the column default is already TRUE and no row is FALSE. Written as literals because a migration's text is frozen
+    /// at the version it ships in. An older build reads the same boolean column and is unaffected.</para>
+    /// </summary>
+    private const string V216Sql = @"
+ALTER TABLE config.config_alert_settings ALTER COLUMN client_timeouts_enabled SET DEFAULT TRUE;
+UPDATE config.config_alert_settings SET client_timeouts_enabled = TRUE WHERE client_timeouts_enabled = FALSE;";
+
+    /// <summary>
+    /// V217 (#6581) - <c>collect.query_store_hints</c>: the Query Store hints in place, read from <c>sys.query_store_query_hints</c> by
     /// <c>QueryStoreHintsCollector</c> (SQL Server 2022 and later) every five minutes, one row per hint plus ONE all-NULL marker row
     /// (<c>query_hint_id</c> NULL) per captured database per pass, so a hint that left a captured database reads as CLEARED, not as not
     /// captured. The forced-plans table's model: a PLAIN table on every store (<c>StaysPlainTable</c>), 30-day time-sliced DELETE. Columns
@@ -2295,7 +2350,7 @@ CREATE TRIGGER trg_bump_known_patterns
     /// previous complete capture by one seek. New table, no data moves, no grant (the <c>collect</c> schema carries blanket SELECT).
     /// Every statement is idempotent.
     /// </summary>
-    private const string V215Sql = @"
+    private const string V217Sql = @"
 CREATE TABLE IF NOT EXISTS collect.query_store_hints (
     collection_id bigint NOT NULL,
     collection_time timestamp NOT NULL,
@@ -2704,7 +2759,9 @@ $rung$;";
         new Migration(212, "server-machine-identity", V212Sql),
         new Migration(213, "query-store-replica", V213Sql),
         new Migration(214, "known-patterns", V214Sql),
-        new Migration(215, "query-store-hints", V215Sql),
+        new Migration(215, "agent-table-indexes", V215Sql),
+        new Migration(216, "client-timeouts-on-by-default", V216Sql),
+        new Migration(217, "query-store-hints", V217Sql),
     };
 
     /// <summary>

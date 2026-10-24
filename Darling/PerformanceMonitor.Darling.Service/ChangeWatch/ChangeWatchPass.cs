@@ -150,7 +150,7 @@ WHERE after.hit IS NULL
                   WHERE a.server_id = $1 AND a.database_name = p.database_name AND a.query_id = p.query_id AND a.plan_id = p.plan_id
                     AND a.outcome = 'succeeded' AND a.action_time > n.prev_t AND a.action_time <= n.t)";
 
-    /* #6581 slice 2: Query Store hint changes, read the way PlanSnapshotChangesSql reads forced plans, from collect.query_store_hints (V215). The collector
+    /* #6581 slice 2: Query Store hint changes, read the way PlanSnapshotChangesSql reads forced plans, from collect.query_store_hints (V217). The collector
        writes ONE all-NULL marker row (query_hint_id IS NULL) per captured database per pass, then one row per hint. A capture is a marker row, and its previous
        capture is the newest marker row of the same database in the day before it (a LATERAL seek on idx_query_store_hints_markers), so a database with no
        previous capture is a baseline, one that has no capture in a run (Query Store off, the collector failed or skipped it, SQL Server before 2022) has nothing
