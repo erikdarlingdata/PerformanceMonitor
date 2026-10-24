@@ -4312,17 +4312,26 @@
              ══════════════════════════════════════════════════════════════════════════════════════════ -->
 
         <TabItem x:Name="PgOverviewTab" Header="Overview" Visibility="Collapsed">
+            <!-- #6387: six panels do not fit one screen. Every row is Auto and each grid has a MinHeight (several rows) and a
+                 MaxHeight (inner scroll), so the tab scrolls as a page, as the Vacuum tab does (#6133). The wheel handler is the
+                 Vacuum tab's, which is generic over its ScrollViewer. -->
+            <ScrollViewer x:Name="PgOverviewScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                          PreviewMouseWheel="PgVacuumScroll_PreviewMouseWheel">
             <Grid Margin="8">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgEngineBanner" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,4" TextWrapping="Wrap"/>
                 <StackPanel Grid.Row="1">
@@ -4344,7 +4353,7 @@
                         </DataGrid>
                     </Expander>
                 </StackPanel>
-                <DataGrid Grid.Row="2" x:Name="PgCollectorHealthGrid" Style="{StaticResource DarkGrid}"
+                <DataGrid Grid.Row="2" x:Name="PgCollectorHealthGrid" Style="{StaticResource DarkGrid}" MinHeight="110" MaxHeight="300"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
                         <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
@@ -4392,7 +4401,7 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
-                    <DataGrid Grid.Row="0" x:Name="PgExtensionsGrid" Style="{StaticResource DarkGrid}"
+                    <DataGrid Grid.Row="0" x:Name="PgExtensionsGrid" Style="{StaticResource DarkGrid}" MinHeight="110" MaxHeight="240"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <!-- installed/outdated are per-database facts and available/absent are cluster-wide,
@@ -4430,13 +4439,40 @@
                     </DataGrid>
                 </Grid>
 
+                <!-- #6387 what changed in the window, above the settings it changed: somebody opening this tab
+                     during an incident is asking what moved, not what the server is. The SAME read the web
+                     "Configuration Changes" panel and get_pg_server_config_changes call. -->
+                <StackPanel Grid.Row="5">
+                    <TextBlock x:Name="PgConfigChangesNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgConfigChangesDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
+                <DataGrid Grid.Row="6" x:Name="PgConfigChangesGrid" Style="{StaticResource DarkGrid}" MinHeight="110" MaxHeight="300"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Changed" Binding="{Binding ChangedAt}" Width="150" SortMemberPath="ChangedAtUtc"/>
+                        <DataGridTextColumn Header="Setting" Binding="{Binding Name}" Width="240"/>
+                        <DataGridTextColumn Header="Old Value" Binding="{Binding OldValue}" Width="160"/>
+                        <DataGridTextColumn Header="New Value" Binding="{Binding NewValue}" Width="160"/>
+                        <DataGridTextColumn Header="Unit" Binding="{Binding Unit}" Width="70"/>
+                        <DataGridTextColumn Header="Scope" Binding="{Binding Scope}" Width="160"/>
+                        <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="80"/>
+                        <DataGridTextColumn Header="Change Needs" Binding="{Binding Context}" Width="120"/>
+                        <DataGridTextColumn Header="Source" Binding="{Binding Source}" Width="150"/>
+                        <DataGridTextColumn Header="Description" Binding="{Binding ShortDescription}" MinWidth="200" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
                 <!-- #2658 the server's own configuration, beneath the extension axis because it is the same
                      kind of fact one layer in: extensions say what this server CAN do, settings say what it
                      was told to do. Non-default first - several hundred parameters sorted alphabetically is
                      a dump, and the ones somebody chose are the answer. -->
-                <TextBlock Grid.Row="5" x:Name="PgServerConfigNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                <TextBlock Grid.Row="7" x:Name="PgServerConfigNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                <DataGrid Grid.Row="6" x:Name="PgServerConfigGrid" Style="{StaticResource DarkGrid}"
+                <DataGrid Grid.Row="8" x:Name="PgServerConfigGrid" Style="{StaticResource DarkGrid}" MinHeight="110" MaxHeight="360"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Setting" Binding="{Binding Name}" Width="240"/>
@@ -4456,11 +4492,38 @@
                     </DataGrid.Columns>
                 </DataGrid>
 
+                <!-- #6387 the logging audit, beneath the settings grid because it is judged from the same stored configuration
+                     snapshot (pg_server_config), so it takes no window. It answers one question the plan-capture readiness
+                     panel on the Vacuum tab leaves open: is this target writing every log line it could. -->
+                <StackPanel Grid.Row="9">
+                    <TextBlock Text="Is this server writing every log line it could - the logging settings" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                    <TextBlock x:Name="PgLoggingAuditNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                </StackPanel>
+                <DataGrid Grid.Row="10" x:Name="PgLoggingAuditGrid" Style="{StaticResource DarkGrid}"
+                          MinHeight="110" MaxHeight="300"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True"
+                          AutoGenerateColumns="False" IsReadOnly="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Setting" Binding="{Binding Setting}" Width="220"/>
+                        <DataGridTextColumn Header="Verdict" Binding="{Binding Verdict}" Width="100"/>
+                        <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="110"/>
+                        <DataGridTextColumn Header="Unit" Binding="{Binding Unit}" Width="60"/>
+                        <DataGridTextColumn Header="Source" Binding="{Binding Source}" Width="130"/>
+                        <DataGridTextColumn Header="Change Needs" Binding="{Binding ChangeNeeds}" Width="110"/>
+                        <DataGridTextColumn Header="Unlocks" Binding="{Binding Unlocks}" ElementStyle="{StaticResource FreeTextCell}" Width="260"/>
+                        <DataGridTextColumn Header="Recommended" Binding="{Binding Recommended}" ElementStyle="{StaticResource FreeTextCell}" Width="220"/>
+                        <DataGridTextColumn Header="Cost" Binding="{Binding CostNote}" ElementStyle="{StaticResource FreeTextCell}" Width="260"/>
+                        <DataGridTextColumn Header="Remedy" Binding="{Binding Remedy}" ElementStyle="{StaticResource FreeTextCell}" MinWidth="260" Width="*"/>
+                        <DataGridTextColumn Header="Pending Restart" Binding="{Binding PendingRestart}" ElementStyle="{StaticResource FreeTextCell}" Width="220"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
                 <!-- #2719 instance-level CPU, beneath configuration because it is the same kind of fact one
                      layer further in: extensions say what this server CAN do, settings say what it was told
                      to do, this says what it is doing right now. Sourced from AWS Performance Insights
                      rather than a database connection. -->
-                <StackPanel Grid.Row="7">
+                <StackPanel Grid.Row="11">
                     <TextBlock x:Name="PgCpuNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                     <TextBlock x:Name="PgCpuDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
@@ -4468,7 +4531,7 @@
                                Foreground="{DynamicResource ForegroundBrush}"
                                Background="#22FFAA00"/>
                 </StackPanel>
-                <DataGrid Grid.Row="8" x:Name="PgCpuGrid" Style="{StaticResource DarkGrid}"
+                <DataGrid Grid.Row="12" x:Name="PgCpuGrid" Style="{StaticResource DarkGrid}" MinHeight="110" MaxHeight="300"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="160" SortMemberPath="SampleTimeUtc"/>
@@ -4476,6 +4539,7 @@
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>
+            </ScrollViewer>
         </TabItem>
 
         <TabItem x:Name="PgActivityTab" Header="Activity" Visibility="Collapsed">
@@ -4574,6 +4638,7 @@
                                            Background="#22FFAA00"/>
                             </StackPanel>
                             <DataGrid Grid.Row="4" x:Name="PgDeadlocksGrid" Style="{StaticResource DarkGrid}" MaxHeight="220"
+                                      MouseDoubleClick="PgDeadlocksGrid_MouseDoubleClick"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="When" Binding="{Binding OccurredAtUtc, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="150"/>

@@ -1032,6 +1032,23 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     }
 
     /// <summary>
+    /// #6596: journals an alert on an agent route that opened no request because its story is recurring at this hour
+    /// (<see cref="InvestigationEvents.RecurringSkipped"/>). The row has no request id; it names the route, the server, the metric
+    /// (as the reason) and the story path hash, once per route, server, metric and alert hour.
+    /// </summary>
+    public async Task RecordRecurringSkipAsync(InvestigationAlert alert, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(alert);
+        var alertTime = DateTime.SpecifyKind(alert.AlertTimeUtc, DateTimeKind.Utc);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await JournalAsync(connection, transaction, Now(), null, alert.RouteId, alert.ServerId, InvestigationEvents.RecurringSkipped,
+            "service", alert.MetricName, InvestigationEvents.RecurringSkippedDetail(alert.StoryPathHash, alertTime),
+            InvestigationEvents.RecurringSkippedOnceKey(alert.RouteId, alert.ServerId, alert.MetricName, alertTime), cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    /// <summary>
     /// Journals a refusal the tool layer decided (an invalid report, an action proposal at Level 1, an unsupported format)
     /// once per request, operation and reason (#5632 review ruling). An unknown request id is journaled once per hour per
     /// reason, as the store's own refusals are. An agent id <see cref="InvestigationRules.IsValidAgentId"/> refuses is journaled as

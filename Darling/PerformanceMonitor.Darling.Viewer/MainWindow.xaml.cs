@@ -527,6 +527,15 @@ public partial class MainWindow : Window
             }
         }
 
+        /* --add-server (#6480): the MSI's finish page starts the viewer with it, so a new install lands on the same
+           add-server dialog the empty state offers. Queued at idle priority so OnLoaded finishes (tray, timers)
+           before the modal dialog's loop starts, and the window is on screen behind it. No store connection means
+           no dialog (the message overlay already says why). */
+        if (_dataService is not null && ViewerArgs.AddServerRequested(Environment.GetCommandLineArgs().Skip(1).ToArray()))
+        {
+            _ = Dispatcher.BeginInvoke(new Action(() => AddServerButton_Click(this, new RoutedEventArgs())), DispatcherPriority.ContextIdle);
+        }
+
         /* System tray + in-app alert toasts (the ported Lite tray, adapted for headless). The tray icon lives
            for the process; restore shares the single-instance SurfaceWindow path so the tray Restore and a
            second-launch surface behave identically. Minimize-to-tray reads the live _minimizeToTray value. */

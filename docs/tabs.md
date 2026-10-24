@@ -90,6 +90,6 @@ The page for one SQL Server has these tabs:
 - Overview, Wait Stats, CPU, Memory, and Blocking
 - File I/O, I/O Trends, Queries, and Configuration
 - Config Changes, Activity, and System Events
-- Collection Health and Recommendations
+- Collection Health and Recommendations (accounts that can edit get Generate now, which queues the same analysis run as the Viewer; every finding has Ask AI, which copies the same prompt)
 
 The page for one PostgreSQL server has these tabs: Overview, Activity, Vacuum, Waits, I/O, Replication, Storage, and Configuration.

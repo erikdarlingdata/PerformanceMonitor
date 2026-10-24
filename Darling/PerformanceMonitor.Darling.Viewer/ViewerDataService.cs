@@ -501,9 +501,10 @@ public sealed partial class ViewerDataService : IAsyncDisposable
     /// </param>
     public ViewerDataService(string connectionString, int? connectionTimeoutSeconds = null)
     {
-        var effectiveConnectionString = connectionTimeoutSeconds is int seconds
+        /* #6630: the store's search path comes from the ONE helper the service uses (set-if-absent, appended). */
+        var effectiveConnectionString = DarlingStoreConnection.EnsureStoreSearchPath(connectionTimeoutSeconds is int seconds
             ? ApplyConnectionTimeout(connectionString, seconds)
-            : connectionString;
+            : connectionString);
 
         /* #3016: the read-deadline family and the fan-out bound both need the pool size this seat really
            gets, and the managed constant is only one of the two strings the viewer can be handed. Published

@@ -718,6 +718,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapQueryTags(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapCollectorRuns(app, new PostgresSnapshotNowStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct, NameClash.Refuse); return (r.ServerId, err); });
         MapActiveQueriesLive(app, new PostgresActiveQueriesLiveStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct, NameClash.Refuse); return (r.ServerId, err); }, managedStore, readAdmission: readAdmission, readLatencyRecorder: readLatencyRecorder);
+        MapAnalyzeNow(app, new PostgresAnalyzeNowStore(postgres), postgres, logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct, NameClash.Refuse); return (r.ServerId, err); }, managedStore);
         MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
         MapInvestigationFeedback(app, postgres, logger, managedStore, adminArm);
@@ -4153,6 +4154,199 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         });
     }
 
+    /// <summary>The most request-body bytes the analyze-now route reads (a server name).</summary>
+    internal const int MaxAnalyzeNowBodyBytes = 4 * 1024;
+
+    /// <summary>The longest finding title the Ask AI route builds a prompt around (a headline is a sentence).</summary>
+    internal const int MaxAskAiTitleLength = 500;
+
+    /// <summary>
+    /// The Recommendations tab's routes (#6389). <c>POST /api/analyze-now</c> (body: the server name) queues the same argument-less
+    /// <c>analyze_now</c> command the Viewer's Generate now queues, through <c>config.request_analyze_now</c> (the viewer role has no INSERT
+    /// on the command queue). Built like <see cref="MapActiveQueriesLive"/>: edit seat only (403 otherwise), 202 queued, 409 when a run for
+    /// the server is queued or going, 429 (with Retry-After) within 15 seconds of the last, 404 for an unknown server, 403 when the web's
+    /// store login cannot execute the function. <c>GET /api/analyze-now/{commandId}</c> is the command's state (the page polls it and
+    /// re-reads the findings when it finishes); <c>GET /api/analyze-now/available</c> says whether this seat and store login can queue a
+    /// run. <c>GET /api/analysis/ask-ai-prompt</c> returns the text the Viewer's Ask AI copies, from the one shared builder: no key and no
+    /// model call, only a prompt for the reader's own MCP client.
+    /// </summary>
+    internal static void MapAnalyzeNow(
+        WebApplication app, IAnalyzeNowStore store, NpgsqlDataSource postgres, ILogger logger,
+        Func<string, CancellationToken, Task<(int ServerId, string? Error)>> resolveServer, bool managedStore, TimeProvider? clock = null)
+    {
+        app.MapGet("/api/analyze-now/available", async (HttpContext context) =>
+        {
+            var seat = DarlingWebSeat.FromContext(context);
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                var storeCan = seat.CanEdit && await store.CanQueueAsync(context.RequestAborted);
+                context.Response.Headers.CacheControl = "no-store";
+                return JsonNodeResult(new JsonObject { ["can_queue"] = storeCan, ["can_edit"] = seat.CanEdit, ["managed_store"] = managedStore });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ServerErrorResult($"analyze now availability failed ({ex.GetType().Name})", "/api/analyze-now/available", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+        });
+
+        app.MapPost("/api/analyze-now", async (HttpContext context) =>
+        {
+            var seat = DarlingWebSeat.FromContext(context);
+            if (!seat.CanEdit)
+            {
+                return ErrorResult("This account has read-only access.", StatusCodes.Status403Forbidden);
+            }
+
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            string body;
+            try
+            {
+                body = await ReadBoundedBodyAsync(context, MaxAnalyzeNowBodyBytes);
+            }
+            catch (InvalidDataException)
+            {
+                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+            }
+
+            string? serverName;
+            try
+            {
+                serverName = (JsonNode.Parse(body) as JsonObject)?["server"]?.GetValue<string>();
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
+            {
+                return ErrorResult("The body must be a JSON object with a \"server\" name.", StatusCodes.Status400BadRequest);
+            }
+
+            if (string.IsNullOrWhiteSpace(serverName))
+            {
+                return ErrorResult("The body must name the server.", StatusCodes.Status400BadRequest);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            int id;
+            SnapshotRequestOutcome outcome;
+            try
+            {
+                var (resolvedId, resolveError) = await resolveServer(serverName, context.RequestAborted);
+                if (resolveError is not null)
+                {
+                    return CollectorRunResolveFailure(resolveError, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+                }
+
+                id = resolvedId;
+                outcome = await AnalyzeNowRequests.RequestAsync(store, id, seat.EditorPrincipal ?? "web", context.RequestAborted);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ServerErrorResult($"analyze now request failed ({ex.GetType().Name})", "/api/analyze-now", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+
+            if (!outcome.Accepted)
+            {
+                var refusal = new JsonObject { ["error"] = outcome.Text, ["code"] = outcome.Code };
+                if (outcome.NextAllowedUtc is { } next)
+                {
+                    refusal["next_allowed_utc"] = next.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+                    var wait = (int)Math.Ceiling(Math.Max(1, (next - (clock ?? TimeProvider.System).GetUtcNow().UtcDateTime).TotalSeconds));
+                    context.Response.Headers["Retry-After"] = wait.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                }
+
+                return JsonNodeResult(refusal, outcome.Code switch
+                {
+                    SnapshotRequestOutcome.InFlightCode => StatusCodes.Status409Conflict,
+                    SnapshotRequestOutcome.RateLimitedCode => StatusCodes.Status429TooManyRequests,
+                    SnapshotRequestOutcome.UnknownServerCode => StatusCodes.Status404NotFound,
+                    AnalyzeNowRequests.StoreRefusedCode => StatusCodes.Status403Forbidden,
+                    _ => StatusCodes.Status400BadRequest,
+                });
+            }
+
+            logger.LogInformation("Web: {Principal} queued an analysis run for server {ServerId}.", seat.EditorPrincipal, id);
+            return JsonNodeResult(new JsonObject { ["status"] = "queued", ["command_id"] = outcome.CommandId }, StatusCodes.Status202Accepted);
+        });
+
+        app.MapGet("/api/analyze-now/{commandId:long}", async (HttpContext context, long commandId) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            SnapshotCommandState? state;
+            try
+            {
+                state = await store.ReadStateAsync(commandId, context.RequestAborted);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ServerErrorResult($"analyze now read failed ({ex.GetType().Name})", "/api/analyze-now/{commandId}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+
+            if (state is null)
+            {
+                return ErrorResult("No such analysis run.", StatusCodes.Status404NotFound);
+            }
+
+            context.Response.Headers.CacheControl = "no-store";
+            return JsonNodeResult(new JsonObject
+            {
+                ["status"] = state.Status,
+                ["finished"] = state.Status is "succeeded" or "failed",
+                ["succeeded"] = state.Status == "succeeded",
+                ["result_status"] = state.ResultStatus,
+            });
+        });
+
+        app.MapGet("/api/analysis/ask-ai-prompt", async (HttpContext context) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var server = context.Request.Query["server"].ToString();
+            var title = context.Request.Query["title"].ToString();
+            if (string.IsNullOrWhiteSpace(server) || string.IsNullOrWhiteSpace(title) || title.Length > MaxAskAiTitleLength)
+            {
+                return ErrorResult("The request must name the server and a finding title (at most " + MaxAskAiTitleLength + " characters).", StatusCodes.Status400BadRequest);
+            }
+
+            DateTime? start = null;
+            DateTime? end = null;
+            var startText = context.Request.Query["start"].ToString();
+            var endText = context.Request.Query["end"].ToString();
+            if (startText.Length > 0 || endText.Length > 0)
+            {
+                const System.Globalization.DateTimeStyles utc = System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal;
+                if (!DateTime.TryParse(startText, System.Globalization.CultureInfo.InvariantCulture, utc, out var parsedStart)
+                    || !DateTime.TryParse(endText, System.Globalization.CultureInfo.InvariantCulture, utc, out var parsedEnd))
+                {
+                    return ErrorResult("start and end must be UTC timestamps.", StatusCodes.Status400BadRequest);
+                }
+
+                start = parsedStart;
+                end = parsedEnd;
+            }
+
+            try
+            {
+                var (serverId, resolveError) = await resolveServer(server, context.RequestAborted);
+                if (resolveError is not null)
+                {
+                    return CollectorRunResolveFailure(resolveError, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+                }
+
+                var clocks = await DarlingServerClocksReader.GetAsync(postgres, serverId, McpCommandDeadlines.ReadSeconds, context.RequestAborted);
+                var prompt = PerformanceMonitor.Analysis.RecommendationAskAiPrompt.BuildFor(
+                    server, title, start, end, DarlingServerClocksReader.ClockFor(clocks, serverId), (clock ?? TimeProvider.System).GetUtcNow().UtcDateTime);
+                context.Response.Headers.CacheControl = "no-store";
+                return JsonNodeResult(new JsonObject { ["prompt"] = prompt });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ServerErrorResult($"ask ai prompt failed ({ex.GetType().Name})", "/api/analysis/ask-ai-prompt", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+        });
+    }
+
     /// <summary>
     /// What the run route answers when the server resolver hands back an error string (#5941 review). The resolver has three
     /// shapes and each gets its own answer: a registry read fault (a store fault, not the caller's request) is logged and answers
@@ -4741,9 +4935,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static IResult QueryTagToolResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted,
         int successStatus = StatusCodes.Status200OK)
     {
+        /* #6341 round 1: a ServerError is answered with a fixed body and is not swept; the status and the one log line come from
+           the tool's own result, never from the swept text. */
+        if (ClassifyToolResponse(result) is ToolResponseKind.ServerError)
+        {
+            return ServerTagToolResult(result, route, logger, elapsedMs, requestAborted, successStatus);
+        }
+
         var swept = DarlingWebStatementSweep.Apply(result);
         if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs, requestAborted);
-        return ServerTagToolResult(swept.Text, route, logger, elapsedMs, requestAborted, successStatus);
+        return ServerTagToolResult(result, route, logger, elapsedMs, requestAborted, successStatus, swept.Text);
     }
 
     /// <summary>Parses the request body as one JSON object, or names why it is not.</summary>
@@ -4937,7 +5138,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// handling (the caught-exception sentence never reaches the wire) with <see cref="ServerTagEnvelopeStatus"/>'s
     /// status.</summary>
     internal static IResult ServerTagToolResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted,
-        int successStatus = StatusCodes.Status200OK)
+        int successStatus = StatusCodes.Status200OK, string? writtenBody = null)
     {
         var kind = ClassifyToolResponse(result);
         if (kind is ToolResponseKind.ServerError)
@@ -4945,10 +5146,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             return ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs, requestAborted);
         }
 
+        /* #6341 round 1: the status comes from the tool's own result; writtenBody (the swept text) only replaces what is written. */
         var httpStatus = ServerTagEnvelopeStatus(result, successStatus);
+        var body = writtenBody ?? result;
         return kind is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal
-            ? Results.Text(result, "application/json", statusCode: httpStatus)
-            : ErrorResult(McpHelpers.ErrorMessageOf(result), httpStatus);
+            ? Results.Text(body, "application/json", statusCode: httpStatus)
+            : ErrorResult(McpHelpers.ErrorMessageOf(body), httpStatus);
     }
 
     /// <summary>Reads the raw request body text — what the mute-rule cores parse themselves, so the web layer
@@ -5018,13 +5221,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// 500 otherwise. Any other error (a bare non-JSON string) is still wrapped as <c>{"error": sentence}</c>.</para>
     /// </summary>
     internal static IResult MuteRuleToolResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted,
-        int successStatus = StatusCodes.Status200OK)
+        int successStatus = StatusCodes.Status200OK, SensitiveStatements.JudgeBudget? sweepBudget = null)
     {
-        /* #4348: swept first, like ToHttpResult. A mute rule echoes the pattern it was given, which can be a statement. */
-        var swept = DarlingWebStatementSweep.Apply(result);
-        if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs, requestAborted);
-        result = swept.Text;
-
+        /* #6341 round 1: classified, and the status read, from the tool's own result BEFORE the sweep, like ToHttpResult: the
+           sweep can withhold the status word and must not decide the status or whether the fault is logged. */
         var kind = ClassifyToolResponse(result);
         if (kind is ToolResponseKind.ServerError)
         {
@@ -5032,9 +5232,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
 
         var httpStatus = MuteRuleEnvelopeStatus(result, successStatus);
+
+        /* #4348: swept over the body that is written. A mute rule echoes the pattern it was given, which can be a statement. */
+        var swept = DarlingWebStatementSweep.Apply(result, sweepBudget);
+        if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs, requestAborted);
+
         return kind is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal
-            ? Results.Text(result, "application/json", statusCode: httpStatus)
-            : ErrorResult(McpHelpers.ErrorMessageOf(result), httpStatus);
+            ? Results.Text(swept.Text, "application/json", statusCode: httpStatus)
+            : ErrorResult(McpHelpers.ErrorMessageOf(swept.Text), httpStatus);
     }
 
     /// <summary>#6390 S2c: what the service gives the composed-panel run core, which lives in Storage: its own server-name resolver
@@ -7404,20 +7609,28 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// The bare <c>"Error during "</c> arm <see cref="ClassifyToolResponse"/> keeps for an un-migrated producer
     /// maps here too, for the same reason.</para>
     /// </summary>
-    internal static IResult ToHttpResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted)
+    internal static IResult ToHttpResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted,
+        SensitiveStatements.JudgeBudget? sweepBudget = null)
     {
-        /* #4348: the statement filter's web sweep. It runs BEFORE ClassifyToolResponse, so the error sentence
-           ServerErrorResult echoes is swept too, and a body it cannot read is never written. */
-        var swept = DarlingWebStatementSweep.Apply(result);
-        if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs, requestAborted);
-        result = swept.Text;
-
-        return ClassifyToolResponse(result) switch
+        /* #6341 round 1: classified from the tool's own result BEFORE the sweep. The sweep can withhold the status word
+           or the whole sentence (it fails closed when the judge runs out of time), and a classification read off that
+           placeholder answered a store fault 200 or 400 with no log line. The status and the one log line never depend on
+           the sweep. A ServerError is answered with a fixed body and writes none of the tool's text, so it is not swept. */
+        var kind = ClassifyToolResponse(result);
+        if (kind == ToolResponseKind.ServerError)
         {
-            ToolResponseKind.JsonPassthrough => Results.Text(result, "application/json"),
-            ToolResponseKind.Refusal => Results.Text(result, "application/json", statusCode: StatusCodes.Status400BadRequest),
-            ToolResponseKind.ServerError => ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs, requestAborted),
-            _ => Results.Json(new { error = result }, statusCode: StatusCodes.Status400BadRequest),
+            return ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs, requestAborted);
+        }
+
+        /* #4348: the statement filter's web sweep, over the body that is written; a body it cannot read is never written. */
+        var swept = DarlingWebStatementSweep.Apply(result, sweepBudget);
+        if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs, requestAborted);
+
+        return kind switch
+        {
+            ToolResponseKind.JsonPassthrough => Results.Text(swept.Text, "application/json"),
+            ToolResponseKind.Refusal => Results.Text(swept.Text, "application/json", statusCode: StatusCodes.Status400BadRequest),
+            _ => Results.Json(new { error = swept.Text }, statusCode: StatusCodes.Status400BadRequest),
         };
     }
 
