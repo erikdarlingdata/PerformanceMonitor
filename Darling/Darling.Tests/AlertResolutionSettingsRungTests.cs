@@ -272,7 +272,7 @@ public sealed class AlertResolutionSettingsRungTests
                     PagerDutyRoutingKey = "0123456789abcdef0123456789abcdef",
                     PagerDutyUseEuRegion = true,
                     PagerDutyProxy = "http://pd-proxy.example.com:8080",
-                    // Mixed on purpose: all-true values cannot see a swap among the six boolean parameters the seed binds (#2218).
+                    // Mixed on purpose: all-true values cannot see a swap among the six boolean parameters the seed binds (#6715).
                     PagerDutyAutoResolve = false,
                     SlackSendResolutions = true,
                     TeamsSendResolutions = false,
