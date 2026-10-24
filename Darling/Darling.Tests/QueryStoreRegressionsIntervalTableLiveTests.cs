@@ -294,7 +294,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         /* The viewer's grid takes the same route to the same rows. */
         await using (var viewer = new ViewerDataService(scratch.ConnectionString))
         {
-            var viewerTable = await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, start, end, null, [Db], baselineStart, ct);
+            var viewerTable = await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, start, end, null, [Db], baselineStart, null, ct);
             Assert.NotNull(viewerTable);
             Assert.Equal(raw, viewerTable.Select(Describe).ToList());
             var viewerRows = await viewer.GetQueryStoreRegressionsAsync(ServerId, start, end, [Db], cancellationToken: ct);
@@ -323,7 +323,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.Equal("raw", fallback.Source);
         await using (var viewer = new ViewerDataService(scratch.ConnectionString))
         {
-            Assert.Null(await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, start, end, null, [Db], baselineStart, ct));
+            Assert.Null(await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, start, end, null, [Db], baselineStart, null, ct));
             var viewerRows = await viewer.GetQueryStoreRegressionsAsync(ServerId, start, end, [Db], cancellationToken: ct);
             Assert.Equal(raw, viewerRows.Select(Describe).ToList());
         }
@@ -461,7 +461,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.Equal(fixedBefore, served.Rows.Select(Describe).ToList());
 
         await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
-        var viewerTable = await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, rig.Start, rig.End, null, [Db], rig.BaselineStart, ct);
+        var viewerTable = await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, rig.Start, rig.End, null, [Db], rig.BaselineStart, null, ct);
         Assert.NotNull(viewerTable);
         Assert.Equal(fixedBefore, viewerTable.Select(Describe).ToList());
         var viewerRows = await viewer.GetQueryStoreRegressionsAsync(ServerId, rig.Start, rig.End, [Db], cancellationToken: ct);

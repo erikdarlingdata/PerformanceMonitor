@@ -574,14 +574,10 @@ public static class QueryStoreRegressionBaseline
             WHERE (f.is_cost OR f.is_timeouts OR f.is_errors)
             /* #6654: a dropped database's queries are left out here, before the rank and the cap, so they cannot fill the page. */
            {{DatabaseFilter.ExcludeClause("f.database_name", ExcludeToken)}}
-            /* #6654: the monitor's own statements are dropped at collection (QueryStoreCollector.SelfQueryMarker), but the text this read
-               resolves from query_store_text can still carry the marker, so a candidate whose text does is left out before the cap too.
-               The same keyed lookup the output projection makes, with the MAX(query_text) sample as its fallback. */
-            AND   strpos(COALESCE((SELECT x.query_sql_text
-                                   FROM query_store_text AS x
-                                   WHERE x.server_id = $1
-                                   AND   x.database_name = f.database_name
-                                   AND   x.query_id = f.query_id), f.query_text_sample, ''), '{{QueryStoreCollector.SelfQueryMarker}}') = 0
+            /* #6654: the monitor's own statement is left out before the cap too. The collector's drop of it never fires on Darling
+               (the text arrives separately, so the row it tests is empty), so the stored statement is found by the shared read-side
+               predicate: the marker against the text in query_store_text, with the MAX(query_text) sample as its fallback. */
+            AND   {{QueryStoreSelfStatement.NotSelfOfKeyedText("$1", "f.database_name", "f.query_id", "f.query_text_sample")}}
         ),
         ranked AS (
             SELECT

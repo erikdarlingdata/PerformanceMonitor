@@ -225,14 +225,14 @@ public sealed partial class ViewerDataService
            queries would otherwise fill the 50-row cap. A database the user picked is read as asked; an unknown set leaves out nothing. */
         var excludedDatabases = databaseNames is { Count: > 0 }
             ? null
-            : (await CurrentDatabaseScope.NarrowAsync(_dataSource, serverId, DatabaseFilter.All, windowStartUtc: baselineStartUtc, logger: ViewerStoreLogger.Instance, cancellationToken: cancellationToken)).ExcludedNames;
+            : (await CurrentDatabaseScope.NarrowAsync(_dataSource, serverId, DatabaseFilter.All, windowStartUtc: baselineStartUtc, asOfUtc: literalEndUtc, logger: ViewerStoreLogger.Instance, cancellationToken: cancellationToken)).ExcludedNames;
 
         /* #5809: the interval table where the Queries grid's own gate allows, raw otherwise. */
         var schemaVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
         if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
         {
             var tableRows = await TryGetQueryStoreRegressionsFromTableAsync(
-                serverId, startUtc, endUtc, literalEndUtc, databaseNames, baselineStartUtc, cancellationToken, excludedDatabases);
+                serverId, startUtc, endUtc, literalEndUtc, databaseNames, baselineStartUtc, excludedDatabases, cancellationToken);
             if (tableRows is not null)
             {
                 return new ViewerQueryStoreRegressionsRead(tableRows, DatabasesLeftOut.Distinct(excludedDatabases));
@@ -267,8 +267,7 @@ public sealed partial class ViewerDataService
     /// the span <see cref="GetQueryStoreRegressionsDataStartAsync"/>'s notice describes.
     /// </summary>
     internal async Task<List<ViewerQueryStoreRegressionRow>?> TryGetQueryStoreRegressionsFromTableAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc, CancellationToken cancellationToken,
-        IReadOnlyList<string>? excludedDatabases = null)
+        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc, IReadOnlyList<string>? excludedDatabases, CancellationToken cancellationToken)
     {
         try
         {

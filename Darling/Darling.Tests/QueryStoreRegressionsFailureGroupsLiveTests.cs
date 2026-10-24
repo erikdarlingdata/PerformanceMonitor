@@ -38,12 +38,12 @@ namespace Darling.Tests;
 [Collection("gap-cache-serial")]
 public sealed class QueryStoreRegressionsFailureGroupsLiveTests
 {
-    private const int ServerId = QueryStoreIntervalWideBelowFloorLiveTests.ServerId;
-    private const string Db = "qsFail";
+    internal const int ServerId = QueryStoreIntervalWideBelowFloorLiveTests.ServerId;
+    internal const string Db = "qsFail";
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private sealed class Rig : IAsyncDisposable
+    internal sealed class Rig : IAsyncDisposable
     {
         public required ScratchPostgres Scratch { get; init; }
         public required NpgsqlConnection Connection { get; init; }
@@ -62,7 +62,7 @@ public sealed class QueryStoreRegressionsFailureGroupsLiveTests
 
     /// <summary>One interval of one query and outcome, written through the real collector write path. Its last execution is 30
     /// minutes after its first, so its day and its side of the window start are those of <c>first + 30 minutes</c>.</summary>
-    private static async Task WriteAsync(
+    internal static async Task WriteAsync(
         DarlingCollectorRunner runner, ServerRuntime server, CollectorContext context, string type, long intervalId,
         DateTime first, long queryId, long executions, long cpuUs, long durationUs, CancellationToken ct,
         string? databaseName = null, string? queryText = null)
@@ -89,7 +89,7 @@ public sealed class QueryStoreRegressionsFailureGroupsLiveTests
         await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, [row], server, first.AddMinutes(40), context, ct);
     }
 
-    private static async Task<Rig> OpenAsync(Func<DarlingCollectorRunner, ServerRuntime, CollectorContext, DateTime, DateTime, Task> seed, CancellationToken ct)
+    internal static async Task<Rig> OpenAsync(Func<DarlingCollectorRunner, ServerRuntime, CollectorContext, DateTime, DateTime, Task> seed, CancellationToken ct)
     {
         var baseCs = BaseConnectionString;
         var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
@@ -224,8 +224,9 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         rows.Single(r => r.QueryId == queryId);
 
     /// <summary>
-    /// #6654: the monitor's own statement and a dropped database's queries are not regressions. Three queries each triple their CPU:
-    /// 20 (a normal statement), 21 (its text carries the collector's self-query marker, which lives in query_store_text) and 30 in a
+    /// #6654: the monitor's own statement and a dropped database's queries are not regressions. Four queries each triple their CPU:
+    /// 20 (a normal statement), 21 and 22 (their text carries the collector's self-query marker: 21 as an inline sample, 22 only in
+    /// query_store_text with a NULL inline sample, the shape a live Darling store has) and 30 in a
     /// database an earlier database_states snapshot lists and the newest does not. With no database chosen only 20 is listed and the
     /// dropped database is named in <c>databases_left_out</c>; naming the dropped database reads it as asked, and the marker stays out.
     /// </summary>
@@ -249,6 +250,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
             {
                 (20L, Db, "SELECT normal"),
                 (21L, Db, "/* " + QueryStoreCollector.SelfQueryMarker + " */ SELECT own"),
+                (22L, Db, "SELECT own_in_text_table"),
                 (30L, Gone, "SELECT in_dropped"),
             })
             {
@@ -259,7 +261,27 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
             await W(start.AddDays(-12), 90, 1_000, Db, "SELECT floor");
         }, ct);
 
-        foreach (var (age, names) in new[] { (TimeSpan.FromHours(1), new[] { Db, Gone }), (TimeSpan.FromMinutes(5), new[] { Db }) })
+        /* Query 22 is the shape a live Darling store has (#6665): the text fetch is separate, so the stats rows carry NO inline text
+           and the marker sits only in collect.query_store_text, which is the arm the predicate's lookup reads. Query 21 keeps the
+           inline sample, the fallback arm for a query the text table has no row for. */
+        await using (var blank = new NpgsqlCommand("UPDATE query_store_stats SET query_text = NULL WHERE server_id = $1 AND query_id = 22", rig.Connection))
+        {
+            blank.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+            await blank.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var production = new NpgsqlCommand(
+            "INSERT INTO query_store_text (server_id, database_name, query_id, query_sql_text, last_seen) VALUES ($1, $2, 22, $3, $4)",
+            rig.Connection))
+        {
+            production.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+            production.Parameters.Add(new NpgsqlParameter<string> { TypedValue = Db });
+            production.Parameters.Add(new NpgsqlParameter<string> { TypedValue = "/* " + QueryStoreCollector.SelfQueryMarker + " */ SELECT own_in_text_table" });
+            production.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(now, DateTimeKind.Unspecified) });
+            await production.ExecuteNonQueryAsync(ct);
+        }
+
+        foreach (var (age, names) in new[] { (TimeSpan.FromHours(3.5), new[] { Db, Gone }), (TimeSpan.FromHours(1), new[] { Db, Gone }), (TimeSpan.FromMinutes(5), new[] { Db }) })
         {
             var at = DateTime.SpecifyKind(DateTime.UtcNow - age, DateTimeKind.Unspecified);
             var n = 1;
@@ -308,6 +330,14 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         var viewerNamed = await viewer.GetQueryStoreRegressionsWithScopeAsync(ServerId, viewerStart, now, [Gone], cancellationToken: ct);
         Assert.Equal([30L], viewerNamed.Rows.Select(r => r.QueryId).OrderBy(x => x).ToList());
         Assert.Null(viewerNamed.DatabasesLeftOut);
+
+        /* #6665: a custom range that ended BEFORE the drop is judged by the databases the server had then (the dropped set is
+           anchored at the range's end, as get_query_store_regressions does with as_of), so the database dropped later still shows
+           its rows for that range. The newest snapshot at or before the range's end (3.5 hours ago) lists both databases. */
+        var rangeEnd = now.AddHours(-2);
+        var viewerHistorical = await viewer.GetQueryStoreRegressionsWithScopeAsync(ServerId, rangeEnd.AddHours(-24), rangeEnd, literalEndUtc: rangeEnd, cancellationToken: ct);
+        Assert.Equal([20L, 30L], viewerHistorical.Rows.Select(r => r.QueryId).OrderBy(x => x).ToList());
+        Assert.Null(viewerHistorical.DatabasesLeftOut);
     }
 
     [Fact]

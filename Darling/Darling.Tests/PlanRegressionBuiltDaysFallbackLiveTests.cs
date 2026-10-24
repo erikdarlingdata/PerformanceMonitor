@@ -367,6 +367,28 @@ public sealed class PlanRegressionBuiltDaysFallbackLiveTests
         }
 
         Assert.Null(await ReadAsync());
+
+        /* #6665: the monitor's own statement, stored only in the text table (the shape a live Darling store has), is no offender
+           either; the same row with an ordinary text is. */
+        await using (var restore = new NpgsqlCommand(
+            "UPDATE collect.query_store_text SET query_sql_text = $1 WHERE server_id = $2 AND database_name = 'fallbackdb' AND query_id = 1", connection))
+        {
+            restore.Parameters.AddWithValue("SELECT ordinary");
+            restore.Parameters.AddWithValue(ServerId);
+            await restore.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.NotNull(await ReadAsync());
+
+        await using (var own = new NpgsqlCommand(
+            "UPDATE collect.query_store_text SET query_sql_text = $1 WHERE server_id = $2 AND database_name = 'fallbackdb' AND query_id = 1", connection))
+        {
+            own.Parameters.AddWithValue("(@cutoff_time datetime2(7))SELECT /* " + PerformanceMonitor.Collectors.QueryStoreCollector.SelfQueryMarker + " */ qsrs.plan_id");
+            own.Parameters.AddWithValue(ServerId);
+            await own.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.Null(await ReadAsync());
     }
 
     private static List<CollectionFailure> PlanRegressionFailures(AnalysisContext context) =>

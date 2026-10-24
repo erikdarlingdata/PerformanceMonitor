@@ -2733,7 +2733,7 @@ internal static class DarlingDataReader
     /// the final <c>ORDER BY</c> and <c>LIMIT $4</c>. It reads only <c>ranked</c>'s column list, so
     /// <see cref="QueryStoreTopSuffix"/> (the raw and the interval-table reads) and <see cref="QueryStoreTopDailyTableSql"/>
     /// (the daily-summary read) share this one text and cannot drift apart below <c>ranked</c>.</summary>
-    private const string QueryStoreTopTail = """
+    private const string QueryStoreTopTail = $$"""
         page AS (
         SELECT
             p.database_name,
@@ -2801,7 +2801,11 @@ internal static class DarlingDataReader
                            )
                        ) AS query_text
             ) AS t ON TRUE
-            WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
+            /* #6665: the monitor's own statement is left out here too, before the LIMIT, by the shared read-side predicate
+               (QueryStoreSelfStatement): on Darling its row is stored, because the collector's drop tests an inline text column
+               that the separate text fetch leaves empty, and the marker is only in the text resolved above. */
+            WHERE (t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%')
+            AND   {{QueryStoreSelfStatement.NotSelfOfLateralText}}
             ORDER BY r.sort_cost DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role
             LIMIT $4
         ) AS p
