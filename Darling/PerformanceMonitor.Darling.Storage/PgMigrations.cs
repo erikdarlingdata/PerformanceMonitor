@@ -2323,7 +2323,7 @@ CREATE INDEX IF NOT EXISTS ix_investigation_reports_family_of
     /// Warning, with 40 of the 42 servers never crossing a bar. Two statements. The column default becomes TRUE, so a store that has no row yet
     /// (or a new one) starts with the alert on. And the one row a store has is moved from FALSE to TRUE.
     ///
-    /// <para><b>Why moving the row is right.</b> Nothing offered "off" as a choice distinct from the default until now. A stored FALSE is the
+    /// <para><b>Why moving the row is right.</b> Nothing RECORDED "off" as a choice distinct from the default until now. Both Settings windows and <c>update_alert_settings</c> have offered the checkbox since #5640, but the column stores a boolean with no provenance. A stored FALSE is the
     /// old default, written by V179 or by a Settings save that sent the whole row back, and a store cannot tell it from an operator's choice. The
     /// rung says so rather than guessing: an operator who turned the alert off on purpose switches it off again, once. The repo has no
     /// settings-change journal to write to, so the reason is stated here, in the Darling README's V216 rollback note, in docs/alerts.md
