@@ -138,8 +138,8 @@ public class EmailAlertService : IFindingAlertSender
         AlertNotificationMode? deliveryMode = null,
         bool trayShown = true,
         string? storyPathHash = null,
-        CancellationToken cancellationToken = default,
-        bool recurringAtThisHour = false)
+        bool recurringAtThisHour = false,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -163,7 +163,7 @@ public class EmailAlertService : IFindingAlertSender
                     InvestigationDispatchCore.Facts(
                         currentValue, numericCurrentValue, thresholdValue, numericThresholdValue, muted, detailText,
                         context is not null ? AlertContextSerializer.Serialize(context) : null),
-                    _readInvestigation, _investigationDataDetail(), cancellationToken, recurringAtThisHour);
+                    _readInvestigation, _investigationDataDetail(), recurringAtThisHour, cancellationToken);
 
             var result = await _core.TrySendAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId.ToString(), context, attemptChannels: !muted,
@@ -321,7 +321,7 @@ public class EmailAlertService : IFindingAlertSender
                         InvestigationDispatchCore.Facts(
                             page.CurrentValue, page.Severity, page.ThresholdValue, page.NotifyThreshold, muted: false,
                             page.DetailText, page.Context is not null ? AlertContextSerializer.Serialize(page.Context) : null),
-                        readRequest: null, _investigationDataDetail(), CancellationToken.None, page.RecurringAtThisHour);
+                        readRequest: null, _investigationDataDetail(), page.RecurringAtThisHour, CancellationToken.None);
                 }
             }
 

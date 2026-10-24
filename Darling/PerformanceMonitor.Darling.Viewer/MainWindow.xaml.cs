@@ -556,7 +556,7 @@ public partial class MainWindow : Window
         _toastCoordinator = new AlertToastCoordinator(s_alertSeenRetention);
         try
         {
-            var existing = await _dataService.GetAlertHistoryAsync(
+            var existing = await dataService.GetAlertHistoryAsync(
                 DateTime.UtcNow - s_alertPollWindow, serverId: null, limit: 500);
             _toastCoordinator.Prime(existing);
 

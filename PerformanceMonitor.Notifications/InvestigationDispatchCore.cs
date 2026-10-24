@@ -86,8 +86,8 @@ public sealed class InvestigationDispatchCore
     /// </summary>
     /// <returns>What the store did, or null when nothing was asked of it (muted, no family, no agent route) or it failed.</returns>
     public async Task<InvestigationOpenOutcome?> DispatchAsync(
-        AlertHistoryRecord record, AlertContext? context, string? storyPathHash = null, CancellationToken cancellationToken = default,
-        bool recurringAtThisHour = false)
+        AlertHistoryRecord record, AlertContext? context, string? storyPathHash = null, bool recurringAtThisHour = false,
+        CancellationToken cancellationToken = default)
     {
         if (record is null)
         {
@@ -289,7 +289,7 @@ public sealed class InvestigationDispatchCore
         string serverId, string serverName, string metricName, bool muted, DateTime alertTimeUtc, AlertContext? context,
         string? storyPathHash, InvestigationAlertFacts? facts,
         Func<Guid, CancellationToken, Task<(InvestigationRequestRow Row, string? Brief)?>>? readRequest,
-        McpDataDetail dataDetail, CancellationToken cancellationToken, bool recurringAtThisHour = false)
+        McpDataDetail dataDetail, bool recurringAtThisHour, CancellationToken cancellationToken)
     {
         var result = await OpenOrJoinAsync(
             serverId, serverName, metricName, muted, alertTimeUtc, context, storyPathHash, facts, cancellationToken,
