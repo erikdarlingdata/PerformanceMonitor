@@ -1165,14 +1165,17 @@ ORDER BY ms_delta DESC LIMIT 1";
             }
 
             // Write latency anomaly — its own tile list, its own map lookup (each gate scores independently).
+            // #6696: scored against the WRITE-latency baseline (IoWriteLatency), not the read series.
             var writeMap = await _baselineProvider.GetBucketMapAsync(
-                context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
+                context.ServerId, MetricNames.IoWriteLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
+            var writeThreshold = GetDeviationThreshold(MetricNames.IoWriteLatency);
+            var writeModifiedZThreshold = ModifiedZThresholdFor(MetricNames.IoWriteLatency, writeThreshold);
             var wholeWrite = WindowTiles.WholeWindow(writeTiles);
             if (wholeWrite.Samples > 0)
             {
                 var writeTv = AnomalyGate.EvaluateTiles(
                     writeTiles, writeMap,
-                    ioThreshold, modifiedZThreshold, WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                    writeThreshold, writeModifiedZThreshold, WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
                     window);
 
                 AnomalyGate.ZDecision writeDecision;
@@ -1191,14 +1194,14 @@ ORDER BY ms_delta DESC LIMIT 1";
                 else
                 {
                     writeBaseline = await _baselineProvider.GetBaselineAsync(
-                        context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.CancellationToken);
+                        context.ServerId, MetricNames.IoWriteLatency, context.TimeRangeStart, context.CancellationToken);
                     peakWriteLat = wholeWrite.Peak;
                     avgWriteLat = wholeWrite.Mean;
                     writeDecision = writeBaseline.SampleCount == 0
                         ? default
                         : AnomalyGate.EvaluateZScore(
                             writeBaseline, peakWriteLat, avgWriteLat,
-                            ioThreshold, modifiedZThreshold, WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                            writeThreshold, writeModifiedZThreshold, WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
                             window: window);
                 }
 

@@ -128,7 +128,7 @@ public class BaselineSupplyTests
         var families = new[]
         {
             MetricNames.Cpu, MetricNames.BatchRequests, MetricNames.WaitStats, MetricNames.SessionCount,
-            MetricNames.QueryDuration, MetricNames.IoLatency, MetricNames.Blocking, MetricNames.Deadlock,
+            MetricNames.QueryDuration, MetricNames.IoLatency, MetricNames.IoWriteLatency, MetricNames.Blocking, MetricNames.Deadlock,
             MetricNames.Memory, MetricNames.WaitMsPerSec, MetricNames.BlockingPerMinute,
         };
 

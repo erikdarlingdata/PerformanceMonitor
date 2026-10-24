@@ -518,7 +518,7 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
         var early = new DateTime(2026, 3, 4, 1, 0, 0);
         var late = new DateTime(2026, 3, 4, 23, 0, 0);
 
-        foreach (var metric in new[] { MetricNames.Blocking, MetricNames.Deadlock, MetricNames.Cpu, MetricNames.IoLatency })
+        foreach (var metric in new[] { MetricNames.Blocking, MetricNames.Deadlock, MetricNames.Cpu, MetricNames.IoLatency, MetricNames.IoWriteLatency })
         {
             Assert.True(BaselineProvider.IsDailyCacheMetric(metric), metric);
             Assert.Equal(WindowEnd, BaselineProvider.RoundedKeyTime(metric, early));
