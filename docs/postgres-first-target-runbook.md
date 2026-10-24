@@ -412,11 +412,11 @@ carries any older store to the newest version. `StorageVersion.SchemaVersion` is
 3.11.0), and step 5's proof line quotes whatever it says at your build.
 
 **Before starting, if your store is unmanaged and has TimescaleDB**, re-derive the background-worker
-settings. Every collector table becomes a hypertable — all 71 of them, 29 PostgreSQL — so the required
+settings. Nearly every collector table becomes a hypertable. The required
 numbers move whenever collectors are added, and undersizing does not error — it silently stops
 compression and retention from running. See
 [Background workers](../Darling/README.md#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont);
-for an 8 GB host the numbers are 128 and 139 for 72 hypertables (74 and 85 at 4 GB or less, 177 and 188 at 12 GB or more), and both need a server restart. Managed mode does this itself.
+count your own hypertables and continuous aggregates with the two queries there and work its formula. For example, a store with 72 hypertables and 29 continuous aggregates gets 128 and 139 on an 8 GB host. It gets 74 and 85 at 4 GB or less, and 177 and 188 at 12 GB or more. Both settings need a server restart. Managed mode does this itself.
 
 ## 5. First start, in console mode
 
