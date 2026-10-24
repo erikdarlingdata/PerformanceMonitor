@@ -369,7 +369,7 @@ VALUES ({id}, '{Ts(seen)}', {Server}, 'srv', 'AppDb', 7, {plan}, 'Regular', '{Ts
 VALUES ({id}, '{Ts(seen)}', {Server}, 'srv', 'AppDb', {queryId}, {plan}, 'Regular', '{Ts(seen.AddHours(-1))}', '{Ts(seen.AddMinutes(plan))}', {executions}, {avgCpu}, {avgCpu}, '0xHASH{plan}', {plan}, '{text}')");
         Plan(1, 7, 1, 100, 50, "SELECT * FROM dbo.Orders");
         Plan(2, 7, 2, 1000, 40, "SELECT * FROM dbo.Orders");
-        const string cleanup = "delete top(@batch_size) from sys.change_tracking_1234567 where sys_change_xdes_id < @cutoff";
+        const string cleanup = "delete top(@batch_size) from sys.[change_tracking_1228027148] where sys_change_xdes_id < @cutoff";
         Plan(3, 8, 3, 100, 50, cleanup);
         Plan(4, 8, 4, 10000, 40, cleanup);
         CollectorRan("query_store", T0.AddMinutes(2));
@@ -383,9 +383,12 @@ VALUES ({id}, '{Ts(seen)}', {Server}, 'srv', 'AppDb', {queryId}, {plan}, 'Regula
 
     [Theory]
     [InlineData("delete top(@batch_size) from sys.change_tracking_1234567 where x < @y", true)]
+    [InlineData("(@csn bigint,@batch_size int)delete top(@batch_size) from sys.[change_tracking_1228027148] where sys_change_xdes_id < @csn", true)]
+    [InlineData("DELETE TOP (@batch_size)\r\n FROM SYS.[CHANGE_TRACKING_1228027148]", true)]
     [InlineData("DELETE TOP (@batch_size)\r\n FROM sys.change_tracking_99", true)]
     [InlineData("EXEC sys.sp_flush_commit_table_on_demand 1000", true)]
     [InlineData("EXEC sys.sp_cdc_cleanup_change_table @capture_instance = N'dbo_Orders'", true)]
+    [InlineData("SELECT * FROM sys.[change_tracking_tables]", false)]
     [InlineData("SELECT * FROM sys.change_tracking_tables", false)]
     [InlineData("SELECT * FROM dbo.Orders", false)]
     [InlineData(null, false)]

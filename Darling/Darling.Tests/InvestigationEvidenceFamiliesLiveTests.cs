@@ -230,7 +230,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             await PlantQueryStoreAsync(setup.Connection, ct, 511, 22, 2, cpuUs: 10_000, lastExec: AlertAt.AddMinutes(-1));
             await PlantQueryStoreAsync(setup.Connection, ct, 512, 23, 1, cpuUs: 1_000, lastExec: AlertAt.AddMinutes(-4));
             await PlantQueryStoreAsync(setup.Connection, ct, 512, 24, 2, cpuUs: 100_000, lastExec: AlertAt.AddMinutes(-1));
-            foreach (var (queryId, text) in new[] { (511L, "SELECT * FROM dbo.Orders"), (512L, "delete top(@batch_size) from sys.change_tracking_1234567 where x < @y") })
+            foreach (var (queryId, text) in new[] { (511L, "SELECT * FROM dbo.Orders"), (512L, "(@csn bigint,@batch_size int)delete top(@batch_size) from sys.[change_tracking_1228027148] where sys_change_xdes_id < @csn") })
             {
                 await DarlingMcpTestData.ExecAsync(setup.Connection, ct,
                     "INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen) VALUES ($1, $2, $3, $4, $5)",
