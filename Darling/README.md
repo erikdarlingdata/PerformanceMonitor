@@ -598,7 +598,7 @@ All sections except `postgres` and `servers` are optional — omit a section (or
 
 ### Where each setting lives: first-run seed or file only
 
-`darling.json` does two jobs. Some keys are read from the file at every start. Others are only a **first-run seed**: the first time the service starts against a store that has no settings yet, it copies them into the store. After that the store holds the only copy that counts, and the service replaces the file's value with the store's on every load. If you change a seeded key in the file and restart, nothing changes. Each seeded section is copied once, only while its own store table is empty.
+`darling.json` does two jobs. Some keys are read from the file at every start. Others are only a **first-run seed**. The first time the service starts against a store with no settings, it copies them into the store. After that the store holds the only copy that counts, and the service replaces the file's value with the store's on every load. If you change a seeded key in the file and restart, nothing changes. Each seeded section is copied once, only while its own store table is empty.
 
 | Keys | Where they live | Where to change them after the first start |
 |---|---|---|
@@ -609,7 +609,7 @@ All sections except `postgres` and `servers` are optional — omit a section (or
 | `planContentRetentionDays` (default `21`), `composeStatementTimeoutSeconds` (default `60`), `planXmlCompression` (default `"gzip"`) | First-run seed | Neither the Viewer nor MCP edits them. Change the column in `config.config_service` (`plan_content_retention_days`, `compose_statement_timeout_seconds`, `plan_xml_compression`). The statement timeout reaches the `viewer` and `mcp` roles on the next service start |
 | `mcp.enabled`, `mcp.port`, `web.enabled`, `web.port` | First-run seed | The Viewer's Settings window, live and with no restart. On a box with no Viewer, `--enable-mcp` and `--enable-web` |
 | `servers` | First-run seed, copied once while the server registry is empty. A server added to the file later is ignored | The Viewer, the web dashboard's Admin page, or the MCP tools `add_servers` and `edit_server`. The one exception is the `remediation*` and `hypotheticalIndex*` login keys, which the service syncs from the file at every start |
-| `analysis.uncorroboratedRoute` | Both. The store's value wins when it is set; otherwise the file's value is used | The store value, from the same places as the rest of `analysis`. Clear it to hand the choice back to the file |
+| `analysis.uncorroboratedRoute` | Both. The store's value wins when it is set. Otherwise the file's value is used | The store value, from the same places as the rest of `analysis`. Clear it to hand the choice back to the file |
 | `postgres`, `collectSchemaChangeEvents`, `rawChunkIntervalReconcileEnabled` (default `true`), `procedureStatsPlanCycleInterval`, `queryStatsDeferredPlanFetch`, `procedureStatsDeferredPlanFetch`, `allowedAwsRoles`, `peers`, `heartbeat`, `reads`, `forcePlanBot`, `analyzer`, and every other key in `mcp` and `web` (including `mcp.network` and `web.network`) | File only | Edit `darling.json` and restart the service |
 
 ### postgres
@@ -645,7 +645,7 @@ Two mutually exclusive modes — setting `managed: true` together with `connecti
 | `encryptMode` | `"Mandatory"` | `Mandatory` / `Strict` / `Optional`; unknown values fail closed to `Mandatory` |
 | `multiSubnetFailover` | `false` | |
 | `excludedDatabases` | `[]` | Databases excluded from collection |
-| `monthlyCostUsd` | `0` | The server's monthly cost in USD. Every cost figure on the FinOps tab is proportional math on this number; `0` hides the cost columns and cards |
+| `monthlyCostUsd` | `0` | The server's monthly cost in USD. Every cost figure on the FinOps tab is proportional math on this number. `0` hides the cost columns and cards |
 | `alertDeliveryModeOverride` | *(none)* | `"Summary"` or `"PerEvent"` for this server's deadlock and blocking alerts. With none, the server follows `alerts.deliveryMode` |
 | `awsRoleArn` | *(none)* | PostgreSQL targets on Amazon RDS or Aurora only: the IAM role ARN (such as `arn:aws:iam::123456789012:role/darling-monitor`) Darling assumes for this server's AWS calls (the host check, CPU and host memory from Performance Insights, and the log reads behind plan capture, deadlocks and log events). With none, the process's own AWS credentials are used. The role must be allowed: a role named in `servers[]` is allowed by being here, and the web, MCP, desktop viewer and `--add-server` can set only roles listed in [`allowedAwsRoles`](#allowedawsroles-array-optional). See the [runbook](../docs/postgres-first-target-runbook.md) for the trust policy |
 | `awsExternalId` | *(none)* | Optional, needs `awsRoleArn`: the external ID sent when the role is assumed, to match the trust policy's `sts:ExternalId` condition. 2 to 1224 characters. Never returned by the web or MCP and never written to a log |
@@ -831,26 +831,26 @@ These keys are in the same `alerts` section and are first-run seeds like the tab
 |---|---|---|
 | `notifyConnectionChanges` | `true` | Send the Server Unreachable and Server Restored alerts |
 | `notifyConnectionDownAtStartup` | `false` | Also announce a server that is already down on its first connect attempt after the service starts |
-| `connectionRefireMinutes` | `0` | Re-announce a server that stays down every N minutes; `0` is off |
+| `connectionRefireMinutes` | `0` | Re-announce a server that stays down every N minutes. `0` is off |
 | `notifyAgHealth` | `true` | Master switch for the Availability Group alerts (failover, replica disconnect and reconnect, sync fell behind, database suspended) |
-| `agLagAlertSeconds` | `300` | AG Sync Fell Behind fires when a secondary's lag reaches this many seconds; `0` is off |
-| `agRedoQueueAlertKb` | `0` | The second AG Sync Fell Behind trigger: a secondary's redo queue in KB; `0` is off |
-| `agDisconnectRefireMinutes` | `0` | Re-announce a replica that stays disconnected every N minutes; `0` is off |
+| `agLagAlertSeconds` | `300` | AG Sync Fell Behind fires when a secondary's lag reaches this many seconds. `0` is off |
+| `agRedoQueueAlertKb` | `0` | The second AG Sync Fell Behind trigger: a secondary's redo queue in KB. `0` is off |
+| `agDisconnectRefireMinutes` | `0` | Re-announce a replica that stays disconnected every N minutes. `0` is off |
 | `pvsEnabled` | `true` | The persistent version store alert (SQL Server databases with accelerated database recovery) |
-| `pvsThresholdPercent` | `40` | Fire when the version store reaches this percent of the database's data files; `0` turns the check off |
-| `pvsFloorGb` | `1` | A breach also needs at least this many GB of version store; `0` removes the floor |
+| `pvsThresholdPercent` | `40` | Fire when the version store reaches this percent of the database's data files. `0` turns the check off |
+| `pvsFloorGb` | `1` | A breach also needs at least this many GB of version store. `0` removes the floor |
 | `fileGrowthEnabled` | `false` | The database file-growth alert. Off by default |
-| `fileGrowthRiseMb` | `10240` | Fire when a database file grows faster than this many MB per hour, averaged over `fileGrowthLookbackMinutes`; `0` turns this gate off |
-| `fileGrowthVolumePercent` | `60` | Also fire when a growing database file is over this percent of its volume; `0` turns this gate off |
-| `fileGrowthLookbackMinutes` | `60` | The window the growth rate is averaged over; it does not rescale `fileGrowthRiseMb` |
-| `selfDiskFreeWarnPercent` | `10` | Store Disk Pressure warns below this percent free on the store's volume; `0` turns the check off |
-| `selfDiskFreeWarnGb` | `50` | The percent also needs free space below this many GB, so a large volume at a low percent does not page; `0` removes the floor |
-| `collectionStaleMinutes` | `30` | How long collection may go quiet before Collection Stopped fires |
+| `fileGrowthRiseMb` | `10240` | Fire when a database file grows faster than this many MB per hour, averaged over `fileGrowthLookbackMinutes`. `0` turns this gate off |
+| `fileGrowthVolumePercent` | `60` | Also fire when a growing database file is over this percent of its volume. `0` turns this gate off |
+| `fileGrowthLookbackMinutes` | `60` | The window the growth rate is averaged over. It does not rescale `fileGrowthRiseMb` |
+| `selfDiskFreeWarnPercent` | `10` | Store Disk Pressure warns below this percent free on the store's volume. `0` turns the check off |
+| `selfDiskFreeWarnGb` | `50` | The percent also needs free space below this many GB, so a large volume at a low percent does not page. `0` removes the floor |
+| `collectionStaleMinutes` | `30` | How long collection can go quiet before Collection Stopped fires |
 | `collectionFailureThreshold` | `10` | Consecutive failures with no success that fire Collection Stopped without waiting out the window above |
 | `diskCriticalFreePercent` | `3` | The Low Disk alert is graded Critical below this percent free |
 | `diskCriticalFreeGb` | `2` | The Low Disk alert is graded Critical below this many GB free |
 | `analysisNotifyCooldownMinutes` | `360` | Cooldown between notifications for the same analysis finding (clamped 30 to 10080) |
-| `storeJobCadenceWarnPercent` | `25` | Store Job Over Cadence warns when a store job's last run reaches this percent of its schedule interval; Critical is fixed at 100 |
+| `storeJobCadenceWarnPercent` | `25` | Store Job Over Cadence warns when a store job's last run reaches this percent of its schedule interval. Critical is fixed at 100 |
 | `retentionHoldWarnRatio` | `2.0` | Retention Held warns when a policy held by rollup coverage is holding this many times its own horizon |
 | `retentionHoldCriticalRatio` | `4.0` | The same for the Critical tier |
 | `fleetSweepEnabled` | `true` | Run the scheduled fleet sweep. It has its own switch and keeps running when `enabled` is `false` |
@@ -1213,7 +1213,7 @@ An identical long read is answered from memory for a short time: 15 seconds for 
 
 There are deliberately **no collection-schedule settings and no per-collector retention settings** in `darling.json`. The service consumes the shared per-collector defaults (`CollectorScheduleDefaults`) — the same cadences and retention horizons a fresh Lite install uses, identity-pinned by tests so the two editions cannot drift. If a schedule knob is ever genuinely needed, it will be added then, not speculatively.
 
-One retention setting does exist in the file: `planContentRetentionDays`. It sets how many days a stored plan outlives its last sighting before it may be removed. The default is `21`, `0` turns it off, and any other value is held to 7 through 365. It is a first-run seed (see [Where each setting lives](#where-each-setting-lives-first-run-seed-or-file-only)), so after the first start you change it in the store. The plan's query statistics keep their normal retention; a plan older than this limit shows as a missing plan.
+One retention setting does exist in the file: `planContentRetentionDays`. It sets how many days a stored plan outlives its last sighting before it can be removed. The default is `21`, `0` turns it off, and any other value is held to 7 through 365. It is a first-run seed (see [Where each setting lives](#where-each-setting-lives-first-run-seed-or-file-only)), so after the first start you change it in the store. The plan's query statistics keep their normal retention. A plan older than this limit shows as a missing plan.
 
 The overrides that do exist live in the **store**, not the file. `config.config_collector_schedules` is a sparse table where an absent row means "the code default". The Viewer's Collector Schedules window is where cadence, retention, database scope, the enabled flag and the run time are edited, per fleet or per server. The two columns an operator *must* be able to change without a desktop are the enabled flag and the run time. The next two sections are those paths.
 
