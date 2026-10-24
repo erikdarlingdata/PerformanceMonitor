@@ -1772,6 +1772,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                command plane's own plans on config.config_collector_schedules and config_collector_run_times; the mcp role holds the
                narrow write grant on those two tables. */
             .WithGeminiCompatibleTools<DarlingMcpCollectorScheduleTools>()
+            /* #6393: update_service_flags (a write, mcp.allowWrites, never offered to an investigation agent) sets plan capture, Query Store
+               backfill, text budget, max concurrent sweeps and fetch top N on config.config_service. The mcp role holds a column grant on
+               exactly those five columns, so the MCP and web flags and ports and paused stay Viewer-only. */
+            .WithGeminiCompatibleTools<DarlingMcpServiceFlagTools>()
             /* The server-onboarding WRITE tools — add_servers (BULK) / remove_server: an MCP client can stand up
                or tear down FLEET monitoring conversationally. The service-side twin of the Viewer's Add / Add-
                Multiple dialogs: add_servers validates each entry, probes the connection IN-PROCESS (the service

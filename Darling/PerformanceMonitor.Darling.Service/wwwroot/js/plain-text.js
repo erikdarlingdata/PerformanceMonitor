@@ -75,7 +75,7 @@ export const MCP_ACTION_TOOL_NAMES = [
   "submit_investigation_report", "test_connection", "test_custom_alert_rule", "test_query_tag_rule", "unassign_query_tag",
   "unassign_server_tag", "undo_plan_change", "unforce_query_store_plan", "unmute_analysis_finding", "update_alert_settings", "update_custom_alert_rule",
   "update_custom_view", "update_mute_rule", "update_notification_channels", "update_notification_route", "update_query_tag", "update_query_tag_rule",
-  "update_server_tag", "validate_custom_alert_rule", "validate_custom_view", "wait_for_investigation_requests",
+  "update_server_tag", "update_service_flags", "validate_custom_alert_rule", "validate_custom_view", "wait_for_investigation_requests",
 ];
 const ACTION_TOOL_SET = new Set(MCP_ACTION_TOOL_NAMES);
 
