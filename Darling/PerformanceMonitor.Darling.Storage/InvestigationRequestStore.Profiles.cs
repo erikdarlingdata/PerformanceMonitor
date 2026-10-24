@@ -72,8 +72,11 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
     /// <summary>Whether a tag exists (#6400). $1 tag id. No foreign key ties a profile to its tag, so a save checks it.</summary>
     public const string TagExistsSql = "SELECT 1 FROM config.server_tags WHERE id = $1";
 
-    /// <summary>Whether a server is registered (#6400). $1 server id. No foreign key ties a profile to its server, so a save checks it.</summary>
-    public const string ServerExistsSql = "SELECT 1 FROM collect.servers WHERE server_id = $1";
+    /// <summary>Whether a server is registered (#6400): defined in <c>config.config_monitored_servers</c>, the set every picker and
+    /// <c>list_servers</c> offer. Not <c>collect.servers</c>: that is the observed registry, written on a server's first connection (so a server
+    /// just added has no row there yet) and never pruned (so a removed server keeps its row). $1 server id. No foreign key ties a profile to its
+    /// server, so a save checks it.</summary>
+    public const string ServerExistsSql = "SELECT 1 FROM config.config_monitored_servers WHERE server_id = $1";
 
     /// <summary>A profile: one scope at most (fleet, a server or a tag), at most <see cref="MaxLength"/> characters. A tag id is 1 or more
     /// (#6400): the store matches a scope on <c>coalesce(scope_tag_id, 0)</c>, so a profile saved for tag 0 would stand in the fleet profile's place.</summary>

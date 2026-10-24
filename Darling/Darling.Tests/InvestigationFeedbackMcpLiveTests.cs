@@ -80,6 +80,8 @@ public sealed class InvestigationFeedbackMcpLiveTests
             await owner.OpenAsync(ct);
             await PgMigrations.MigrateAsync(owner, ct);
             await DarlingMcpTestData.RegisterServerAsync(owner, ServerId, ServerName, ct);
+            /* #6400: a profile may name a server the operator defined (config_monitored_servers), not merely one the worker observed (collect.servers). */
+            await DarlingMcpTestData.ExecAsync(owner, ct, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ($1, $2, 'host-a')", ServerId, ServerName);
             /* The managed roles carry fixed names and a role is cluster-wide: never adopt or drop a set that belongs to something else. */
             await using var probe = new NpgsqlCommand("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", owner);
             Assert.SkipWhen((bool)(await probe.ExecuteScalarAsync(ct))!, "A cluster-wide admin/viewer/mcp role already exists on this rig; the managed provisioning batch would adopt it.");
@@ -224,6 +226,17 @@ public sealed class InvestigationFeedbackMcpLiveTests
             Assert.Null(removed["profile"]!["after"]);
             Assert.Equal("0", await ScalarAsync(ownerSource, "SELECT count(*) FROM config.agent_environment_profiles WHERE scope_server_id IS NULL AND scope_tag_id IS NULL", ct));
             Assert.Equal("profile_removed", await ScalarAsync(ownerSource, "SELECT event FROM config.investigation_journal WHERE event LIKE 'profile_%' ORDER BY journal_id DESC LIMIT 1", ct));
+
+            /* #6400: a server that was removed keeps its collect.servers row (the registry is never purged), so its name still resolves; with no
+               config_monitored_servers row it is not registered, and the save is refused with the store's sentence and writes nothing. */
+            await ExecAsync(ownerSource, $"INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) VALUES ({ServerId + 1}, 'LcFeedbackRemoved', 'LcFeedbackRemoved', TRUE, 15, now(), now())", ct);
+            var removedRows = await ScalarAsync(ownerSource, "SELECT count(*) FROM config.agent_environment_profiles", ct);
+            var removedJournal = await ScalarAsync(ownerSource, "SELECT count(*) FROM config.investigation_journal", ct);
+            var removedServer = Parse(await DarlingMcpInvestigationFeedbackTools.SaveEnvironmentProfile(mcp, "Removed server.", "LcFeedbackRemoved", cancellationToken: ct));
+            Assert.Equal("invalid", (string)removedServer["status"]!);
+            Assert.Contains($"Server {ServerId + 1} is not a registered server, so no profile was saved.", (string)removedServer["message"]!, StringComparison.Ordinal);
+            Assert.Equal(removedRows, await ScalarAsync(ownerSource, "SELECT count(*) FROM config.agent_environment_profiles", ct));
+            Assert.Equal(removedJournal, await ScalarAsync(ownerSource, "SELECT count(*) FROM config.investigation_journal", ct));
 
             /* #6400: tag 0, a negative tag and a tag that names no tag are invalid and write nothing (the profile table has no foreign key to
                the tags); a fleet save afterwards still works, and an existing tag saves. The mcp role reads the tag with its config SELECT. */

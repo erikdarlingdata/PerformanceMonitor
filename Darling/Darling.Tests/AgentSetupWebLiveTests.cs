@@ -73,6 +73,9 @@ public sealed class AgentSetupWebLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        /* #6400: the server a profile may name is one the operator defined (config_monitored_servers, what every picker lists), not one the worker
+           has observed (collect.servers, written on a first connection and never pruned), so the fixture's server is defined as well. */
+        await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ($1, $2, 'host-a')", ServerId, ServerName);
         return NpgsqlDataSource.Create(scratch.ConnectionString);
     }
 
@@ -943,8 +946,8 @@ public sealed class AgentSetupWebLiveTests
     }
 
     /* #6400: the server side of the tag test above. The profile table has no foreign key to a server either, so a profile for server 0 (or
-       below), or for a server id that is not registered, is a 400 with one sentence and writes nothing; a registered server still saves, and
-       a blank save still removes the profile of a server that has gone. */
+       below), or for a server id that is not registered (no row in config.config_monitored_servers), is a 400 with one sentence and writes
+       nothing; a registered server still saves, and a blank save still removes the profile of a server that has gone. */
     [Fact]
     public async Task EnvironmentProfiles_AServerThatIs0OrBelowOrIsNotRegistered_Is400_AndWritesNothing_ViaTheWebAndTheStore()
     {
@@ -954,6 +957,18 @@ public sealed class AgentSetupWebLiveTests
             const string Journal = "SELECT count(*) FROM config.investigation_journal WHERE event IN ('profile_saved', 'profile_removed')";
             var store = new InvestigationRequestStore(owner, 30);
             var unregistered = ServerId + 1000;
+            var neverConnected = ServerId + 2000;
+
+            /* The registered/observed split (#6400): `unregistered` was observed (it has a collect.servers row, as a removed server keeps one) but
+               has no definition; `neverConnected` is defined and has never connected (no collect.servers row, as a server just added). */
+            await using (var observed = await owner.OpenConnectionAsync(ct))
+            {
+                await DarlingMcpTestData.RegisterServerAsync(observed, unregistered, "LcAgentSetupRemoved", ct);
+            }
+
+            await ExecAsync(owner, $"INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ({neverConnected}, 'LcAgentSetupNew', 'host-new')", ct);
+            Assert.Equal("0", await ScalarAsync(owner, $"SELECT count(*) FROM collect.servers WHERE server_id = {neverConnected}", ct));
+            Assert.Equal("0", await ScalarAsync(owner, $"SELECT count(*) FROM config.config_monitored_servers WHERE server_id = {unregistered}", ct));
 
             Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\"}")).Status);
             var fleetStamp = await ScalarAsync(owner, "SELECT modified_at::text FROM config.agent_environment_profiles", ct);
@@ -979,10 +994,18 @@ public sealed class AgentSetupWebLiveTests
             /* A registered server still saves; an orphan profile (its server gone) can still be removed by a blank save. */
             Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{ServerId},\"profile_text\":\"server: reporting\"}}")).Status);
             Assert.Equal("2", await ScalarAsync(owner, Rows, ct));
+
+            /* A defined server that has never connected saves, through the web and through the store. */
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{neverConnected},\"profile_text\":\"server: just added\"}}")).Status);
+            Assert.Equal("3", await ScalarAsync(owner, Rows, ct));
+            await store.SaveProfileAsync(neverConnected, null, "server: just added, edited", "dave",
+                (await store.ListProfilesAsync(ct)).First(p => p.ScopeServerId == neverConnected).ModifiedAtUtc, ct);
+            Assert.Equal("server: just added, edited", await ScalarAsync(owner, $"SELECT profile_text FROM config.agent_environment_profiles WHERE scope_server_id = {neverConnected}", ct));
+
             await ExecAsync(owner, $"INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text, modified_by) VALUES ({unregistered}, 'orphan', 'test')", ct);
             Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{unregistered},\"profile_text\":\"orphan, edited\"}}")).Status);
             Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{unregistered},\"profile_text\":\"\"}}")).Status);
-            Assert.Equal("2", await ScalarAsync(owner, Rows, ct));
+            Assert.Equal("3", await ScalarAsync(owner, Rows, ct));
         }, seat: new DarlingWebSeat("alice", true));
     }
 
