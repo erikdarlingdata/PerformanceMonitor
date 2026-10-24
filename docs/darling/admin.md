@@ -1,5 +1,7 @@
 # Running Darling day to day
 
+Audience: operators.
+
 This page is for the person who keeps a Darling install running after the first week. Each heading below is one task, written as numbered steps. When you need to know what a setting means, follow the link to the [Darling operator guide](../../Darling/README.md).
 
 ## Read this first: `darling.json` is only a seed for the server list

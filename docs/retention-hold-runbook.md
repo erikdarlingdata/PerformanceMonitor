@@ -1,5 +1,7 @@
 # Clearing a "Retention Held" alert (Darling)
 
+Audience: operators.
+
 The `Retention Held` self-alert (#2813) means a retention policy has been **paused on purpose** and the
 tier it governs has grown past its configured horizon. Warning fires at 2.0x that horizon by default,
 Critical at 4.0x; both are settable — see [Adjusting the thresholds](#adjusting-the-thresholds).

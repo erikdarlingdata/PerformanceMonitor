@@ -1,5 +1,7 @@
 # Install Darling
 
+Audience: operators.
+
 This page takes you from a downloaded zip to a service that collects data. It is for anyone who installs Darling on Windows. You need a Windows box, a SQL Server that you are allowed to monitor, and a Darling build. You do not need to have run Darling before.
 
 The service fills one store. Three surfaces read that store, and each has its own page:

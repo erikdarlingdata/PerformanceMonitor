@@ -1,5 +1,7 @@
 # Back up, restore and move the store
 
+Audience: operators.
+
 This guide shows how to back up a Darling store, restore it, and move it to another machine. It covers the three ways a store runs: the managed store on Windows, your own PostgreSQL, and the Linux compose stack. It ends with how much disk the store uses and how to change that.
 
 The store is the PostgreSQL database named `darling`. Copying the database is not enough. The service also keeps files outside the database that the database cannot be opened or read without. Back those up with the database, and keep them apart from it where the section says so.

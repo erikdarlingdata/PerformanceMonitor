@@ -1,5 +1,7 @@
 # Tabs
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 The **Lite** app and the **Darling** viewer have the same main-window tabs and nearly the same tabs for one server. The viewer is Lite's front end reading a Postgres store instead of local DuckDB.
