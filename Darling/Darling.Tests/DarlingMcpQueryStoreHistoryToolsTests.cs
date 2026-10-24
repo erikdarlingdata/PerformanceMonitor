@@ -12,6 +12,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -29,22 +30,21 @@ public sealed class DarlingMcpQueryStoreHistoryToolsTests
     private static ForcedPlanFact Fact(long plan, ForcedPlanState state, DateTime lastSeen, long query = 1, string db = "Db") =>
         new(db, query, plan, state, lastSeen, lastSeen, null, lastSeen, null, 0, null, 0, null, Array.Empty<ForcedPlanOtherPlan>());
 
-    /// <summary>#6598: one plan with a REMOVED fact and a standing fact gives one fact, the standing one, even when the REMOVED one is newer.</summary>
+    /// <summary>
+    /// #6598: the facts the reader emits, one per (database, plan_id). Only the named query's facts stay, standing before REMOVED, then in plan order.
+    /// The reader's <c>DISTINCT ON (database_name, plan_id)</c> never emits two facts for one plan in one database, so no such fixture is built.
+    /// </summary>
     [Fact]
-    public void PickForces_KeepsOneFactPerPlan_AndAStandingForceBeatsARemovedOne()
+    public void PickForces_KeepsTheNamedQuerysFacts_OnePerPlan()
     {
         var t = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         var picked = DarlingMcpQueryStoreHistoryTools.PickForces(new[]
         {
-            Fact(7, ForcedPlanState.Removed, t.AddHours(2)),
-            Fact(7, ForcedPlanState.Working, t),
-            Fact(8, ForcedPlanState.Removed, t),
-            Fact(8, ForcedPlanState.Removed, t.AddHours(1)),
+            Fact(7, ForcedPlanState.Removed, t),
+            Fact(8, ForcedPlanState.Working, t),
             Fact(9, ForcedPlanState.Working, t, query: 2),
         }, "Db", 1);
-        Assert.Equal(new long[] { 7, 8 }, picked.Select(f => f.PlanId).ToArray());
-        Assert.Equal(ForcedPlanState.Working, picked[0].State);
-        Assert.Equal(t.AddHours(1), picked[1].LastSeen);
+        Assert.Equal(new long[] { 8, 7 }, picked.Select(f => f.PlanId).ToArray());
     }
 
     /// <summary>#6598: facts of another database never merge into the named database's fact (a blank name reads every database).</summary>
@@ -67,6 +67,49 @@ public sealed class DarlingMcpQueryStoreHistoryToolsTests
         var picked = DarlingMcpQueryStoreHistoryTools.PickForces(facts, "Db", 1);
         Assert.Equal(99, picked[0].PlanId);
         Assert.Contains(picked, f => f.PlanId == 99);
+    }
+
+    /// <summary>
+    /// #6598: a REMOVED force that has no history rows still gets a row, and that row is not forced. A standing force with no rows gets a forced row.
+    /// Inverting <c>IsStanding</c> on the synthesized row fails both arms.
+    /// </summary>
+    [Fact]
+    public void WithForcedPlans_AForceWithNoRows_GetsARowThatIsForcedOnlyWhileItStands()
+    {
+        var t = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var ran = new DarlingMcpQueryStoreHistoryTools.PlanTotals(3, 5, 1, 5, 1, 5, t, t, false);
+        var rows = DarlingMcpQueryStoreHistoryTools.WithForcedPlans(
+            new() { ran }, new() { ran },
+            new[] { Fact(4, ForcedPlanState.Removed, t), Fact(5, ForcedPlanState.Working, t) });
+        Assert.Equal(new long[] { 3, 4, 5 }, rows.Select(p => p.PlanId).ToArray());
+        Assert.False(rows[0].IsForcedPlan);
+        Assert.False(rows[1].IsForcedPlan);
+        Assert.Equal(0, rows[1].ExecutionCount);
+        Assert.True(rows[2].IsForcedPlan);
+        Assert.Equal(0, rows[2].ExecutionCount);
+    }
+
+    /// <summary>
+    /// #6598: a REMOVED force's runs were not read, so its node says so with nulls, not the zeros of a force that was measured and did not run.
+    /// The same node for a standing force with no runs does report zero, because there the zero was read. Both tools share this node.
+    /// </summary>
+    [Fact]
+    public void ForceNode_ARemovedForceDoesNotReportZeroRuns_AStandingOneDoes()
+    {
+        var t = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        using var removed = JsonDocument.Parse(JsonSerializer.Serialize(DarlingMcpForcedPlanTools.ForceNode(Fact(4, ForcedPlanState.Removed, t))));
+        var r = removed.RootElement;
+        Assert.Equal("REMOVED", r.GetProperty("state").GetString());
+        Assert.False(r.GetProperty("runs_read").GetBoolean());
+        foreach (var name in new[] { "forced_plan", "variant_plans", "variant_plans_total", "other_plans", "other_plans_total", "unknown_plans", "unknown_plans_total" })
+            Assert.Equal(JsonValueKind.Null, r.GetProperty(name).ValueKind);
+
+        using var standing = JsonDocument.Parse(JsonSerializer.Serialize(DarlingMcpForcedPlanTools.ForceNode(Fact(5, ForcedPlanState.NotExercised, t))));
+        var s = standing.RootElement;
+        Assert.True(s.GetProperty("runs_read").GetBoolean());
+        Assert.Equal(0, s.GetProperty("forced_plan").GetProperty("execution_count").GetInt64());
+        Assert.Equal(0, s.GetProperty("other_plans_total").GetInt32());
+        Assert.Equal(JsonValueKind.Array, s.GetProperty("other_plans").ValueKind);
     }
 
     /// <summary>#6598: a REMOVED fact alone does not make a plan forced. Sampled-forced stays forced.</summary>

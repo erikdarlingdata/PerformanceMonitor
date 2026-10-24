@@ -270,6 +270,11 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,$12,0)",
                 Assert.Equal(51, force.GetProperty("plan_id").GetInt64());
                 Assert.Equal("REMOVED", force.GetProperty("state").GetString());
                 Assert.Equal("ok", removed.RootElement.GetProperty("forced_plans_status").GetString());
+                /* The plan ran 3 times, and the force's own runs were not read, so the force does not say it ran zero times. */
+                Assert.Equal(3, plan.GetProperty("execution_count").GetInt64());
+                Assert.False(force.GetProperty("runs_read").GetBoolean());
+                Assert.Equal(JsonValueKind.Null, force.GetProperty("forced_plan").ValueKind);
+                Assert.Equal(JsonValueKind.Null, force.GetProperty("other_plans_total").ValueKind);
             }
 
             return 0;

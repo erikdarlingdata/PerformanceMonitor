@@ -290,6 +290,17 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         }
     }
 
+    /// <summary>
+    /// A plan forced in the newest capture is always listed, cut or not, run or not. One that never ran in the window gets a row of zeros that is
+    /// forced only while its force stands (#6598), so a REMOVED force with no rows is not marked forced.
+    /// </summary>
+    internal static List<PlanTotals> WithForcedPlans(List<PlanTotals> plans, List<PlanTotals> allPlans, IReadOnlyList<ForcedPlanFact> facts) =>
+        plans
+            .Concat(allPlans.Where(p => facts.Any(f => f.PlanId == p.PlanId) && !plans.Any(k => k.PlanId == p.PlanId)))
+            .Concat(facts.Where(f => !allPlans.Any(p => p.PlanId == f.PlanId))
+                .Select(f => new PlanTotals(f.PlanId, 0, null, 0, null, 0, null, null, IsStanding(f))))
+            .OrderBy(p => p.PlanId).ToList();
+
     /// <summary>A force that still stands. REMOVED is a record that a force ended (#6598).</summary>
     internal static bool IsStanding(ForcedPlanFact fact) => fact.State != ForcedPlanState.Removed;
 
@@ -298,14 +309,13 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         sampledForced || (fact is not null && IsStanding(fact));
 
     /// <summary>
-    /// One fact per plan_id for the query in the named database (#6598): a standing force wins over a REMOVED one, else the newest (LastSeen)
-    /// wins. Standing forces come first, so a REMOVED force never pushes a standing one out of the <see cref="MaxPlans"/> cap. Facts of other
-    /// databases are dropped: a blank database_name widens the read to every database, and the history rows never match a blank name.
+    /// The facts of the query in the named database (#6598), standing forces first, so a REMOVED force never pushes a standing one out of the
+    /// <see cref="MaxPlans"/> cap. The reader emits one fact per (database, plan_id) (<c>DISTINCT ON</c>), so with the database named there is one fact
+    /// per plan_id and no tiebreak is needed. Facts of other databases are dropped: a blank database_name widens the read to every database, the same
+    /// plan_id can be forced in two of them, and the history rows never match a blank name.
     /// </summary>
     internal static List<ForcedPlanFact> PickForces(IEnumerable<ForcedPlanFact> facts, string databaseName, long queryId) =>
         facts.Where(f => f.QueryId == queryId && string.Equals(f.DatabaseName, databaseName, StringComparison.Ordinal))
-            .GroupBy(f => f.PlanId)
-            .Select(g => g.OrderBy(f => f.State == ForcedPlanState.Removed ? 1 : 0).ThenByDescending(f => f.LastSeen).First())
             .OrderBy(f => f.State == ForcedPlanState.Removed ? 1 : 0).ThenBy(f => f.PlanId)
             .Take(MaxPlans).ToList();
 
@@ -315,8 +325,9 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         "Outcomes (Regular, Aborted, Exception) and replica roles are combined, execution-weighted, into one value per plan and collection time. " +
         "Reads the raw tier, or the per-interval table (kept 10 days) past raw retention, by get_query_store_top's own rule, so it covers what that grid does; effective_start is where complete history begins. " +
         "points keeps the newest 150 of the listed plans (points_truncated) and plans the 20 longest by total duration (plans_truncated). " +
-        "Every plan of the query forced in its database's newest forced-plan capture is listed, standing forces first (forced_state: WORKING, NOT_EXERCISED, IGNORED, FAILING or UNKNOWN_PLAN_NOT_COLLECTED; get_forced_plans explains the states), even with no executions in the window. " +
-        "A force removed in the window is listed too, as forced_state REMOVED; it does not make is_forced_plan true, which means forced when sampled or standing now. " +
+        "Every plan of the query forced in its database's newest forced-plan capture is listed (forced_state: WORKING, NOT_EXERCISED, IGNORED, FAILING or UNKNOWN_PLAN_NOT_COLLECTED; get_forced_plans explains the states), even with no executions in the window. " +
+        "A force removed in the window is listed too, as forced_state REMOVED, after the standing forces in forced_plans; it does not make is_forced_plan true, which means forced when sampled or standing now. " +
+        "A REMOVED entry has runs_read false and null run fields (forced_plan, variant_plans, other_plans, unknown_plans): its runs are not read, so null means not measured, not zero runs. The plans list has the plan's own executions. " +
         "is_forced_plan true with forced_state null: when forced_plans_status is ok, no force is in the capture at all; when it is no_capture_in_window or unavailable, the force state is unknown. " +
         "Each forced_plans entry also lists variant_plans (plans SQL Server compiled to run the force, which count as the forced plan running) and plan_guide (a plan guide that covers the query), as get_forced_plans does.")]
     public static async Task<string> GetQueryStoreQueryHistory(
@@ -397,11 +408,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
             var plans = plansTruncated ? allPlans.OrderByDescending(p => p.TotalDurationMs).Take(MaxPlans).OrderBy(p => p.PlanId).ToList() : allPlans;
             var forcedById = forced.Facts.ToDictionary(f => f.PlanId);
             /* A plan forced in the newest capture is always listed, cut or not, run or not. */
-            plans = plans
-                .Concat(allPlans.Where(p => forcedById.ContainsKey(p.PlanId) && !plans.Any(k => k.PlanId == p.PlanId)))
-                .Concat(forced.Facts.Where(f => !allPlans.Any(p => p.PlanId == f.PlanId))
-                    .Select(f => new PlanTotals(f.PlanId, 0, null, 0, null, 0, null, null, IsStanding(f))))
-                .OrderBy(p => p.PlanId).ToList();
+            plans = WithForcedPlans(plans, allPlans, forced.Facts);
             var allPoints = BuildPoints(rows, plans.Select(p => p.PlanId));
             var points = NewestWithinBudget(allPoints, p => JsonSerializer.SerializeToUtf8Bytes(p, McpHelpers.JsonOptions).Length, MaxPoints, PointByteBudget);
             var pointsTruncated = points.Count < allPoints.Count;

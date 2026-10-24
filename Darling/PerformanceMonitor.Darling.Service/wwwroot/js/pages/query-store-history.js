@@ -141,14 +141,14 @@ const cell = (text, cls) => el("td", { class: cls || null, text: text == null ? 
 const num = (v, f) => (v == null ? "—" : f(v));
 const whole = (v) => Number(v).toLocaleString("en-US", { maximumFractionDigits: 0 });
 
-/* `scope` is the panel's own key. It keys each Plan button's panel, so a plan opened here is not also open in the grid's Plan
-   column or in the History table under another row of the same query. */
 /* The Forced column follows is_forced_plan, so a plan whose force was removed and never sampled as forced says "No (removed)", not "Yes (removed)" (#6598). */
 function forcedLabel(p) {
   const state = p.forced_state ? " (" + p.forced_state.toLowerCase().replace(/_/g, " ") + ")" : "";
   return (p.is_forced_plan ? "Yes" : "No") + state;
 }
 
+/* `scope` is the panel's own key. It keys each Plan button's panel, so a plan opened here is not also open in the grid's Plan
+   column or in the History table under another row of the same query. */
 function planTable(server, data, scope) {
   const head = ["Plan ID", "Execs", "Avg Duration", "Total Duration", "Avg CPU", "Total CPU", "First seen", "Last seen", "Forced", "Plan"];
   const rows = data.plans.map((p) =>
