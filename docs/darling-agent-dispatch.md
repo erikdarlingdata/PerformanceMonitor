@@ -1,5 +1,7 @@
 # Agent dispatch (Darling)
 
+Audience: operators.
+
 Agent dispatch hands an alert to an agent that you run yourself. Darling ships no agent. It opens a request when an alert fires, gives the agent a brief, and records the agent's report. At the higher levels the agent can also change settings, and Darling records every change so that a person can undo it.
 
 Lite can hand an alert to an agent too, but only to read and report. See "Lite" at the end of this page.

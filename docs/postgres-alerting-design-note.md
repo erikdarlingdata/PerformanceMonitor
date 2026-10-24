@@ -1,5 +1,7 @@
 # PostgreSQL alerting — scoping note
 
+Audience: contributors. This is a design note, kept as history. Don't follow it as a procedure.
+
 Status: **decided (Option B) and implemented.** Kept for the reasoning; see the header notes on
 `IPostgresAlertReadAdapter` and `PostgresAlertEvaluator` for what shipped.
 
