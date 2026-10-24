@@ -22,9 +22,9 @@ namespace PerformanceMonitorLite.Tests;
 /// #6458: a first start on an empty data root must not log a warning about the <c>notification_routes</c> table. The cache
 /// primed its first load when the loader was installed, before the store had created the table, so the first load failed and
 /// logged. The loader is now installed after the store is initialized. A table that is missing after that is still logged.
-/// In the <c>app-alert-statics</c> collection because the log buffer it drains is process-wide.
+/// In the <c>app-logger-statics</c> collection because the log buffer it drains is process-wide, and every class that drains it is in that collection.
 /// </summary>
-[Collection("app-alert-statics")]
+[Collection("app-logger-statics")]
 public sealed class NotificationRouteFirstStartTests : IDisposable
 {
     /* Only an upper bound on one in-process read of a freshly built file; the store is initialized before the wait, so it ends in
