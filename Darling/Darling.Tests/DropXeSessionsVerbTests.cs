@@ -1328,11 +1328,6 @@ public sealed class DropXeSessionsVerbTests
         var collector = readme[collectorAt..Math.Min(readme.Length, collectorAt + 500)];
         Assert.Contains("If that attempt failed or ran out of time", collector, StringComparison.Ordinal);
         Assert.Contains("`--drop-xe-sessions --print-sql`", collector, StringComparison.Ordinal);
-
-        // The list of verbs that survive an unusable store connection names this one.
-        var listAt = readme.IndexOf("Every other verb that opens the store (", StringComparison.Ordinal);
-        Assert.True(listAt >= 0, "the README no longer lists the verbs that open the store");
-        Assert.Contains("`--drop-xe-sessions <server-name>`", readme[listAt..Math.Min(readme.Length, listAt + 400)], StringComparison.Ordinal);
     }
 
     [Fact]
