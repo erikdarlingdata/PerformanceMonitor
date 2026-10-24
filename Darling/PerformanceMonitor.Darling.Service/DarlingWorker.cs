@@ -8863,7 +8863,7 @@ LIMIT 1";
                         NumericThresholdValue: threshold,
                         Muted: muted,
                         Severity: AlertEngine.GradeDeadlockFire(count, rateTiers),
-                        ShortMessage: $"{count} deadlock(s) in the last hour"),
+                        ShortMessage: $"{count} {(count == 1 ? "deadlock" : "deadlocks")} in the last hour"),
                     cancellationToken);
                 readClock.Restart();
 
@@ -9042,7 +9042,7 @@ LIMIT 1";
                         NumericThresholdValue: threshold,
                         Muted: muted,
                         Severity: PgBlockingFireSeverity,
-                        ShortMessage: $"{count} blocking session(s)"),
+                        ShortMessage: $"{count} blocking {(count == 1 ? "session" : "sessions")}"),
                     cancellationToken);
                 readClock.Restart();
 
@@ -9255,7 +9255,7 @@ LIMIT 1";
                         key,
                         snapshot.ServerName,
                         metricName,
-                        $"{rows.Count} query(s), longest {elapsedMinutes}m",
+                        $"{rows.Count} {(rows.Count == 1 ? "query" : "queries")}, longest {elapsedMinutes}m",
                         $"{thresholdMinutes}m",
                         Context: AlertSampleAge.Stamp(
                             new AlertContext
@@ -9674,7 +9674,7 @@ LIMIT 1";
                    without this, a multi-line statement breaks the one-line-per-incident rendering and an
                    unbounded one can bloat the stored context past what Slack/Teams will accept. */
                 string.IsNullOrWhiteSpace(row.VictimStatement)
-                    ? $"victim pid {row.VictimPid}, {row.ParticipantCount} participant(s)"
+                    ? $"victim pid {row.VictimPid}, {row.ParticipantCount} {(row.ParticipantCount == 1 ? "participant" : "participants")}"
                     : AlertContextBuilders.TruncateText(row.VictimStatement!),
             });
 
@@ -9767,7 +9767,7 @@ LIMIT 1";
                 : row.RootBackendId.ToString(CultureInfo.InvariantCulture),
             new[]
             {
-                $"root pid {row.RootPid} blocking {row.TotalVictims} session(s)"
+                $"root pid {row.RootPid} blocking {row.TotalVictims} {(row.TotalVictims == 1 ? "session" : "sessions")}"
                     + (row.Databases.Length > 0 ? $" in [{string.Join(", ", row.Databases)}]" : string.Empty)
                     /* AlertContextBuilders.TruncateText — same reasoning as BuildPgDeadlockIncident's
                        VictimStatement: root queries are commonly multi-line and otherwise unbounded. */

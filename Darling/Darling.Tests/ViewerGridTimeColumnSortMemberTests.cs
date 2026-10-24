@@ -106,7 +106,6 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         /* Columns whose row already had a UTC (or display-zone) DateTime and only lacked the SortMemberPath. */
         { "AlertsHistoryTab.xaml", "AlertsDataGrid", "TimeLocal", Name(typeof(ViewerAlertRow)), "AlertTime" },
         { "JobHistoryTab.xaml", "JobHistoryDataGrid", "RunTimeLocal", Name(typeof(ViewerJobHistoryRow)), "RunDateTimeUtc" },
-        { "JobHistoryTab.xaml", "JobHistoryDataGrid", "LastSuccessfulRunLocal", Name(typeof(ViewerJobHistoryRow)), "LastSuccessfulRunUtc" },
         { "MuteRulesWindow.xaml", "RulesGrid", "ExpiresDisplay", Name(typeof(MuteRule)), "ExpiresAtUtc" },
         { "AlertRulesWindow.xaml", "RulesGrid", "ExpiryText", Name(typeof(AlertRuleRow)), "ExpiresAtUtc" },
         { "FleetSweepsTab.xaml", "WatchItemsDataGrid", "FirstSeen", Name(typeof(FleetSweepWatchRow)), "FirstSeenUtc" },

@@ -7,6 +7,7 @@ Read these pages in this order. After the install, each page is complete on its 
 3. [The web dashboard](web-dashboard.md): the browser view that the service serves.
 4. [Darling MCP setup](mcp.md): the endpoint for an LLM client.
 5. [Running Darling day to day](admin.md): add or remove a server, change a password, rotate a token, pause, upgrade, uninstall, and where everything is.
-6. [Troubleshooting](../troubleshooting.md#darling): a table of what you see, the likely cause and the fix, for Darling and Lite.
+6. [Command line reference](cli.md): every verb of the service exe, with exit codes.
+7. [Troubleshooting](../troubleshooting.md#darling): a table of what you see, the likely cause and the fix, for Darling and Lite.
 
 For every config field and permission, see the [Darling operator guide](../../Darling/README.md).
