@@ -130,6 +130,9 @@ public class PgBaselineProvider
     private readonly ILogger? _logger;
     private readonly BaselineLocalClock _localClock;
 
+    /* #6706: the clock the plain-view event arms measure the purge horizon from. Tests set it; the service never does. */
+    private readonly TimeProvider _time;
+
     /// <summary>Cache TTL — baselines are recomputed after this interval.</summary>
     public static TimeSpan CacheTtl { get; set; } = TimeSpan.FromHours(1);
 
@@ -147,11 +150,14 @@ public class PgBaselineProvider
     /// <param name="sharedCache">#3941: the process's <see cref="BaselineCache"/>, consulted on a miss in this
     /// provider's own cache and handed every successful compute. Null (every caller before #3941) keeps a private
     /// cache and nothing else.</param>
-    public PgBaselineProvider(NpgsqlDataSource postgres, ILogger? logger = null, BaselineCache? sharedCache = null)
+    /// <param name="timeProvider">#6706: the clock the Blocking and Deadlock arms measure the raw tables' purge horizon
+    /// from. Null is <see cref="TimeProvider.System"/>.</param>
+    public PgBaselineProvider(NpgsqlDataSource postgres, ILogger? logger = null, BaselineCache? sharedCache = null, TimeProvider? timeProvider = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
         _shared = sharedCache;
+        _time = timeProvider ?? TimeProvider.System;
         /* Information, not Warning: "this host cannot resolve that zone id" is a statement about the host's
            configuration, made once per zone per process by the resolver itself — see BaselineLocalClock. */
         _localClock = new BaselineLocalClock(message => _logger?.LogInformation("{Message}", message));
@@ -851,6 +857,66 @@ LIMIT 1";
         return prefersSuccessor ? query : legacyQuery;
     }
 
+    /// <summary>The collector whose raw rows back each event arm, and the baseline relation the arm reads them through (#6706).</summary>
+    internal static (string Collector, string View)? EventSupplyFor(string metricName) => metricName switch
+    {
+        MetricNames.Blocking => ("blocked_process_report", TimescaleSupport.BlockedProcessBaselineView),
+        MetricNames.Deadlock => ("deadlocks", TimescaleSupport.DeadlockBaselineView),
+        _ => null,
+    };
+
+    /// <summary>
+    /// #6706: is this baseline relation an ordinary view over the raw table, rather than a continuous aggregate or absent?
+    /// A continuous aggregate is itself a <c>relkind='v'</c> view, so the catalog check alone is not enough; the
+    /// aggregate half is <see cref="TimescaleSupport.ResolveMaterializationAsync"/> (#3684: one definition, not a copy).
+    /// </summary>
+    internal static string IsPlainBaselineViewSql(string view)
+        => $"SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'collect' AND c.relname = '{view}' AND c.relkind = 'v')";
+
+    /// <summary>
+    /// #6706: on a store where the Blocking or Deadlock arm's event relation is a plain view over the raw table (no
+    /// TimescaleDB, or the fallback view of a partly built one), the events reach back only as far as the raw table's purge
+    /// horizon, while the <c>logged</c> side reads <c>collection_log</c>, kept twice as long. With the collector's retention
+    /// below the 30-day window, every day between the horizon and the window start has logged runs and no events, and each
+    /// would count as a measured zero. The window starts no earlier than now minus the retention in force (the fleet override
+    /// or the default, <see cref="DarlingRetentionHorizons.FleetRetentionDaysSql"/>, the rule the purge applies; the purge never
+    /// removes a row newer than that). A continuous aggregate keeps 35 days whatever raw retention is, so it is left alone (the
+    /// aggregate check is <see cref="TimescaleSupport.ResolveMaterializationAsync"/>: null for a plain view or a store without
+    /// the extension), as is every other metric. At the default 30 days the floor sits within a day of the window start (the window ends at the UTC
+    /// midnight), so a default store changes only in the hours of its oldest day that the purge may already have taken. The arm's
+    /// text is unchanged: it still reads <c>$2</c>.
+    /// </summary>
+    private async Task<DateTime> ClampToPlainViewPurgeHorizonAsync(
+        NpgsqlConnection connection, string metricName, DateTime windowStart, CancellationToken cancellationToken)
+    {
+        if (EventSupplyFor(metricName) is not var (collector, view))
+        {
+            return windowStart;
+        }
+
+        using (var plain = new NpgsqlCommand(IsPlainBaselineViewSql(view), connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
+        {
+            if (await plain.ExecuteScalarAsync(cancellationToken) is not true)
+            {
+                return windowStart;
+            }
+        }
+
+        if (await TimescaleSupport.ResolveMaterializationAsync(connection, view, cancellationToken) is not null)
+        {
+            return windowStart;
+        }
+
+        long retentionDays;
+        using (var retention = new NpgsqlCommand("SELECT " + DarlingRetentionHorizons.FleetRetentionDaysSql(collector), connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
+        {
+            retentionDays = Convert.ToInt64(await retention.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        var horizon = DateTime.SpecifyKind(_time.GetUtcNow().UtcDateTime.AddDays(-retentionDays), DateTimeKind.Unspecified);
+        return horizon > windowStart ? horizon : windowStart;
+    }
+
     private static async Task<DateTime?> OldestBucketAsync(NpgsqlConnection connection, string relation, int serverId, CancellationToken cancellationToken)
     {
         using var probe = new NpgsqlCommand(SupplyOldestBucketSql(relation), connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
@@ -894,6 +960,7 @@ LIMIT 1";
             if (keys is null)
             {
                 query = await ChooseSupplyAsync(connection, serverId, metricName, query, windowStart, cancellationToken);
+                windowStart = await ClampToPlainViewPurgeHorizonAsync(connection, metricName, windowStart, cancellationToken);
             }
 
             /* #6705 (the #3590 trap): the Blocking arm counts a collection_log run with no event as a measured zero, and the
