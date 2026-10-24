@@ -557,8 +557,8 @@ public sealed class AlertSettingsRow
     public int RunnableQueueWarningPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultWarningPerScheduler;
     /// <summary>#5641 (V177): Critical bar, runnable tasks per scheduler. Default 16; never below the Warning bar.</summary>
     public int RunnableQueueCriticalPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultCriticalPerScheduler;
-    /// <summary>#5640 (V179): the Client Timeouts alert's switch. OFF by default. Its two bars are floors scaled by each server's own baseline (#5736).</summary>
-    public bool ClientTimeoutsEnabled { get; set; }
+    /// <summary>#5640 (V179): the Client Timeouts alert's switch. ON by default since #5736 (V216). Its two bars are floors scaled by each server's own baseline.</summary>
+    public bool ClientTimeoutsEnabled { get; set; } = true;
     /// <summary>#5640 (V179), #5736: Warning FLOOR, client attentions (cancels and timeouts) per minute over the covered span. Default 10. The bar is
     /// max(this, <see cref="ClientTimeoutsWarningMultiple"/> x the server's own baseline).</summary>
     public int ClientTimeoutsWarningPerMinute { get; set; } = AttentionEvaluator.DefaultWarningPerMinute;

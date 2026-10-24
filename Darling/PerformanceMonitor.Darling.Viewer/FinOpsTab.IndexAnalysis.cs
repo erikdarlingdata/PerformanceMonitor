@@ -71,7 +71,8 @@ public partial class FinOpsTab
     {
         FinOpsIndexAnalysisBannerPanel.Children.Clear();
 
-        if (result.UptimeWarning)
+        /* #6653: dedupe-only mode flags no unused index, so the uptime caveat about them is left out beside its notice. */
+        if (result.ShowUptimeCaveat)
         {
             AddIndexAnalysisBanner(
                 "Server uptime is under 14 days — index usage data may be incomplete, so some \"Unused Index\" findings could be premature.",

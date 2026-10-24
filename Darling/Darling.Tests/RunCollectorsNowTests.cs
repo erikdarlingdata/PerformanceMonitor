@@ -26,6 +26,7 @@ using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -427,7 +428,7 @@ public sealed class RunCollectorsNowTests
     [Fact]
     public async Task TheWebRoute_AnswersEachResolverOutcome_ItsOwnStatus_WithAPlainMessage()
     {
-        var registry = new List<DarlingServerResolver.RegisteredServer>
+        var registry = new List<RegisteredServer>
         {
             new(1, "alpha-one", null),
             new(2, "alpha-two", null),

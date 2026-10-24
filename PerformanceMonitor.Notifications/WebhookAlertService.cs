@@ -305,6 +305,9 @@ public class WebhookAlertService
             bool attempted = false;
             string? firstError = null;
 
+            /* #6718: the {{dedup_key}} the generic post rendered, handed back so the deliverer closes that key. */
+            string? genericDedupKey = null;
+
             /* #4750: what each channel's send did, keyed by the channel name, so the history row's route record
                can say which channel delivered and which failed. `sent` above answers only "did any channel
                get through", so a channel that failed beside one that delivered was visible nowhere but a
@@ -392,7 +395,11 @@ public class WebhookAlertService
                    so it stays the immutable metric name — the display name is a human-title concern only, and
                    this channel has no title. The prose detail DOES go, because it is alert content. */
                 attempted = true;
-                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, investigationJson, GenericSigningFor(delivery, route.Generic.RouteId, genericUrl), cancellationToken));
+                /* #6718: the key is derived once, here, from the filtered context the post renders, and the post is handed
+                   this value. The deliverer records the same value, so a resolution closes the key the receiver opened even
+                   when the filter dropped the alert's first incident (the key anchors on the first incident it keeps). */
+                genericDedupKey = DeriveGenericDedupKey(serverId, serverName, metricName, renderContext);
+                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, investigationJson, GenericSigningFor(delivery, route.Generic.RouteId, genericUrl), cancellationToken, dedupKeyOverride: genericDedupKey));
             }
 
             if (route.PagerDuty.Destination is { } pagerDutyKey)
@@ -459,8 +466,8 @@ public class WebhookAlertService
                 _repeatBudget.Release(budget);
             }
 
-            return sent ? WebhookFanoutResult.Delivered with { Route = route, ChannelOutcomes = channelOutcomes }
-                : attempted ? WebhookFanoutResult.Failed(firstError) with { Route = route, ChannelOutcomes = channelOutcomes }
+            return sent ? WebhookFanoutResult.Delivered with { Route = route, ChannelOutcomes = channelOutcomes, GenericDedupKey = genericDedupKey }
+                : attempted ? WebhookFanoutResult.Failed(firstError) with { Route = route, ChannelOutcomes = channelOutcomes, GenericDedupKey = genericDedupKey }
                 : WebhookFanoutResult.NotAttempted with { Route = route };
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -2174,7 +2181,9 @@ public class WebhookAlertService
         DateTime nowUtc,
         string? investigationJson = null,
         WebhookSigningKeys? signing = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string status = GenericStatusFiring,
+        string? dedupKeyOverride = null)
     {
         try
         {
@@ -2198,7 +2207,8 @@ public class WebhookAlertService
             var payload = BuildGenericPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 context: context, bodyTemplate: settings.GenericWebhookBodyTemplate, serverId: serverId,
-                triageUrl: triageUrl, detailText: detailText, nowUtc: nowUtc, investigationJson: investigationJson);
+                triageUrl: triageUrl, detailText: detailText, nowUtc: nowUtc, investigationJson: investigationJson,
+                status: status, dedupKeyOverride: dedupKeyOverride);
 
             if (!IsWellFormedJson(payload, out var bodyError))
             {
@@ -2418,7 +2428,9 @@ public class WebhookAlertService
         string? triageUrl = null,
         string? detailText = null,
         DateTime? nowUtc = null,
-        string? investigationJson = null)
+        string? investigationJson = null,
+        string status = GenericStatusFiring,
+        string? dedupKeyOverride = null)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var template = string.IsNullOrWhiteSpace(bodyTemplate) ? DefaultGenericBodyTemplate : bodyTemplate!;
@@ -2436,8 +2448,7 @@ public class WebhookAlertService
            serverName arm is THIS channel's own fallback for callers with no id (the settings-window test
            send); it is not a guarantee PagerDuty's path shares, so a caller wanting cross-channel
            correlation must pass the id. */
-        var dedupKey = DerivePagerDutyDedupKey(
-            string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, context);
+        var dedupKey = dedupKeyOverride ?? DeriveGenericDedupKey(serverId, serverName, metricName, context);
 
         var values = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -2455,6 +2466,7 @@ public class WebhookAlertService
             ["context_json"] = context is null ? "{}" : AlertContextSerializer.Serialize(RedactForWebhook(context)),
             ["incidents_json"] = AlertContextSerializer.SerializeIncidents(context),
             ["dedup_key"] = EscapeForJson(dedupKey),
+            ["status"] = EscapeForJson(status),
             ["resource_name"] = EscapeForJson(DeriveResourceName(context) ?? ""),
             ["database"] = EscapeForJson(DeriveResourceDatabase(context) ?? ""),
             ["triage_url"] = EscapeForJson(triageUrl ?? ""),
@@ -2475,6 +2487,24 @@ public class WebhookAlertService
     }
 
     private const string InvestigationToken = "investigation_json";
+
+    /// <summary>#6718: the <c>{{status}}</c> value on a fire (and on the settings window's test send).</summary>
+    internal const string GenericStatusFiring = "firing";
+
+    /// <summary>#6718: the <c>{{status}}</c> value on a resolution send.</summary>
+    internal const string GenericStatusResolved = "resolved";
+
+    /// <summary>#6718: the error a generic resolution reports when the caller gave no fire key.</summary>
+    internal const string GenericResolutionWithoutKeyText = "generic resolution not sent: no dedup key recorded from its fire";
+
+    /// <summary>
+    /// #6718: the generic webhook's <c>{{dedup_key}}</c> for an alert: the serverId-else-serverName identity and the default
+    /// <c>autoResolve = false</c> (#5469), so the paired-edge and per-replica rules never apply to it. The one place that
+    /// derivation lives. The fan-out calls it once on the delivery-filtered context and hands the result to the post and back
+    /// to the deliverer, so the resolution renders that value rather than deriving its own.
+    /// </summary>
+    internal static string DeriveGenericDedupKey(string serverId, string serverName, string metricName, AlertContext? context) =>
+        DerivePagerDutyDedupKey(string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, context);
 
     /// <summary>
     /// #5821: whether a generic body template places <c>{{investigation_json}}</c>. A blank template is the default, which
@@ -2535,7 +2565,7 @@ public class WebhookAlertService
     {
         "metric", "server", "value", "threshold", "severity",
         "context_json", "incidents_json", "dedup_key", "resource_name", "database", "triage_url",
-        "context", "timestamp", "detail", InvestigationToken
+        "context", "timestamp", "detail", "status", InvestigationToken
     };
 
     private static readonly System.Text.RegularExpressions.Regex s_genericPlaceholders =
@@ -2915,8 +2945,13 @@ public class WebhookAlertService
     /// headline. No cooldown and no route: the caller passes the destination the fire used. Null when the post
     /// succeeded, the error text when it did not; never throws except for the caller's own cancellation.
     /// </summary>
+    /// <param name="genericDedupKey">#6718: the <c>{{dedup_key}}</c> the fire's generic post rendered. Required for the
+    /// generic channel, which renders it as given and does not derive one: a key derived here has no incidents to anchor
+    /// on and would close a key the fire never opened. Null on the generic channel is not sent and returns an error.
+    /// Ignored on Teams and Slack.</param>
     internal async Task<string?> TrySendResolutionAsync(
-        string channel, string destination, AlertResolutionFacts facts, string serverId, CancellationToken cancellationToken = default)
+        string channel, string destination, AlertResolutionFacts facts, string serverId, string? genericDedupKey,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(facts);
         var delivery = _settings.SnapshotForDelivery();
@@ -2940,9 +2975,16 @@ public class WebhookAlertService
                not sent, rather than sent unsigned. */
             NotificationRouter.GenericChannel when delivery.GenericSigningKeyUnreadable && !IsConfiguredGenericUrl(delivery, destination) =>
                 GenericSigningKeyUnreadableText,
+            /* #6718: {{dedup_key}} is the key the fire's generic post rendered, which the caller recorded from the fire, so the
+               receiver sees one key for the episode and {{status}} says resolved. {{metric}} stays the resolution's title. No key,
+               no send: there is nothing here to derive the fire's key from. */
+            NotificationRouter.GenericChannel when genericDedupKey is null =>
+                GenericResolutionWithoutKeyText,
             NotificationRouter.GenericChannel => await TrySendGenericAlertAsync(
                 delivery, destination, title, serverName, "resolved", "", serverId, context: null, triageUrl, detailText, now,
-                cancellationToken: cancellationToken, signing: GenericSigningFor(delivery, routeId: null, destination)),
+                cancellationToken: cancellationToken, signing: GenericSigningFor(delivery, routeId: null, destination),
+                status: GenericStatusResolved,
+                dedupKeyOverride: genericDedupKey),
             _ => $"{channel} does not carry a resolution post",
         };
     }
@@ -3473,7 +3515,7 @@ public class WebhookAlertService
        HttpClient/handler per request leaks sockets into TIME_WAIT and can exhaust
        the ephemeral port range when many servers alert. One pooled client covers the
        no-proxy case; proxied clients are cached per proxy address. #6231: the two direct clients connect through
-       WebhookConnectGuard, which refuses link-local and cloud instance addresses (a proxied client connects to its proxy, which resolves the host). */
+       WebhookConnectGuard, which refuses link-local and cloud instance addresses (a proxied client's connection to its proxy goes through it too, #6392). */
     private static readonly HttpClient s_defaultClient =
         new(WebhookConnectGuard.NewHandler())
         { Timeout = TimeSpan.FromSeconds(30) };
@@ -3503,15 +3545,21 @@ public class WebhookAlertService
             return followRedirects ? s_defaultClient : s_defaultNoRedirectClient;
 
         return (followRedirects ? s_proxyClients : s_proxyNoRedirectClients).GetOrAdd(proxyAddress, addr =>
-            new HttpClient(new SocketsHttpHandler
-            {
-                Proxy = new WebProxy(addr),
-                UseProxy = true,
-                PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-                AllowAutoRedirect = followRedirects
-            })
+            new HttpClient(NewProxyHandler(addr, followRedirects))
             { Timeout = TimeSpan.FromSeconds(30) });
     }
+
+    /* #6392: the proxied handler's connect goes through WebhookConnectGuard too, so the connection to the proxy itself is
+       checked: a proxy that resolves to a link-local or cloud instance address is refused, and a proxy on loopback or a
+       private address still works. */
+    internal static SocketsHttpHandler NewProxyHandler(string proxyAddress, bool followRedirects) => new()
+    {
+        Proxy = new WebProxy(proxyAddress),
+        UseProxy = true,
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+        AllowAutoRedirect = followRedirects,
+        ConnectCallback = WebhookConnectGuard.ConnectAsync,
+    };
 
     /// <summary>
     /// Posts a JSON payload to a webhook URL, giving up after <see cref="WebhookPostTimeout"/>. Returns null on
@@ -3721,11 +3769,17 @@ public class WebhookAlertService
 /// the error text: that text can name the endpoint's URL, and <paramref name="SendError"/> stays the one place
 /// the first failure's reason is written. Trailing and defaulted like <paramref name="Route"/>.
 /// </param>
+/// <param name="GenericDedupKey">
+/// #6718: the <c>{{dedup_key}}</c> the generic webhook's post rendered, from the #3313 delivery-filtered context. Set
+/// when the generic channel was attempted, null otherwise. The deliverer records it so the alert's resolution renders
+/// exactly this key. Trailing and defaulted like <paramref name="Route"/>.
+/// </param>
 public readonly record struct WebhookFanoutResult(
     AlertChannelOutcome Outcome,
     string? SendError,
     NotificationRouteDecision? Route = null,
-    IReadOnlyDictionary<string, AlertChannelOutcome>? ChannelOutcomes = null)
+    IReadOnlyDictionary<string, AlertChannelOutcome>? ChannelOutcomes = null,
+    string? GenericDedupKey = null)
 {
     /// <summary>Whether a channel delivered. At least one did; the rest may have failed, and each of those
     /// is on its own health counter.</summary>

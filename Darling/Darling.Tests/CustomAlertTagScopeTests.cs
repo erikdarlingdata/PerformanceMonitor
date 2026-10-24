@@ -8,6 +8,7 @@
 
 using System.Collections.Generic;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;

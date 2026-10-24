@@ -92,7 +92,7 @@ public static class AlertContextBuilders
         {
             context.Details.Add(new AlertDetailItem
             {
-                Heading = $"+{groups.Count - maxGroups} more distinct blocking incident(s)",
+                Heading = $"+{groups.Count - maxGroups} more distinct blocking {(groups.Count - maxGroups == 1 ? "incident" : "incidents")}",
                 Fields = new()
             });
         }
@@ -499,7 +499,12 @@ public static class AlertContextBuilders
     {
         if (events == null || events.Count == 0) return Array.Empty<BlockedProcessAlertRow>();
 
-        var hasXeReports = events.Any(r => r.Source == BlockedProcessAlertRow.XeReportSource);
+        /* #6645: a parallel query's self-wait report (the same non-zero spid on both sides) is not a blocking
+           report, so a window whose XE reports are all self-waits has no XE reports and falls back to the DMV
+           waits, as the SQL read surfaces do (BlockingWaits.NotSelfWaitSql). Spid 0 is a report that named no
+           session and still counts. */
+        var hasXeReports = events.Any(r => r.Source == BlockedProcessAlertRow.XeReportSource
+            && !(r.BlockedSpid == r.BlockingSpid && r.BlockedSpid != 0));
 
         var waits = BlockingWaits.Collapse(
             FilterBlocking(events, excludedDatabases),
@@ -867,7 +872,7 @@ public static class AlertContextBuilders
     /// states the omission as a final item rather than cutting silently. Fields are the Long-Running Query
     /// card's session fields, so a reader sees the same facts under both alerts. Returns an empty list when the
     /// snapshot holds no request. <paramref name="readHitCap"/> says the read returned a full page, so the count of
-    /// omitted requests is a floor and the trailer reads "at least N more request(s)".
+    /// omitted requests is a floor and the trailer reads "at least N more requests" ("1 more request" for one).
     /// </summary>
     public static IReadOnlyList<AlertDetailItem> BuildRunnableQueueRequestItems(IReadOnlyList<LongRunningQueryInfo> sessions, bool readHitCap = false)
     {
@@ -912,7 +917,7 @@ public static class AlertContextBuilders
                 Fields = new()
                 {
                     ("Not shown", string.Create(CultureInfo.InvariantCulture,
-                        $"{(readHitCap ? "at least " : "")}{ranked.Count - RunnableQueueRequestDisplayCap} more request(s) in the newest query snapshot"))
+                        $"{(readHitCap ? "at least " : "")}{ranked.Count - RunnableQueueRequestDisplayCap} more {(ranked.Count - RunnableQueueRequestDisplayCap == 1 ? "request" : "requests")} in the newest query snapshot"))
                 }
             });
         }
@@ -1207,7 +1212,7 @@ public static class AlertContextBuilders
 
         /* The #3494 discipline: whole lines that fit, then a stated omission — never a silent cut. */
         if (omitted > 0)
-            sb.Append("\n  Active maintenance: ").Append(omitted).Append(" more maintenance session(s) not shown");
+            sb.Append("\n  Active maintenance: ").Append(omitted).Append(omitted == 1 ? " more maintenance session not shown" : " more maintenance sessions not shown");
 
         return sb.ToString();
     }
@@ -1388,7 +1393,7 @@ public static class AlertContextBuilders
 
         return new AlertDetailItem
         {
-            Heading = $"Blocking Wait Time — {current.TotalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked session(s)",
+            Heading = $"Blocking Wait Time — {current.TotalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked {(current.BlockedSessionCount == 1 ? "session" : "sessions")}",
             Fields = new()
             {
                 (BlockingWaitFiredByLabel, firedBy),

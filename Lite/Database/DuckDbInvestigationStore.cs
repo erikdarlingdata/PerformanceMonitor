@@ -794,6 +794,24 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         return use;
     }
 
+    /// <summary>
+    /// #6596: journals an alert on an agent route that opened no request because its story is recurring at this hour
+    /// (<see cref="InvestigationEvents.RecurringSkipped"/>). Darling's <c>InvestigationRequestStore.RecordRecurringSkipAsync</c>:
+    /// no request id, the metric as the reason, once per route, server, metric and alert hour.
+    /// </summary>
+    public async Task RecordRecurringSkipAsync(InvestigationAlert alert, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(alert);
+        var alertTime = Micro(alert.AlertTimeUtc);
+        using var writeLock = _db.AcquireWriteLock(_lockBudget);
+        using var connection = await OpenAsync(cancellationToken);
+        using var transaction = connection.BeginTransaction();
+        await JournalAsync(connection, Now(), null, alert.RouteId, alert.ServerId, InvestigationEvents.RecurringSkipped,
+            "service", alert.MetricName, InvestigationEvents.RecurringSkippedDetail(alert.StoryPathHash, alertTime),
+            InvestigationEvents.RecurringSkippedOnceKey(alert.RouteId, alert.ServerId, alert.MetricName, alertTime), cancellationToken);
+        transaction.Commit();
+    }
+
     /// <inheritdoc />
     public async Task RecordRefusalAsync(Guid requestId, string agentId, string operation, string reason, string? detailJson,
         CancellationToken cancellationToken = default)

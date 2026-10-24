@@ -521,7 +521,7 @@ LIMIT 1";
         bool RunnableQueueEnabled,
         int RunnableQueueWarningPerScheduler,
         int RunnableQueueCriticalPerScheduler,
-        /* #5640 (V179): the Client Timeouts alert's switch (OFF by default) and its two bars (client attentions per minute over the
+        /* #5640 (V179): the Client Timeouts alert's switch (ON by default since V216) and its two bars (client attentions per minute over the
            attention collector's last runs), NOT NULL in the store. APPENDED, same reason. Carried as stored: the payload reports the
            bars through AttentionEvaluator.ClampBars, the way the engine reads them. */
         bool ClientTimeoutsEnabled,
