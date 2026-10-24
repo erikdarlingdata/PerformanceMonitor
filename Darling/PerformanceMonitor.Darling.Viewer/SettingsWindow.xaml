@@ -88,8 +88,14 @@
                                 </Grid>
                                 <CheckBox x:Name="CapturePlansCheckBox" Content="Capture execution plans (all servers)" Margin="0,12,0,0"
                                           Foreground="{DynamicResource ForegroundBrush}"/>
+                                <TextBlock Text="Store query and Query Store execution-plan XML across the fleet. Disable to shave storage on a very large fleet; a per-server override lives on each server's dialog."
+                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           TextWrapping="Wrap" Margin="24,2,0,0"/>
                                 <CheckBox x:Name="QueryStoreBackfillCheckBox" Content="Query Store history backfill (all servers)" Margin="0,12,0,0"
                                           Foreground="{DynamicResource ForegroundBrush}"/>
+                                <TextBlock Text="Fill Query Store history gaps (outages, newly added or freshly restored databases) in bounded background slices. Disable to stop a heavy catch-up — for example after restoring a large database onto a monitored server — live collection is unaffected; re-enabling resumes where it left off."
+                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           TextWrapping="Wrap" Margin="24,2,0,0"/>
                                 <Grid Margin="0,12,0,0">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto"/>
@@ -119,12 +125,6 @@
                                 <TextBlock Text="Query text and plan XML are fetched for each database-hour's top N plans on CPU, duration, physical reads, writes, memory grant, tempdb and executions (0-100000, default 100), plus forced plans and plans the engine's plan correction names. A plan outside the top N keeps its runtime statistics, shows as not collected, and is fetched by a later run if it ranks then. 0 fetches every new plan. Takes effect on the next collection cycle, no restart."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            TextWrapping="Wrap" Margin="0,4,0,0"/>
-                                <TextBlock Text="Fill Query Store history gaps (outages, newly added or freshly restored databases) in bounded background slices. Disable to stop a heavy catch-up — for example after restoring a large database onto a monitored server — live collection is unaffected; re-enabling resumes where it left off."
-                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                           TextWrapping="Wrap" Margin="24,2,0,0"/>
-                                <TextBlock Text="Store query and Query Store execution-plan XML across the fleet. Disable to shave storage on a very large fleet; a per-server override lives on each server's dialog."
-                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                           Margin="0,4,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
                         </Border>
 

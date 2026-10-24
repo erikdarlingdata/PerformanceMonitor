@@ -20,6 +20,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -1230,9 +1231,9 @@ public sealed class DropXeSessionsVerbTests
     public void RemoveServer_NamesTheVerb_ForAServerThatHadConnected()
     {
         var connected = DarlingMcpServerAdminTools.RemovedAnswer(
-            new DarlingMcpServerAdminTools.ServerDefinition(new DarlingServerResolver.RegisteredServer(1, "sql01", "sql01"), true, "plain"), "exact");
+            new DarlingMcpServerAdminTools.ServerDefinition(new RegisteredServer(1, "sql01", "sql01"), true, "plain"), "exact");
         var never = DarlingMcpServerAdminTools.RemovedAnswer(
-            new DarlingMcpServerAdminTools.ServerDefinition(new DarlingServerResolver.RegisteredServer(2, "sql02", "sql02"), false, "plain"), "exact");
+            new DarlingMcpServerAdminTools.ServerDefinition(new RegisteredServer(2, "sql02", "sql02"), false, "plain"), "exact");
 
         using var connectedDoc = JsonDocument.Parse(connected);
         using var neverDoc = JsonDocument.Parse(never);

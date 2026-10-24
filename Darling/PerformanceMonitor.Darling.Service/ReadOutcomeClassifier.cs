@@ -9,6 +9,7 @@
 using System;
 using System.Threading;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -28,7 +29,7 @@ public static class ReadOutcomeClassifier
 {
     /// <summary>The SQLSTATE PostgreSQL raises when a role's <c>temp_file_limit</c> is exceeded
     /// (<c>configuration_limit_exceeded</c>, #4605) — "temporary file size exceeds temp_file_limit".</summary>
-    internal const string ConfigurationLimitExceeded = "53400";
+    internal const string ConfigurationLimitExceeded = ComposePanelRunner.ConfigurationLimitExceededSqlState;
 
     /// <summary>The caller's own token already carries the cancellation — the request left, or an operator's
     /// explicit cancel. Checked FIRST: a request whose own token fired is <see cref="ReadOutcome.Cancelled"/>

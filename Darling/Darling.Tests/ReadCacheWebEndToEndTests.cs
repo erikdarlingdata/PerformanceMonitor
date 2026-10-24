@@ -28,6 +28,7 @@ using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -402,7 +403,7 @@ public sealed class ReadCacheWebEndToEndTests
         var cache = admission.Cache;
         var ttl = ReadResultCache.TtlOf(band);
         await using var postgres = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Database=none;Username=none;Timeout=1");
-        var timedOut = DarlingWebEndpoints.ComposeRunOutcome.AuthorQueryError("canceling statement due to statement timeout", "57014");
+        var timedOut = ComposeRunOutcome.AuthorQueryError("canceling statement due to statement timeout", "57014");
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var lead = cache.Join(ReadCacheKey.ForCompose(ReadSurface.Mcp, route, body.ToJsonString(), cache.Generation, cache, ttl), ttl,
             async _ =>
@@ -413,7 +414,7 @@ public sealed class ReadCacheWebEndToEndTests
             _ => null);
         Assert.True(lead.IsLead);
 
-        Task<DarlingWebEndpoints.ComposeRunOutcome>[] joined;
+        Task<ComposeRunOutcome>[] joined;
         try
         {
             joined =

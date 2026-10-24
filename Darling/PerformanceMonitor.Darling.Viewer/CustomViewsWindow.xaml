@@ -1,0 +1,116 @@
+<Window x:Class="PerformanceMonitor.Darling.Viewer.CustomViewsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Manage Custom Views"
+        Height="640" Width="1100"
+        WindowStartupLocation="CenterOwner"
+        Icon="EDD.ico"
+        ResizeMode="CanResizeWithGrip"
+        Background="{DynamicResource BackgroundLightBrush}"
+        Foreground="{DynamicResource ForegroundBrush}">
+    <!-- The Custom Views manager (#6390 S5), KnownPatternsWindow's shape: a grid of the stored views grouped by folder, a toolbar of
+         New / Rename / Move to folder / Delete / Import / Export, and a JSON editor with Validate and Save. Every read and write goes
+         through ViewerDataService, which uses CustomViewStore and CustomViewValidation (Storage): the web dashboard's own code. -->
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="ViewerDarkTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Custom Views" FontSize="18" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+        <TextBlock Grid.Row="1"
+                   Text="The dashboards and notebooks the web dashboard's Views pages show. Everything saved here is shared and is checked by the same rules the web applies. Personal views are not listed."
+                   Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+
+        <StackPanel x:Name="ActionButtonsPanel" Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Left" Margin="0,0,0,8">
+            <Button x:Name="NewButton" Content="_New..." Width="80" Height="28" Margin="0,0,8,0" Click="New_Click"/>
+            <Button x:Name="RenameButton" Content="_Rename..." Width="90" Height="28" Margin="0,0,8,0" Click="Rename_Click"/>
+            <Button x:Name="MoveButton" Content="_Move to folder..." Width="130" Height="28" Margin="0,0,8,0" Click="Move_Click"/>
+            <Button x:Name="DeleteButton" Content="_Delete" Width="80" Height="28" Margin="0,0,8,0" Click="Delete_Click"/>
+            <Button x:Name="ImportButton" Content="_Import JSON..." Width="120" Height="28" Margin="0,0,8,0" Click="Import_Click"/>
+            <Button x:Name="ExportButton" Content="E_xport JSON..." Width="120" Height="28" Margin="0,0,8,0" Click="Export_Click"/>
+            <Button x:Name="RunButton" Content="Ru_n view..." Width="110" Height="28" Click="Run_Click"
+                    ToolTip="Run the saved version of the selected view: its composed panels, as the web dashboard shows them."/>
+        </StackPanel>
+
+        <Grid Grid.Row="3">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="420"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <Grid Grid.Column="0">
+                <DataGrid x:Name="ViewsGrid"
+                          Style="{StaticResource DarkGrid}"
+                          CanUserDeleteRows="False"
+                          SelectionMode="Single"
+                          SelectionChanged="ViewsGrid_SelectionChanged">
+                    <DataGrid.GroupStyle>
+                        <GroupStyle>
+                            <GroupStyle.HeaderTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" Margin="4,4,0,2"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                </DataTemplate>
+                            </GroupStyle.HeaderTemplate>
+                        </GroupStyle>
+                    </DataGrid.GroupStyle>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="*"/>
+                        <DataGridTextColumn Header="Kind" Binding="{Binding KindDisplay}" Width="80"/>
+                        <DataGridTextColumn Header="Ver" Binding="{Binding Version}" Width="40"/>
+                        <DataGridTextColumn Header="Saved" Binding="{Binding UpdatedDisplay}" SortMemberPath="UpdatedUtc" Width="150"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+                <TextBlock x:Name="NoViewsMessage"
+                           Text="No custom views yet. Create one with New, or bring one in with Import JSON."
+                           Foreground="{DynamicResource ForegroundMutedBrush}"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           TextWrapping="Wrap" TextAlignment="Center" MaxWidth="320"
+                           Visibility="Collapsed"/>
+            </Grid>
+
+            <GridSplitter Grid.Column="1" Width="6" HorizontalAlignment="Center" VerticalAlignment="Stretch" Background="Transparent"/>
+
+            <Grid Grid.Column="2">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <TextBlock x:Name="EditorHeader" Grid.Row="0" Text="Select a view to edit its definition." FontWeight="SemiBold" Margin="0,0,0,6"
+                           TextTrimming="CharacterEllipsis"/>
+                <TextBox x:Name="DefinitionBox" Grid.Row="1"
+                         AcceptsReturn="True" AcceptsTab="True" TextWrapping="NoWrap"
+                         HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
+                         FontFamily="Consolas" FontSize="12" IsEnabled="False"
+                         Background="{DynamicResource BackgroundBrush}"
+                         Foreground="{DynamicResource ForegroundBrush}"
+                         BorderBrush="{DynamicResource BorderBrush}"
+                         TextChanged="DefinitionBox_TextChanged"/>
+                <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0">
+                    <Button x:Name="ValidateButton" Content="_Validate" Width="90" Height="28" Margin="0,0,8,0" IsEnabled="False" Click="Validate_Click"/>
+                    <Button x:Name="SaveButton" Content="_Save" Width="90" Height="28" Margin="0,0,12,0" IsEnabled="False" Click="Save_Click"/>
+                    <TextBlock x:Name="EditorStatus" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="520"/>
+                </StackPanel>
+            </Grid>
+        </Grid>
+
+        <TextBlock x:Name="StatusBanner" Grid.Row="4" HorizontalAlignment="Left" VerticalAlignment="Center"
+                   Margin="0,12,0,0" Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap" MaxWidth="820" Visibility="Collapsed"/>
+        <Button Grid.Row="4" Content="_Close" Width="80" Height="28" Margin="0,12,0,0"
+                HorizontalAlignment="Right" Click="Close_Click" IsCancel="True"/>
+    </Grid>
+</Window>

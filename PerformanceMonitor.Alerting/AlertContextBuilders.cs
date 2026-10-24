@@ -499,7 +499,12 @@ public static class AlertContextBuilders
     {
         if (events == null || events.Count == 0) return Array.Empty<BlockedProcessAlertRow>();
 
-        var hasXeReports = events.Any(r => r.Source == BlockedProcessAlertRow.XeReportSource);
+        /* #6645: a parallel query's self-wait report (the same non-zero spid on both sides) is not a blocking
+           report, so a window whose XE reports are all self-waits has no XE reports and falls back to the DMV
+           waits, as the SQL read surfaces do (BlockingWaits.NotSelfWaitSql). Spid 0 is a report that named no
+           session and still counts. */
+        var hasXeReports = events.Any(r => r.Source == BlockedProcessAlertRow.XeReportSource
+            && !(r.BlockedSpid == r.BlockingSpid && r.BlockedSpid != 0));
 
         var waits = BlockingWaits.Collapse(
             FilterBlocking(events, excludedDatabases),

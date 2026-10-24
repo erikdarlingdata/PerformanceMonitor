@@ -51,4 +51,4 @@ For a bug report, run the service with `--diagnostics-bundle <path>`. It writes 
 
 A remote SQL Server reachable only over a named pipe does not connect. Lite and the Darling service connect to a remote SQL Server over TCP only. Turn on TCP/IP for the instance in SQL Server Configuration Manager. If the port is not 1433, write the host as `name,port`. A host that starts with `np:`, `lpc:` or `admin:`, or a path that starts with `\` or `/`, is refused.
 
-Darling troubleshooting (service logs, store connectivity, permissions) is in the [Darling operator guide](../Darling/README.md). **Dashboard** (Full edition) troubleshooting is in [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md).
+Darling troubleshooting (service logs, store connectivity, permissions) is in the [Darling operator guide](../Darling/README.md). Install problems are in [Things that will bite you](darling/install.md#things-that-will-bite-you), and the known gaps are in [Known gaps](darling/install.md#known-gaps). **Dashboard** (Full edition) troubleshooting is in [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md).

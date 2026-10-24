@@ -3457,7 +3457,7 @@ LIMIT 1";
            service is hoisted too so a reload can re-LoadAsync() it (closes F16 — the engine holds
            its IsAlertMuted delegate, so refreshing the same instance's cache mutes the next sweep). */
         var alertSettings = new DarlingAlertSettings(config, _logger);
-        var historyStore = new PgAlertHistoryStore(postgres, _logger);
+        var historyStore = new PgAlertHistoryStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, _logger);
         var webhookAlertService = new WebhookAlertService(
             alertSettings, DarlingAlertDeliverer.Branding,
             _loggerFactory.CreateLogger<WebhookAlertService>(), historyStore);

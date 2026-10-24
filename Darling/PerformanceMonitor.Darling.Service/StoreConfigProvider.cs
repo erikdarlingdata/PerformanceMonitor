@@ -1866,10 +1866,10 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
 
     /// <summary>The V59 collector-memory knob clamps (#2164/#2170) — a bad stored value degrades to a sane
     /// one rather than failing the config load, matching the alert knobs' posture.</summary>
-    internal const int MinTextBudgetMb = 4;
-    internal const int MaxTextBudgetMb = 256;
-    internal const int MinConcurrentSweeps = 1;
-    internal const int MaxConcurrentSweepsLimit = 16;
+    internal const int MinTextBudgetMb = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.TextBudgetMbMin;
+    internal const int MaxTextBudgetMb = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.TextBudgetMbMax;
+    internal const int MinConcurrentSweeps = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ConcurrentSweepsMin;
+    internal const int MaxConcurrentSweepsLimit = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ConcurrentSweepsMax;
 
     internal static int ClampTextBudgetMb(int value) => Math.Clamp(value, MinTextBudgetMb, MaxTextBudgetMb);
 

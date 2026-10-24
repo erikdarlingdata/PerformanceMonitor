@@ -135,5 +135,5 @@ WHERE ctid = (SELECT ctid FROM collect.query_store_interval_wide WHERE server_id
     }
 
     private static Task<DateTime?> StampThroughForAsync(NpgsqlConnection connection, int[] serverIds, DateTime start, DateTime end, CancellationToken ct) =>
-        DarlingWebEndpoints.ResolveQueryStoreStampThroughAsync(connection, serverIds, start, end, QueryStoreComposeStamp.RungVersion, ct);
+        ComposePanelRunner.ResolveQueryStoreStampThroughAsync(connection, serverIds, start, end, QueryStoreComposeStamp.RungVersion, ct);
 }
