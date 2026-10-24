@@ -77,8 +77,15 @@ The collector verbs, `--reset-password-key`, the alert source verbs, `--export-i
 | Number | Meaning |
 | --- | --- |
 | `0` | The verb finished. |
-| `1` | A usage or configuration problem, or a name that matches nothing (or more than one thing). Examples are a bad argument, an unknown collector, a missing config, and a `--server` that names no server. |
-| `2` | The store cannot be reached or refused the change. For `--drop-xe-sessions`, the monitored server cannot be reached, cannot be searched, or refused a `DROP`. |
+| `1` | A usage or configuration problem, or a name that matches nothing (or more than one thing). Examples are a bad argument, an unknown collector, a missing config, and a `--server` that names no server. It also covers a connection string that cannot be used and a managed store credential that cannot be read. |
+| `2` | The store cannot be reached, refuses the login, or refuses the change. A wrong password is the store's answer, so it is `2`, not `1`. A failure to read the row back after the change counts here too. For `--drop-xe-sessions`, the store is not part of this number: `2` means the monitored server cannot be reached, cannot be searched, or refused a `DROP`. |
+
+These verbs also use `1` for a few cases of their own:
+
+- A managed store credential that was never stored. The setup is not finished. This holds for the verbs that open the store, but not for `--drop-xe-sessions`.
+- A store that has not been upgraded yet. This is `--set-collector-run-at` when the run-time table is missing, and the alert source verbs when the alert tables are missing. Start the service once, then run the verb again.
+- A source name that is invalid, already taken, or unknown. This is the alert source verbs.
+- An output file that cannot be written, or that exists when `--force` was not given. This is `--export-investigations`. When it cannot read the store, it exits `2`.
 
 `--export-investigations` also exits `130` when it is cancelled. It writes no file in that case.
 
