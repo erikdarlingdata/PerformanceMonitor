@@ -138,7 +138,8 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
         var command = Bind(new AlertSettingsRow { ClientTimeoutsWarningPerMinute = warning, ClientTimeoutsCriticalPerMinute = critical });
         Assert.Equal(storedWarning, command.Parameters[74].Value);
         Assert.Equal(storedCritical, command.Parameters[75].Value);
-        Assert.Equal(false, command.Parameters[73].Value);
+        /* #5736: a new row's switch defaults to on, and the clamp leaves it alone. */
+        Assert.Equal(true, command.Parameters[73].Value);
     }
 
     [Fact]
