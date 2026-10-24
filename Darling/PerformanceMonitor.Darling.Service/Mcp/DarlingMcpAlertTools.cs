@@ -831,7 +831,7 @@ public sealed partial class DarlingMcpAlertTools
                 undo = UndoCall("set_notification_route_enabled", new { route_id, enabled = existing.Enabled }),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("set_notification_route_enabled", ex);
         }
@@ -904,7 +904,7 @@ public sealed partial class DarlingMcpAlertTools
                 undo = FallbackUndo(route_id, existing.FallbackRouteId),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("set_notification_route_fallback", ex);
         }
