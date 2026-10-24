@@ -1070,10 +1070,12 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
        Resolves member; the candidate rows come back and C# parses each context (a text match would miss the escapings).
        A metric with no candidate comes back once with a NULL context, so a request with an uncleared metric is unresolved.
        Read through v_config_alert_log (live plus archive) so an archived resolution still counts.
-       The bound on h.alert_time is the oldest last alert among the candidates, which keeps the join from reading the whole
-       alert log, the archive included, every pass. It drops no candidate: a resolution row a candidate can use is after that
-       candidate's last alert, so after the oldest one. It is not the clock minus a fixed window, because a follow-up opens now
-       but copies its source's alert rows with their original times, so its last alert can be weeks old. */
+       The bound on h.alert_time is the oldest last alert among the candidates. It saves the per-row work (the Resolves test
+       and the join) on every older row, live or archived; the rows are still read, and the saving was measured on Darling's
+       PostgreSQL store only. A live follow-up can pull the oldest last alert back by up to 30 days, so the saving is smaller
+       while one is open. It drops no candidate: a resolution row a candidate can use is after that candidate's last alert,
+       so after the oldest one. It is not the clock minus a fixed window, because a follow-up opens now but copies its
+       source's alert rows with their original times, so its last alert can be weeks old. */
     internal const string ResolveCandidatesSql = @"
 WITH m AS (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS last_alert
            FROM investigation_request_alerts AS a

@@ -369,9 +369,11 @@ LIMIT $2";
        each context_json (System.Text.Json reads every escaping); one a text column holds but jsonb refuses (a NUL
        escape) is no problem there. The prefilter is the member's key, which no encoder escapes. A metric with no candidate
        comes back once with a NULL context, so a request with an uncleared metric is seen as unresolved.
-       The bound on h.alert_time is the oldest last alert among the candidates, so the join stops reading the whole 90-day
-       log (about 60 ms a minute on a store with 30,000 alert rows). It drops no candidate: every resolution row a candidate
-       can use is after that candidate's last alert, so after the oldest one. The bound is NOT the clock minus a fixed window:
+       The bound on h.alert_time is the oldest last alert among the candidates. The plan still scans the log; the bound saves
+       the per-row work (the Resolves test and the join) on every older row, about 44 ms a pass on a store with 30,000 alert
+       rows (warm, and the pass runs once a minute). A live follow-up can pull the oldest last alert back by up to 30 days, so
+       the saving is smaller while one is open. It drops no candidate: every resolution row a candidate can use is after that
+       candidate's last alert, so after the oldest one. The bound is NOT the clock minus a fixed window:
        a follow-up opens now but copies its source's alert rows with their original times, so its last alert can be weeks old
        (follow_up_at may be 30 days out), and a fixed window would hide a clear older than it and lose the resolved event. */
     internal const string ResolveCandidatesSql = @"
