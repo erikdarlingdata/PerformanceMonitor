@@ -141,7 +141,43 @@ public sealed class ViewerCustomViewRunTests
     {
         Assert.Equal(tab, AlertChainLink.TabFor(metric, postgres));
         Assert.Equal(innerTabIndex, ViewerServerTab.InnerTabIndexFor(tab));
-        Assert.Equal(tab != AlertServerTab.None, AlertChainLink.TabLinkText(metric) is not null);
+        Assert.Equal(tab != AlertServerTab.None, AlertChainLink.TabLinkText(tab) is not null);
+    }
+
+    /* The link's text and its target come from one choice (round 1 of #6612): a PostgreSQL server's Blocking Detected opens the Activity
+       tab, so the text names that tab; a SQL Server's keeps the Blocking view's text. */
+    [Theory]
+    [InlineData("Blocking Detected", true, AlertChainView.None, AlertServerTab.PgActivity, "Open the Activity tab at this time")]
+    [InlineData("Blocking Detected", false, AlertChainView.Blocking, AlertServerTab.None, "Open the Blocking view at this time")]
+    [InlineData("Deadlocks Detected", false, AlertChainView.Deadlocks, AlertServerTab.None, "Open the Deadlocks view at this time")]
+    [InlineData("High CPU", false, AlertChainView.None, AlertServerTab.Cpu, "Open the CPU tab at this time")]
+    [InlineData("High CPU", true, AlertChainView.None, AlertServerTab.PgOverview, "Open the Overview tab at this time")]
+    public void TheTriageLink_TextNamesWhereItOpens(string metric, bool postgres, AlertChainView view, AlertServerTab tab, string text)
+    {
+        var target = AlertChainLink.TargetFor(metric, postgres);
+        Assert.NotNull(target);
+        Assert.Equal(view, target!.View);
+        Assert.Equal(tab, target.Tab);
+        Assert.Equal(text, target.Text);
+    }
+
+    [Theory]
+    [InlineData("Deadlocks Detected", true)]
+    [InlineData("Custom Alert Rules Unhealthy", false)]
+    public void TheTriageLink_HasNoTarget_WhenNoViewOrTabHoldsTheMetric(string metric, bool postgres) =>
+        Assert.Null(AlertChainLink.TargetFor(metric, postgres));
+
+    [Theory]
+    [InlineData(12, false)]
+    [InlineData(13, true)]
+    public void TheSeriesCap_SaysHowManyAreShown_OfHowManyThereAre(int total, bool notice)
+    {
+        var text = ViewerCustomViewRun.SeriesCapNotice(total);
+        Assert.Equal(notice, text is not null);
+        if (notice)
+        {
+            Assert.Equal($"Showing the first 12 of {total} series.", text);
+        }
     }
 
     [Fact]

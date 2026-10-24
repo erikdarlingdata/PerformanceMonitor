@@ -16,7 +16,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>One row of the Fleet Sweeps timeline (#6390): a sweep, as the web's timeline row words it.</summary>
 public sealed record FleetSweepRunRow(
-    string SweepId, string SweptAtLocal, string Flags, string ServersText, string BandsText, string WatchText, string WouldHavePagedText);
+    string SweepId, string SweptAtLocal, string Flags, string ServersText, string BandsText, string WatchText, string WouldHavePagedText)
+{
+    /// <summary>The sweep instant in UTC, the "Swept at" column's sort key (<see cref="SweptAtLocal"/> is display text); MinValue when the node had none.</summary>
+    public DateTime SweptAtUtc { get; init; }
+}
 
 public sealed record FleetSweepTransitionRow(string Server, string From, string To, string Reason);
 
@@ -120,7 +124,10 @@ internal static class FleetSweepsRows
                 $"{Num(Int(s, "servers_reported"))}/{Num(Int(s, "servers_expected"))} reported",
                 BandsText(report),
                 watchText,
-                whp > 0 ? $"{whp} would have paged" : ""));
+                whp > 0 ? $"{whp} would have paged" : "")
+            {
+                SweptAtUtc = Utc(Str(s, "swept_at")),
+            });
         }
 
         return rows;

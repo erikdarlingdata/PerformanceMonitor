@@ -146,6 +146,9 @@ public enum AlertServerTab
     PgReplication
 }
 
+/// <summary>Where an alert's link opens (<see cref="View"/> or <see cref="Tab"/>, the other is None) and the text that names it.</summary>
+public sealed record AlertChainTarget(AlertChainView View, AlertServerTab Tab, string Text);
+
 /// <summary>
 /// The Alert Details window's "open the full chain" link (#5847): which view a Blocking or Deadlocks alert opens, and
 /// the window around the alert's time that view reads. The alert's statements are shortened when it is built, so the
@@ -208,11 +211,48 @@ public static class AlertChainLink
         };
     }
 
-    /// <summary>The Triage link's text for a metric that has a server tab on either engine, else null.</summary>
-    public static string? TabLinkText(string? metricName) =>
-        TabFor(metricName, false) != AlertServerTab.None || TabFor(metricName, true) != AlertServerTab.None
-            ? "Open this server's tab at this time"
-            : null;
+    /// <summary>The Triage link's text for a server tab: it names the tab the link opens, else null for <see cref="AlertServerTab.None"/>.</summary>
+    public static string? TabLinkText(AlertServerTab tab) => TabName(tab) is { } name ? $"Open the {name} tab at this time" : null;
+
+    /// <summary>The header of a server tab as the viewer shows it, or null for <see cref="AlertServerTab.None"/>.</summary>
+    private static string? TabName(AlertServerTab tab) => tab switch
+    {
+        AlertServerTab.Overview or AlertServerTab.PgOverview => "Overview",
+        AlertServerTab.WaitStats => "Wait Stats",
+        AlertServerTab.Queries => "Queries",
+        AlertServerTab.Cpu => "CPU",
+        AlertServerTab.Memory => "Memory",
+        AlertServerTab.FileIo => "File I/O",
+        AlertServerTab.TempDb => "tempdb",
+        AlertServerTab.Blocking => "Blocking",
+        AlertServerTab.RunningJobs => "Running Jobs",
+        AlertServerTab.Configuration => "Configuration",
+        AlertServerTab.SystemEvents => "System Events",
+        AlertServerTab.CollectionHealth => "Collection Health",
+        AlertServerTab.PgActivity => "Activity",
+        AlertServerTab.PgVacuum => "Vacuum",
+        AlertServerTab.PgWaits => "Waits",
+        AlertServerTab.PgReplication => "Replication",
+        _ => null
+    };
+
+    /// <summary>
+    /// The Darling Viewer's one answer for where an alert's link opens and what it says (#6390): the incident view (Blocking or
+    /// Deadlocks) on a SQL Server, else the server tab <see cref="TabFor"/> names; the text comes from the same choice, so the label
+    /// and the target cannot disagree. A PostgreSQL server has no Blocking or Deadlocks view, so its Blocking Detected opens a tab.
+    /// Null when the metric has neither (no link).
+    /// </summary>
+    public static AlertChainTarget? TargetFor(string? metricName, bool isPostgres)
+    {
+        var view = isPostgres ? AlertChainView.None : ViewFor(metricName);
+        if (view != AlertChainView.None)
+        {
+            return new AlertChainTarget(view, AlertServerTab.None, LinkText(view)!);
+        }
+
+        var tab = TabFor(metricName, isPostgres);
+        return TabLinkText(tab) is { } text ? new AlertChainTarget(AlertChainView.None, tab, text) : null;
+    }
 
     /// <summary>The naive-UTC window the view opens on, around the stored naive-UTC alert time.</summary>
     public static (DateTime FromUtc, DateTime ToUtc) WindowUtc(DateTime alertTimeUtc) =>

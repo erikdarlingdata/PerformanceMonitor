@@ -272,6 +272,13 @@ public static class ViewerCustomViewRun
     /// <summary>The viz families the viewer draws as a chart; the others (table, bar, pie, bandlist) are a table or list.</summary>
     public static bool IsLineFamily(string? viz) => viz is "line" or "area" or "stacked" or "stacked-bar";
 
+    /// <summary>The most lines one chart draws; a legend of more is unreadable.</summary>
+    public const int MaxSeries = 12;
+
+    /// <summary>The line shown beside a chart that drew fewer lines than the payload held, or null when every line is drawn.</summary>
+    public static string? SeriesCapNotice(int total) =>
+        total > MaxSeries ? $"Showing the first {MaxSeries} of {total} series." : null;
+
     /// <summary>A time-series payload's lines: one per distinct value of the non-time, non-value columns, each point (UTC bucket, value).
     /// Null when the rows carry no <c>bucket</c> (a ranked or scalar result), which is shown as a table.</summary>
     public static IReadOnlyList<(string Name, IReadOnlyList<(DateTime Bucket, double Value)> Points)>? Lines(JsonArray rows)

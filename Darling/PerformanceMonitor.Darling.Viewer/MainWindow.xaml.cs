@@ -2217,22 +2217,30 @@ public partial class MainWindow : Window
     /// time, through the same open-tab path the Recommendations deep link uses. Null (no link) for any other alert, a
     /// server no longer registered, or a PostgreSQL server, whose tab has no Blocking tab.
     /// </summary>
-    private Action? FullChainOpenerFor(ViewerAlertRow row)
+    private AlertChainOpener? FullChainOpenerFor(ViewerAlertRow row)
     {
-        var view = AlertChainLink.ViewFor(row.MetricName);
         var server = FindManagedServerById(row.ServerId);
         if (server is null)
         {
             return null;
         }
 
+        /* One choice for the target and the link's text (AlertChainLink.TargetFor), so the label names where it opens. */
+        var target = AlertChainLink.TargetFor(row.MetricName, server.IsPostgres);
+        if (target is null)
+        {
+            return null;
+        }
+
+        var view = target.View;
+        var tab = target.Tab;
+
         /* #6390 S6: every other metric with a server tab (and a PostgreSQL server's Blocking Detected, which has no Blocked Process
            Reports grid) opens that tab over the same window: the viewer's Triage. */
-        var tab = view == AlertChainView.None || server.IsPostgres ? AlertChainLink.TabFor(row.MetricName, server.IsPostgres) : AlertServerTab.None;
         if (tab != AlertServerTab.None)
         {
             var (tabFrom, tabTo) = AlertChainLink.WindowUtc(row.AlertTime);
-            return async () =>
+            return new AlertChainOpener(target.Text, async () =>
             {
                 try
                 {
@@ -2246,16 +2254,11 @@ public partial class MainWindow : Window
                 {
                     OnServerTabStatusChanged($"Opening the {tab} tab failed: {ex.Message}");
                 }
-            };
-        }
-
-        if (view == AlertChainView.None || server.IsPostgres)
-        {
-            return null;
+            });
         }
 
         var (fromUtc, toUtc) = AlertChainLink.WindowUtc(row.AlertTime);
-        return async () =>
+        return new AlertChainOpener(target.Text, async () =>
         {
             try
             {
@@ -2269,7 +2272,7 @@ public partial class MainWindow : Window
             {
                 OnServerTabStatusChanged($"Opening the {view} view failed: {ex.Message}");
             }
-        };
+        });
     }
 
     /// <summary>Finds a registered server by id in the Recommendations tab's own selector list (populated

@@ -149,6 +149,10 @@ public partial class CustomViewRunWindow : Window
         else if (ViewerCustomViewRun.IsLineFamily(item.Viz) && ViewerCustomViewRun.Lines(rows) is { Count: > 0 } lines)
         {
             host.Children.Add(Chart(lines));
+            if (ViewerCustomViewRun.SeriesCapNotice(lines.Count) is { } capNotice)
+            {
+                host.Children.Add(Muted(capNotice));
+            }
         }
         else
         {
@@ -175,7 +179,7 @@ public partial class CustomViewRunWindow : Window
         var chart = new ScottPlot.WPF.WpfPlot { Height = 280 };
         var palette = ChartPalette.CyclingPalette.ToArray();
         var index = 0;
-        foreach (var (name, points) in lines.Take(12))
+        foreach (var (name, points) in lines.Take(ViewerCustomViewRun.MaxSeries))
         {
             var scatter = chart.Plot.Add.TimeSeries(points.Select(p => p.Bucket.ToOADate()).ToArray(), points.Select(p => p.Value).ToArray());
             scatter.Color = ScottPlot.Color.FromHex(palette[index++ % palette.Length]);

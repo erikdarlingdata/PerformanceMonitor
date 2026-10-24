@@ -46,7 +46,7 @@
                       SelectionMode="Single"
                       SelectionChanged="RunsDataGrid_SelectionChanged">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Header="Swept at" Binding="{Binding SweptAtLocal}" Width="150"/>
+                    <DataGridTextColumn Header="Swept at" Binding="{Binding SweptAtLocal}" SortMemberPath="SweptAtUtc" Width="150"/>
                     <DataGridTextColumn Header="Flags" Binding="{Binding Flags}" Width="170"/>
                     <DataGridTextColumn Header="Servers" Binding="{Binding ServersText}" Width="120"/>
                     <DataGridTextColumn Header="Bands" Binding="{Binding BandsText}" Width="*" MinWidth="160"/>
