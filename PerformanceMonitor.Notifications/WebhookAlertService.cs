@@ -2174,7 +2174,9 @@ public class WebhookAlertService
         DateTime nowUtc,
         string? investigationJson = null,
         WebhookSigningKeys? signing = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string status = GenericStatusFiring,
+        string? dedupKeyOverride = null)
     {
         try
         {
@@ -2198,7 +2200,8 @@ public class WebhookAlertService
             var payload = BuildGenericPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 context: context, bodyTemplate: settings.GenericWebhookBodyTemplate, serverId: serverId,
-                triageUrl: triageUrl, detailText: detailText, nowUtc: nowUtc, investigationJson: investigationJson);
+                triageUrl: triageUrl, detailText: detailText, nowUtc: nowUtc, investigationJson: investigationJson,
+                status: status, dedupKeyOverride: dedupKeyOverride);
 
             if (!IsWellFormedJson(payload, out var bodyError))
             {
@@ -2418,7 +2421,9 @@ public class WebhookAlertService
         string? triageUrl = null,
         string? detailText = null,
         DateTime? nowUtc = null,
-        string? investigationJson = null)
+        string? investigationJson = null,
+        string status = GenericStatusFiring,
+        string? dedupKeyOverride = null)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var template = string.IsNullOrWhiteSpace(bodyTemplate) ? DefaultGenericBodyTemplate : bodyTemplate!;
@@ -2436,8 +2441,7 @@ public class WebhookAlertService
            serverName arm is THIS channel's own fallback for callers with no id (the settings-window test
            send); it is not a guarantee PagerDuty's path shares, so a caller wanting cross-channel
            correlation must pass the id. */
-        var dedupKey = DerivePagerDutyDedupKey(
-            string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, context);
+        var dedupKey = dedupKeyOverride ?? DeriveGenericDedupKey(serverId, serverName, metricName, context);
 
         var values = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -2455,6 +2459,7 @@ public class WebhookAlertService
             ["context_json"] = context is null ? "{}" : AlertContextSerializer.Serialize(RedactForWebhook(context)),
             ["incidents_json"] = AlertContextSerializer.SerializeIncidents(context),
             ["dedup_key"] = EscapeForJson(dedupKey),
+            ["status"] = EscapeForJson(status),
             ["resource_name"] = EscapeForJson(DeriveResourceName(context) ?? ""),
             ["database"] = EscapeForJson(DeriveResourceDatabase(context) ?? ""),
             ["triage_url"] = EscapeForJson(triageUrl ?? ""),
@@ -2475,6 +2480,21 @@ public class WebhookAlertService
     }
 
     private const string InvestigationToken = "investigation_json";
+
+    /// <summary>#6718: the <c>{{status}}</c> value on a fire (and on the settings window's test send).</summary>
+    internal const string GenericStatusFiring = "firing";
+
+    /// <summary>#6718: the <c>{{status}}</c> value on a resolution send.</summary>
+    internal const string GenericStatusResolved = "resolved";
+
+    /// <summary>
+    /// #6718: the generic webhook's <c>{{dedup_key}}</c> for an alert: the serverId-else-serverName identity and the default
+    /// <c>autoResolve = false</c> (#5469), exactly what <see cref="BuildGenericPayload"/> renders on a fire. The one place that
+    /// derivation lives: the resolution send reads the key the fire used through this, so a receiver sees one key for both
+    /// halves of the episode.
+    /// </summary>
+    internal static string DeriveGenericDedupKey(string serverId, string serverName, string metricName, AlertContext? context) =>
+        DerivePagerDutyDedupKey(string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, context);
 
     /// <summary>
     /// #5821: whether a generic body template places <c>{{investigation_json}}</c>. A blank template is the default, which
@@ -2535,7 +2555,7 @@ public class WebhookAlertService
     {
         "metric", "server", "value", "threshold", "severity",
         "context_json", "incidents_json", "dedup_key", "resource_name", "database", "triage_url",
-        "context", "timestamp", "detail", InvestigationToken
+        "context", "timestamp", "detail", "status", InvestigationToken
     };
 
     private static readonly System.Text.RegularExpressions.Regex s_genericPlaceholders =
@@ -2916,7 +2936,8 @@ public class WebhookAlertService
     /// succeeded, the error text when it did not; never throws except for the caller's own cancellation.
     /// </summary>
     internal async Task<string?> TrySendResolutionAsync(
-        string channel, string destination, AlertResolutionFacts facts, string serverId, CancellationToken cancellationToken = default)
+        string channel, string destination, AlertResolutionFacts facts, string serverId, CancellationToken cancellationToken = default,
+        string? genericDedupKey = null)
     {
         ArgumentNullException.ThrowIfNull(facts);
         var delivery = _settings.SnapshotForDelivery();
@@ -2940,9 +2961,14 @@ public class WebhookAlertService
                not sent, rather than sent unsigned. */
             NotificationRouter.GenericChannel when delivery.GenericSigningKeyUnreadable && !IsConfiguredGenericUrl(delivery, destination) =>
                 GenericSigningKeyUnreadableText,
+            /* #6718: {{dedup_key}} is the key the fire's generic post rendered, which the caller read from the fire, so the receiver
+               sees one key for the episode and {{status}} says resolved. {{metric}} stays the resolution's title. With no key given
+               it is derived from the alert's own name, the metric the fire used. */
             NotificationRouter.GenericChannel => await TrySendGenericAlertAsync(
                 delivery, destination, title, serverName, "resolved", "", serverId, context: null, triageUrl, detailText, now,
-                cancellationToken: cancellationToken, signing: GenericSigningFor(delivery, routeId: null, destination)),
+                cancellationToken: cancellationToken, signing: GenericSigningFor(delivery, routeId: null, destination),
+                status: GenericStatusResolved,
+                dedupKeyOverride: genericDedupKey ?? DeriveGenericDedupKey(serverId, serverName, facts.AlertName, context: null)),
             _ => $"{channel} does not carry a resolution post",
         };
     }

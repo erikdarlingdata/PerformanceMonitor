@@ -340,6 +340,10 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
 
         public HashSet<string> PagerDutyDedupKeys { get; } = new(StringComparer.Ordinal);
 
+        /// <summary>The <c>{{dedup_key}}</c> the generic webhook's fires rendered (#6718), which its resolution renders again so
+        /// the receiver closes what the fire opened. Not the PagerDuty keys: the generic token ignores the auto-resolve flag.</summary>
+        public HashSet<string> GenericDedupKeys { get; } = new(StringComparer.Ordinal);
+
         /// <summary>Channels a fire read back from history reached through a route that is gone or disabled now: no
         /// destination to send to, and the row's outcome says so.</summary>
         public List<string> RouteGoneChannels { get; } = new();
@@ -384,6 +388,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         var now = _utcNow();
         var serverId = string.IsNullOrEmpty(outcome.ServerKey) ? outcome.ServerName : outcome.ServerKey;
         var dedupKey = WebhookAlertService.DerivePagerDutyDedupKeyForSend(serverId, outcome.MetricName, context, _settings);
+        var genericDedupKey = WebhookAlertService.DeriveGenericDedupKey(outcome.ServerKey, outcome.ServerName, outcome.MetricName, context);
         lock (_deliveredFires)
         {
             var key = (outcome.ServerKey, outcome.MetricName);
@@ -404,6 +409,10 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
                 if (channel == NotificationRouter.PagerDutyChannel)
                 {
                     fire.PagerDutyDedupKeys.Add(dedupKey);
+                }
+                else if (channel == NotificationRouter.GenericChannel)
+                {
+                    fire.GenericDedupKeys.Add(genericDedupKey);
                 }
             }
         }
@@ -628,6 +637,16 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
                         destination, dedupKey, resolution.MetricName, resolution.ServerName, serverId, detail, cancellationToken);
                 }
             }
+            else if (channel == NotificationRouter.GenericChannel && fire.GenericDedupKeys.Count > 0)
+            {
+                /* #6718: one resolution post per key the fire's posts rendered, as the PagerDuty close does per incident. Usually one. */
+                error = null;
+                foreach (var dedupKey in fire.GenericDedupKeys)
+                {
+                    error ??= await _webhooks.TrySendResolutionAsync(
+                        channel, destination, facts, serverId, cancellationToken, genericDedupKey: dedupKey);
+                }
+            }
             else
             {
                 error = await _webhooks.TrySendResolutionAsync(channel, destination, facts, serverId, cancellationToken);
@@ -730,6 +749,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
 
             AlertContextSerializer.TryDeserialize(row.ContextJson, out var context);
             var dedupKey = WebhookAlertService.DerivePagerDutyDedupKeyForSend(serverId, resolution.MetricName, context, _settings);
+            var genericDedupKey = WebhookAlertService.DeriveGenericDedupKey(resolution.ServerKey, resolution.ServerName, resolution.MetricName, context);
             firstDedupKey = dedupKey;
             foreach (var destination in route.Destinations)
             {
@@ -739,6 +759,10 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
                     if (destination.Outcome == AlertRouteOutcomes.Delivered && destination.Channel == NotificationRouter.PagerDutyChannel)
                     {
                         fire.PagerDutyDedupKeys.Add(dedupKey);
+                    }
+                    else if (destination.Outcome == AlertRouteOutcomes.Delivered && destination.Channel == NotificationRouter.GenericChannel)
+                    {
+                        fire.GenericDedupKeys.Add(genericDedupKey);
                     }
 
                     continue;
@@ -760,6 +784,10 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
                 if (destination.Channel == NotificationRouter.PagerDutyChannel)
                 {
                     fire.PagerDutyDedupKeys.Add(dedupKey);
+                }
+                else if (destination.Channel == NotificationRouter.GenericChannel)
+                {
+                    fire.GenericDedupKeys.Add(genericDedupKey);
                 }
             }
         }
