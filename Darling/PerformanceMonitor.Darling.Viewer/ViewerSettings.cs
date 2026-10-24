@@ -14,6 +14,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -153,7 +154,7 @@ public sealed class ViewerSettings
     private const string ViewerRoleName = "viewer";
     private const string AdminCredentialFileName = "pg-admin-credential.dpapi";
     private const string ViewerCredentialFileName = "pg-viewer-credential.dpapi";
-    private const string ManagedSearchPath = "collect,config,public";
+    internal const string ManagedSearchPath = DarlingStoreConnection.StoreSearchPath;
 
     /// <summary>
     /// The viewer's own store connection's <c>ApplicationName</c> (#4479) — the twin, under the same

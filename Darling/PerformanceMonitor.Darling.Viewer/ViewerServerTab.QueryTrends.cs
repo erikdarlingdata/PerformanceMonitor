@@ -227,7 +227,7 @@ public partial class ViewerServerTab
         ClearChart(QueryDurationTrendChart);
         ApplyTheme(QueryDurationTrendChart);
 
-        if (data.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "Duration (ms/sec)"); return; }
+        if (data.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "Duration ms/s"); return; }
         ShowTrendCoverage(QueryDurationTrendChart, series);
 
         var rangeStart = startUtc.ToOADate();
@@ -246,7 +246,7 @@ public partial class ViewerServerTab
         QueryDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         QueryDurationTrendChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(QueryDurationTrendChart);
-        QueryDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
+        QueryDurationTrendChart.Plot.YLabel("Duration ms/s");
         SetChartYLimitsWithLegendPadding(QueryDurationTrendChart, 0, values.Max());
         ShowChartLegend(QueryDurationTrendChart);
         QueryDurationTrendChart.Refresh();
@@ -258,7 +258,7 @@ public partial class ViewerServerTab
         ClearChart(ProcDurationTrendChart);
         ApplyTheme(ProcDurationTrendChart);
 
-        if (data.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "Duration (ms/sec)"); return; }
+        if (data.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "Duration ms/s"); return; }
         ShowTrendCoverage(ProcDurationTrendChart, series);
 
         var rangeStart = startUtc.ToOADate();
@@ -277,7 +277,7 @@ public partial class ViewerServerTab
         ProcDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ProcDurationTrendChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(ProcDurationTrendChart);
-        ProcDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
+        ProcDurationTrendChart.Plot.YLabel("Duration ms/s");
         SetChartYLimitsWithLegendPadding(ProcDurationTrendChart, 0, values.Max());
         ShowChartLegend(ProcDurationTrendChart);
         ProcDurationTrendChart.Refresh();
@@ -289,7 +289,7 @@ public partial class ViewerServerTab
         ClearChart(QueryStoreDurationTrendChart);
         ApplyTheme(QueryStoreDurationTrendChart);
 
-        if (data.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "Duration (ms/sec)"); return; }
+        if (data.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "Duration ms/s"); return; }
         ShowTrendCoverage(QueryStoreDurationTrendChart, series);
 
         var rangeStart = startUtc.ToOADate();
@@ -308,7 +308,7 @@ public partial class ViewerServerTab
         QueryStoreDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         QueryStoreDurationTrendChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(QueryStoreDurationTrendChart);
-        QueryStoreDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
+        QueryStoreDurationTrendChart.Plot.YLabel("Duration ms/s");
         SetChartYLimitsWithLegendPadding(QueryStoreDurationTrendChart, 0, values.Max());
         ShowChartLegend(QueryStoreDurationTrendChart);
         QueryStoreDurationTrendChart.Refresh();

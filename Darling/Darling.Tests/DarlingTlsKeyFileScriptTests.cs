@@ -69,18 +69,13 @@ public sealed class DarlingTlsKeyFileScriptTests
     }
 
     /// <summary>The verb runs after the last tree lock (the lock resets any extra write grant on a file it walks) and before
-    /// the service starts, in both scripts. A failure to run it is a warning, never a stop.</summary>
+    /// the service starts, in the upgrade script (the install script's order is not pinned as text: under -MsiPhase the
+    /// start is the package's, #6480). A failure to run it is a warning, never a stop, in both.</summary>
     [Fact]
     public void TheScripts_CallTheVerb_AfterTheLastTreeLock_AndBeforeTheServiceStarts_AndNeverFailOverIt()
     {
         var install = Script("install-darling.ps1");
         var upgrade = Script("upgrade-darling.ps1");
-
-        var installLock = install.LastIndexOf("\nInvoke-InstallTreeLock $serviceAccount\n", StringComparison.Ordinal);
-        var installCall = install.IndexOf("\n$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening $serviceExe $configPath\n", StringComparison.Ordinal);
-        var installStart = install.IndexOf("\nStart-Service -Name $serviceName\n", StringComparison.Ordinal);
-        Assert.True(installLock > 0 && installCall > installLock && installCall < installStart, $"install order: lock {installLock}, call {installCall}, start {installStart}");
-        Assert.Matches(@"\$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening \$serviceExe \$configPath\nif \(\$tlsKeyWarning\) \{ Write-Host ""WARNING: \$tlsKeyWarning"" -ForegroundColor Yellow \}\n", install);
 
         var upgradeLock = upgrade.LastIndexOf("\nInvoke-UpgradeTreeLock 'after the copy'\n", StringComparison.Ordinal);
         var upgradeCall = upgrade.IndexOf("\n$tlsKeyWarning = Get-UpgradeTlsKeyFileWarning (Join-Path $InstallRoot $serviceExeName) $configPath\n", StringComparison.Ordinal);

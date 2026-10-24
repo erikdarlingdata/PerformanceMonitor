@@ -424,7 +424,12 @@ public sealed class McpReadCommandTimeoutTests
             File.ReadAllText(Path.Combine(
                 RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs")));
 
-        Assert.Contains("McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres", code, StringComparison.Ordinal);
+        /* #6390 S2c: the run core moved to Storage; it reads the deadline through the host the service builds. */
+        var runnerCode = CSharpSourceWalker.StripCommentsAndStrings(
+            File.ReadAllText(Path.Combine(
+                RepoRoot(), "Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs")));
+        Assert.Contains("host.ResolveComposedQuerySeconds(postgres", runnerCode, StringComparison.Ordinal);
+        Assert.Contains("McpCommandDeadlines.ResolveComposedQuerySecondsAsync", code, StringComparison.Ordinal);
 
         Assert.DoesNotContain("CommandTimeout = McpCommandDeadlines.ComposedQuery", code, StringComparison.Ordinal);
         Assert.DoesNotContain("MaxComposeStatementTimeoutSeconds", code, StringComparison.Ordinal);
@@ -435,11 +440,12 @@ public sealed class McpReadCommandTimeoutTests
         /* Anchored on the RETURN TYPE rather than on what follows the open paren: the declaration wraps its
            parameter list, so a line-ending-sensitive anchor here would be CRLF-fragile in exactly the way a
            source-scanning pin must not be — the blobs are LF and the working copies are CRLF. */
-        var runner = code.IndexOf("Task<ComposeRunOutcome> RunComposedPanelAsync(", StringComparison.Ordinal);
-        Assert.True(runner >= 0, "RunComposedPanelAsync's declaration was not found — the shared runner has moved");
+        /* #6390 S2c: the shared runner's body is the run core in Storage. */
+        var runner = runnerCode.IndexOf("Task<ComposeRunOutcome> RunComposedPanelCoreAsync(", StringComparison.Ordinal);
+        Assert.True(runner >= 0, "RunComposedPanelCoreAsync's declaration was not found — the shared runner has moved");
 
-        var resolve = code.IndexOf("ResolveComposedQuerySecondsAsync(postgres", StringComparison.Ordinal);
-        var query = code.IndexOf("static async Task<JsonArray> RunComposedQueryAsync", StringComparison.Ordinal);
+        var resolve = runnerCode.IndexOf("ResolveComposedQuerySeconds(postgres", StringComparison.Ordinal);
+        var query = runnerCode.IndexOf("static async Task<JsonArray> RunComposedQueryAsync", StringComparison.Ordinal);
         Assert.True(
             resolve > runner && resolve < query,
             "the resolve does not sit inside the shared RunComposedPanelAsync body — it must happen once per "
@@ -700,7 +706,8 @@ public sealed class McpReadCommandTimeoutTests
 
         Assert.True(Directory.Exists(mcp), $"MCP directory not found: {mcp}");
 
-        var named = new[] { "CustomViewStore.cs", "DarlingWebEndpoints.cs" }
+        /* #6390 S2c: the composed-panel run core, whose commands this surface still runs, now lives in Storage's Compose folder. */
+        var named = new[] { "DarlingWebEndpoints.cs", Path.Combine("..", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs") }
             .Select(f => Path.Combine(project, f))
             .ToArray();
 
