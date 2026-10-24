@@ -402,7 +402,7 @@ public class WebhookAlertService
                    this value. The deliverer records the same value, so a resolution closes the key the receiver opened even
                    when the filter dropped the alert's first incident (the key anchors on the first incident it keeps). */
                 genericDedupKey = DeriveGenericDedupKey(serverId, serverName, metricName, renderContext);
-                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, investigationJson, GenericSigningFor(delivery, route.Generic.RouteId, genericUrl), cancellationToken, dedupKeyOverride: genericDedupKey));
+                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, investigationJson, GenericSigningFor(delivery, route.Generic.RouteId, genericUrl), dedupKeyOverride: genericDedupKey, cancellationToken: cancellationToken));
             }
 
             if (route.PagerDuty.Destination is { } pagerDutyKey)
@@ -2189,9 +2189,9 @@ public class WebhookAlertService
         DateTime nowUtc,
         string? investigationJson = null,
         WebhookSigningKeys? signing = null,
-        CancellationToken cancellationToken = default,
         string status = GenericStatusFiring,
-        string? dedupKeyOverride = null)
+        string? dedupKeyOverride = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
