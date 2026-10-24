@@ -3326,6 +3326,10 @@ LIMIT 1";
            Never throws; a key that cannot be used is a refusing ring with the reason logged and recorded in the store. */
         _passwordKeyRuntime = await DarlingPasswordKeyRuntime.StartForServiceAsync(
             config, DarlingConfig.ResolveConfigPath(), postgres, _logger, stoppingToken);
+        /* #6715: the seed above copies the webhook values from darling.json as plain text, because the ring it would seal them with
+           needs the seeded store and loads only now. Seal those (and any an older build left) here, before the first view reads the
+           row, so this host's reload baseline already includes the write's config_version bump. Never stops the start. */
+        await configProvider.SealPlainWebhookSettingsAsync(_passwordKeyRuntime.Ring, stoppingToken);
         /* #5456: a pin step that could not run is tried again on every sweep, and until it does the re-enter line says to wait.
            Set before the first view so that view's line already knows; the pins it takes bump config_version, which every
            host's reload beacon picks up. */
