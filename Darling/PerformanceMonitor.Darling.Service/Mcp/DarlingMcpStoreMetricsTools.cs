@@ -859,11 +859,11 @@ public sealed class DarlingMcpStoreMetricsTools
               + $"{DarlingSelfAlertEvaluator.FormatSyncSeconds(seen.SyncMs)}s, in the minute ending {DarlingSelfAlertEvaluator.FormatSyncMinute(seen.SampledUtc)}."
             : string.Empty;
         var measured = $" Over the {minutes} minutes ending {Stamp(reading.ObservedAt)} the checkpointer ran "
-            + (checkpointCount is long count ? $"{count} checkpoint(s), spending " : "an unmeasured number of checkpoints (a row before V140 has no timed count), spending ")
+            + (checkpointCount is long count ? $"{count} {(count == 1 ? "checkpoint" : "checkpoints")}, spending " : "an unmeasured number of checkpoints (a row before V140 has no timed count), spending ")
             + $"{(syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s total in its sync (fsync) phase and "
             + $"{((reading.WriteMs ?? 0) / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s in its write phase — "
             + (averageSyncMs is double average ? $"an average of {(average / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s of sync per checkpoint — " : string.Empty)
-            + $"and {requested} checkpoint(s) were REQUESTED rather than timed (started by WAL volume reaching max_wal_size, "
+            + $"and {requested} {(requested == 1 ? "checkpoint was" : "checkpoints were")} REQUESTED rather than timed (started by WAL volume reaching max_wal_size, "
             + "a base backup, or a CHECKPOINT statement, not by checkpoint_timeout).";
 
         if (!reading.IsPressure)

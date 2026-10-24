@@ -84,6 +84,27 @@ public sealed class ServerActionSwitchWriteLiveTests
     }
 
     [Fact]
+    public async Task ADryRunRefusedForWantOfTheClaim_ReadsTheSwitchWithoutOne_AndSaysOnOrOff()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            /* #6455: no claim, no agent_action. The plan tools read the switch for a refused dry run through ServerActionSwitches.ListAsync. */
+            var off = await DarlingMcpPlanForceTools.ReadSwitchStateAsync(owner, null, SqlServerId, "srv-1", "force_plan", ct);
+            Assert.Contains("is currently off", off, StringComparison.Ordinal);
+            /* The per-server switch answers server_action_off; actions_off is the service-wide switch. */
+            Assert.Contains($"refused as {AgentActionCodes.SwitchOff} ", off, StringComparison.Ordinal);
+            Assert.DoesNotContain(AgentActionCodes.ActionsOff, off, StringComparison.Ordinal);
+
+            await ServerActionSwitches.SetAsync(owner, SqlServerId, "force_plan", true, "person:alice", ServerActionSurfaces.Viewer, ct);
+            var on = await DarlingMcpPlanForceTools.ReadSwitchStateAsync(owner, null, SqlServerId, "srv-1", "force_plan", ct);
+            Assert.Contains("is currently on.", on, StringComparison.Ordinal);
+
+            /* An unknown server has no switch to describe, so the refusal goes out without the note. */
+            Assert.Null(await DarlingMcpPlanForceTools.ReadSwitchStateAsync(owner, null, 9999, "nowhere", "force_plan", ct));
+        });
+    }
+
+    [Fact]
     public async Task TheService_RefusesAnUnknownAction_AnActionTheEngineCannotRun_AndAnUnknownServer_WritingAndJournalingNothing()
     {
         await WithStoreAsync(async (owner, ct) =>
@@ -132,7 +153,13 @@ public sealed class ServerActionSwitchWriteLiveTests
                 ReadCredential = (serverId, token) => store.ReadServerCredentialStateAsync(owner, serverId, token),
             };
 
-            Assert.Equal(AgentActionCodes.SwitchOff, (await store.CheckServerActionAsync(call, hooks, ct))?.Reason);
+            var realRefusal = await store.CheckServerActionAsync(call, hooks, ct);
+            Assert.Equal(AgentActionCodes.SwitchOff, realRefusal?.Reason);
+
+            /* #6455: the code a dry run predicts is the code the real call gets for this server. */
+            var predicted = await DarlingMcpPlanForceTools.ReadSwitchStateAsync(owner, null, SqlServerId, "alpha-sql-01", ServerActionNames.ForcePlan, ct);
+            Assert.Contains($"refused as {realRefusal!.Reason} ", predicted, StringComparison.Ordinal);
+
             await ServerActionSwitches.SetAsync(owner, SqlServerId, "force_plan", true, "person:alice", ServerActionSurfaces.Viewer, ct);
             Assert.Null(await store.CheckServerActionAsync(call, hooks, ct));
             await ServerActionSwitches.SetAsync(owner, SqlServerId, "force_plan", false, "person:alice", ServerActionSurfaces.Viewer, ct);

@@ -262,46 +262,14 @@ public sealed class WatermarkPolicyTests
     [Fact]
     public void TheLiteSuite_RunsOnEveryTreeTheHorizonPinScans()
     {
-        var yaml = File.ReadAllText(Path.Combine(RepoRoot(), ".github", "workflows", "build.yml"))
-            .Replace("\r\n", "\n", StringComparison.Ordinal);
-
-        /* #3887: the filter that gates the SUITE is the lite-tests matrix job's 'lite_shard' — a
-           copy of 'lite' (split with 'darling_reads_shard'), pinned equal by CrossAppGuardCiGateTests. This pin
-           follows the suite rather than the name, because what it protects is the Darling Service tree REACHING the
-           tests; 'lite' itself still gates the Lite build and publish in the build job. */
+        /* #6656: the filter file is read by ci-plan.py and ci-select.py now; the lite-tests job that consumed it is gone.
+           This pin follows the set, because what it protects is the Darling Service tree REACHING the tests. */
         /* #5669: the set lives in .github/lite-paths-filter.yml, the one file the shard legs, lite-scope and
            ci-select.py read. */
         var block = string.Join("\n", CrossAppGuardCiGateTests.LiteFilterFilePatterns("darling_reads_shard"));
         Assert.True(block.Length > 0, ".github/lite-paths-filter.yml's 'darling_reads_shard' path filter is gone — find where it moved before editing this test");
 
         Assert.Contains("Darling/PerformanceMonitor.Darling.Service/**/!(*.md)", block, StringComparison.Ordinal);
-
-        /* The step that consumes it. If the sharded run ever stops reading `lite_shard`, the entry above
-           is decoration and this test is the only thing that would notice.
-
-           Matched on the FULL step name, not a prefix: since #3887 there are two steps whose names begin
-           "Run Lite tests" — the build job's release-only unsharded pass and the matrix job's sharded one
-           — and IndexOf on the prefix finds the release-only one, whose `if` is the release guard and
-           carries no filter at all. That is exactly how this pin first went red on the change that split
-           the suite, which is the pin working. */
-        var job = yaml.IndexOf("\n  lite-tests:\n", StringComparison.Ordinal);
-        Assert.True(job > 0, "the 'lite-tests' job is gone — find where it moved before editing this test");
-
-        var scope = yaml.IndexOf("- name: Decide how much of the Lite suite runs\n", job, StringComparison.Ordinal);
-        Assert.True(scope > 0, "the 'Decide how much of the Lite suite runs' step is gone — find where it moved before editing this test");
-        var scopeEnd = yaml.IndexOf("\n      - name: ", scope, StringComparison.Ordinal);
-        Assert.Contains(
-            "DARLING_READS: ${{ steps.filter.outputs.darling_reads_shard }}",
-            yaml[scope..scopeEnd],
-            StringComparison.Ordinal);
-
-        /* The sharded step runs only when the scope step says this leg has work, which for a Darling-only
-           diff is the `reads` selection in shard 0. */
-        var run = CrossAppGuardCiGateTests.StepBlock(yaml[job..], "Run Lite tests (shard)");
-        Assert.Contains(
-            "\n        if: steps.scope.outputs.run == 'true'\n",
-            run,
-            StringComparison.Ordinal);
     }
 
     /// <summary>The repo root, located by walking up from this file's compile-time path — the same idiom

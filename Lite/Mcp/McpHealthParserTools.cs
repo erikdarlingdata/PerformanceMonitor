@@ -686,7 +686,7 @@ public sealed class McpHealthParserTools
         {
             return WitnessStatus(
                 "unavailable",
-                RingBufferTruncationNote.HealthParserMessage(eventType, serverName, hoursBack, truncation),
+                RingBufferTruncationNote.HealthParserMessage(eventType, serverName, hoursBack, truncation, captured, noneQualifiedBecause),
                 sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: captured);
         }
 

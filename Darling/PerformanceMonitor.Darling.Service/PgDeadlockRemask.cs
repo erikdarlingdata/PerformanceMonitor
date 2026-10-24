@@ -782,9 +782,11 @@ AND   d.victim_statement IS DISTINCT FROM $5";
     public readonly record struct ResolvedReport(ReportState State, AlertIncident? Incident);
 
     /// <summary>The live alert's text for a report with no victim statement
-    /// (<see cref="DarlingWorker.BuildPgDeadlockIncident"/>), which carries no SQL.</summary>
+    /// (<see cref="DarlingWorker.BuildPgDeadlockIncident"/>), which carries no SQL. The builder writes "1 participant" or
+    /// "3 participants" (#6703); rows stored before that keep "2 participant(s)" for their retention, so all three
+    /// spellings are the same line.</summary>
     private static readonly Regex s_noStatementObject = new(
-        @"^victim pid -?[0-9]+, -?[0-9]+ participant\(s\)$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        @"^victim pid -?[0-9]+, -?[0-9]+ participant(?:s|\(s\))?$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>A report's key as a PostgreSQL deadlock alert carries it: <see cref="PgDeadlockLogParser.HashOf"/>'s
     /// shape, 32 upper-case hex characters, which the SQL Server alert's fingerprint (64, lower case) never

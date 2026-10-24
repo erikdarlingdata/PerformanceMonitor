@@ -385,8 +385,8 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
         }
     }
 
-    /// <summary>The truncated-baseline sentence Lite adds to its note, which this tool copies.</summary>
-    private const string BaselineTail = "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.";
+    /// <summary>The truncated-baseline sentence both products add to the note: one constant in Common (#6649).</summary>
+    private const string BaselineTail = PerformanceMonitor.Common.QueryStoreRegressionRules.BaselineWindowTail;
 
     /// <summary>
     /// #4966: the store's first Query Store row comes 40 hours back, inside the 7-day baseline, so the baseline holds only part

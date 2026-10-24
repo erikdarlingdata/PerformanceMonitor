@@ -26,6 +26,7 @@ using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -142,7 +143,7 @@ public sealed class ComposeOpenPhaseTimeoutTests
         /* The same prefix assertion, with the whole text as the failure message: xunit cuts a StartsWith failure after about
            fifty characters, which hid the cause when this failed on a loaded runner. */
         Assert.True(outcome.Error!.StartsWith("Error running query: could not get a store connection in time: ", StringComparison.Ordinal), outcome.Error + Environment.NewLine + DescribeChain(thrown));
-        Assert.NotEqual(DarlingWebEndpoints.StatementTimeoutText, outcome.Error);
+        Assert.NotEqual(ComposePanelRunner.StatementTimeoutText, outcome.Error);
         Assert.NotEqual("57014", outcome.AuthorSqlState);
     }
 

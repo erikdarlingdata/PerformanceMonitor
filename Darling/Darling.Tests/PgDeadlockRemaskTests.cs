@@ -272,6 +272,38 @@ public sealed class PgDeadlockRemaskTests
     }
 
     /// <summary>
+    /// The no-SQL line the live alert writes today ("victim pid 555, 1 participant" / "3 participants", #6703) is kept
+    /// as written when its report cannot be found, and does not count as text that still carries literals. The line
+    /// is built by <see cref="DarlingWorker.BuildPgDeadlockIncident"/> itself, not typed here, so a change to the
+    /// builder's wording that the pass's whitelist does not follow fails this test.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    public void TheBuildersNoStatementLine_IsKeptAsWritten_AndNotJudgedToCarryLiterals(int participants)
+    {
+        var hash = PgDeadlockLogParser.HashOf("a report retention dropped, " + participants);
+        var built = DarlingWorker.BuildPgDeadlockIncident(new DarlingPgDeadlockReader.PgDeadlockRow(
+            new DateTime(2026, 8, 31, 0, 0, 0, DateTimeKind.Utc), 555, participants, hash, null, null, null, 1));
+        var line = Assert.Single(built.InvolvedObjects);
+        Assert.Equal($"victim pid 555, {participants} {(participants == 1 ? "participant" : "participants")}", line);
+
+        var context = AlertContextSerializer.Serialize(new AlertContext { Incidents = [built] });
+        static PgDeadlockRemask.ResolvedReport Gone(string key) => new(PgDeadlockRemask.ReportState.Missing, null);
+
+        /* Before every report is rewritten, a row holding only this line has nothing to rewrite and nothing that
+           would key it: a line judged to carry literals would be withheld and its key replaced here. */
+        Assert.Null(PgDeadlockRemask.RemaskAlert(context, null, Gone, s_key, reportsMayBeRaw: true));
+
+        /* With the key passed (the alert-key stage), the key is replaced and the line stays as written. */
+        var keyed = PgDeadlockRemask.RemaskAlert(context, null, Gone, s_key);
+        Assert.NotNull(keyed);
+        Assert.True(AlertContextSerializer.TryDeserialize(keyed.Value.ContextJson, out var after));
+        Assert.Equal(s_key.DeadlockAlertKey(hash), after.Incidents![0].DedupKey);
+        Assert.Equal(line, Assert.Single(after.Incidents[0].InvolvedObjects));
+    }
+
+    /// <summary>
     /// An alert whose report cannot be found (retention dropped it, or the report stage already rewrote it) has its
     /// statement normalized as it stands, and its key, which may be a raw graph's hash, keyed under the store's secret
     /// (#4012's review): the same key in, the same key out, so two alerts that shared one still do, and not a report

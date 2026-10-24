@@ -99,12 +99,35 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
             step);
     }
 
+    /* #6654 review: the grid has no envelope, so the dropped databases it left out reach the user through this text. */
+    [Fact]
+    public void TheLeftOutBanner_NamesTheDatabases_InTheWordsOfDatabasesLeftOut()
+    {
+        Assert.Null(ViewerServerTab.DatabasesLeftOutBannerText(null));
+        Assert.Null(ViewerServerTab.DatabasesLeftOutBannerText(Array.Empty<string>()));
+        Assert.Null(ViewerServerTab.DatabasesLeftOutBannerText(new[] { " ", "" }));
+
+        var one = ViewerServerTab.DatabasesLeftOutBannerText(new[] { "Gone" })!;
+        Assert.StartsWith("Left out of this grid: Gone. ", one, StringComparison.Ordinal);
+        Assert.Contains("no longer lists it", one, StringComparison.Ordinal);
+        Assert.DoesNotContain("in all", one, StringComparison.Ordinal);
+
+        var two = ViewerServerTab.DatabasesLeftOutBannerText(new[] { "b", "a", "b" })!;
+        Assert.StartsWith("Left out of this grid: a, b. ", two, StringComparison.Ordinal);
+        Assert.Contains("no longer lists them", two, StringComparison.Ordinal);
+
+        var many = ViewerServerTab.DatabasesLeftOutBannerText(Enumerable.Range(0, 25).Select(i => "db" + i.ToString("00", System.Globalization.CultureInfo.InvariantCulture)).ToArray())!;
+        Assert.Contains("(25 in all; the first 20 are listed)", many, StringComparison.Ordinal);
+        Assert.Contains("db19", many, StringComparison.Ordinal);
+        Assert.DoesNotContain("db20", many, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void EveryTabRead_OfTheGrid_HasItsProbe()
     {
         var tabs = string.Join("\n", Directory.GetFiles(PathTo("Darling", "PerformanceMonitor.Darling.Viewer"), "ViewerServerTab*.cs").Select(File.ReadAllText));
 
-        Assert.Equal(1, Matches(tabs, @"_dataService\.GetQueryStoreRegressionsAsync\("));
+        Assert.Equal(1, Matches(tabs, @"_dataService\.GetQueryStoreRegressionsWithScopeAsync\("));
         Assert.Equal(1, Matches(tabs, @"_dataService\.GetQueryStoreRegressionsDataStartAsync\("));
         Assert.Equal(1, Matches(tabs, @"ShowQueryStoreRegressionsDataStartAsync\(QueryStoreRegressionsTruncationBanner,"));
     }
@@ -118,7 +141,7 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
         Assert.True(banner.Success, "QueryStoreRegressionsTruncationBanner is not declared in ViewerServerTab.xaml, in the row above the grid");
         Assert.Contains("Visibility=\"Collapsed\"", banner.Value, StringComparison.Ordinal);
         Assert.Contains("Background=\"#22FFAA00\"", banner.Value, StringComparison.Ordinal);
-        Assert.Matches(@"<DataGrid Grid\.Row=""2"" x:Name=""QueryStoreRegressionsGrid""", xaml);
+        Assert.Matches(@"<DataGrid Grid\.Row=""3"" x:Name=""QueryStoreRegressionsGrid""", xaml);
     }
 
     // ── What the banner shows ──

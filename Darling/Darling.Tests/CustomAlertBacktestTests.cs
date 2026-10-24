@@ -132,7 +132,7 @@ public sealed class CustomAlertBacktestTests
         var deliverer = new RecordingDeliverer();
         var evaluator = new CustomAlertEvaluator(
             new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds), new CustomAlertStateStore(dataSource, StorageCommandDeadlines.McpReadSeconds), dataSource, deliverer,
-            isAlertMuted: _ => false, alertsEnabled: static () => true, new PgAlertHistoryStore(dataSource),
+            isAlertMuted: _ => false, alertsEnabled: static () => true, new PgAlertHistoryStore(dataSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds),
             defaultIntervalSeconds: 0, cacheTtl: TimeSpan.Zero, new CapturingTestLogger());
         var row = new CustomAlertRule(5911, "backtest parity", DefinitionJson, null, true, 1, End, End, null);
         var state = CustomAlertRuleState.Fresh(1);

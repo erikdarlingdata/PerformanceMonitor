@@ -795,15 +795,16 @@ LIMIT 6";
             var scopeList = context.SeparatelyMonitoredDatabases;
             var scoped = scopeList is { Count: > 0 };
             var rowScope = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
-            /* current_blocking: prefer the blocked-process-report; fall back to the always-on DMV
+            /* #6645: a row whose blocked and blocking spid are the same is a parallel query waiting on itself, not blocking.
+               current_blocking: prefer the blocked-process-report; fall back to the always-on DMV
                snapshot so RDS (where the BPR session is empty) still counts blocking. Mirrors the
                overview/alert path (LocalDataService.Overview.cs / LocalDataService.Blocking.cs). */
             cmd.CommandText = (@"
 SELECT
     COALESCE(NULLIF(
-        (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3{SCOPE}") + @" AS ev), 0),
+        (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + "{SCOPE}") + @" AS ev), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3{SCOPE})) AS current_blocking,
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + @"{SCOPE})) AS current_blocking,
     (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3) AS current_deadlocks")
                 .Replace("{SCOPE}", rowScope);
 
@@ -905,6 +906,14 @@ SELECT
             var ioThreshold = GetDeviationThreshold(MetricNames.IoLatency);
             var map = await _baselineProvider.GetBucketMapAsync(
                 context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
+
+            /* #6696: the write baseline and map are fetched here, beside the read ones and BEFORE the store read lock.
+               On the first pass of a UTC day each is a cold 30-day file_io scan (the daily cache tier), and run inside
+               the lock they would sit against the command wall. */
+            var writeBaseline = await _baselineProvider.GetBaselineAsync(
+                context.ServerId, MetricNames.IoWriteLatency, context.TimeRangeStart, context.CancellationToken);
+            var writeMap = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.IoWriteLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
@@ -1019,12 +1028,15 @@ ORDER BY local_hour";
                 }
             }
 
-            // Write latency anomaly
+            // Write latency anomaly — #6696: scored against the WRITE-latency baseline (IoWriteLatency), not the read series.
             if (wholeWrite.Samples > 0)
             {
+                var writeThreshold = GetDeviationThreshold(MetricNames.IoWriteLatency);
+                var writeModifiedZThreshold = ModifiedZThresholdFor(MetricNames.IoWriteLatency, writeThreshold);
+
                 var writeTv = AnomalyGate.EvaluateTiles(
-                    writeTiles, map,
-                    ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                    writeTiles, writeMap,
+                    writeThreshold, writeModifiedZThreshold, WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
                     window);
 
                 AnomalyGate.ZDecision writeDecision;
@@ -1034,13 +1046,16 @@ ORDER BY local_hour";
 
                 if (writeTv is null)
                 {
-                    writeBucketUsed = baseline;
+                    writeBucketUsed = writeBaseline;
                     peakWriteLat = wholeWrite.Peak;
                     avgWriteLat = wholeWrite.Mean;
-                    writeDecision = AnomalyGate.EvaluateZScore(
-                        baseline, peakWriteLat, avgWriteLat,
-                        ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
-                        window: window);
+                    // The write baseline can be empty while the read one is not (a server whose files have not written yet).
+                    writeDecision = writeBaseline.SampleCount == 0
+                        ? default
+                        : AnomalyGate.EvaluateZScore(
+                            writeBaseline, peakWriteLat, avgWriteLat,
+                            writeThreshold, writeModifiedZThreshold, WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                            window: window);
                 }
                 else
                 {

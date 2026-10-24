@@ -31,7 +31,7 @@ public class ComposeClientTimeoutAttributionTests
     public void WebComposeClientDeadline_IsStrictlyAboveTheServerStatementTimeout()
     {
         const int server = 60;
-        var client = DarlingWebEndpoints.ComposeClientDeadlineSeconds(server, DarlingWebEndpoints.ComposeClientDeadlineHeadroomSeconds);
+        var client = ComposePanelRunner.ComposeClientDeadlineSeconds(server, DarlingWebEndpoints.ComposeClientDeadlineHeadroomSeconds);
 
         Assert.True(client > server, $"web compose client deadline {client}s must exceed the server statement_timeout {server}s so 57014 wins the race");
         Assert.True(DarlingWebEndpoints.ComposeClientDeadlineHeadroomSeconds > 0);
@@ -40,7 +40,7 @@ public class ComposeClientTimeoutAttributionTests
     [Fact]
     public void McpComposeCaller_KeepsItsDeadline_NoHeadroom()
     {
-        Assert.Equal(60, DarlingWebEndpoints.ComposeClientDeadlineSeconds(60, 0));
+        Assert.Equal(60, ComposePanelRunner.ComposeClientDeadlineSeconds(60, 0));
     }
 
     private static NpgsqlException StatementPhaseTimeout() =>
@@ -49,25 +49,25 @@ public class ComposeClientTimeoutAttributionTests
     [Fact]
     public void StatementPhaseClientTimeout_OnTheWebPath_MapsToTimeoutWithTheActionableText()
     {
-        var ex = new DarlingWebEndpoints.ComposeStatementClientTimeoutException(StatementPhaseTimeout());
+        var ex = new ComposePanelRunner.ComposeStatementClientTimeoutException(StatementPhaseTimeout());
 
-        var outcome = DarlingWebEndpoints.FromRunException(ex, remapClientTimeout: true);
+        var outcome = ComposePanelRunner.FromRunException(ex, remapClientTimeout: true);
 
         Assert.False(outcome.IsServerError);
         Assert.Null(outcome.Fault);
         Assert.Equal("57014", outcome.AuthorSqlState);
-        Assert.Equal(DarlingWebEndpoints.StatementTimeoutText, outcome.Error);
+        Assert.Equal(ComposePanelRunner.StatementTimeoutText, outcome.Error);
         Assert.Equal(
-            DarlingWebEndpoints.FromPostgresException(new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014")).Error,
+            ComposePanelRunner.FromPostgresException(new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014")).Error,
             outcome.Error);
     }
 
     [Fact]
     public void StatementPhaseClientTimeout_WithoutTheRemapFlag_KeepsTheGenericServerError()
     {
-        var ex = new DarlingWebEndpoints.ComposeStatementClientTimeoutException(StatementPhaseTimeout());
+        var ex = new ComposePanelRunner.ComposeStatementClientTimeoutException(StatementPhaseTimeout());
 
-        foreach (var outcome in new[] { DarlingWebEndpoints.FromRunException(ex), DarlingWebEndpoints.FromRunException(ex, remapClientTimeout: false) })
+        foreach (var outcome in new[] { ComposePanelRunner.FromRunException(ex), ComposePanelRunner.FromRunException(ex, remapClientTimeout: false) })
         {
             Assert.True(outcome.IsServerError);
             Assert.Null(outcome.AuthorSqlState);
@@ -88,18 +88,18 @@ public class ComposeClientTimeoutAttributionTests
     public void OpenTimeout_IsAServerErrorNamingTheOpen_NotAStatementTimeout(string innerMessage)
     {
         var inner = new NpgsqlException(innerMessage, new TimeoutException());
-        var ex = new DarlingWebEndpoints.ComposeStoreOpenException(inner);
+        var ex = new ComposePanelRunner.ComposeStoreOpenException(inner);
 
         foreach (var flag in new[] { true, false })
         {
-            var outcome = DarlingWebEndpoints.FromRunException(ex, remapClientTimeout: flag);
+            var outcome = ComposePanelRunner.FromRunException(ex, remapClientTimeout: flag);
 
             Assert.True(outcome.IsServerError);
             Assert.Null(outcome.AuthorSqlState);
             Assert.NotEqual("57014", outcome.AuthorSqlState);
             Assert.StartsWith("Error running query: could not get a store connection in time: ", outcome.Error, StringComparison.Ordinal);
             Assert.Contains(innerMessage, outcome.Error, StringComparison.Ordinal);
-            Assert.DoesNotContain(DarlingWebEndpoints.StatementTimeoutText, outcome.Error, StringComparison.Ordinal);
+            Assert.DoesNotContain(ComposePanelRunner.StatementTimeoutText, outcome.Error, StringComparison.Ordinal);
         }
 
     }
@@ -107,11 +107,11 @@ public class ComposeClientTimeoutAttributionTests
     [Fact]
     public void OpenFailure_WithoutATimeout_AnswersCouldNotOpen()
     {
-        var ex = new DarlingWebEndpoints.ComposeStoreOpenException(new NpgsqlException("boom", new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.ConnectionRefused)));
+        var ex = new ComposePanelRunner.ComposeStoreOpenException(new NpgsqlException("boom", new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.ConnectionRefused)));
 
         foreach (var flag in new[] { true, false })
         {
-            var outcome = DarlingWebEndpoints.FromRunException(ex, remapClientTimeout: flag);
+            var outcome = ComposePanelRunner.FromRunException(ex, remapClientTimeout: flag);
 
             Assert.True(outcome.IsServerError);
             Assert.Null(outcome.AuthorSqlState);
@@ -122,12 +122,12 @@ public class ComposeClientTimeoutAttributionTests
     [Fact]
     public void OtherExceptions_StillMapToTheGenericServerError()
     {
-        var plain = DarlingWebEndpoints.FromRunException(new InvalidOperationException("boom"), remapClientTimeout: true);
+        var plain = ComposePanelRunner.FromRunException(new InvalidOperationException("boom"), remapClientTimeout: true);
         Assert.True(plain.IsServerError);
         Assert.Equal("Error running query: boom", plain.Error);
         Assert.Null(plain.AuthorSqlState);
 
-        var npgsqlOther = DarlingWebEndpoints.FromRunException(new NpgsqlException("connection refused", new System.IO.IOException("x")), remapClientTimeout: true);
+        var npgsqlOther = ComposePanelRunner.FromRunException(new NpgsqlException("connection refused", new System.IO.IOException("x")), remapClientTimeout: true);
         Assert.True(npgsqlOther.IsServerError);
     }
 
@@ -136,7 +136,8 @@ public class ComposeClientTimeoutAttributionTests
     private static string Code(params string[] relative) =>
         Regex.Replace(CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFileLf(relative)), @"\s+", " ");
 
-    private static string WebCode() => Code("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+    /* #6390 S2c: the run core moved to Storage; the rules read the endpoints and the runner as one text. */
+    private static string WebCode() => Code("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs") + Code("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs");
 
     [Fact]
     public void TheRunner_PassesTheClientDeadlineToTheMeasureAndAnnotationQueries()
@@ -157,6 +158,12 @@ public class ComposeClientTimeoutAttributionTests
         var at = code.IndexOf(signature, StringComparison.Ordinal);
         Assert.True(at >= 0, $"method '{signature}' not found");
         var next = code.IndexOf("private static", at + signature.Length, StringComparison.Ordinal);
+        /* #6390 S2c: the runner file ends with this method's neighbours, so the last one has no private member after it. */
+        if (next < 0)
+        {
+            next = code.Length;
+        }
+
         Assert.True(next > at);
         return code[at..next];
     }
@@ -188,8 +195,8 @@ public class ComposeClientTimeoutAttributionTests
         var compiled = new ComposeCompiled(
             "SELECT 1 AS n", new System.Collections.Generic.List<NpgsqlParameter>(), new ComposeRoute(ComposeSourceTier.Raw, null));
 
-        await Assert.ThrowsAsync<DarlingWebEndpoints.ComposeStoreOpenException>(
-            () => DarlingWebEndpoints.RunComposedQueryAsync(unreachable, compiled, 30, ct));
+        await Assert.ThrowsAsync<ComposePanelRunner.ComposeStoreOpenException>(
+            () => ComposePanelRunner.RunComposedQueryAsync(unreachable, compiled, 30, ct));
     }
 
     [Fact]

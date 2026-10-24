@@ -1548,7 +1548,7 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), 60, 
             await using var viewerSource = NpgsqlDataSource.Create(viewerLogin!);
             var evaluator = new CustomAlertEvaluator(
                 rules, state, viewerSource, new NoopDeliverer(), isAlertMuted: null, alertsEnabled: static () => true,
-                new PgAlertHistoryStore(ownerSource), defaultIntervalSeconds: 0, cacheTtl: TimeSpan.Zero, NullLogger.Instance);
+                new PgAlertHistoryStore(ownerSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds), defaultIntervalSeconds: 0, cacheTtl: TimeSpan.Zero, NullLogger.Instance);
 
             await evaluator.EvaluateServerAsync(serverId, storage, storage, ct);
 

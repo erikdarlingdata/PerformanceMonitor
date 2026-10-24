@@ -276,7 +276,7 @@ public sealed class RunnableQueueRound1Tests
         Assert.Contains("session #201", requests[1].Heading, StringComparison.Ordinal);
         Assert.Contains("session #202", requests[2].Heading, StringComparison.Ordinal);
         /* The read hit its 50-row cap, so the 47 left are a floor. */
-        Assert.Equal("at least 47 more request(s) in the newest query snapshot", MoreText(fired));
+        Assert.Equal("at least 47 more requests in the newest query snapshot", MoreText(fired));
     }
 
     [Fact]
@@ -291,7 +291,7 @@ public sealed class RunnableQueueRound1Tests
 
         await h.Build().EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
 
-        Assert.Equal("3 more request(s) in the newest query snapshot", MoreText(Assert.Single(h.Deliverer.Outcomes)));
+        Assert.Equal("3 more requests in the newest query snapshot", MoreText(Assert.Single(h.Deliverer.Outcomes)));
     }
 
     [Fact]
@@ -302,8 +302,13 @@ public sealed class RunnableQueueRound1Tests
         var exact = AlertContextBuilders.BuildRunnableQueueRequestItems(sessions);
         var floor = AlertContextBuilders.BuildRunnableQueueRequestItems(sessions, readHitCap: true);
 
-        Assert.Equal("2 more request(s) in the newest query snapshot", exact[^1].Fields.Single().Value);
-        Assert.Equal("at least 2 more request(s) in the newest query snapshot", floor[^1].Fields.Single().Value);
+        Assert.Equal("2 more requests in the newest query snapshot", exact[^1].Fields.Single().Value);
+        Assert.Equal("at least 2 more requests in the newest query snapshot", floor[^1].Fields.Single().Value);
+
+        /* #6703: one request past the display cap reads in the singular. */
+        var one = AlertContextBuilders.BuildRunnableQueueRequestItems(
+            sessions.Take(AlertContextBuilders.RunnableQueueRequestDisplayCap + 1).ToList());
+        Assert.Equal("1 more request in the newest query snapshot", one[^1].Fields.Single().Value);
     }
 
     [Fact]

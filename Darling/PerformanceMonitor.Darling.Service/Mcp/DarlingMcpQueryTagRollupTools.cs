@@ -69,7 +69,7 @@ public sealed class DarlingMcpQueryTagRollupTools
             if (fault != null) return fault;
 
             var fleet = string.IsNullOrWhiteSpace(server_name);
-            List<DarlingServerResolver.RegisteredServer> scope;
+            List<RegisteredServer> scope;
             if (fleet)
             {
                 scope = servers.ToList();
@@ -331,7 +331,7 @@ public sealed class DarlingMcpQueryTagRollupTools
     }
 
     private static Dictionary<string, object?> Wrap(
-        QueryTagRollupSection section, string source, bool fleet, IReadOnlyList<DarlingServerResolver.RegisteredServer> scope,
+        QueryTagRollupSection section, string source, bool fleet, IReadOnlyList<RegisteredServer> scope,
         Dictionary<int, string> names, IReadOnlyList<QueryTagNode> tags, int? tagFilter, int limit,
         List<QueryTagRollupFact> facts, string status, string? message, Dictionary<int, string>? refused)
     {
@@ -368,7 +368,7 @@ public sealed class DarlingMcpQueryTagRollupTools
     }
 
     private static Dictionary<string, object?> WrapDeadlocks(
-        bool fleet, IReadOnlyList<DarlingServerResolver.RegisteredServer> scope, Dictionary<int, string> names,
+        bool fleet, IReadOnlyList<RegisteredServer> scope, Dictionary<int, string> names,
         IReadOnlyList<QueryTagNode> tags, int? tagFilter, int limit, List<QueryTagDeadlockFact> facts, bool scanTruncated)
     {
         var section = QueryTagRollupSection.Deadlocks;

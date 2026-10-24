@@ -18,7 +18,7 @@ namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// Persists the <see cref="AlertPersistenceGate"/>'s per-<c>(rule_id, server_id)</c> hysteresis state to
-/// <c>config.custom_alert_state</c> (#3285). Written by the <see cref="CustomAlertEvaluator"/> on the worker's
+/// <c>config.custom_alert_state</c> (#3285). Written by the <c>CustomAlertEvaluator</c> on the worker's
 /// OWNER pool (the evaluator already reads collect + writes <c>config_alert_log</c> there), so this store does
 /// NOT go through the least-privilege viewer/mcp pools and needs no extra grant.
 ///
