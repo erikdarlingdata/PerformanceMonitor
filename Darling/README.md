@@ -265,7 +265,7 @@ These properties are available:
 | `WEBDASHBOARD` | If you set `1`, the `darling.json` that setup writes has `web.enabled` on. The dashboard listens on this machine only. Anyone signed in to this machine can open it without a password. If `darling.json` already exists, setup ignores this property. |
 | `PURGEDATA` | If you set `1` on uninstall, the uninstall also deletes the store. |
 
-The MSI and the scripts must not manage the same install. If `install-darling.ps1` already installed the service on this machine, the MSI stops and changes nothing. To switch, run `uninstall-darling.ps1` from the script install's folder, which keeps `darling.json` and the store. Then run the MSI again with the same `INSTALLFOLDER`. To stay on the scripts, keep using `upgrade-darling.ps1`. In the other direction, `install-darling.ps1` and `upgrade-darling.ps1` refuse to run over an MSI install.
+The MSI and the scripts must not manage the same install. If `install-darling.ps1` already installed the service on this machine, the MSI stops and changes nothing. To switch, run `uninstall-darling.ps1` from the script install's folder, which keeps `darling.json` and the store. Then run the MSI again with the same `INSTALLFOLDER`. To stay on the scripts, keep using `upgrade-darling.ps1`. In the other direction, `install-darling.ps1`, `upgrade-darling.ps1` and `uninstall-darling.ps1` refuse to run over an MSI install. Uninstall an MSI install from Settings, Apps.
 
 A newer MSI upgrades an MSI install in place. It reinstalls into the folder of the first install, and it keeps `darling.json` and the store. Uninstalling from Settings, Apps keeps `darling.json` and the store too, unless you set `PURGEDATA=1`.
 
