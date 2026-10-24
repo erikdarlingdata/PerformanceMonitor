@@ -243,6 +243,67 @@ public sealed class AlertResolutionSettingsRungTests
         }
     }
 
+    [Fact]
+    public async Task OnAnEmptyStore_TheFirstStartSeedsTheGenericPagerDutyAndSendResolutionsSettingsFromTheFile()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the #6715 seed round trip (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await migrate.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(migrate, ct);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bodySucceeded = false;
+        try
+        {
+            var file = new DarlingConfig
+            {
+                Smtp = new SmtpConfig { SendResolutions = true },
+                Webhooks = new WebhooksConfig
+                {
+                    GenericUrl = "https://hooks.example.com/alert",
+                    GenericHeaders = "{\"Authorization\":\"Bearer abc\"}",
+                    GenericBodyTemplate = "{\"text\":\"{{metric}} on {{server}}\"}",
+                    GenericProxy = "http://proxy.example.com:8080",
+                    PagerDutyRoutingKey = "0123456789abcdef0123456789abcdef",
+                    PagerDutyUseEuRegion = true,
+                    PagerDutyProxy = "http://pd-proxy.example.com:8080",
+                    PagerDutyAutoResolve = true,
+                    SlackSendResolutions = true,
+                    TeamsSendResolutions = true,
+                    GenericSendResolutions = true,
+                },
+            };
+
+            var provider = new StoreConfigProvider(dataSource);
+            await provider.SeedIfEmptyAsync(file, ct);
+
+            var view = await provider.LoadViewAsync(new DarlingConfig(), ct);
+            Assert.NotNull(view);
+            var w = view.Webhooks;
+            Assert.Equal("https://hooks.example.com/alert", w.GenericUrl);
+            Assert.Equal("{\"Authorization\":\"Bearer abc\"}", w.GenericHeaders);
+            Assert.Equal("{\"text\":\"{{metric}} on {{server}}\"}", w.GenericBodyTemplate);
+            Assert.Equal("http://proxy.example.com:8080", w.GenericProxy);
+            Assert.Equal("0123456789abcdef0123456789abcdef", w.PagerDutyRoutingKey);
+            Assert.True(w.PagerDutyUseEuRegion);
+            Assert.Equal("http://pd-proxy.example.com:8080", w.PagerDutyProxy);
+            Assert.True(w.PagerDutyAutoResolve);
+            Assert.True(w.SlackSendResolutions && w.TeamsSendResolutions && w.GenericSendResolutions);
+            Assert.True(view.Smtp.SendResolutions);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
     private static async Task AssertOverrideAsync(
         ViewerDataService viewer, StoreConfigProvider provider, NpgsqlDataSource dataSource, int routeId, bool? expected, CancellationToken ct)
     {
