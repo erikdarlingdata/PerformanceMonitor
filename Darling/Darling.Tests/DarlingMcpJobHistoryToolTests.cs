@@ -60,7 +60,7 @@ public sealed class DarlingMcpJobHistoryToolSurfaceTests
             .ToArray();
 
         Assert.Equal(
-            new[] { "server_name", "hours_back", "job_name", "status", "category", "limit", "as_of" },
+            new[] { "server_name", "hours_back", "job_name", "status", "category", "limit", "as_of", "min_duration_seconds" },
             described.Select(p => p.Name).ToArray());
         Assert.All(described, p => Assert.True(p.HasDefaultValue, $"{p.Name} must be optional"));
     }
