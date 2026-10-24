@@ -315,16 +315,18 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// Whether the XE blocked_process_reports source holds a report in the window: the same predicate the Blocking charts' reads
-    /// use for their <c>bpr</c> arm (event time in the window, the event-window floor on collection time, the database filter),
-    /// so true here means the charts draw from XE rows and not from the DMV fallback beside them.
+    /// use for their <c>bpr</c> arm (event time in the window, the event-window floor on collection time, the database filter,
+    /// and <see cref="BlockingWaits.NotSelfWaitSql"/>: a parallel query waiting on itself is not blocking, #6705), so true here
+    /// means the charts draw from XE rows and not from the DMV fallback beside them.
     /// </summary>
-    public const string BlockedProcessReportsInWindowSql = """
+    public const string BlockedProcessReportsInWindowSql = $"""
         SELECT EXISTS (
             SELECT 1
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
+            AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
         )
         """;
 
