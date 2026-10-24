@@ -308,6 +308,9 @@ public class WebhookAlertService
             /* #6718: the {{dedup_key}} the generic post rendered, handed back so the deliverer closes that key. */
             string? genericDedupKey = null;
 
+            /* The dedup_key the PagerDuty trigger carried, handed back for the same reason: the resolve closes that key. */
+            string? pagerDutyDedupKey = null;
+
             /* #4750: what each channel's send did, keyed by the channel name, so the history row's route record
                can say which channel delivered and which failed. `sent` above answers only "did any channel
                get through", so a channel that failed beside one that delivered was visible nowhere but a
@@ -405,7 +408,12 @@ public class WebhookAlertService
             if (route.PagerDuty.Destination is { } pagerDutyKey)
             {
                 attempted = true;
-                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, autoResolveFlag, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken: cancellationToken);
+                /* The trigger's key is derived once, here, with the arguments the send always used (the filtered context and
+                   the flag read above, so the paired-edge and per-replica rules apply as before), and the send is handed this
+                   value. The deliverer records it, so the resolve closes the incident this trigger opened even when the
+                   filter dropped the alert's first incident. */
+                pagerDutyDedupKey = DerivePagerDutyDedupKey(serverId, metricName, renderContext, autoResolveFlag);
+                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, autoResolveFlag, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, dedupKeyOverride: pagerDutyDedupKey, cancellationToken: cancellationToken);
                 Record(NotificationRouter.PagerDutyChannel, pagerDutyError);
 
                 /* With auto-resolve on, a DELIVERED close re-opens the lifecycle: the cooldown entry the
@@ -466,8 +474,8 @@ public class WebhookAlertService
                 _repeatBudget.Release(budget);
             }
 
-            return sent ? WebhookFanoutResult.Delivered with { Route = route, ChannelOutcomes = channelOutcomes, GenericDedupKey = genericDedupKey }
-                : attempted ? WebhookFanoutResult.Failed(firstError) with { Route = route, ChannelOutcomes = channelOutcomes, GenericDedupKey = genericDedupKey }
+            return sent ? WebhookFanoutResult.Delivered with { Route = route, ChannelOutcomes = channelOutcomes, GenericDedupKey = genericDedupKey, PagerDutyDedupKey = pagerDutyDedupKey }
+                : attempted ? WebhookFanoutResult.Failed(firstError) with { Route = route, ChannelOutcomes = channelOutcomes, GenericDedupKey = genericDedupKey, PagerDutyDedupKey = pagerDutyDedupKey }
                 : WebhookFanoutResult.NotAttempted with { Route = route };
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -3774,12 +3782,18 @@ public class WebhookAlertService
 /// when the generic channel was attempted, null otherwise. The deliverer records it so the alert's resolution renders
 /// exactly this key. Trailing and defaulted like <paramref name="Route"/>.
 /// </param>
+/// <param name="PagerDutyDedupKey">
+/// The <c>dedup_key</c> the PagerDuty trigger carried, from the same filtered context and auto-resolve flag the trigger used.
+/// Set when PagerDuty was attempted, null otherwise. One trigger per fire, so one key. The deliverer records it so the
+/// resolve closes exactly the incident this trigger opened. Trailing and defaulted like <paramref name="Route"/>.
+/// </param>
 public readonly record struct WebhookFanoutResult(
     AlertChannelOutcome Outcome,
     string? SendError,
     NotificationRouteDecision? Route = null,
     IReadOnlyDictionary<string, AlertChannelOutcome>? ChannelOutcomes = null,
-    string? GenericDedupKey = null)
+    string? GenericDedupKey = null,
+    string? PagerDutyDedupKey = null)
 {
     /// <summary>Whether a channel delivered. At least one did; the rest may have failed, and each of those
     /// is on its own health counter.</summary>
