@@ -1,6 +1,6 @@
 # Darling store sizing
 
-This guide gives the disk, RAM and vCPU counts for a Darling store host, by the number of monitored servers. The numbers come from three production stores that we measured on 2026-10-14. A load test on a restored copy of a store will update them ([#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794)). The harness and its runbook are in [`Darling/loadtest/`](../Darling/loadtest/README.md).
+This guide gives the disk, RAM and vCPU counts for a Darling store host, by the number of monitored servers. The numbers come from three production stores that we measured on 2026-10-14. A load test on a restored copy of a store ([#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794)) went to 210 servers in one store and is done. The next numbers come from production stores, after the read fixes it found have shipped. This guide stays based on what was measured. The harness and its runbook are in [`Darling/loadtest/`](../Darling/loadtest/README.md).
 
 To back up, restore or move a store, and to see how much disk it uses, see [Back up, restore and move the store](darling-store-backup.md).
 
@@ -28,7 +28,7 @@ We have a daily figure only for the Query Store interval tables. These tables ar
 | `collect.query_store_interval_wide` | about 0.23 GiB | about 10 GiB a day | Measured on store A |
 | `collect.query_store_interval_latest` | about 0.09 GiB | about 4 GiB a day | Measured on store A |
 | Query Store interval tables at steady state | about 3.7 GiB per server in total | about 160 GiB | Computed from the daily sizes and the retention horizons: 10 GiB x 10 days + 4 GiB x 15 days = 160 GiB |
-| Every other collector, SQL Server or PostgreSQL | not measured | not measured | The load test will add it |
+| Every other collector, SQL Server or PostgreSQL | not measured | not measured | The load test did not cover it |
 
 The Query Store interval tables are plain PostgreSQL tables, partitioned by day. TimescaleDB compression does not apply to them, so all of their rows stay uncompressed.
 
@@ -67,7 +67,7 @@ With TimescaleDB, the service compresses each 1-day chunk when it is older than 
 The tables below use these rules:
 
 - RAM: the uncompressed chunk size per server times the server count, rounded up to a common size. This is the cautious rule above. The chunk sizes are in GiB and the RAM sizes are in GB. 1 GiB is 1.074 GB, so we turn the sum into GB before we round it up. Store A runs at about 150% of RAM and keeps up, so 64 GB works for 43 servers. We have not run store A on a smaller host, so 64 GB is the one size that we know works, not a proven minimum.
-- The RAM rule counts only the TimescaleDB chunks. It leaves out the Query Store interval tables, about 3.5 GiB per server, which are never compressed. [#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794) expects them to matter less for RAM than the chunks. But this guide expects the reads on those tables to reach their limits first, so the load test measures them.
+- The RAM rule counts only the TimescaleDB chunks. It leaves out the Query Store interval tables, about 3.5 GiB per server, which are never compressed. [#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794) expects them to matter less for RAM than the chunks. But this guide expects the reads on those tables to reach their limits first. The load test did not measure their RAM use.
 - Disk: the size per server times the server count, plus 50% for growth, vacuum and the temporary space of the compression jobs.
 - vCPUs: one vCPU for each 5.4 servers, which is store A's ratio (43 servers on 8 vCPUs). At the top of each row that gives 3.7, 8.3, 16.7 and 27.8 vCPUs. We round them to 4, 8, 16 and 32. The last one is rounded up, to be cautious.
 
@@ -82,7 +82,14 @@ Only the store A row is measured. The other rows are estimates from these rules.
 | 46 to 90 | 16 | 256 GB | 1.4 TiB | Estimate: 90 x 2.1 GiB = 189 GiB (203 GB) uncompressed, 90 x 10 GiB x 1.5 = 1,350 GiB |
 | 91 to 150 | 32 | 384 GB | 2.2 TiB | Estimate: 150 / 5.4 = 27.8 vCPUs, rounded up to 32. 150 x 2.1 GiB = 315 GiB (338 GB) uncompressed, 150 x 10 GiB x 1.5 = 2,250 GiB |
 
-Of the stores we measured, the one with Query Store collected has 43 servers, so the rows above 45 servers are not tested. We expect the day-scan reads on the Query Store tables to get slower as you add servers. The load test will measure how much slower.
+Of the stores we measured, the one with Query Store collected has 43 servers, so the rows above 45 servers are estimates. The load test copy held N copies of one production store with 42 servers. N=3 is 126 servers and N=5 is 210 servers, about 1.1 TB. The host was like store A's, with a gp3 disk at 6,000 IOPS and 250 MB/s.
+
+- Writes fit at 210 servers on that host and disk class. Replay lag stayed at about 1.5 minutes.
+- Reads were the first limit, as this guide predicted. At 210 servers the regressions read had a p95 of 40.9 s through MCP and 59.4 s through the web, with one reader. The fleet Query Store panel hit its 60 second limit every time. With 10 readers, 28% of calls were refused as busy and 10 more timed out. At 126 servers, 4.6% were refused.
+- The disk was the limit. A faster disk was not measured.
+- The Query Store compose rollup had 13 hour builds fail on the 60 second statement timeout at 126 servers, across 3 hourly runs. The failures came in a window shared with the 12:00Z policy jobs. We infer that link. We did not prove it.
+
+These read numbers predate the fixes, so they do not set a server count. The fixes are [#6259](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6259) (the fleet panel reads the interval table for the servers that can use it), [#6260](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6260) (the regressions baseline comes from the per-day totals) and [#6484](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6484) (the text label is a keyed lookup). The measured edge margin is in progress. On a production store with 42 servers, after #6260, a first regressions call takes 9 to 22 s and a second one under 2 s.
 
 ### SQL Server without Query Store, and PostgreSQL
 
@@ -101,7 +108,7 @@ A store that holds both kinds of server needs the sum of the two sizes.
 
 ## More than 150 servers
 
-The sizes for more than 150 servers are pending the load test in [#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794). We have no measurement above 50 servers in one store.
+The sizes for more than 150 servers are estimates. The load test in [#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794) went to 210 servers in one store and is done. Writes fit there, and reads failed before the fixes above. We have no measurement above 210 servers. The next numbers come from production stores after the read fixes ship.
 
 For reference, these are the straight-line estimates for 400 servers like those on store A. They are estimates, not measurements.
 
@@ -114,7 +121,7 @@ For reference, these are the straight-line estimates for 400 servers like those 
 | Rows in a day-scan read | about 10 times the rows on store A |
 | Hourly aggregate refresh | about 2 minutes each hour |
 
-We expect the day-scan reads on the Query Store tables to reach their limits first. The load test will show if that is correct.
+We expect the day-scan reads on the Query Store tables to reach their limits first. The 210-server result points the same way, but its read numbers predate the fixes and do not set a server count.
 
 ## What to watch after you install
 
