@@ -72,13 +72,16 @@
 
   // ---- Client timeouts (#5640) -------------------------------------------------------
   // Alerts on client attentions (a client cancelled a query or its timeout expired) per minute over the
-  // covered span of the attention collector's last runs (about 3 minutes). OFF by default. Since #5736 the
+  // covered span of the attention collector's last runs (about 3 minutes). ON by default. Since #5736 the
   // two per-minute settings are FLOORS: each bar is the higher of its floor and a multiple of the server's
   // own baseline (the p99.9 of its 3-minute average rate over the last 7 days). A server with under a day
   // of capture, or under 720 minutes with a successful run, is graded on the floors alone. The floors and
   // multiples are whole numbers: floor at least 1, multiple at least 1, Critical never below Warning (a
   // lower Critical is raised to the Warning one).
-  "alert_client_timeouts_enabled": false,
+  "alert_client_timeouts_enabled": true,
+  // The marker that makes the switch above count. A settings.json without it is read as if it held the new default (on), because a Settings
+  // save used to write the whole block and its "false" was the old default, not a choice. The Settings window writes it on every save.
+  "alert_client_timeouts_on_by_default_applied": true,
   "alert_client_timeouts_warning_per_minute": 10,
   "alert_client_timeouts_critical_per_minute": 60,
   "alert_client_timeouts_warning_multiple": 3,

@@ -2396,7 +2396,7 @@ public sealed class AlertEngine
     /// <summary>
     /// The Client Timeouts alert (#5640): client attentions (a client cancelled or timed out a query) per minute, from the
     /// attention collector's <c>attention_events</c>, graded Warning at the Warning bar (the higher of the 10 per minute floor and 3 times the baseline by default) and Critical
-    /// at the Critical bar (60), where each bar is the higher of its floor and a multiple of the server's own baseline (#5736). OFF by default. The count model, the rate rule, the not-observed rule and the proportional
+    /// at the Critical bar (60), where each bar is the higher of its floor and a multiple of the server's own baseline (#5736). ON by default since #5736. The count model, the rate rule, the not-observed rule and the proportional
     /// mute are on <see cref="AttentionEvaluator"/>.
     ///
     /// <para>Everything around the grade is Runnable Queue's: a window that is not an observation neither fires nor clears
