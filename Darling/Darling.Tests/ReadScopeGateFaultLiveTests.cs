@@ -83,7 +83,7 @@ public sealed class ReadScopeGateFaultLiveTests
 
         var logger = new CapturingTestLogger();
         using var scope = ReadScope.Open(logger);
-        var resolution = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(postgres, null, end.AddDays(-3), end, end, ct);
+        var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(postgres, null, end.AddDays(-3), end, end, ct);
 
         Assert.False(resolution.Eligible);
         Assert.Equal(ReadFallback.GateFailed, scope.Fallback);

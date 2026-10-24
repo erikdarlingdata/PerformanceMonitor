@@ -40,6 +40,18 @@ public sealed class ViewerArgsTests
         => Assert.Null(ViewerArgs.ExplicitConfigPath(new[] { "--open-server", "A", "--upgrade-takeover" }));
 
     [Fact]
+    public void AddServer_IsAFlag_NeverAPath_AndDoesNotHideTheOthers()
+    {
+        Assert.True(ViewerArgs.AddServerRequested(new[] { "--add-server" }));
+        Assert.True(ViewerArgs.AddServerRequested(new[] { "--ADD-SERVER", "C:\\x\\darling.json" }));
+        Assert.False(ViewerArgs.AddServerRequested(new[] { "--open-server", "A" }));
+        Assert.False(ViewerArgs.AddServerRequested(System.Array.Empty<string>()));
+        Assert.Null(ViewerArgs.ExplicitConfigPath(new[] { "--add-server" }));
+        Assert.Equal("C:\\x\\darling.json", ViewerArgs.ExplicitConfigPath(new[] { "--add-server", "C:\\x\\darling.json" }));
+        Assert.Equal("A", ViewerArgs.OpenServerName(new[] { "--add-server", "--open-server", "A" }));
+    }
+
+    [Fact]
     public void PositionalAlone_IsThePath()
         => Assert.Equal("C:\\x\\darling.json", ViewerArgs.ExplicitConfigPath(new[] { "C:\\x\\darling.json" }));
 

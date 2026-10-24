@@ -423,10 +423,11 @@ public sealed class DarlingSecuritySplitLiveTests
                 await ExecAsync(mcp, "INSERT INTO config.config_command (command_type) VALUES ('sec-mcp-noop')", ct));
             Assert.Equal("42501", stillDenied.SqlState);
 
-            /* And the config_service beacon grant is strictly COLUMN-level: mcp can bump config_version/updated_at
-               (proven above) but CANNOT flip a real service flag like capture_plans (paused is the one other column mcp holds, #6230). */
+            /* And the config_service grants are strictly COLUMN-level: mcp can bump config_version/updated_at
+               (proven above) and write the five #6393 service flags, but CANNOT flip a Viewer-only flag like mcp_enabled
+               (turning MCP off from MCP would lock the admin out; paused goes through a queued command, #6230). */
             var beaconOnly = await Assert.ThrowsAsync<PostgresException>(async () =>
-                await ExecAsync(mcp, "UPDATE config.config_service SET capture_plans = NOT capture_plans WHERE id = 1", ct));
+                await ExecAsync(mcp, "UPDATE config.config_service SET mcp_enabled = NOT mcp_enabled WHERE id = 1", ct));
             Assert.Equal("42501", beaconOnly.SqlState);
 
             bodySucceeded = true;
@@ -710,6 +711,8 @@ GRANT INSERT, UPDATE, DELETE ON config.custom_views TO {McpRole};
 GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO {McpRole};
 GRANT UPDATE ON config.config_alert_settings TO {McpRole};
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO {McpRole};
+-- #6393: the five service flags update_service_flags writes (mirrors the DarlingManagedRoles grant of the same list).
+GRANT UPDATE (capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n) ON config.config_service TO {McpRole};
 -- #3314: the DELIVERY cooldown, the one alert knob stored on config_notification. COLUMN-level, because that
 -- table holds the SMTP password blob and the Teams/Slack/generic webhook URLs and the PagerDuty routing key.
 -- Mirrors DarlingManagedRoles section 8.

@@ -503,6 +503,23 @@ END IF; END $$;"),
         new(214, "hasKnownPatterns",
             @"
 DROP TABLE IF EXISTS config.config_known_patterns;"),
+        // V215: the agent-table indexes. The reports index is the probe's newest sentinel. The rewind drops all six, so a re-run of V215 builds them
+        // again. Safe on a store that never had them.
+        new(215, "hasAgentTableIndexes",
+            @"
+DROP INDEX IF EXISTS config.ix_investigation_requests_reported_condition, config.ix_investigation_requests_follow_up_of,
+    config.ix_investigation_requests_follow_up_at, config.ix_investigation_requests_opened_at,
+    config.ix_investigation_requests_practice_of, config.ix_investigation_reports_family_of;"),
+        // V216 (#5736): the Client Timeouts switch's column default is TRUE, the probe's newest sentinel. The rewind sets the default back to
+        // FALSE (V179's), so a re-run of V216 sets it again. The row's value is left as it is: V216 only ever moves FALSE to TRUE. Guarded, so
+        // it is safe on a store whose V179 columns are already gone.
+        new(216, "hasClientTimeoutsOnByDefault",
+            @"
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'client_timeouts_enabled' AND NOT attisdropped) THEN
+        ALTER TABLE config.config_alert_settings ALTER COLUMN client_timeouts_enabled SET DEFAULT FALSE;
+    END IF;
+END $$;"),
     ];
 
     /// <summary>

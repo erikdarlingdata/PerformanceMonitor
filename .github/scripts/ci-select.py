@@ -56,6 +56,7 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 WORKFLOW = os.path.join(ROOT, ".github", "workflows", "build.yml")
 DARLING_FILTER = os.path.join(ROOT, ".github", "darling-paths-filter.yml")
 LITE_FILTER = os.path.join(ROOT, ".github", "lite-paths-filter.yml")
+TREE_FILTER = os.path.join(ROOT, ".github", "darling-tree-paths-filter.yml")
 CORPUS = os.path.join(ROOT, ".github", "ci-history", "failures.jsonl")
 ACCEPTED = os.path.join(ROOT, ".github", "ci-history", "replay-accepted.txt")
 
@@ -173,7 +174,8 @@ def load_file_filters(path: str = DARLING_FILTER) -> dict[str, list[str]]:
 class Rules:
     """The pattern sets, loaded once."""
 
-    def __init__(self, workflow: str = WORKFLOW, darling_filter: str = DARLING_FILTER, lite_filter: str = LITE_FILTER) -> None:
+    def __init__(self, workflow: str = WORKFLOW, darling_filter: str = DARLING_FILTER, lite_filter: str = LITE_FILTER,
+                 tree_filter: str = TREE_FILTER) -> None:
         wf = load_workflow_filters(workflow)
         self.build = wf["build"]
         # The Lite shard sets live in their own file (#5669), the one the shard legs and the lite-scope job give
@@ -181,8 +183,7 @@ class Rules:
         self.lite_shards = load_file_filters(lite_filter)
         if not self.lite_shards:
             raise SystemExit(f"{lite_filter} holds no filters")
-        self.tree = wf["darling-tree-guards"]
-        self.guard = wf["guard-build"]
+        self.tree = load_file_filters(tree_filter)
         self.gate = load_file_filters(darling_filter)
 
     @staticmethod

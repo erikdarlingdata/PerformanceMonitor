@@ -83,7 +83,10 @@ public sealed class NotificationRouteSecretGenerationTests : IDisposable
     }
 
     /* The log buffer is process-wide and classes in other collections write to it at the same time, so a test reads only the
-       lines with its own wording. Every class that drains it is in app-logger-statics, so no drain takes another's lines. */
+       lines with its own wording. A drain here can also take lines another class counts, so every class that counts buffered
+       lines is in app-logger-statics. The reverse holds too: a class outside it must not log this wording. The failed-delete
+       tests from NotificationRouteSecretSaveTests (app-alert-statics) were moved into this class for that reason, because their
+       "could not be removed" warning carries only a route id, and ids are not unique across the two classes' stores. */
     private static string[] RouteLines(string wording) =>
         AppLogger.DrainBufferedLines()
             .Where(l => l.Contains("[NotificationRoutes]", StringComparison.Ordinal) && l.Contains(wording, StringComparison.Ordinal))
@@ -171,6 +174,35 @@ public sealed class NotificationRouteSecretGenerationTests : IDisposable
 
         Assert.Single(_secrets.Keys);
         Assert.Equal(NewTeams, (await restarted.GetAsync(id))!.TeamsUrl);
+    }
+
+    [Fact]
+    public async Task ADeleteWhoseCredentialWillNotGo_StillDeletesTheRow()
+    {
+        var id = await _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams));
+        _secrets.DeleteGate = _ => false;
+
+        Assert.True(await _store.DeleteAsync(id));
+
+        Assert.Empty(await _store.ListAsync());
+    }
+
+    [Fact]
+    public async Task AReusedRouteId_DoesNotInheritACredentialLeftByAFailedDelete()
+    {
+        var id = await _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams, slack: OldSlack));
+        _secrets.DeleteGate = _ => false;
+        await _store.DeleteAsync(id);
+        Assert.True(_secrets.Has(id, "Slack"), "precondition: the failed delete left the credential");
+        _secrets.DeleteGate = _ => true;
+
+        var reused = await _store.InsertAsync(Route("Blocking", server: 7102, teams: "https://teams.fresh-secret.test/h"));
+
+        /* The leftover is under another generation than anything the new row points at, so it is never read (#5775). */
+        Assert.Equal(id, reused);
+        Assert.False(await FlagAsync(reused, "slack_set"));
+        Assert.Equal("", (await _store.GetAsync(reused))!.SlackUrl);
+        Assert.Equal("https://teams.fresh-secret.test/h", (await _store.GetAsync(reused))!.TeamsUrl);
     }
 
     [Fact]

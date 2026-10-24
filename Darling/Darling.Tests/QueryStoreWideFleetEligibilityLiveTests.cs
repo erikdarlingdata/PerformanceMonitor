@@ -170,7 +170,7 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
         for (var run = 0; run < 20; run++)
         {
             var before = floorReads.Count;
-            var got = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(postgres, null, S, end, end, ct);
+            var got = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(postgres, null, S, end, end, ct);
             Assert.Equal(expected, (got.Eligible, got.WideStart, got.Bound, got.SettingServer));
             Assert.Equal(1, floorReads.Count - before);
         }
@@ -201,7 +201,7 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
         Assert.True(controlReads.Count == 1,
             $"The Npgsql activity listener counted {controlReads.Count} control commands on '{scratch.DatabaseName}' instead of 1, so its floors count would be meaningless.");
 
-        var got = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(postgres, null, S, end, literalEnd, ct);
+        var got = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(postgres, null, S, end, literalEnd, ct);
         Assert.False(got.Eligible);
         Assert.Equal(0, floorReads.Count);
     }
@@ -222,7 +222,7 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
         Assert.Equal(default, await SerialAsync(connection, end, ct));
         /* #6115: the serial answer is still "raw for the fleet", because one server refuses. The runner no longer sends the fleet there:
            the three passing servers keep the interval table and the server holding legacy rows reads raw. */
-        var got = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(postgres, null, S, end, end, ct);
+        var got = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(postgres, null, S, end, end, ct);
         Assert.True(got.Eligible);
         Assert.Equal(new[] { -4605204 }, got.RawServerIds);
         Assert.Equal(S.AddHours(14), got.WideStart);

@@ -216,18 +216,19 @@ public sealed class AlertDetailWindowTests
     [InlineData("Blocking Detected", true, true)]
     [InlineData("Deadlocks Detected", true, true)]
     [InlineData("Blocking Detected", false, false)]
-    [InlineData("High CPU", true, false)]
-    public void FullChainLink_ShowsOnlyForAViewTheOpenerCanReach(string metric, bool hasOpener, bool shown)
+    [InlineData("High CPU", true, true)]
+    public void FullChainLink_ShowsOnlyWhenTheShellGivesAnOpener_WithTheTextItGave(string metric, bool hasOpener, bool shown)
     {
         StaTestThread.Run(() =>
         {
             var opened = 0;
-            var window = new AlertDetailWindow(Row(metric), hasOpener ? () => opened++ : null);
+            var window = new AlertDetailWindow(Row(metric), hasOpener ? new AlertChainOpener("Open the Activity tab at this time", () => opened++) : null);
             try
             {
                 Assert.Equal(shown ? Visibility.Visible : Visibility.Collapsed, window.FullChainLinkText.Visibility);
                 if (shown)
                 {
+                    Assert.Equal("Open the Activity tab at this time", window.FullChainLinkRun.Text);
                     window.FullChainLink.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
                     Assert.Equal(1, opened);
                 }
