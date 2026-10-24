@@ -1563,8 +1563,11 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         using var command = new NpgsqlCommand(@"
 INSERT INTO config_notification (
     id, smtp_host, smtp_port, smtp_use_ssl, smtp_username, smtp_encrypted_password, smtp_from_address,
-    smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy, modified_at)
-VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy, modified_at,
+    generic_url, generic_headers, generic_body_template, generic_proxy,
+    pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve,
+    slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions)
+VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(s.Host);
         command.Parameters.AddWithValue(s.Port);
@@ -1579,6 +1582,22 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         command.Parameters.AddWithValue(w.SlackUrl);
         command.Parameters.AddWithValue(w.SlackProxy);
         command.Parameters.AddWithValue(now);
+        /* #6715: every other column ReadNotificationAsync reads that darling.json can set. The row is read back whole and the store
+           wins, so a column this INSERT left out kept its empty default and the file's value was dead. Raw like the Teams and Slack
+           values above: a value that is not sealed is read as stored (DarlingWebhookSecrets.OpenValue). The signing keys are not here:
+           WebhooksConfig.GenericSigning is JsonIgnore, so the file cannot carry one. */
+        command.Parameters.AddWithValue(w.GenericUrl);
+        command.Parameters.AddWithValue(w.GenericHeaders);
+        command.Parameters.AddWithValue(w.GenericBodyTemplate);
+        command.Parameters.AddWithValue(w.GenericProxy);
+        command.Parameters.AddWithValue(w.PagerDutyRoutingKey);
+        command.Parameters.AddWithValue(w.PagerDutyUseEuRegion);
+        command.Parameters.AddWithValue(w.PagerDutyProxy);
+        command.Parameters.AddWithValue(w.PagerDutyAutoResolve);
+        command.Parameters.AddWithValue(w.SlackSendResolutions);
+        command.Parameters.AddWithValue(w.TeamsSendResolutions);
+        command.Parameters.AddWithValue(w.GenericSendResolutions);
+        command.Parameters.AddWithValue(s.SendResolutions);
         await command.ExecuteNonQueryAsync(ct);
     }
 
