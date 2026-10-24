@@ -9079,18 +9079,40 @@ LEFT JOIN eligible AS e
   AND e.hypertable_name = w.table_name";
 
     /// <summary>
-    /// Whether the staging has anything to size (#6648): an aggregate with compression enabled and no policy yet.
-    /// A converged store, every aggregate already carrying its job, answers false and the ensure reads no size
-    /// and no chunk count at all.
+    /// Applies the size rows of <see cref="AggregateCompressionSizeSql"/> to the aggregates about to be staged (#6648).
+    /// The tier picks the chunk count: an hourly target takes <c>EligibleHourly</c>, a daily or baseline one
+    /// <c>EligibleDaily</c>. A view the rows do not name is returned as unread and is NOT in the sized list: its
+    /// 0 bytes and 0 eligible chunks mean "not read", and staging them would read as "nothing eligible, night zero is
+    /// harmless" and put a full backlog on night zero, the thing #3581 staged against. That is what a failed read does
+    /// too; the caller adds no policy for an unread view this pass and the next ensure sizes it. A converged store
+    /// never gets here: only an aggregate with no policy yet is in <paramref name="needingPolicy"/>.
     /// </summary>
-    public static bool NeedsSizeRead(IEnumerable<AggregateCompressionState> states)
+    internal static (List<AggregateCompressionState> Sized, List<string> Unread) ApplyAggregateCompressionSizes(
+        IReadOnlyList<AggregateCompressionState> needingPolicy,
+        IReadOnlyDictionary<string, (long Bytes, long EligibleHourly, long EligibleDaily)> sizes)
     {
-        if (states is null)
+        ArgumentNullException.ThrowIfNull(needingPolicy);
+        ArgumentNullException.ThrowIfNull(sizes);
+
+        var sized = new List<AggregateCompressionState>(needingPolicy.Count);
+        var unread = new List<string>();
+        foreach (var state in needingPolicy)
         {
-            throw new ArgumentNullException(nameof(states));
+            if (sizes.TryGetValue(state.View, out var size))
+            {
+                sized.Add(state with
+                {
+                    MaterializationBytes = size.Bytes,
+                    EligibleChunksNow = AggregateCompressionTargetFor(state.View).Hourly ? size.EligibleHourly : size.EligibleDaily,
+                });
+            }
+            else
+            {
+                unread.Add(state.View);
+            }
         }
 
-        return states.Any(s => s.CompressionEnabled && s.JobId is null);
+        return (sized, unread);
     }
 
     /// <summary>
@@ -9767,24 +9789,27 @@ ORDER BY i.indexname";
         }
 
         /* Size and eligible chunks for the aggregates that are about to be staged, and only those (#6648): the staging is
-           the one decision that reads them. A converged store has none in needingPolicy and makes no second read. */
-        if (NeedsSizeRead(needingPolicy))
+           the one decision that reads them. needingPolicy holds only aggregates with compression enabled and no policy,
+           so a converged store has none and makes no second read. */
+        if (needingPolicy.Count > 0)
         {
             try
             {
-                var sized = await ReadAggregateCompressionSizesAsync(connection, needingPolicy.Select(s => s.View).ToArray(), cancellationToken);
-                for (var i = 0; i < needingPolicy.Count; i++)
+                var sizes = await ReadAggregateCompressionSizesAsync(connection, needingPolicy.Select(s => s.View).ToArray(), cancellationToken);
+                var (sized, unread) = ApplyAggregateCompressionSizes(needingPolicy, sizes);
+                foreach (var state in sized)
                 {
-                    var view = needingPolicy[i].View;
-                    if (sized.TryGetValue(view, out var size))
-                    {
-                        needingPolicy[i] = needingPolicy[i] with
-                        {
-                            MaterializationBytes = size.Bytes,
-                            EligibleChunksNow = AggregateCompressionTargetFor(view).Hourly ? size.EligibleHourly : size.EligibleDaily,
-                        };
-                        states[view] = needingPolicy[i];
-                    }
+                    states[state.View] = state;
+                }
+
+                needingPolicy = sized;
+                if (unread.Count > 0)
+                {
+                    /* Unsized is not "nothing eligible" (#3707): the aggregate left the catalog between the two reads, so
+                       it gets no policy this pass, like a failed read, and the next hourly ensure sizes it. */
+                    logger?.LogWarning(
+                        "TimescaleDB: the size read did not return {Views}, so no compression policy was added to {Count} continuous aggregate(s) this pass — the next ensure retries",
+                        string.Join(", ", unread), unread.Count);
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)

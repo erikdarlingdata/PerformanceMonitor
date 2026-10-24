@@ -353,8 +353,9 @@ public sealed class TimescaleAggregateCompressionTests
         Assert.DoesNotContain("scheduled =>", converge, StringComparison.Ordinal);
 
         /* The state read joins the job on EITHER identity (view or materialization) and is scoped to collect. It no longer
-           reads the size or a chunk count (#6648): those cost a read that grows with the chunk count, for all 27
-           aggregates every hour, to feed a decision only an aggregate without a policy makes. */
+           reads the size or a chunk count (#6648): those cost a read that grows with the chunk count, for all 29 collect
+           aggregates every hour (the 22 targets plus the 6 frozen rollups and the off-grid one), to feed a decision only an
+           aggregate without a policy makes. */
         var state = TimescaleSupport.AggregateCompressionStateSql;
         Assert.Contains("j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name", state, StringComparison.Ordinal);
         Assert.Contains("j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name", state, StringComparison.Ordinal);
@@ -362,16 +363,6 @@ public sealed class TimescaleAggregateCompressionTests
         Assert.DoesNotContain("hypertable_size", state, StringComparison.Ordinal);
         Assert.DoesNotContain("timescaledb_information.chunks", state, StringComparison.Ordinal);
 
-        /* The size read takes the view names as $1, counts chunks on the MATERIALIZATION at BOTH tiers' delays in one grouped
-           pass, and is scoped to collect. */
-        var size = TimescaleSupport.AggregateCompressionSizeSql;
-        Assert.Contains("ca.view_name = ANY($1::text[])", size, StringComparison.Ordinal);
-        Assert.Contains("c.hypertable_name", size, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY c.hypertable_schema, c.hypertable_name", size, StringComparison.Ordinal);
-        Assert.Contains("now() - INTERVAL '2 days'", size, StringComparison.Ordinal);
-        Assert.Contains("now() - INTERVAL '4 days'", size, StringComparison.Ordinal);
-        Assert.Contains("hypertable_size(", size, StringComparison.Ordinal);
-        Assert.Contains("WHERE ca.view_schema = 'collect'", size, StringComparison.Ordinal);
         Assert.Contains("proc_name LIKE '%compression%'", state, StringComparison.Ordinal);
         Assert.Contains("proc_name LIKE '%columnstore%'", state, StringComparison.Ordinal);
 
@@ -432,26 +423,39 @@ public sealed class TimescaleAggregateCompressionTests
     }
 
     /// <summary>
-    /// #6648: the size and chunk-count read happens only for an aggregate with compression enabled and no policy yet. A
-    /// converged store (every aggregate carrying its job) makes no second read; one aggregate without a job makes it.
+    /// #6648: applying the size rows to the aggregates about to be staged. The tier picks the chunk count (an hourly
+    /// target takes EligibleHourly, a daily one EligibleDaily), and a view the rows do not name is reported unread and is
+    /// kept out of the sized list, so it never reaches the staging as 0 bytes and nothing eligible.
     /// </summary>
     [Fact]
-    public void NeedsSizeRead_IsFalseForAConvergedStore_AndTrueOnlyWhenAnAggregateHasNoPolicy()
+    public void ApplyAggregateCompressionSizes_PicksTheTierCount_AndReportsAMissingViewUnread()
     {
-        static TimescaleSupport.AggregateCompressionState State(string view, bool enabled, int? jobId) =>
-            new(view, CompressionEnabled: enabled, JobId: jobId, CompressAfterSeconds: null, ScheduleIntervalSeconds: null,
+        static TimescaleSupport.AggregateCompressionState State(string view) =>
+            new(view, CompressionEnabled: true, JobId: null, CompressAfterSeconds: null, ScheduleIntervalSeconds: null,
                 FixedSchedule: false, PhaseHour: null, PhaseMinute: null, MaterializationBytes: 0, EligibleChunksNow: 0);
 
-        var converged = TimescaleSupport.AggregateCompressionTargets
-            .Select((t, i) => State(t.View, enabled: true, jobId: 1000 + i)).ToList();
-        Assert.False(TimescaleSupport.NeedsSizeRead(converged));
-        Assert.False(TimescaleSupport.NeedsSizeRead(Array.Empty<TimescaleSupport.AggregateCompressionState>()));
+        var hourly = TimescaleSupport.AggregateCompressionTargets.First(t => t.Hourly).View;
+        var daily = TimescaleSupport.AggregateCompressionTargets.First(t => !t.Hourly).View;
+        var missing = TimescaleSupport.AggregateCompressionTargets.First(t => t.View != hourly && t.View != daily).View;
 
-        /* Compression not enabled (the enable failed): nothing to stage, so nothing to size either. */
-        Assert.False(TimescaleSupport.NeedsSizeRead(new[] { State(converged[0].View, enabled: false, jobId: null) }));
+        var rows = new Dictionary<string, (long Bytes, long EligibleHourly, long EligibleDaily)>(StringComparer.Ordinal)
+        {
+            [hourly] = (1000, 7, 3),
+            [daily] = (2000, 9, 5),
+        };
 
-        converged[3] = State(converged[3].View, enabled: true, jobId: null);
-        Assert.True(TimescaleSupport.NeedsSizeRead(converged));
+        var (sized, unread) = TimescaleSupport.ApplyAggregateCompressionSizes(
+            new[] { State(hourly), State(missing), State(daily) }, rows);
+
+        Assert.Equal(new[] { hourly, daily }, sized.Select(s => s.View));
+        Assert.Equal((1000L, 7L), (sized[0].MaterializationBytes, sized[0].EligibleChunksNow));
+        Assert.Equal((2000L, 5L), (sized[1].MaterializationBytes, sized[1].EligibleChunksNow));
+        Assert.Equal(new[] { missing }, unread);
+
+        var (none, allUnread) = TimescaleSupport.ApplyAggregateCompressionSizes(
+            new[] { State(hourly) }, new Dictionary<string, (long Bytes, long EligibleHourly, long EligibleDaily)>());
+        Assert.Empty(none);
+        Assert.Equal(new[] { hourly }, allUnread);
     }
 
     /// <summary>
