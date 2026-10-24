@@ -1,6 +1,8 @@
 # Darling store sizing
 
-This guide gives the disk, RAM and vCPU counts for a Darling store host, by the number of monitored servers. The numbers come from three production stores that we measured on 2026-10-14. A load test on a restored copy of a store ([#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794)) went to 210 servers in one store and is done. The next numbers come from production stores, after the read fixes it found have shipped. This guide stays based on what was measured. The harness and its runbook are in [`Darling/loadtest/`](../Darling/loadtest/README.md).
+Audience: operators.
+
+This guide gives the disk, RAM and vCPU counts for a Darling store host, by the number of monitored servers. The numbers come from three production stores that we measured on 2026-10-14. A load test on a restored copy of a store ([#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794)) went to 210 servers in one store. It ran twice and is done. The test copy is torn down. This guide stays based on what was measured. The harness and its runbook are in [`Darling/loadtest/`](../Darling/loadtest/README.md).
 
 To back up, restore or move a store, and to see how much disk it uses, see [Back up, restore and move the store](darling-store-backup.md).
 
@@ -82,14 +84,45 @@ Only the store A row is measured. The other rows are estimates from these rules.
 | 46 to 90 | 16 | 256 GB | 1.4 TiB | Estimate: 90 x 2.1 GiB = 189 GiB (203 GB) uncompressed, 90 x 10 GiB x 1.5 = 1,350 GiB |
 | 91 to 150 | 32 | 384 GB | 2.2 TiB | Estimate: 150 / 5.4 = 27.8 vCPUs, rounded up to 32. 150 x 2.1 GiB = 315 GiB (338 GB) uncompressed, 150 x 10 GiB x 1.5 = 2,250 GiB |
 
-Of the stores we measured, the one with Query Store collected has 43 servers, so the rows above 45 servers are estimates. The load test copy held N copies of one production store with 42 servers. N=3 is 126 servers and N=5 is 210 servers, about 1.1 TB. The host was like store A's, with a gp3 disk at 6,000 IOPS and 250 MB/s.
+Of the stores we measured, the one with Query Store collected has 43 servers, so the rows above 45 servers are estimates. The load test fills that gap.
 
-- Writes fit at 210 servers on that host and disk class. Replay lag stayed at about 1.5 minutes.
-- Reads were the first limit, as this guide predicted. At 210 servers the regressions read had a p95 of 40.9 s through MCP and 59.4 s through the web, with one reader. The fleet Query Store panel hit its 60 second limit every time. With 10 readers, 28% of calls were refused as busy and 10 more timed out. At 126 servers, 4.6% were refused.
-- The disk was the limit. A faster disk was not measured.
-- The Query Store compose rollup had 13 hour builds fail on the 60 second statement timeout at 126 servers, across 3 hourly runs. The failures came in a window shared with the 12:00Z policy jobs. We infer that link. We did not prove it.
+#### The load test at 210 servers
 
-These read numbers predate the fixes, so they do not set a server count. The fixes are [#6259](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6259) (the fleet panel reads the interval table for the servers that can use it), [#6260](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6260) (the regressions baseline comes from the per-day totals) and [#6484](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6484) (the text label is a keyed lookup). The measured edge margin is in progress. On a production store with 42 servers, after #6260, a first regressions call takes 9 to 22 s and a second one under 2 s.
+The test copy held N copies of one production store with 42 servers. N=3 is 126 servers and N=5 is 210 servers, about 1 TB. The host had 8 vCPUs, 64 GB of RAM and a gp3 disk at 6,000 IOPS and 250 MB/s. A reader is one client that reads at the same time as the others. K is the number of readers. All numbers below are measured.
+
+| | Run 1 | Run 2 |
+|---|---|---|
+| Date | 2026-10-21 | 2026-10-24 |
+| Build | An older build, before the read fixes | `dev` at `d659bef1a`, with [#6686](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6686) and the later read fixes |
+
+**The finding: this host takes the writes and the hourly jobs for 210 servers. The reads are the limit.**
+
+- **Writes:** replay lag stayed at 1.5 to 1.7 minutes in both runs. Run 2 had no replay errors.
+- **Hourly aggregate jobs at steady state:** no hourly job ran over 60 minutes. After the catch-up, each job took 14 minutes or less. In the last two sampled hours, every job took 2 min 20 s or less.
+- **After you add many servers at once:** expect a catch-up period. In run 2, we went from 126 to 210 servers. Two hourly jobs then ran about 2 hours each. Each skipped its next hour. Plan for this, and add servers in steps if you can.
+- **Reads, one reader:** at 210 servers, the Query Store reads miss the 5 s budget even with one reader. The fleet panel does not finish in 60 s.
+- **Reads, ten readers:** 25% of calls were refused as busy in run 2, and 28% in run 1. At 126 servers in run 1, 4.6% were refused. When a K=10 run overlapped the hourly refresh, 62% were refused.
+
+Read times at one reader (K=1), at 210 servers:
+
+| Read | Run 1 p95 | Run 2 p95 |
+|---|---|---|
+| Regressions, 24 h, MCP | 40.9 s | 17.7 to 29.3 s |
+| Regressions, 24 h, web | 59.4 s | 32.3 to 34.8 s |
+| Top statements, 24 h, MCP | 1.1 s | 11.6 to 20.5 s |
+| Regressions, 168 h, MCP | Not measured | 16 to 19 s |
+| Fleet panel | Timed out at 60 s | Timed out at 60 s, 5 of 5 calls |
+
+- **Sample size:** each K=1 read in run 2 has 1 to 7 calls. Its p95 is its slowest call.
+- **The fleet panel number is not final.** The 4 newer copies had not filled their wide table yet. That takes about 2 days after a copy starts.
+- **The regressions read is faster, but not fast enough.** The slowest statement is still the regressions baseline. Its mean fell from 14.4 s to 3.8 s.
+- **Not explained yet:** the 24 h top read was slower in run 2 than in run 1. The samples are small.
+- **The disk:** run 1 found the disk to be the limit. A faster disk was not measured.
+- **Compose rollup in run 1:** 13 hour builds failed on the 60 second statement timeout at 126 servers, across 3 hourly runs. They shared a window with the 12:00Z policy jobs. We infer that link. We did not prove it.
+
+The fixes since run 1 are [#6259](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6259) (the fleet panel reads the interval table for the servers that can use it), [#6260](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6260) (the regressions baseline comes from the per-day totals), [#6484](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6484) (the text label is a keyed lookup) and #6686. On a production store with 42 servers, after #6260, a first regressions call takes 9 to 22 s and a second one under 2 s (measured).
+
+The project to speed up reads for many users ([#5506](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5506)) was closed as not planned on 2026-10-24. The last section of this page says to move some servers to a second store if the day-scan reads are the limit.
 
 ### SQL Server without Query Store, and PostgreSQL
 
@@ -108,7 +141,7 @@ A store that holds both kinds of server needs the sum of the two sizes.
 
 ## More than 150 servers
 
-The sizes for more than 150 servers are estimates. The load test in [#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794) went to 210 servers in one store and is done. Writes fit there, and reads failed before the fixes above. We have no measurement above 210 servers. The next numbers come from production stores after the read fixes ship.
+The sizes for more than 150 servers are estimates. The load test in [#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794) went to 210 servers in one store. Writes and the hourly jobs fit there. The Query Store reads missed their budget. We have no measurement above 210 servers.
 
 For reference, these are the straight-line estimates for 400 servers like those on store A. They are estimates, not measurements.
 
@@ -121,7 +154,7 @@ For reference, these are the straight-line estimates for 400 servers like those 
 | Rows in a day-scan read | about 10 times the rows on store A |
 | Hourly aggregate refresh | about 2 minutes each hour |
 
-We expect the day-scan reads on the Query Store tables to reach their limits first. The 210-server result points the same way, but its read numbers predate the fixes and do not set a server count.
+We expect the day-scan reads on the Query Store tables to reach their limits first. The 210-server result points the same way.
 
 ## What to watch after you install
 
