@@ -791,9 +791,13 @@ GROUP BY server_id, bucket, collection_time
 WITH NO DATA";
 
 
-    /// <summary>Blocking AND BlockingPerMinute baseline supply -- both families share this source and both
-    /// have NO row-level filter, so one aggregate serves both. Event counts per collection re-aggregate to
-    /// either shape: Blocking sums them per hour/dow bucket, BlockingPerMinute re-buckets by minute.</summary>
+    /// <summary>Blocking AND BlockingPerMinute baseline supply -- both families share this source and the same
+    /// row-level filter, so one aggregate serves both. Since #6663 both leave a parallel query's self-waits out of
+    /// their current window (<see cref="PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql"/>), so the baseline they are compared with
+    /// leaves them out too (#6690): a count over every report row would read a server's baseline high and under-flag
+    /// its real blocking. Event counts per collection re-aggregate to either shape: Blocking sums them per
+    /// hour/dow bucket, BlockingPerMinute re-buckets by minute. A store that built this aggregate before #6690 is
+    /// rebuilt by <see cref="DropStaleContinuousAggregatesAsync(NpgsqlConnection, ILogger?, CancellationToken)"/>.</summary>
     public const string CreateBlockedProcessBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.blocked_process_baseline
 WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT
@@ -802,6 +806,7 @@ SELECT
     collection_time,
     count(*) AS event_count
 FROM collect.blocked_process_reports
+WHERE " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + @"
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA";
 
@@ -1068,6 +1073,23 @@ WITH NO DATA";
                 {
                     if (await probe.ExecuteScalarAsync(cancellationToken) is true)
                     {
+                        /* #6690: the one relation that is "present" and still wrong: a plain view built before the
+                           blocking baseline left self-waits out. A plain view has no data to lose, so it is replaced
+                           in place; a continuous aggregate is never touched here (the reshape sweep rebuilds it). */
+                        if (view == BlockedProcessBaselineView && await IsStalePlainBlockedBaselineViewAsync(connection, cancellationToken))
+                        {
+                            using var replace = new NpgsqlCommand(CreateBaselineFallbackViewSql(view, createSql), connection)
+                            {
+                                CommandTimeout = SetupTimeoutSeconds,
+                            };
+                            await replace.ExecuteNonQueryAsync(cancellationToken);
+                            filled++;
+
+                            logger?.LogInformation(
+                                "Baseline relation {View} was a plain view that still counted blocking self-waits (#6690) -- replaced it with the filtered select.",
+                                view);
+                        }
+
                         continue;
                     }
                 }
@@ -1092,6 +1114,25 @@ WITH NO DATA";
         }
 
         return filled;
+    }
+
+    /// <summary>
+    /// #6690: is <c>collect.blocked_process_baseline</c> a PLAIN view (not a continuous aggregate) whose select does
+    /// not carry the self-wait filter? <see cref="ResolveMaterializationAsync"/> is null for a plain view and for a
+    /// store without the extension, which is what separates it from an aggregate (also a <c>relkind='v'</c> view);
+    /// the filter is recognised by its <c>blocking_spid</c> column, which the pre-#6690 select never named.
+    /// </summary>
+    private static async Task<bool> IsStalePlainBlockedBaselineViewAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        if (await ResolveMaterializationAsync(connection, BlockedProcessBaselineView, cancellationToken) is not null)
+        {
+            return false;
+        }
+
+        using var probe = new NpgsqlCommand(
+            $"SELECT COALESCE(position('blocking_spid' IN pg_get_viewdef('collect.{BlockedProcessBaselineView}'::regclass)) = 0, false) FROM pg_class WHERE oid = 'collect.{BlockedProcessBaselineView}'::regclass AND relkind = 'v'",
+            connection) { CommandTimeout = SetupTimeoutSeconds };
+        return await probe.ExecuteScalarAsync(cancellationToken) is true;
     }
 
     /// <summary>Does this baseline relation exist under any implementation — continuous aggregate or plain view?</summary>
@@ -6202,6 +6243,13 @@ WITH NO DATA";
                answer from raw, exactly; WarmCollectionHealthHourlyAsync closes that window with one refresh. */
             (View: CollectionHealthHourlyView,
              StaleCheck: "SELECT (EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'collection_health_hourly') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'collection_health_hourly' AND column_name = 'latest_run_note'))"),
+            /* blocked_process_baseline gained the self-wait filter (#6690) -> stale iff the aggregate EXISTS but its
+               definition does not mention blocking_spid (the filter's column; the old text had no WHERE at all).
+               Nothing is built on it, so the CASCADE drops only the view; the ensure sweep recreates it WITH NO DATA
+               and the start path's coverage-gated BackfillBaselineAggregatesAsync (its materialization is empty, so
+               its gate fires on this very start) re-materializes it from raw. NULL view_definition is not stale. */
+            (View: BlockedProcessBaselineView,
+             StaleCheck: "SELECT EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = 'blocked_process_baseline' AND position('blocking_spid' IN view_definition) = 0)"),
         };
 
         var dropped = 0;
@@ -6237,7 +6285,7 @@ WITH NO DATA";
                 hold = AggregateJobHold.None;
                 dropped++;
                 logger?.LogInformation(
-                    "TimescaleDB: dropped stale continuous aggregate {View} (composer-dimension reshape) — recreated in the new shape this cycle.",
+                    "TimescaleDB: dropped stale continuous aggregate {View} (reshape) — recreated in the new shape this cycle.",
                     view);
             }
             catch (OperationCanceledException) when (hold.Unscheduled.Count > 0)
