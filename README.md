@@ -64,6 +64,12 @@ Before you upgrade an older install with `Setup.exe`, read the warning in the [L
 | [Darling quick start](docs/darling-quick-start.md) | Install on Windows, Linux notes, web dashboard |
 | [Darling operator guide](Darling/README.md) | Darling configuration, permissions, operations |
 | [Darling store sizing](docs/darling-store-sizing.md) | Disk, RAM and vCPU for a store host, by number of servers |
+| [Back up, restore and move the store](docs/darling-store-backup.md) | Back up a Darling store, restore it, or move it to another machine |
+| [Darling guides](docs/darling/README.md) | Install, viewer, web dashboard, MCP, day-to-day admin and command line reference |
+| [PostgreSQL target runbook](docs/postgres-first-target-runbook.md) | Point Darling at a PostgreSQL target, with a proof point at each step |
+| [Retention Held runbook](docs/retention-hold-runbook.md) | Clear a Retention Held alert |
+| [How collection works](docs/how-collection-works.md) | A tour of the collection pipeline, for people who read the code |
+| [Documentation index](docs/README.md) | Every page in `docs/`, grouped by audience |
 | [Tabs](docs/tabs.md) | What each tab shows |
 | [Alerts and notifications](docs/alerts.md) | Alert types, channels, routes, email |
 | [Agent dispatch](docs/darling-agent-dispatch.md) | Hand an alert to your own AI agent: levels, the brief and report, undo, the remediation login |

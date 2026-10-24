@@ -1,5 +1,7 @@
 # The Darling web dashboard
 
+Audience: operators.
+
 The web dashboard is a browser view of the fleet. The Darling service serves it. It is off by default. This page shows how to turn it on, what it shows, and how to reach it from another machine.
 
 Install the service first. See [Install Darling](install.md).
