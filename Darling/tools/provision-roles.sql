@@ -3057,6 +3057,11 @@ BEGIN
    GRANT INSERT, UPDATE, DELETE ON config.config_threshold_overrides TO admin;
    GRANT INSERT, UPDATE, DELETE ON config.investigation_feedback TO admin;
    GRANT INSERT, UPDATE, DELETE ON config.config_threshold_overrides TO mcp;
+   -- #6401: set_agent_actions_enabled (the MCP twin of the web's PUT /api/agent-changes/switch) updates the service row's switch and who set it.
+   -- UPDATE only, column-level on exactly those columns, so mcp still cannot write paused, capture_plans or any other flag, and cannot create the row:
+   -- the service creates it when it copies darling.json into the store, and a switch written before then must not make the store look set up.
+   -- agent_actions_enabled arrives with V191, the version that makes the block above run.
+   GRANT UPDATE (agent_actions_enabled, updated_by) ON config.config_service TO mcp;
    -- #5918 (V191's practice_of column, so here and not in 3i): the Viewer opens a practice request (a replay of a judged case) and copies the case's alert rows.
    GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
       window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON config.investigation_requests TO admin;
@@ -3135,6 +3140,8 @@ BEGIN
    -- agent supplies (merge_id and merged_at are the table's own); a person's undo runs as admin and stamps undone_at and undone_by.
    GRANT INSERT (server_id, signature, merged_into, reason, merged_by) ON config.investigation_signature_merges TO mcp;
    GRANT UPDATE (undone_at, undone_by) ON config.investigation_signature_merges TO admin;
+   -- #6401: undo_agent_change undoes a signature merge the way the web's undo does, by stamping the row; so mcp gets the same two columns.
+   GRANT UPDATE (undone_at, undone_by) ON config.investigation_signature_merges TO mcp;
 END $do$;
 
 -- 3g. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
