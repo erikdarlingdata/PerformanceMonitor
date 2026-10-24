@@ -14,6 +14,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -69,7 +70,7 @@ public sealed class DarlingPeerDisclosureTests
             },
         });
 
-    private static DarlingServerResolver.RegisteredServer Registered(string storageName, string? displayName = null) =>
+    private static RegisteredServer Registered(string storageName, string? displayName = null) =>
         new(storageName.GetHashCode(StringComparison.Ordinal), storageName, displayName ?? storageName);
 
     /* ───────────────────────── the config block ───────────────────────── */

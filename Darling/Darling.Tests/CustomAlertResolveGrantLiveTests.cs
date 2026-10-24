@@ -239,7 +239,7 @@ GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, t
             var evaluator = new CustomAlertEvaluator(
                 rules, state, owner /* viewer: unused by reconcile */, new NoopDeliverer(),
                 isAlertMuted: null, alertsEnabled: static () => true,
-                new PgAlertHistoryStore(lowPriv), defaultIntervalSeconds: 60,
+                new PgAlertHistoryStore(lowPriv, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds), defaultIntervalSeconds: 60,
                 cacheTtl: TimeSpan.Zero, NullLogger.Instance);
 
             await evaluator.ReconcileStateAsync(monitored, ct);

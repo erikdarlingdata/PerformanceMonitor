@@ -227,12 +227,12 @@ public sealed class DarlingMcpToolsTests
 
     /* ---------------- ungated: server-name resolution (Lite's semantics) ---------------- */
 
-    private static DarlingServerResolver.RegisteredServer Registered(
+    private static RegisteredServer Registered(
         string storageName, string? displayName = null, int? serverId = null)
     {
         /* The worker's upsert derives server_id from the storage name via the shared hash;
            the tests default to the same derivation unless pinning id passthrough. */
-        return new DarlingServerResolver.RegisteredServer(
+        return new RegisteredServer(
             serverId ?? ServerIdHelper.GetDeterministicHashCode(storageName),
             storageName,
             displayName ?? storageName);
@@ -312,7 +312,7 @@ public sealed class DarlingMcpToolsTests
     public void Resolver_EmptyRegistry_ExplainsHeadlessRegistration()
     {
         var (resolved, error) = DarlingServerResolver.ResolveOrError(
-            Array.Empty<DarlingServerResolver.RegisteredServer>(), "anything");
+            Array.Empty<RegisteredServer>(), "anything");
 
         Assert.Equal(default, resolved);
         Assert.Contains("registers each monitored server on its first successful connection", error, StringComparison.Ordinal);

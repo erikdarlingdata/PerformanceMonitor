@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -825,6 +826,25 @@ ORDER BY server_id, item_key;";
         }
 
         return names;
+    }
+
+    /// <summary>
+    /// The worklist's names map (#3482), gated on the worklist actually naming a server: one read of the
+    /// retained verdict history (<see cref="GetSweepServerNamesAsync"/>), skipped when the worklist is empty
+    /// or all fleet-scope. The ONE copy of that gate: the web feed, <c>get_sweep_reports</c> and the Viewer's
+    /// Fleet Sweeps tab (#6390) all call it, so none of them can join names on different rules.
+    /// </summary>
+    public static async Task<Dictionary<int, string>> GetWatchItemNamesAsync(
+        NpgsqlDataSource postgres,
+        IReadOnlyList<FleetSweepWatchItem> items,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+
+        return items.Any(item => item.ServerId != FleetScopeServerId)
+            ? await GetSweepServerNamesAsync(postgres, logger, cancellationToken).ConfigureAwait(false)
+            : new Dictionary<int, string>();
     }
 
     /// <summary>

@@ -38,6 +38,7 @@
     <!-- AN4: the Darling service's analysis MCP tools use McpHelpers (Status envelope,
          ValidateHoursBack, JsonOptions, FormatError) exactly like both apps' tools. -->
     <InternalsVisibleTo Include="PerformanceMonitor.Darling.Service" />
+    <InternalsVisibleTo Include="PerformanceMonitor.Darling.Storage" />
     <InternalsVisibleTo Include="Lite.Tests" />
     <InternalsVisibleTo Include="Dashboard.Tests" />
     <!-- #2417: Darling.Tests serializes the MCP alert payload through McpHelpers.JsonOptions rather

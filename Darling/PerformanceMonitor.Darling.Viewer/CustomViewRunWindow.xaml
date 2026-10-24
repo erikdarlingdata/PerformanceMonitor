@@ -1,0 +1,44 @@
+<Window x:Class="PerformanceMonitor.Darling.Viewer.CustomViewRunWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Run Custom View"
+        Height="720" Width="1000"
+        WindowStartupLocation="CenterOwner"
+        Icon="EDD.ico"
+        ResizeMode="CanResizeWithGrip"
+        Background="{DynamicResource BackgroundLightBrush}"
+        Foreground="{DynamicResource ForegroundBrush}">
+    <!-- Runs a saved Custom View from the viewer (#6390 S6): its composed panels go through ComposePanelRunner.RunComposedPanelCoreAsync
+         (Storage), the call the web's /api/compose/run makes. A v1 read panel is not run; it says to open the web dashboard. -->
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="ViewerDarkTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="ViewTitle" Grid.Row="0" FontSize="18" FontWeight="Bold" Margin="0,0,0,8" TextTrimming="CharacterEllipsis"/>
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock Text="Server:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <ComboBox x:Name="ServerBox" Width="260" Height="28" DisplayMemberPath="Display" Margin="0,0,12,0"/>
+            <Button x:Name="RunButton" Content="_Run" Width="90" Height="28" Margin="0,0,12,0" Click="Run_Click" IsDefault="True"/>
+            <TextBlock x:Name="RunStatus" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="560"/>
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+            <StackPanel x:Name="Panels"/>
+        </ScrollViewer>
+
+        <Button Grid.Row="3" Content="_Close" Width="80" Height="28" Margin="0,12,0,0" HorizontalAlignment="Right" Click="Close_Click" IsCancel="True"/>
+    </Grid>
+</Window>
