@@ -973,9 +973,17 @@ Use that as `genericBodyTemplate`. incident.io's alert event takes `title`, `sta
 What to know about incident.io:
 
 - incident.io allows 120 events a minute for each alert source. A request over that gets a 429 and incident.io drops the event. Darling makes one attempt and does not retry a 429, so the channel records a failed send.
-- On a resolution the title is `{{metric}}`, so the alert's title can change to the resolution's when it closes.
-- `{{triage_url}}` is an empty string when Darling has no triage link. incident.io's documentation does not say whether an empty `source_url` is accepted, so test it.
-- Not confirmed in incident.io's documentation: what a `resolved` event with an unknown key does, whether `metadata` may hold nested objects, any limit on the key's length or characters (Darling keys hold spaces and colons), and whether a later event changes an alert's title. A fire after a resolve is expected to open a new alert. Check each against your own source before you rely on it.
+- Tested on 2026-10-24 against one incident.io HTTP alert source, with the template above and Darling's own alert and resolution sends:
+  - The alert and its resolution carried the same `{{dedup_key}}`, and the resolution closed the alert.
+  - The alert kept the title from its first event. The resolution's title did not replace it.
+  - A key with spaces and colons, such as `3:High CPU`, was accepted.
+  - An empty `source_url` was accepted. `{{triage_url}}` is empty when Darling has no triage link, and the alert then has no link.
+  - Nested objects in `metadata` were accepted. Whether a Priority or attribute expression can read a nested path was not tested.
+  - A `resolved` event with a key that matches no open alert got a 202 and changed nothing.
+  - A new alert with the same key after a resolution opened a new alert in incident.io.
+  - An event with no `status` got a 422.
+  - With no Priority expression, the alerts got a default priority. Add the expression if your alert routes use priority.
+- Not confirmed: any limit on the key's length, and the largest body incident.io accepts.
 
 Another receiver that matches on a key and takes a status works the same way. Darling has no native incident.io channel.
 
