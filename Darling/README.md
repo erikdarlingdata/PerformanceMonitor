@@ -1695,7 +1695,18 @@ max_worker_processes               = 3 + timescaledb.max_background_workers + 8
 <ceiling> = <hypertables> + 3 * <continuous aggregates> + 2 + 16
 ```
 
-The ceiling is every policy job the schema can create (one compression policy per hypertable, up to three per continuous aggregate, two store-wide) plus 16 for the scheduler and slack. For an 8 GB host that is **128** and **139** for 72 hypertables (the 71 collector tables plus `collection_log`; the 72nd collector table, `attention_events`, is a plain table with its own 30-day delete and is not counted) and 29 aggregates. The same store gets 74 and 85 on a host of 4 GB or less (the floor) and 177 and 188 on 12 GB or more (the ceiling). A fully migrated store carries **142 policy jobs** (measured, #5633 item 14): 94 compression, 23 continuous-aggregate refresh, 23 retention, plus TimescaleDB's own `policy_telemetry` and `policy_job_stat_history_retention`. That depends on the schema (hypertables and aggregates), not on how much data is stored. After any downtime every job is overdue at the next start, so they all ask for a worker at once; with 74 the postmaster log showed 61 to 68 `out of background workers` launch failures on one store at a restart (each job was retried later and ran, so the first pass is noisy and late, not lost). A slot a restart fills is a postgres backend (about 4 to 6 MB private each, measured on an empty store), so the managed store does not hand a small host more slots than its RAM can hold: raise the numbers toward the ceiling on a larger host, or accept the retries on a small one.
+The ceiling is every policy job the schema can create (one compression policy per hypertable, up to three per continuous aggregate, two store-wide) plus 16 for the scheduler and slack. Count your own store's two inputs with these queries. Run them after the service's first start creates the tables, and again after each upgrade, because a new build can add collector tables. A few small collector tables stay plain tables, such as `attention_events`, which has its own 30-day delete. The first query does not count them.
+
+```sql
+SELECT count(*) AS hypertables FROM timescaledb_information.hypertables;
+SELECT count(*) AS continuous_aggregates FROM timescaledb_information.continuous_aggregates;
+```
+
+For example, take a store with 72 hypertables and 29 continuous aggregates. Its ceiling is 177, and on an 8 GB host the two settings are **128** and **139**. The same store gets 74 and 85 on a host of 4 GB or less (the floor). It gets 177 and 188 on 12 GB or more (the ceiling). Your counts will differ, and they grow as collectors are added, so work the formula with the numbers the queries return. One fully migrated store carried **142 policy jobs** when measured for #5633 item 14: 94 compression, 23 continuous-aggregate refresh, 23 retention, plus TimescaleDB's own `policy_telemetry` and `policy_job_stat_history_retention`. The job query below gives your store's own count. The count depends on the schema (hypertables and aggregates), not on how much data is stored.
+
+After any downtime every job is overdue at the next start, so they all ask for a worker at once. With 74 workers the postmaster log showed 61 to 68 `out of background workers` launch failures on one store at a restart (each job was retried later and ran, so the first pass is noisy and late, not lost).
+
+A slot a restart fills is a postgres backend (about 4 to 6 MB private each, measured on an empty store), so the managed store does not hand a small host more slots than its RAM can hold: raise the numbers toward the ceiling on a larger host, or accept the retries on a small one.
 
 ```sql
 SELECT proc_name, count(*) FROM timescaledb_information.jobs GROUP BY proc_name;
