@@ -23,14 +23,14 @@ Exit codes are numbers. The [exit code table](#exit-codes) below says what each 
 | --- | --- | --- | --- | --- | --- |
 | `--help`, `-h`, `-?`, `/?` | Prints the help text. | no | either | `0` | This page |
 | `--version`, `-v` | Prints the product version. | no | either | `0` | This page |
-| `--test-connection`, `--validate-config` | Checks `darling.json` and probes every configured server. | no | either | `0`, `1` | [Validate the config](../../Darling/README.md#validate-the-config-pre-flight) |
-| `--check-settings` | Prints the store host profile and a verdict for each sizing setting. | no | either (1) | `0`, `1`, `2`, `3` | [Check settings](../../Darling/README.md#check-hoststore-sizing-settings) |
-| `--diagnostics-bundle`, `--diag-bundle` | Writes one aliased file to attach to a bug report. | yes on the store host | either | `0` to `5` | [Diagnostics bundle](../../Darling/README.md#diagnostics-bundle) |
-| `--encrypt-password` | Encrypts a SQL login password for `darling.json`. Windows only. | no | no | `0`, `1` | [Configure darling.json](../../Darling/README.md#configure-darlingjson) |
+| `--test-connection`, `--validate-config` | Checks `darling.json` and probes every configured server. | no | either | `0`, `1` | [Validate the config](install.md#validate-the-config-pre-flight) |
+| `--check-settings` | Prints the store host profile and a verdict for each sizing setting. | no | either (1) | `0`, `1`, `2`, `3` | [Check settings](install.md#check-hoststore-sizing-settings) |
+| `--diagnostics-bundle`, `--diag-bundle` | Writes one aliased file to attach to a bug report. | yes on the store host | either | `0` to `5` | [Diagnostics bundle](install.md#diagnostics-bundle) |
+| `--encrypt-password` | Encrypts a SQL login password for `darling.json`. Windows only. | no | no | `0`, `1` | [Configure darling.json](install.md#configure-darlingjson) |
 | `--add-server`, `--add-servers` | Registers one or more monitored servers. | no | either (1) | `0`, `1` | [Add-server](#--add-server) |
 | `--grant-script` | Prints the T-SQL that grants Darling its access on a monitored server. | no | either (1) | `0`, `1` | [Permissions](../permissions.md) |
-| `--print-viewer-connection` | Prints a connection string for a remote Viewer. Windows only. | no | either | `0`, `1` | [Connect a remote Viewer](../../Darling/README.md#manual-configuration-fallback) |
-| `--export-viewer-config` | Writes a ready-to-copy folder for a remote Viewer. Windows only. | no | either | `0`, `1` | [Export the handoff folder](../../Darling/README.md#1-export-the-handoff-folder-on-the-service-host) |
+| `--print-viewer-connection` | Prints a connection string for a remote Viewer. Windows only. | no | either | `0`, `1` | [Connect a remote Viewer](viewer.md#manual-configuration-fallback) |
+| `--export-viewer-config` | Writes a ready-to-copy folder for a remote Viewer. Windows only. | no | either | `0`, `1` | [Export the handoff folder](viewer.md#1-export-the-handoff-folder-on-the-service-host) |
 | `--print-mcp-token` | Prints the MCP access token again. Windows only. | yes | either | `0`, `1` | [MCP endpoint](../../Darling/README.md#mcp-endpoint-assistant-over-the-lan) |
 | `--print-web-token` | Prints the web dashboard access token again. Windows only. | yes | either | `0`, `1` | [Web endpoint](../../Darling/README.md#web-endpoint-browser-over-the-lan) |
 | `--configure-network` | Asks questions, then edits `darling.json` to expose the store, MCP or web endpoint on the network. Windows only. | no, but the service restart and firewall steps need it | either | `0`, `1` | [Guided setup](../../Darling/README.md#guided-setup---configure-network) |
