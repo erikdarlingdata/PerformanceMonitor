@@ -791,9 +791,14 @@ GROUP BY server_id, bucket, collection_time
 WITH NO DATA";
 
 
-    /// <summary>Blocking AND BlockingPerMinute baseline supply -- both families share this source and both
-    /// have NO row-level filter, so one aggregate serves both. Event counts per collection re-aggregate to
-    /// either shape: Blocking sums them per hour/dow bucket, BlockingPerMinute re-buckets by minute.</summary>
+    /// <summary>Blocking AND BlockingPerMinute baseline supply -- both families share this source and the same
+    /// row-level filter, so one aggregate serves both. Both are compared with series that leave a parallel query's
+    /// self-waits out (<see cref="PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql"/>): Blocking with its current window
+    /// (<c>PgAnomalyDetector.BlockingWindowSql</c>, #6663), BlockingPerMinute with the bars drawn over its band (the Viewer's
+    /// <c>BlockingTrendSql</c> and <c>get_blocking_trend</c>, #6705). So the baseline leaves them out too (#6690): a count over
+    /// every report row would read a server's baseline high and under-flag its real blocking. Event counts per collection re-aggregate to either shape: Blocking sums them per
+    /// hour/dow bucket, BlockingPerMinute re-buckets by minute. A store that built this aggregate before #6690 is
+    /// rebuilt by <see cref="DropStaleContinuousAggregatesAsync(NpgsqlConnection, ILogger?, CancellationToken)"/>.</summary>
     public const string CreateBlockedProcessBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.blocked_process_baseline
 WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT
@@ -802,6 +807,7 @@ SELECT
     collection_time,
     count(*) AS event_count
 FROM collect.blocked_process_reports
+WHERE " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + @"
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA";
 
@@ -901,6 +907,13 @@ WITH NO DATA";
                 if (coverageOldest is not null && coverageOldest <= needFrom)
                 {
                     continue;
+                }
+
+                /* #6705: an EMPTY materialization over a raw table that holds rows is a rebuilt (or first-built)
+                   aggregate, and it is about to hold only what raw still holds. Say where that begins BEFORE the refresh. */
+                if (view == BlockedProcessBaselineView && coverageOldest is null)
+                {
+                    await TryRecordBlockedBaselineSupplyFloorAsync(connection, logger, cancellationToken);
                 }
 
                 var after = await RefreshFromAsync(connection, view, needFrom.Value, force: false, cancellationToken);
@@ -1068,6 +1081,23 @@ WITH NO DATA";
                 {
                     if (await probe.ExecuteScalarAsync(cancellationToken) is true)
                     {
+                        /* #6690: the one relation that is "present" and still wrong: a plain view built before the
+                           blocking baseline left self-waits out. A plain view has no data to lose, so it is replaced
+                           in place; a continuous aggregate is never touched here (the reshape sweep rebuilds it). */
+                        if (view == BlockedProcessBaselineView && await IsStalePlainBlockedBaselineViewAsync(connection, cancellationToken))
+                        {
+                            using var replace = new NpgsqlCommand(CreateBaselineFallbackViewSql(view, createSql), connection)
+                            {
+                                CommandTimeout = SetupTimeoutSeconds,
+                            };
+                            await replace.ExecuteNonQueryAsync(cancellationToken);
+                            filled++;
+
+                            logger?.LogInformation(
+                                "Baseline relation {View} was a plain view that still counted blocking self-waits (#6690) -- replaced it with the filtered select.",
+                                view);
+                        }
+
                         continue;
                     }
                 }
@@ -1092,6 +1122,126 @@ WITH NO DATA";
         }
 
         return filled;
+    }
+
+    /// <summary>
+    /// #6690: is <c>collect.blocked_process_baseline</c> a PLAIN view (not a continuous aggregate) whose select does
+    /// not carry the self-wait filter? <see cref="ResolveMaterializationAsync"/> is null for a plain view and for a
+    /// store without the extension, which is what separates it from an aggregate (also a <c>relkind='v'</c> view);
+    /// the filter is recognised by its <c>blocking_spid</c> column, which the pre-#6690 select never named.
+    /// </summary>
+    private static async Task<bool> IsStalePlainBlockedBaselineViewAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        if (await ResolveMaterializationAsync(connection, BlockedProcessBaselineView, cancellationToken) is not null)
+        {
+            return false;
+        }
+
+        using var probe = new NpgsqlCommand(
+            $"SELECT COALESCE(position('blocking_spid' IN pg_get_viewdef('collect.{BlockedProcessBaselineView}'::regclass)) = 0, false) FROM pg_class WHERE oid = 'collect.{BlockedProcessBaselineView}'::regclass AND relkind = 'v'",
+            connection) { CommandTimeout = SetupTimeoutSeconds };
+        return await probe.ExecuteScalarAsync(cancellationToken) is true;
+    }
+
+    /// <summary>
+    /// #6705 (the #3590 trap): the prefix of the view comment that records where the Blocking baseline's EVENT supply begins.
+    /// <see cref="PgBaselineProvider"/>'s event arm counts a <c>collection_log</c> run with no event as a measured zero, and that
+    /// log is kept twice the base, so a day the rebuilt <c>blocked_process_baseline</c> cannot back would read as a quiet day, not a
+    /// missing one. The comment is the floor: the instant the rebuild's raw supply begins (see
+    /// <see cref="RecordBlockedBaselineSupplyFloorAsync"/>). No migration: the service owns the view, and a rebuild
+    /// (<c>DROP ... CASCADE</c>) clears the comment with the view.
+    /// </summary>
+    public const string BlockedBaselineSupplyFloorPrefix = "supply_floor_utc=";
+
+    private const string SupplyFloorFormat = "yyyy-MM-dd'T'HH:mm:ss";
+
+    /// <summary>The view comment and the fleet <c>blocked_process_report</c> retention in force, in one row. A view that does not exist reads NULL.</summary>
+    private static readonly string BlockedBaselineSupplyFloorProbeSql =
+        $"SELECT obj_description(to_regclass('collect.{BlockedProcessBaselineView}'), 'pg_class'), "
+        + DarlingRetentionHorizons.FleetRetentionDaysSql("blocked_process_report");
+
+    /// <summary>The floor a view comment records; null for an absent comment or one that is not a floor.</summary>
+    public static DateTime? ParseBlockedBaselineSupplyFloor(string? comment)
+        => comment is not null
+            && comment.StartsWith(BlockedBaselineSupplyFloorPrefix, StringComparison.Ordinal)
+            && DateTime.TryParseExact(comment.AsSpan(BlockedBaselineSupplyFloorPrefix.Length), SupplyFloorFormat, CultureInfo.InvariantCulture, DateTimeStyles.None, out var floor)
+            ? floor
+            : null;
+
+    private static async Task<(DateTime? Floor, int RetentionDays)> ReadBlockedBaselineSupplyAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        using var probe = new NpgsqlCommand(BlockedBaselineSupplyFloorProbeSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+        await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return (ParseBlockedBaselineSupplyFloor(reader.IsDBNull(0) ? null : reader.GetString(0)), Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// The instant before which the rebuilt <c>blocked_process_baseline</c> cannot back a day, or null (no floor recorded: the
+    /// aggregate was never rebuilt by this build, or the comment is not a floor). The provider raises the Blocking
+    /// baseline's window start to it, so the days the aggregate does not hold are left out of the covered days rather than
+    /// counted as quiet. Never the aggregate's own oldest bucket: a server that rarely blocks has real zero days.
+    /// </summary>
+    public static async Task<DateTime?> ReadBlockedBaselineSupplyFloorAsync(NpgsqlConnection connection, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        return (await ReadBlockedBaselineSupplyAsync(connection, cancellationToken)).Floor;
+    }
+
+    /// <summary>
+    /// Records the floor on the pass that runs the backfill of a rebuilt <c>blocked_process_baseline</c>: <paramref name="utcNow"/>
+    /// minus the <c>blocked_process_report</c> retention the daily purge applies right now
+    /// (<see cref="DarlingRetentionHorizons.FleetRetentionDaysSql"/>, the fleet override or the default). Raw drops its chunks at
+    /// that horizon and the backfill clamps to what raw holds, so the rebuilt aggregate begins there; the aggregate's own 35 days
+    /// never remove a materialized hour that raw has since dropped (the purge is <c>drop_chunks</c>, which records no invalidation,
+    /// and the refresh policy reaches back one day). Written once: a floor already recorded for this view is left alone, so a
+    /// store whose aggregate stays empty (a server with only self-waits) does not move its floor forward on every start.
+    /// </summary>
+    private static async Task RecordBlockedBaselineSupplyFloorAsync(NpgsqlConnection connection, ILogger? logger, DateTime utcNow, CancellationToken cancellationToken)
+    {
+        var (recorded, retentionDays) = await ReadBlockedBaselineSupplyAsync(connection, cancellationToken);
+        if (recorded is not null)
+        {
+            return;
+        }
+
+        var floor = utcNow - TimeSpan.FromDays(retentionDays);
+        using var comment = new NpgsqlCommand(
+            $"COMMENT ON VIEW collect.{BlockedProcessBaselineView} IS '{BlockedBaselineSupplyFloorPrefix}{floor.ToString(SupplyFloorFormat, CultureInfo.InvariantCulture)}'",
+            connection) { CommandTimeout = SetupTimeoutSeconds };
+        await comment.ExecuteNonQueryAsync(cancellationToken);
+        logger?.LogInformation(
+            "TimescaleDB: {View} was rebuilt over the {RetentionDays} days of blocked process reports the store keeps -- the Blocking baseline counts no day before {Floor:u}.",
+            BlockedProcessBaselineView, retentionDays, floor);
+    }
+
+    private static async Task<bool> RawHoldsRowsAsync(NpgsqlConnection connection, string sourceTable, CancellationToken cancellationToken)
+    {
+        using var probe = new NpgsqlCommand($"SELECT EXISTS (SELECT 1 FROM collect.{sourceTable})", connection) { CommandTimeout = SetupTimeoutSeconds };
+        return await probe.ExecuteScalarAsync(cancellationToken) is true;
+    }
+
+    /// <summary>
+    /// #6705: <see cref="RecordBlockedBaselineSupplyFloorAsync"/>, failure-isolated. A failed comment write must not skip the
+    /// backfill that follows it (it would fail again on every start and the baseline would never be backfilled); it logs and the
+    /// pass goes on, and the next start tries the write again.
+    /// </summary>
+    private static async Task TryRecordBlockedBaselineSupplyFloorAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await RecordBlockedBaselineSupplyFloorAsync(connection, logger, DateTime.UtcNow, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not record where the {View} supply begins -- the Blocking baseline counts quiet days it cannot back until this succeeds: {Message}",
+                BlockedProcessBaselineView, ex.Message);
+        }
     }
 
     /// <summary>Does this baseline relation exist under any implementation — continuous aggregate or plain view?</summary>
@@ -6202,6 +6352,13 @@ WITH NO DATA";
                answer from raw, exactly; WarmCollectionHealthHourlyAsync closes that window with one refresh. */
             (View: CollectionHealthHourlyView,
              StaleCheck: "SELECT (EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'collection_health_hourly') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'collection_health_hourly' AND column_name = 'latest_run_note'))"),
+            /* blocked_process_baseline gained the self-wait filter (#6690) -> stale iff the aggregate EXISTS but its
+               definition does not mention blocking_spid (the filter's column; the old text had no WHERE at all).
+               Nothing is built on it, so the CASCADE drops only the view; the ensure sweep recreates it WITH NO DATA
+               and the start path's coverage-gated BackfillBaselineAggregatesAsync (its materialization is empty, so
+               its gate fires on this very start) re-materializes it from raw. NULL view_definition is not stale. */
+            (View: BlockedProcessBaselineView,
+             StaleCheck: "SELECT EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = 'blocked_process_baseline' AND position('blocking_spid' IN view_definition) = 0)"),
         };
 
         var dropped = 0;
@@ -6237,7 +6394,7 @@ WITH NO DATA";
                 hold = AggregateJobHold.None;
                 dropped++;
                 logger?.LogInformation(
-                    "TimescaleDB: dropped stale continuous aggregate {View} (composer-dimension reshape) — recreated in the new shape this cycle.",
+                    "TimescaleDB: dropped stale continuous aggregate {View} (reshape) — recreated in the new shape this cycle.",
                     view);
             }
             catch (OperationCanceledException) when (hold.Unscheduled.Count > 0)
@@ -6369,9 +6526,27 @@ WITH NO DATA";
         {
             try
             {
+                /* #6705: was the blocking baseline absent before this CREATE? The plain fallback view was dropped above, so
+                   a relation that exists here is a real aggregate. Read before the CREATE, as IF NOT EXISTS says nothing. */
+                var createsBlockedBaseline = false;
+                if (view == BlockedProcessBaselineView)
+                {
+                    using var exists = new NpgsqlCommand(BaselineRelationExistsSql(view), connection) { CommandTimeout = SetupTimeoutSeconds };
+                    createsBlockedBaseline = await exists.ExecuteScalarAsync(cancellationToken) is false;
+                }
+
                 using (var create = new NpgsqlCommand(createSql, connection) { CommandTimeout = SetupTimeoutSeconds })
                 {
                     await create.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                /* #6705: the floor is written on the pass that CREATES the baseline, before its refresh policy can materialize
+                   anything. Written only at backfill time, a service that stopped between this CREATE and the backfill left the
+                   policy to materialize the last day first, so the backfill saw a non-empty materialization and recorded
+                   nothing. A fresh store (raw empty) records nothing: its aggregate will hold everything raw ever gets. */
+                if (createsBlockedBaseline && await RawHoldsRowsAsync(connection, SourceTableFor(view), cancellationToken))
+                {
+                    await TryRecordBlockedBaselineSupplyFloorAsync(connection, logger, cancellationToken);
                 }
 
                 /* #3893: an off-grid aggregate's materialization width is set HERE, after its CREATE and BEFORE

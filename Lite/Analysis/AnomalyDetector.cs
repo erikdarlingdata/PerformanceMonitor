@@ -907,6 +907,14 @@ SELECT
             var map = await _baselineProvider.GetBucketMapAsync(
                 context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
+            /* #6696: the write baseline and map are fetched here, beside the read ones and BEFORE the store read lock.
+               On the first pass of a UTC day each is a cold 30-day file_io scan (the daily cache tier), and run inside
+               the lock they would sit against the command wall. */
+            var writeBaseline = await _baselineProvider.GetBaselineAsync(
+                context.ServerId, MetricNames.IoWriteLatency, context.TimeRangeStart, context.CancellationToken);
+            var writeMap = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.IoWriteLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
+
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -1020,12 +1028,15 @@ ORDER BY local_hour";
                 }
             }
 
-            // Write latency anomaly
+            // Write latency anomaly — #6696: scored against the WRITE-latency baseline (IoWriteLatency), not the read series.
             if (wholeWrite.Samples > 0)
             {
+                var writeThreshold = GetDeviationThreshold(MetricNames.IoWriteLatency);
+                var writeModifiedZThreshold = ModifiedZThresholdFor(MetricNames.IoWriteLatency, writeThreshold);
+
                 var writeTv = AnomalyGate.EvaluateTiles(
-                    writeTiles, map,
-                    ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                    writeTiles, writeMap,
+                    writeThreshold, writeModifiedZThreshold, WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
                     window);
 
                 AnomalyGate.ZDecision writeDecision;
@@ -1035,13 +1046,16 @@ ORDER BY local_hour";
 
                 if (writeTv is null)
                 {
-                    writeBucketUsed = baseline;
+                    writeBucketUsed = writeBaseline;
                     peakWriteLat = wholeWrite.Peak;
                     avgWriteLat = wholeWrite.Mean;
-                    writeDecision = AnomalyGate.EvaluateZScore(
-                        baseline, peakWriteLat, avgWriteLat,
-                        ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
-                        window: window);
+                    // The write baseline can be empty while the read one is not (a server whose files have not written yet).
+                    writeDecision = writeBaseline.SampleCount == 0
+                        ? default
+                        : AnomalyGate.EvaluateZScore(
+                            writeBaseline, peakWriteLat, avgWriteLat,
+                            writeThreshold, writeModifiedZThreshold, WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                            window: window);
                 }
                 else
                 {
