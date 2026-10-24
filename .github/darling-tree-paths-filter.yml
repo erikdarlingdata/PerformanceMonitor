@@ -1,0 +1,11 @@
+# The two area answers ci-select.py's `workflow` and `lite_tree_count` read (#6656 PR 3b). They were the inline
+# filter of build.yml's darling-tree-guards job; that job went with the push trigger, and the answers stay because
+# ci-plan.py and run-ci-leg.ps1 still read them. A file outside .github/workflows/, as the other path filters are.
+workflow:
+  - '.github/workflows/build.yml'
+# #5459 cut 3c: a change made ONLY of Lite files (lite_tree_count == all_count) needs just the Darling
+# classes that read Lite, not the whole suite. Counts rather than booleans: "every changed file is a Lite
+# file" is a count comparison, never a path predicate.
+lite_tree:
+  - 'Lite/**'
+  - 'Lite.Tests/**'

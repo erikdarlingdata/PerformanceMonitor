@@ -792,7 +792,7 @@ public sealed class CustomAlertEvaluator
     /// </summary>
     public static Task<CustomAlertRuleResult> ResolveAndDeleteRuleAsync(
         NpgsqlDataSource postgres, long ruleId, ILogger? logger, CancellationToken cancellationToken) =>
-        ResolveAndDeleteRuleAsync(postgres, new CustomAlertRuleStore(postgres), ruleId, logger, cancellationToken);
+        ResolveAndDeleteRuleAsync(postgres, new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds), ruleId, logger, cancellationToken);
 
     /// <summary>
     /// The same resolve-then-delete over <paramref name="ruleStore"/> (#5915): a Level 2 agent delete passes a store bound to
@@ -805,7 +805,7 @@ public sealed class CustomAlertEvaluator
         var current = await ruleStore.GetAsync(ruleId, cancellationToken);
         if (current is CustomAlertRuleResult.Ok ok && ok.Rule is not null)
         {
-            var stateStore = new CustomAlertStateStore(postgres);
+            var stateStore = new CustomAlertStateStore(postgres, McpCommandDeadlines.ReadSeconds);
             var firing = await stateStore.ListFiringWithNamesAsync(ruleId, cancellationToken);
             if (firing.Count > 0)
             {

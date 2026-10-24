@@ -503,6 +503,13 @@ END IF; END $$;"),
         new(214, "hasKnownPatterns",
             @"
 DROP TABLE IF EXISTS config.config_known_patterns;"),
+        // V215: the agent-table indexes. The reports index is the probe's newest sentinel. The rewind drops all six, so a re-run of V215 builds them
+        // again. Safe on a store that never had them.
+        new(215, "hasAgentTableIndexes",
+            @"
+DROP INDEX IF EXISTS config.ix_investigation_requests_reported_condition, config.ix_investigation_requests_follow_up_of,
+    config.ix_investigation_requests_follow_up_at, config.ix_investigation_requests_opened_at,
+    config.ix_investigation_requests_practice_of, config.ix_investigation_reports_family_of;"),
     ];
 
     /// <summary>

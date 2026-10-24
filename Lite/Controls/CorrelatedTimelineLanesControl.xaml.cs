@@ -764,6 +764,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     private static void ClearChart(ScottPlot.WPF.WpfPlot chart)
     {
         chart.Reset();
+        PerformanceMonitor.Ui.ChartDisplayScale.Apply(chart); // #6678: Reset swaps in a plot at scale 1
         chart.Plot.Clear();
     }
 

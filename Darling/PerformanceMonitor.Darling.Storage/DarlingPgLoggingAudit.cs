@@ -10,9 +10,8 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using PerformanceMonitor.Darling.Storage;
 
-namespace PerformanceMonitor.Darling.Service.Mcp;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The logging-settings audit for a PostgreSQL target (#3607): which of the server's logging GUCs are

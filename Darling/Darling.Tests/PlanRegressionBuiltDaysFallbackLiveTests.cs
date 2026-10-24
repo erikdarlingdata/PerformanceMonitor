@@ -361,7 +361,7 @@ public sealed class PlanRegressionBuiltDaysFallbackLiveTests
         await using (var update = new NpgsqlCommand(
             "UPDATE collect.query_store_text SET query_sql_text = $1 WHERE server_id = $2 AND database_name = 'fallbackdb' AND query_id = 1", connection))
         {
-            update.Parameters.AddWithValue("(@p0 bigint)DELETE TOP(@batch_size) FROM sys.change_tracking_1234567 WHERE commit_ts < @p0");
+            update.Parameters.AddWithValue("(@p0 bigint)DELETE TOP(@batch_size) FROM sys.[change_tracking_1228027148] WHERE commit_ts < @p0");
             update.Parameters.AddWithValue(ServerId);
             await update.ExecuteNonQueryAsync(ct);
         }

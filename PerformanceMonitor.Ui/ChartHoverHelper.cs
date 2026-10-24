@@ -502,6 +502,9 @@ internal sealed class ChartHoverHelper
 
         var lr = _chart.Plot.LastRender;
         if (lr.Count == 0) return false;                                  // not yet rendered
+
+        /* #6678: the legend panel's layout is in the plot's scaled units, the click is in device pixels. */
+        clickPixel = clickPixel.Divide((float)_chart.Plot.ScaleFactor);
         var layout = lr.Layout;
 
         var panel = layout.PanelSizes.Keys.OfType<ScottPlot.Panels.LegendPanel>().FirstOrDefault();
