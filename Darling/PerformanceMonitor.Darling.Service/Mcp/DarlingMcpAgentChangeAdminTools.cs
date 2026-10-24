@@ -51,11 +51,11 @@ public sealed class DarlingMcpAgentChangeAdminTools
     internal const string TurnOnRefusalMessage =
         "Over MCP agent actions can only be turned off. A person turns them on in the Viewer (Agent changes) or on the web dashboard, so an MCP client cannot give agents back the actions a person took away. Nothing was written.";
 
-    /// <summary>The journal actor of these two writes: <c>mcp:</c> plus the caller the request filter worked out.</summary>
-    internal static string ActorOf() => "mcp:" + ReadCaller.WriteIdentity();
+    /// <summary>The journal actor of these two writes: the MCP actor <see cref="DarlingMcpServerActionTools.ActorOf"/> spells (#3684: alias, do not copy).</summary>
+    internal static string ActorOf() => DarlingMcpServerActionTools.ActorOf();
 
     [McpServerTool(Name = "set_agent_actions_enabled"), Description(
-        "Turns the service-wide agent-actions switch on or off: the one brake over every change an investigation agent can make (mute rules, custom rules, threshold overrides, signature merges, plan force, plan evict, session kill). Off refuses every agent change with actions_off; nothing already done is undone. Over MCP this only turns agent actions OFF: enabled true is refused and writes nothing, because an MCP client must not give agents back actions a person took away; a person turns them on in the Viewer (Agent changes) or the web dashboard. Per-server switches (set_server_action) are separate and still apply. Answers the state before and after, and journals agent_actions_switched. Refused, writing nothing, when the store has no service row yet. Admin only: never offered to an investigation agent.")]
+        "Turns the service-wide agent-actions switch OFF (over MCP it never turns it on): the one brake over every change an investigation agent can make (mute rules, custom rules, threshold overrides, signature merges, plan force, plan evict, session kill). Off refuses every agent change with actions_off; nothing already done is undone. enabled true is refused and writes nothing, because an MCP client must not give agents back actions a person took away; a person turns them on in the Viewer (Agent changes) or the web dashboard. Per-server switches (set_server_action) are separate and still apply. Answers the state before and after, and journals agent_actions_switched. Refused, writing nothing, when the store has no service row yet. Admin only: never offered to an investigation agent.")]
     public static Task<string> SetAgentActionsEnabled(
         [Description("False to refuse every agent change. True is refused over MCP: a person turns agent actions on in the Viewer or the web dashboard.")] bool enabled,
         NpgsqlDataSource postgres,
