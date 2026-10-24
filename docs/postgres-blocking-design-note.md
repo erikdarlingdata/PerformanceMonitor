@@ -1,5 +1,7 @@
 # PostgreSQL blocking chains — design note
 
+Audience: contributors. This is a design note, kept as history. Don't follow it as a procedure.
+
 Status: **built and shipped** — `pg_blocking` → `collect.pg_blocking_edges` (rung V71), `get_pg_blocking`,
 and the `Blocking Detected` alert with its own `pgBlockingCountThreshold` knob (#3444, V122). The decisions
 below are kept as written, for the reasoning; [What building it changed](#what-building-it-changed--2026-08-12)

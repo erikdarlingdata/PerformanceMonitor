@@ -1,5 +1,7 @@
 # Darling guides
 
+Audience: operators.
+
 Read these pages in this order. After the install, each page is complete on its own.
 
 1. [Install Darling](install.md): from a downloaded zip to a service that collects data.
