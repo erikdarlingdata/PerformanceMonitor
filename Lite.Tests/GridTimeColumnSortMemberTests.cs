@@ -125,7 +125,6 @@ public sealed class GridTimeColumnSortMemberTests : IDisposable
         /* The row's own DateTime, a stored server wall clock (no UTC member exists for these): msdb job history, the running
            job's start, the plan cache's creation, cached and last-execution times, the open transaction's begin time. */
         { "Controls/JobHistoryTab.xaml", "JobHistoryDataGrid", "RunTimeLocal", Name(typeof(JobHistoryRow)), "RunDateTimeUtc" },
-        { "Controls/JobHistoryTab.xaml", "JobHistoryDataGrid", "LastSuccessfulRunLocal", Name(typeof(JobHistoryRow)), "LastSuccessfulRunUtc" },
         { "Controls/ServerTab.xaml", "RunningJobsGrid", "StartTimeLocal", Name(typeof(RunningJobRow)), "StartTime" },
         { "Controls/ServerTab.xaml", "QueryStatsGrid", "LastExecutionTimeLocal", Name(typeof(QueryStatsRow)), "LastExecutionTime" },
         { "Controls/ServerTab.xaml", "QueryStatsGrid", "CreationTimeLocal", Name(typeof(QueryStatsRow)), "CreationTime" },

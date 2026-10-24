@@ -204,8 +204,9 @@ public static class IncidentDeliveryFilter
                 (OtherIncidentsLabel,
                  string.Format(
                      CultureInfo.InvariantCulture,
-                     "{0} other incident(s) still open (already reported)",
-                     suppressedCount))
+                     "{0} other {1} still open (already reported)",
+                     suppressedCount,
+                     suppressedCount == 1 ? "incident" : "incidents"))
             }
         });
 

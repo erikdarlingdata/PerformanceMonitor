@@ -2,6 +2,8 @@
 
 Darling is the headless, centralized edition of Performance Monitor: a 24/7 service (a Windows service, or Linux with systemd or Docker Compose) that collects from your SQL Servers into a central PostgreSQL (optionally TimescaleDB) store, plus a detached desktop viewer that reads that store. No desktop app has to stay open for collection to happen, and every viewer seat reads the same central data.
 
+**Running an install day to day?** [Running Darling day to day](../docs/darling/admin.md) has the steps to add or remove a server, change a password, rotate a token, pause collection, upgrade and uninstall.
+
 It runs the **same monitoring brain as the Lite edition** — one shared codebase, two storage engines:
 
 - `PerformanceMonitor.Collectors` owns all 73 collector definitions — 44 for SQL Server and 29 for PostgreSQL: the exact query sent to monitored servers, the result-row mappings, the delta rules, the default cadences and retention horizons, and the ignored-wait-types list. Lite writes those rows to DuckDB; Darling writes the same rows to PostgreSQL via binary COPY. Each definition declares which engine it targets, and a collector never runs against the other one — see [PostgreSQL targets](#postgresql-targets).
@@ -30,7 +32,9 @@ Nothing is installed on the monitored SQL Servers by either edition beyond two l
 
 ## Quick Start
 
-> **First time, on a box with nothing on it?** [**`docs/uat-onboarding.md`**](../docs/uat-onboarding.md) is the ordered procedure from a downloaded zip to a running service and whichever of the three surfaces you need — the WPF viewer, the web dashboard, or MCP — with a proof point at every step. This section, and the rest of this document, is the reference it links back into.
+> **Installing on Windows?** Follow [`docs/darling/install.md`](../docs/darling/install.md). It is the ordered path from a downloaded zip to a working install, with a proof point at every step.
+>
+> **Installing on Linux, or turning on the web dashboard?** Read [`docs/darling-quick-start.md`](../docs/darling-quick-start.md).
 
 ### Prerequisites
 
@@ -147,11 +151,11 @@ PerformanceMonitor.Darling.Service.exe --check-settings [--json]
 
 It prints the host facts (OS, containerization, CPUs, RAM) and the store facts (versions, size, lifetime buffer hit ratio, temp bytes, and how many bytes of uncompressed TimescaleDB chunks sit against RAM). Then it prints one row per setting: its live value, where that value came from, what this host would derive for it right now, and a verdict. The four verdicts are `matches`; `stale-after-hardware-change` (a managed block set it once, but re-deriving from the CURRENT host gives a different number — the case a RAM upgrade or an added hypertable creates, and the reason this verb exists); `operator-override` (an `ALTER SYSTEM`, or a hand-edited line after the managed blocks, is what is actually in force); and `not-managed` (a bring-your-own store, where this class never wrote a block to compare against). `--json` prints the same facts as JSON for scripting. This is diagnostic only: it never writes a setting, and the service always starts regardless of what it finds.
 
-Exit codes separate the failure kinds so an install/upgrade script can gate on them precisely: `0` nothing is stale, `1` the config failed to load or validate, or its store setting cannot be used (a connection string that cannot be parsed, or a managed credential that cannot be read), `2` the store could not be reached (a managed credential that was never stored included: there is no store to check), `3` at least one setting is `stale-after-hardware-change`.
+Exit codes: see [`--check-settings` in the command line reference](../docs/darling/cli.md#exit-codes).
 
-`--enable-collector` and `--disable-collector` (described under "Enable or disable a collector headlessly" below) separate their failures into the same three kinds, but they do not file every case under the same code as `--check-settings`: `0` the row was written and read back, `1` a usage or configuration problem (bad arguments, a config that is missing or invalid, a connection string that cannot be used, a managed store's credential that is not stored or cannot be read, an unknown collector, or a `--server` that names no server or more than one), `2` the store could not be reached or refused the change (a refused login, and a failure reading the row back after the write went through, included). The one case that differs: a managed credential that was never stored exits `1` from the collector verbs (the setup is not finished) and `2` from `--check-settings` (there is no store to check). An empty `postgres.connectionString` is `1` from both: `--check-settings` rejects it when it validates the config.
+Exit codes for `--enable-collector` and `--disable-collector`: see [the command line reference](../docs/darling/cli.md#exit-codes).
 
-Every other verb that opens the store (`--validate-config`, `--enable-mcp`, `--disable-mcp`, `--enable-web`, `--disable-web`, `--collapse-legacy-slices`, `--recompress-plan-dim`, `--add-server`, `--backfill-rollups` and `--drop-xe-sessions <server-name>`; the `--print-sql` form connects to nothing) prints the problem and exits `1` when the connection string cannot be used or the managed credential cannot be read, instead of ending in an unhandled exception. `--backfill-rollups`, `--collapse-legacy-slices` and `--recompress-plan-dim` run on any platform against a bring-your-own store; on a non-Windows host they refuse only a managed store, whose credential only Windows can read (#6071).
+Every other verb, with its exit codes, platform rules and whether it needs the service running, is in the [command line reference](../docs/darling/cli.md).
 
 ### Diagnostics Bundle
 
@@ -167,7 +171,7 @@ Server, host, database, login and domain names and IP addresses are replaced wit
 
 When the store cannot be reached, the registry cannot be read, so a server known only to it cannot be aliased: the service log is then written as counts only. `--include-log-text` adds the message text anyway (open the file before you attach it). `--alias-map` refuses to overwrite the bundle or an existing file without `--force`. The `store_unreachable` section holds no sentence, only an error class and a fixed reason code. For a managed store the bundle reads the store's own `postmaster.pid` when the first connect is refused: a store listening on another port than `postgres.port` is used there (a warning says so; the service reads the port only at start-up), and a store still starting is waited for (about 20 seconds). If it still cannot connect, the reason is `store_not_running` (no live store on the data directory, so start the service and read its log), `store_starting`, or `data_directory_missing` (the bundle is reading a `darling.json` whose data directory is not the service's: pass `--config` with the install folder's file); a bare `connect_failed` means the store is listening on the configured port and still refused.
 
-Exit codes: `0` written, `1` bad arguments or config, `2` the store could not be reached (a reduced bundle is still written), `3` written but one or more sections failed, `4` the output path cannot be used, `5` a known name or secret survived aliasing (nothing written). If the service log is not where the verb looks, the `service_log` section says so; pass `--log-dir`.
+Exit codes: see [`--diagnostics-bundle` in the command line reference](../docs/darling/cli.md#exit-codes). If the service log is not where the verb looks, the `service_log` section says so. Pass `--log-dir`.
 
 ### Run It — Console Mode
 
@@ -1248,9 +1252,29 @@ With `mcp.allowWrites` on (and a token), seven MCP tools change collector schedu
 
 The writes run the same plans as `--enable-collector`, `--disable-collector` and `--set-collector-run-at`, and refuse the same things: an unknown collector name, a frequency that is negative or past the cap for a collector that stores deltas, a retention under 1 day, a run time on a collector that runs more often than daily. A refusal changes nothing and says why. A write changes only its own column: the other columns on the row are kept, and a row the tool creates never switches a collector on or off. Each answer gives what changed, the previous value and the exact call that undoes it (`undo`). The service picks the change up on its next config poll; there is no restart.
 
-These tools are never offered to an agent that Darling sends to investigate an alert: it may read with `get_collector_schedules` and may not stop, start or reschedule collection. Lite's MCP server has no write tools, so none of this applies to Lite.
+These tools are never offered to an agent that Darling sends to investigate an alert: it may read with `get_collector_schedules` and may not stop, start or reschedule collection.
 
-The `mcp` database role gets `INSERT, UPDATE, DELETE` on `config.config_collector_schedules` and `config.config_collector_run_times` when the service provisions roles (every start). It gets no other new privilege. A bring-your-own store needs `tools/provision-roles.sql` run again to add the same two grants.
+The `mcp` database role gets `INSERT, UPDATE, DELETE` on `config.config_collector_schedules` and `config.config_collector_run_times` when the service provisions roles (every start). A bring-your-own store needs `tools/provision-roles.sql` run again to add the same two grants.
+
+### Set the service flags from MCP (#6393)
+
+With `mcp.allowWrites` on (and a token), `update_service_flags` sets the collection flags the Viewer's Settings window saves under Data Collection. Send only the ones to change; an omitted argument keeps the stored value.
+
+| Argument | Meaning | Range |
+|---|---|---|
+| `capture_plans` | Global plan capture. | true or false |
+| `query_store_backfill_enabled` | Query Store history backfill. | true or false |
+| `query_store_text_budget_mb` | Query Store text budget. | 4 to 256 |
+| `max_concurrent_sweeps` | Server sweeps that run at once. | 1 to 16 |
+| `query_store_fetch_top_n` | Plans per database-hour and metric the Query Store collector fetches. | 0 to 100000 (0 = every new plan) |
+
+The ranges are the Settings window's: both call one class (`ServiceFlagLimits`). An out-of-range value answers `invalid`, names the argument and its range, and changes nothing, including the other flags in the same call. The answer carries all five values before and after. The running service reloads on its next sweep.
+
+The MCP on/off flag and port, the web on/off flag and port, and pause are not settable from MCP: turning MCP off from MCP would lock the admin out, and the `mcp` role's column grant covers only these five columns. Change those in the Viewer. Like the schedule tools, `update_service_flags` is never offered to an investigation agent. Lite's MCP server has no write tools, so none of this applies to Lite.
+
+The service grants the `mcp` role `UPDATE` on exactly those five `config.config_service` columns when it provisions roles (every start). A bring-your-own store needs `tools/provision-roles.sql` run again to add that grant; until then `update_service_flags` answers `error` with a permission failure from the store.
+
+
 
 ### Drop the Extended Events sessions a removed server left behind (`--drop-xe-sessions`)
 
@@ -1888,6 +1912,8 @@ It decrypts the `network.role` credential and prints a paste-ready connection st
 ---
 
 ## Troubleshooting
+
+For a table of what you see, the likely cause and the fix, start with [docs/troubleshooting.md](../docs/troubleshooting.md#darling).
 
 **"Cannot load configuration"** (critical, service idles) — no `darling.json` was found at the resolved path. The message names the path it tried; copy `darling.sample.json` there or point `DARLING_CONFIG` at your file. A file another process is holding open is retried for two minutes first, logged as `"Cannot load configuration yet ... attempt N of 25"` at warning; a missing, malformed or unreadable file is never retried, so this line arrives immediately for it.
 

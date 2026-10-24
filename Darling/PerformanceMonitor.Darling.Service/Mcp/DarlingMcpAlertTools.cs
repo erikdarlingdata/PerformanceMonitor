@@ -146,7 +146,7 @@ public sealed partial class DarlingMcpAlertTools
                 return dismissedExcludedCount > 0
                     ? McpHelpers.Status(
                         "empty",
-                        $"No undismissed alerts found in the specified time range{filterSentence}, but {dismissedExcludedCount} dismissed alert(s) were excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.")
+                        $"No undismissed alerts found in the specified time range{filterSentence}, but {dismissedExcludedCount} dismissed {(dismissedExcludedCount == 1 ? "alert was" : "alerts were")} excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.")
                     : McpHelpers.Status("empty", $"No alerts found in the specified time range{filterSentence}.");
             }
 
@@ -779,7 +779,7 @@ public sealed partial class DarlingMcpAlertTools
         try
         {
             var store = new PgNotificationRouteStore(postgres);
-            var existing = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
+            var existing = (await store.LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == route_id);
             if (existing is null)
             {
                 return Outcome("not_found", $"No notification route with route_id {route_id}.");
@@ -814,7 +814,7 @@ public sealed partial class DarlingMcpAlertTools
                 }, McpHelpers.JsonOptions);
             }
 
-            if (await store.SetEnabledAsync(route_id, enabled) == 0)
+            if (await store.SetEnabledAsync(route_id, enabled, cancellationToken) == 0)
             {
                 /* The write holds back a route with an agent setting in its own statement (#6281): one a person gave a setting after the read
                    above is refused here, one removed in the meantime is not found. */
@@ -822,7 +822,7 @@ public sealed partial class DarlingMcpAlertTools
             }
 
             /* Re-read AFTER the write, so the reported row is the stored one (set_mute_rule_enabled's rule). */
-            var stored = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
+            var stored = (await store.LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == route_id);
             return JsonSerializer.Serialize(new
             {
                 status = "updated",
@@ -831,7 +831,7 @@ public sealed partial class DarlingMcpAlertTools
                 undo = UndoCall("set_notification_route_enabled", new { route_id, enabled = existing.Enabled }),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("set_notification_route_enabled", ex);
         }
@@ -858,7 +858,7 @@ public sealed partial class DarlingMcpAlertTools
         try
         {
             var store = new PgNotificationRouteStore(postgres);
-            var routes = await store.LoadSummariesAsync();
+            var routes = await store.LoadSummariesAsync(cancellationToken);
             var existing = routes.FirstOrDefault(r => r.RouteId == route_id);
             if (existing is null)
             {
@@ -894,8 +894,8 @@ public sealed partial class DarlingMcpAlertTools
                 }, McpHelpers.JsonOptions);
             }
 
-            await store.SetFallbackAsync(route_id, fallback_route_id);
-            var stored = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
+            await store.SetFallbackAsync(route_id, fallback_route_id, cancellationToken);
+            var stored = (await store.LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == route_id);
             return JsonSerializer.Serialize(new
             {
                 status = "updated",
@@ -904,7 +904,7 @@ public sealed partial class DarlingMcpAlertTools
                 undo = FallbackUndo(route_id, existing.FallbackRouteId),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("set_notification_route_fallback", ex);
         }
@@ -1127,7 +1127,7 @@ public sealed partial class DarlingMcpAlertTools
                     "empty",
                     configured == 0
                         ? "No mute rules are configured for this store, so no alert is being suppressed anywhere — a quiet alert history is genuine rather than muted."
-                        : $"No mute rules are in force right now: {configured} rule(s) exist but every one of them is disabled or expired, so nothing is being suppressed. Pass enabled_only=false to list them — this is a lapsed mute, not an absent one.",
+                        : $"No mute rules are in force right now: {configured} {(configured == 1 ? "rule exists but it is" : "rules exist but every one of them is")} disabled or expired, so nothing is being suppressed. Pass enabled_only=false to list them — this is a lapsed mute, not an absent one.",
                     new { enabled_only, configured_count = configured, excluded_by_filter = configured - list.Count });
             }
 

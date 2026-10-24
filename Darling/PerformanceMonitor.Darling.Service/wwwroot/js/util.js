@@ -284,7 +284,11 @@ export function localizeIsoText(text) {
  */
 export function localizeAlertDetail(text, sample) {
   if (typeof text !== "string") return text;
-  let out = text.replace(/^(\s*(?:Incident Since|Started|Failed At|Snapshot|From|To|Window): )(.*)$/gm,
+  /* #6649: the collection-history audit's sentence says "N source(s)"; the count is known, so the word agrees with it. The audit's
+     body (CollectionHistoryAudit.Render) is ONE line of ". "-joined clauses, so the match is the sentence, up to its ". " or the
+     end of the text, never the line: the clauses after it (the source names, the ranges, the "Not read" list) print as written. */
+  let out = text.replace(/Retained history for .*?(?:\.(?=\s)|$)/gs, (sentence) => plainText(sentence));
+  out = out.replace(/^(\s*(?:Incident Since|Started|Failed At|Snapshot|From|To|Window): )(.*)$/gm,
     (m, lead, value) => lead + localizeIsoText(value));
   const at = sample && typeof sample.instant_utc === "string" ? parseUtc(sample.instant_utc) : null;
   if (at) {
@@ -388,6 +392,20 @@ export function keptWindowStrip(res) {
     return noticeStrip(readLimitText(res.keptHours) + ", so it shows the part of the custom range the store still holds.");
   }
   return noticeStrip(readLimitText(res.keptHours) + ", so it shows the last " + daysText(res.keptHours) + ".");
+}
+
+/**
+ * #6654: the strip over a grid that names `databases_left_out_note` as its `noteKey` (or in `moreNoteKeys`), drawn on an EMPTY answer too. The
+ * populated path already draws a named note; the empty path draws only the read's message, and "no regressions" over a read that left
+ * out a dropped database is not the same statement as "nothing regressed". Null for any other panel, so a note that is not about
+ * omitted databases is not pulled onto an empty answer by this.
+ */
+export function leftOutStrip(data, desc) {
+  if (!desc || !data) return null;
+  const key = "databases_left_out_note";
+  if (desc.noteKey !== key && !(desc.moreNoteKeys || []).includes(key)) return null;
+  const note = data[key];
+  return typeof note === "string" && note.trim() ? noticeStrip(note) : null;
 }
 
 /**
