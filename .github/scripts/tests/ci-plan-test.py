@@ -213,8 +213,10 @@ check("legs: just over one leg of minutes", cp.leg_count(cp.MINUTES_PER_LEG + 0.
 check("legs: 131 weighted minutes, a full run, is 16", cp.leg_count(131), 16)
 check("legs: capped at the PR maximum", cp.leg_count(500), cp.MAX_LEGS)
 check("legs: the PR maximum is 16", cp.MAX_LEGS, 16)
-check("legs: a push is a fixed 4, however small", cp.leg_count(0.02, "push"), 4)
-check("legs: a push is a fixed 4, however big", cp.leg_count(500, "push"), 4)
+check("legs: a small push gets the floor of 6", cp.leg_count(0.02, "push"), 6)
+check("legs: a push just over the floor follows the estimate", cp.leg_count(cp.MINUTES_PER_LEG * 7 - 0.1, "push"), 7)
+check("legs: a push is cut by the PR estimate above the floor", cp.leg_count(131, "push"), 16)
+check("legs: a push is capped at the PR maximum", cp.leg_count(500, "push"), cp.MAX_LEGS)
 check("legs: a push with no tests is 0", cp.leg_count(0, "push"), 0)
 
 r = run(["Darling/X.cs"], cat=big)
@@ -222,8 +224,8 @@ check("big suite: capped legs", (r["legs"], r["legs_json"]), ("16", json.dumps(l
 full = {"classes": {"darling": classes([f"F{i}" for i in range(131)]), "lite": l_cls},
         "darling_weights": {f"F{i}": 60 for i in range(131)}, "lite_weights": {"L1": 0, "L2": 0, "L3": 0}}
 check("full all-areas PR run: 16 legs", run(["tools/odd.txt"], cat=full)["legs"], "16")
-check("same change as a dev push: 4 legs", run(["tools/odd.txt"], event="push", cat=full)["legs"], "4")
-check("a dev push's legs_json", run(["README.md"], event="push", cat=full)["legs_json"], "[1,2,3,4]")
+check("same change as a dev push: 16 legs", run(["tools/odd.txt"], event="push", cat=full)["legs"], "16")
+check("a dev push's legs_json", run(["README.md"], event="push", cat=full)["legs_json"], json.dumps(list(range(1, 17)), separators=(",", ":")))
 
 # an unknown class weighs the mean; a missing Lite table falls back to the stand-in constants
 mean_cat = {"classes": {"darling": classes(["D1", "D2", "New"]), "lite": {}},
