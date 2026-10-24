@@ -765,6 +765,14 @@ public sealed class DarlingSelfAlertTests
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Contains("The Blocking Extended Events session is missing", fired.DetailText, StringComparison.Ordinal);
+        Assert.Equal("Blocking capture is not running \u2014 XE session missing", fired.ShortMessage);
+
+        /* Two sessions: the short message agrees the way the detail does (#6703's round-1 review). */
+        var h2 = new Harness();
+        await h2.Build().ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct);
+        var both = Assert.Single(h2.Deliverer.Outcomes);
+        Assert.Contains("Extended Events sessions are missing", both.DetailText, StringComparison.Ordinal);
+        Assert.EndsWith("capture is not running \u2014 XE sessions missing", both.ShortMessage, StringComparison.Ordinal);
     }
 
     /* ---------------- agent-not-running edge (#1433 Phase 2) ---------------- */
@@ -1350,7 +1358,18 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyCustomRuleHealthAsync(HealthReport(broken: 1, neverFiring: 0), Ct);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.StartsWith("1 custom alert rule needs attention:", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.Equal("1 custom alert rule needs attention: 1 no longer compiles, 0 armed but never fire", fired.ShortMessage);
+
+        /* Every clause agrees with its own count, not only the head (#6703's round-1 review). */
+        var h2 = new Harness();
+        await h2.Build().ApplyCustomRuleHealthAsync(HealthReport(broken: 1, neverFiring: 1), Ct);
+        Assert.Equal("2 custom alert rules need attention: 1 no longer compiles, 1 armed but never fires",
+            Assert.Single(h2.Deliverer.Outcomes).ShortMessage);
+
+        var h3 = new Harness();
+        await h3.Build().ApplyCustomRuleHealthAsync(HealthReport(broken: 0, neverFiring: 2), Ct);
+        Assert.Equal("2 custom alert rules need attention: 0 no longer compile, 2 armed but never fire",
+            Assert.Single(h3.Deliverer.Outcomes).ShortMessage);
     }
 
     [Fact]

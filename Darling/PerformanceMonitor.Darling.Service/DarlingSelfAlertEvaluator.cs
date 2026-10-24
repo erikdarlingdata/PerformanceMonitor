@@ -1827,7 +1827,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         "collection log for the SESSION_MISSING detail (usually a permissions problem: " +
                         "ALTER ANY EVENT SESSION on-prem, CREATE ANY DATABASE EVENT SESSION on Azure SQL DB).",
                     severity: AlertSeverityLevel.Critical,
-                    shortMessage: $"{list} capture is not running — XE session missing",
+                    shortMessage: $"{list} capture is not running — XE {(missing.Count == 1 ? "session" : "sessions")} missing",
                     /* Which capture is missing ("Blocking and Deadlock") against "session running". */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
@@ -5216,7 +5216,7 @@ internal sealed class DarlingSelfAlertEvaluator
     private static (string ShortMessage, string Detail) RenderCustomRuleHealth(CustomAlertHealthReport report)
     {
         var shortMessage = string.Create(CultureInfo.InvariantCulture,
-            $"{report.TotalIssues} custom alert {(report.TotalIssues == 1 ? "rule needs" : "rules need")} attention: {report.BrokenRules.Count} no longer compile, {report.NeverFiringRules.Count} armed but never fire");
+            $"{report.TotalIssues} custom alert {(report.TotalIssues == 1 ? "rule needs" : "rules need")} attention: {report.BrokenRules.Count} no longer {(report.BrokenRules.Count == 1 ? "compiles" : "compile")}, {report.NeverFiringRules.Count} armed but never {(report.NeverFiringRules.Count == 1 ? "fires" : "fire")}");
 
         var sb = new StringBuilder();
         sb.Append(shortMessage).Append('.');
