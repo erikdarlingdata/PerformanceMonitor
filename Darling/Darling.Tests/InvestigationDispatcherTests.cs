@@ -218,8 +218,48 @@ public sealed class InvestigationDispatcherTests
         Assert.Equal(new string?[] { "bbbb2222cccc3333dddd4444", "dddd4444eeee5555ffff6666", null }, asked.Select(a => a.StoryPathHash));
     }
 
-    internal static FindingAlert Finding(string metric, FindingRoute route = FindingRoute.Page, string serverId = "43", string? hash = null) =>
-        new(metric, "srv", "0.9", "0.5", serverId, new AlertContext(), 0.9, 0.5, "finding detail", false, route, hash);
+    /// <summary>#6596: a finding page whose story the analysis pass labelled "recurring at this hour" opens no request, on a
+    /// single page and on each held page a summary names. Its row is still written and the skip is journaled once per page. The
+    /// same page without the label is handed to the store as before, so the check is not over-broad.</summary>
+    [Fact]
+    public async Task ARecurringAtThisHourFindingPage_OpensNoRequest_ButItsRowIsWritten_AndTheSkipIsJournaled()
+    {
+        var settings = new DarlingAlertSettings(Config(AgentRoute(5, AlertFamily.Performance)));
+        var history = new RecordingHistoryStore();
+        var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        var asked = new List<InvestigationAlert>();
+        var skipped = new List<InvestigationAlert>();
+        var dispatcher = new InvestigationDispatcher(
+            (alert, _) =>
+            {
+                asked.Add(alert);
+                return Task.FromResult(new InvestigationOpenResult(InvestigationOpenOutcome.Opened, Guid.NewGuid()));
+            },
+            settings, NullLogger.Instance,
+            recurringSkipped: (alert, _) =>
+            {
+                skipped.Add(alert);
+                return Task.CompletedTask;
+            });
+        var sender = new DarlingFindingAlertSender(settings, history, webhooks, NullLogger.Instance, dispatcher);
+
+        var delivery = await sender.SendFindingAlertAsync(Finding("Analysis: anomaly [bbbb2222]", hash: "bbbb2222cccc", recurring: true));
+        await sender.SendFindingSummaryAsync(new[] { Finding("Analysis: anomaly [cccc3333]", hash: "cccc3333dddd", recurring: true) });
+
+        Assert.NotNull(delivery);
+        Assert.Empty(asked);
+        Assert.Equal(2, history.Records.Count);
+        Assert.Equal(new[] { "bbbb2222cccc", "cccc3333dddd" }, skipped.Select(a => a.StoryPathHash));
+        Assert.All(skipped, a => Assert.Equal((5, 43), (a.RouteId, a.ServerId)));
+
+        await sender.SendFindingAlertAsync(Finding("Analysis: anomaly [dddd4444]", hash: "dddd4444eeee"));
+        Assert.Equal("dddd4444eeee", Assert.Single(asked).StoryPathHash);
+        Assert.Equal(2, skipped.Count);
+    }
+
+    internal static FindingAlert Finding(string metric, FindingRoute route = FindingRoute.Page, string serverId = "43", string? hash = null,
+        bool recurring = false) =>
+        new(metric, "srv", "0.9", "0.5", serverId, new AlertContext(), 0.9, 0.5, "finding detail", false, route, hash, recurring);
 
     private sealed class RecordingHistoryStore : IAlertHistoryStore
     {

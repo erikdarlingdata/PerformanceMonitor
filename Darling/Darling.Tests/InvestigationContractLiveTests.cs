@@ -283,7 +283,7 @@ public sealed class InvestigationContractLiveTests
         config.NotificationRoutes = new[] { AgentRoute(1, AlertFamily.Performance) };
         configure?.Invoke(config);
         var settings = new DarlingAlertSettings(config);
-        var history = new PgAlertHistoryStore(historySource);
+        var history = new PgAlertHistoryStore(historySource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
         var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
         var dispatcher = new InvestigationDispatcher(store, settings, NullLogger.Instance);
 

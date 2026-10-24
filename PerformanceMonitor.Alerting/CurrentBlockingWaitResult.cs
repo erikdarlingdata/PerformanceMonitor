@@ -49,7 +49,7 @@ namespace PerformanceMonitor.Alerting;
 /// </summary>
 /// <param name="SnapshotTime">The latest snapshot's collection time (naive UTC, as stored).</param>
 /// <param name="TotalWaitMs">Sum of <c>wait_time_ms</c> over that snapshot's rows.</param>
-/// <param name="BlockedSessionCount">Distinct blocked SPIDs in that snapshot — the alert text's "across N blocked session(s)".</param>
+/// <param name="BlockedSessionCount">Distinct blocked SPIDs in that snapshot — the alert text's "across N blocked sessions" ("across 1 blocked session" for one).</param>
 /// <param name="SnapshotIsFresh">False when the snapshot is older than <see cref="MaxSnapshotAge"/>; see remarks.</param>
 /// <param name="CadenceMinutes">The server's effective <c>dmv_blocking_snapshot</c> cadence the freshness verdict was
 /// taken at, or null for a host that has none; see remarks (#3653 A5).</param>

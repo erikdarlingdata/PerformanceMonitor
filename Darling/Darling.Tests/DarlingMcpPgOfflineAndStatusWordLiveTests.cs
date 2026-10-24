@@ -14,6 +14,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -112,8 +113,8 @@ public sealed class DarlingMcpPgOfflineAndStatusWordLiveTests
     {
         var servers = new[]
         {
-            new DarlingServerResolver.RegisteredServer(1, "host-a:appdb:pg", "Orders PG"),
-            new DarlingServerResolver.RegisteredServer(2, "host-b:appdb:pg", null),
+            new RegisteredServer(1, "host-a:appdb:pg", "Orders PG"),
+            new RegisteredServer(2, "host-b:appdb:pg", null),
         };
 
         Assert.Equal("Orders PG", DarlingServerResolver.ResolveOrErrorForAnswer(servers, "host-a").resolved.DisplayName);

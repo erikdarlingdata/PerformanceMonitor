@@ -71,13 +71,13 @@ public sealed class WebExceptionTextCensusTests
     private static readonly (string File, string Snippet, string Reason)[] s_allowList =
     {
         (
-            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs"),
             "Query failed: {ex.MessageText}",
             "The 400 arm of /api/compose/run's PostgresException catch — a Custom Views author needs the real " +
             "syntax/statement_timeout error to fix their own panel; #4283's issue names this one to KEEP."
         ),
         (
-            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs"),
             "Error running query: {ex.Message}",
             "ComposeRunOutcome.ServerError's text, built once and shared by two consumers: the web route " +
             "reclassifies it through DarlingWebFailureLog before it ever reaches a browser (ServerErrorResult), " +
@@ -85,32 +85,32 @@ public sealed class WebExceptionTextCensusTests
             "— #4283 does not touch what an MCP client sees."
         ),
         (
-            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs"),
             "ex.InnerException is TimeoutException",
             "The two statement catch filters (#4605): they only decide whether the runner throws the statement-timeout marker; the exception's text is never read or returned."
         ),
         (
-            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs"),
             "base(inner.Message, inner)",
             "Both compose markers (#4605) carry the original message for the log. The web route answers the fixed StatementTimeoutText at 400 for the statement marker and never logs or returns its message; the open marker's message reaches the server-error sentence, which ServerErrorResult reclassifies before a browser sees it."
         ),
         (
-            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs"),
             "PostgresOpenTimeout.IsTimedOutOpen(open.InnerException!)",
             "FromRunException's chain check (#4605, #5016): it only decides WHICH fixed sentence an open failure answers with; the exception's text is not read here."
         ),
         (
-            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs"),
             "{marker.InnerException!.Message}",
             "FromRunException with the remap flag false (#4605): the same ServerError sentence shape as above, built from the original timeout message; no production caller passes false."
         ),
         (
-            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs"),
             "could not get a store connection in time: {open.InnerException!.Message}",
             "FromRunException's open-timeout sentence (#4605): a ServerError that names the cause and is logged at Error; ServerErrorResult reclassifies it before a browser sees it."
         ),
         (
-            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs"),
             "could not open a store connection: {open.InnerException!.Message}",
             "FromRunException's open-failure sentence (#4605): a ServerError carrying the original message for the log; ServerErrorResult reclassifies it before a browser sees it."
         ),
@@ -412,7 +412,7 @@ public sealed class WebExceptionTextCensusTests
     [Fact]
     public void SnippetCovers_RealAllowList_OnASyntheticLine_LeavesExDetailUnaccounted()
     {
-        var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs");
         const string code = "$\"Query failed: {ex.MessageText} {ex.Detail}\"";
 
         var unaccounted = ComputeUnaccounted(relative, code);
@@ -573,7 +573,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014");
         var envelope = McpHelpers.FormatError("get_blocking", ex);
 
-        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_blocking", logger, 77, System.Threading.CancellationToken.None);
+        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_blocking", logger, 77, System.Threading.CancellationToken.None, CleanSweep());
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, statusCode);
@@ -589,7 +589,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new InvalidOperationException("Host=store.internal;Port=5432 role \"app_rw\" failed");
         var envelope = McpHelpers.FormatError("get_object_locking", ex);
 
-        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_object_locking", logger, 5, System.Threading.CancellationToken.None);
+        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_object_locking", logger, 5, System.Threading.CancellationToken.None, CleanSweep());
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
@@ -610,7 +610,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new PostgresException("relation \"x\" does not exist", "ERROR", "ERROR", "42P01");
         var envelope = McpHelpers.FormatError("get_sweep_reports", ex);
 
-        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_sweep_reports", logger, 9, System.Threading.CancellationToken.None);
+        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_sweep_reports", logger, 9, System.Threading.CancellationToken.None, CleanSweep());
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
@@ -627,7 +627,7 @@ public sealed class WebExceptionTextCensusTests
         var logger = new CapturingTestLogger();
         var refusal = McpHelpers.Refusal("hours_back", "hours_back must be between 1 and 8760.");
 
-        var result = DarlingWebEndpoints.ToHttpResult(refusal, "/api/read/get_x", logger, 1, System.Threading.CancellationToken.None);
+        var result = DarlingWebEndpoints.ToHttpResult(refusal, "/api/read/get_x", logger, 1, System.Threading.CancellationToken.None, CleanSweep());
 
         ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status400BadRequest, statusCode);
@@ -641,7 +641,7 @@ public sealed class WebExceptionTextCensusTests
         var logger = new CapturingTestLogger();
         var sentence = $"{DarlingServerResolver.RegistryReadFaultPrefix}Host=store.internal;Port=5432 role \"app_rw\" failed";
 
-        var result = DarlingWebEndpoints.ToHttpResult(sentence, "/api/triage", logger, 5, System.Threading.CancellationToken.None);
+        var result = DarlingWebEndpoints.ToHttpResult(sentence, "/api/triage", logger, 5, System.Threading.CancellationToken.None, CleanSweep());
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
@@ -656,7 +656,7 @@ public sealed class WebExceptionTextCensusTests
         var logger = new CapturingTestLogger();
         var sentence = $"{DarlingServerResolver.RegistryReadFaultPrefix}57014: canceling statement due to statement timeout";
 
-        var result = DarlingWebEndpoints.ToHttpResult(sentence, "/api/triage", logger, 5, System.Threading.CancellationToken.None);
+        var result = DarlingWebEndpoints.ToHttpResult(sentence, "/api/triage", logger, 5, System.Threading.CancellationToken.None, CleanSweep());
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, statusCode);
@@ -683,7 +683,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new InvalidOperationException("Host=store.internal;Port=5432 role \"app_rw\" failed");
         var envelope = McpHelpers.FormatError("create_mute_rule", ex);
 
-        var result = DarlingWebEndpoints.MuteRuleToolResult(envelope, "/api/mute-rules", logger, 5, System.Threading.CancellationToken.None, StatusCodes.Status201Created);
+        var result = DarlingWebEndpoints.MuteRuleToolResult(envelope, "/api/mute-rules", logger, 5, System.Threading.CancellationToken.None, StatusCodes.Status201Created, CleanSweep());
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
@@ -699,7 +699,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014");
         var envelope = McpHelpers.FormatError("create_mute_rule", ex);
 
-        var result = DarlingWebEndpoints.MuteRuleToolResult(envelope, "/api/mute-rules", logger, 5, System.Threading.CancellationToken.None, StatusCodes.Status201Created);
+        var result = DarlingWebEndpoints.MuteRuleToolResult(envelope, "/api/mute-rules", logger, 5, System.Threading.CancellationToken.None, StatusCodes.Status201Created, CleanSweep());
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, statusCode);
@@ -707,19 +707,76 @@ public sealed class WebExceptionTextCensusTests
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
     }
 
+    /* ═══════════ #6341 round 1: a fault's status and its one log line never depend on the statement sweep ═══════════ */
+
+    [Fact]
+    public void ToHttpResult_FaultEnvelope_WithASweepThatWithholdsEverything_StillAnswers500_OneErrorLog()
+    {
+        var logger = new CapturingTestLogger();
+        var envelope = McpHelpers.FormatError("get_blocking", new InvalidOperationException("Host=store.internal;Port=5432 role \"app_rw\" failed"));
+
+        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_blocking", logger, 5, System.Threading.CancellationToken.None, WithholdingSweep());
+
+        var json = ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
+        Assert.Equal(DarlingWebFailureLog.GenericMessage, json.RootElement.GetProperty("error").GetString());
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+    }
+
+    [Fact]
+    public void ToHttpResult_ResolverFaultTimeout_WithASweepThatWithholdsEverything_StillAnswers503_OneWarning()
+    {
+        var logger = new CapturingTestLogger();
+        var sentence = $"{DarlingServerResolver.RegistryReadFaultPrefix}57014: canceling statement due to statement timeout";
+
+        var result = DarlingWebEndpoints.ToHttpResult(sentence, "/api/triage", logger, 5, System.Threading.CancellationToken.None, WithholdingSweep());
+
+        var json = ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, statusCode);
+        Assert.Equal(DarlingWebFailureLog.TimeoutMessage, json.RootElement.GetProperty("error").GetString());
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+    }
+
+    [Fact]
+    public void ToHttpResult_Refusal_WithASweepThatWithholdsEverything_StillAnswers400()
+    {
+        var logger = new CapturingTestLogger();
+        var refusal = McpHelpers.Refusal("hours_back", "hours_back must be between 1 and 8760.");
+
+        var result = DarlingWebEndpoints.ToHttpResult(refusal, "/api/read/get_x", logger, 1, System.Threading.CancellationToken.None, WithholdingSweep());
+
+        _ = ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status400BadRequest, statusCode);
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+    }
+
+    [Fact]
+    public void MuteRuleToolResult_FaultEnvelope_WithASweepThatWithholdsEverything_StillAnswers500_OneErrorLog()
+    {
+        var logger = new CapturingTestLogger();
+        var envelope = McpHelpers.FormatError("create_mute_rule", new InvalidOperationException("Host=store.internal;Port=5432 role \"app_rw\" failed"));
+
+        var result = DarlingWebEndpoints.MuteRuleToolResult(envelope, "/api/mute-rules", logger, 5, System.Threading.CancellationToken.None, StatusCodes.Status201Created, WithholdingSweep());
+
+        var json = ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
+        Assert.Equal(DarlingWebFailureLog.GenericMessage, json.RootElement.GetProperty("error").GetString());
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+    }
+
     /* ═══════════════════════════ DarlingWebEndpoints.ComposeRunFailureResult / IsComposeRunAuthorActionable (#4283 M1) ═══════════════════════════ */
 
     /// <summary>The ruled design (round-1 review, M1): 42601 (syntax error) is a class-42 SQLSTATE, not 42501,
     /// so it stays author-actionable — the existing "Query failed: {MessageText}" 400 pin must stay green,
-    /// verbatim, with no <see cref="DarlingWebEndpoints.ComposeRunOutcome.Fault"/> attached.</summary>
+    /// verbatim, with no <see cref="ComposeRunOutcome.Fault"/> attached.</summary>
     [Fact]
     public void IsComposeRunAuthorActionable_SyntaxError42601_IsTrue_AndStaysBadRequest_MessageTextVerbatim()
     {
-        Assert.True(DarlingWebEndpoints.IsComposeRunAuthorActionable("42601"));
+        Assert.True(ComposePanelRunner.IsComposeRunAuthorActionable("42601"));
 
         var logger = new CapturingTestLogger();
         var ex = new PostgresException("syntax error at or near \"selct\"", "ERROR", "ERROR", "42601");
-        var outcome = DarlingWebEndpoints.ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}");
+        var outcome = ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}");
 
         var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5, System.Threading.CancellationToken.None);
 
@@ -736,7 +793,7 @@ public sealed class WebExceptionTextCensusTests
     [Fact]
     public void IsComposeRunAuthorActionable_ConfigurationLimitExceeded53400_IsTrue()
     {
-        Assert.True(DarlingWebEndpoints.IsComposeRunAuthorActionable("53400"));
+        Assert.True(ComposePanelRunner.IsComposeRunAuthorActionable("53400"));
     }
 
     /// <summary>42501 (insufficient_privilege) is the one class-42 SQLSTATE the ruling carves OUT of
@@ -744,7 +801,7 @@ public sealed class WebExceptionTextCensusTests
     [Fact]
     public void IsComposeRunAuthorActionable_InsufficientPrivilege42501_IsFalse()
     {
-        Assert.False(DarlingWebEndpoints.IsComposeRunAuthorActionable("42501"));
+        Assert.False(ComposePanelRunner.IsComposeRunAuthorActionable("42501"));
     }
 
     /// <summary>28P01 (auth failure) is not author-actionable — the ruled design's <c>Fault</c> arm answers
@@ -753,11 +810,11 @@ public sealed class WebExceptionTextCensusTests
     [Fact]
     public void ComposeRunFailureResult_AuthFailure28P01_AnswersFixedBody_LogsOnce_NoRoleText()
     {
-        Assert.False(DarlingWebEndpoints.IsComposeRunAuthorActionable("28P01"));
+        Assert.False(ComposePanelRunner.IsComposeRunAuthorActionable("28P01"));
 
         var logger = new CapturingTestLogger();
         var ex = new PostgresException("password authentication failed for user \"app_rw\"", "FATAL", "FATAL", "28P01");
-        var outcome = DarlingWebEndpoints.ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
+        var outcome = ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
 
         var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5, System.Threading.CancellationToken.None);
 
@@ -774,11 +831,11 @@ public sealed class WebExceptionTextCensusTests
     [Fact]
     public void ComposeRunFailureResult_AdminShutdown57P01_AnswersFixedBody_LogsOnce_NoHostText()
     {
-        Assert.False(DarlingWebEndpoints.IsComposeRunAuthorActionable("57P01"));
+        Assert.False(ComposePanelRunner.IsComposeRunAuthorActionable("57P01"));
 
         var logger = new CapturingTestLogger();
         var ex = new PostgresException("terminating connection due to administrator command on host db-primary.internal", "FATAL", "FATAL", "57P01");
-        var outcome = DarlingWebEndpoints.ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
+        var outcome = ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
 
         var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5, System.Threading.CancellationToken.None);
 
@@ -794,7 +851,7 @@ public sealed class WebExceptionTextCensusTests
     /// pre-M1 single-arm <c>ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}")</c> for every
     /// SQLSTATE fails the 28P01 and 57P01 tests above (the role/host text they assert absent is exactly what
     /// the old catch put on the wire) — and, since round 2 pulled the decision into
-    /// <see cref="DarlingWebEndpoints.FromPostgresException"/>, that same revert also fails
+    /// <see cref="ComposePanelRunner.FromPostgresException"/>, that same revert also fails
     /// <c>RunComposedPanelAsync_PostgresExceptionCatch_CallsFromPostgresException</c>'s source pin and every
     /// <c>FromPostgresException_*</c> test below — not only a revert that deletes
     /// <c>ComposeRunOutcome.AuthorQueryError</c> outright.</summary>
@@ -805,7 +862,7 @@ public sealed class WebExceptionTextCensusTests
         // must still route through the Fault arm, not the plain 400 ErrorResult arm — pinning the ordering
         // the doc comment above ComposeRunFailureResult describes.
         var ex = new PostgresException("too many connections for role \"app_rw\"", "FATAL", "FATAL", "53300");
-        var outcome = DarlingWebEndpoints.ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
+        var outcome = ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
 
         Assert.False(outcome.IsServerError);
         Assert.NotNull(outcome.Fault);
@@ -815,7 +872,7 @@ public sealed class WebExceptionTextCensusTests
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
     }
 
-    /* ═══════════════════════════ DarlingWebEndpoints.FromPostgresException / ComposeRunOutcome.AuthorSqlState (#4293 round 2, R2-L1/R2-L2) ═══════════════════════════ */
+    /* ═══════════════════════════ ComposePanelRunner.FromPostgresException / ComposeRunOutcome.AuthorSqlState (#4293 round 2, R2-L1/R2-L2) ═══════════════════════════ */
 
     /// <summary>#4293 round 2 (R2-L2): a FATAL or PANIC severity is a connection-level store fault whatever its
     /// class - a startup parameter the server rejects answers FATAL 22023 or 42704, which IsComposeRunAuthorActionable
@@ -836,7 +893,7 @@ public sealed class WebExceptionTextCensusTests
         })
         {
             var ex = new PostgresException(message, severity, severity, sqlState);
-            var outcome = DarlingWebEndpoints.FromPostgresException(ex);
+            var outcome = ComposePanelRunner.FromPostgresException(ex);
 
             Assert.False(outcome.IsServerError, $"sqlState {sqlState} at {severity}");
             Assert.Same(ex, outcome.Fault);
@@ -859,7 +916,7 @@ public sealed class WebExceptionTextCensusTests
         })
         {
             var ex = new PostgresException(message, "ERROR", "ERROR", sqlState);
-            var outcome = DarlingWebEndpoints.FromPostgresException(ex);
+            var outcome = ComposePanelRunner.FromPostgresException(ex);
 
             Assert.False(outcome.IsServerError, $"sqlState {sqlState}");
             Assert.Null(outcome.Fault);
@@ -875,12 +932,12 @@ public sealed class WebExceptionTextCensusTests
     public void FromPostgresException_ConfigurationLimitExceeded53400_CarriesTheSpillMessage_NoFault()
     {
         var ex = new PostgresException("temporary file size exceeds temp_file_limit", "ERROR", "ERROR", "53400");
-        var outcome = DarlingWebEndpoints.FromPostgresException(ex);
+        var outcome = ComposePanelRunner.FromPostgresException(ex);
 
         Assert.False(outcome.IsServerError);
         Assert.Null(outcome.Fault);
         Assert.Equal("53400", outcome.AuthorSqlState);
-        Assert.Equal(DarlingWebEndpoints.TempFileLimitExceededMessage, outcome.Error);
+        Assert.Equal(ComposePanelRunner.TempFileLimitExceededMessage, outcome.Error);
     }
 
     /// <summary>Source pin (R2-L1, R2-L2): the PostgresException catch inside RunComposedPanelAsync must call
@@ -892,7 +949,7 @@ public sealed class WebExceptionTextCensusTests
     {
         var root = RepoFile.Root;
         var code = StripComments(File.ReadAllText(
-            Path.Combine(root, "Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs")));
+            Path.Combine(root, "Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs")));
 
         var catchStart = code.IndexOf("catch (PostgresException ex)", StringComparison.Ordinal);
         Assert.True(catchStart >= 0, "RunComposedPanelAsync's PostgresException catch was not found");
@@ -913,7 +970,7 @@ public sealed class WebExceptionTextCensusTests
     public void ComposeRunFailureResult_AuthorQueryError_AnswersItsText400_LogsOneWarning()
     {
         var logger = new CapturingTestLogger();
-        var outcome = DarlingWebEndpoints.ComposeRunOutcome.AuthorQueryError("Query failed: syntax error at or near \"selct\"", "42601");
+        var outcome = ComposeRunOutcome.AuthorQueryError("Query failed: syntax error at or near \"selct\"", "42601");
 
         var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5, System.Threading.CancellationToken.None);
 
@@ -928,7 +985,7 @@ public sealed class WebExceptionTextCensusTests
     public void ComposeRunFailureResult_PlainBadRequest_LogsNothing()
     {
         var logger = new CapturingTestLogger();
-        var outcome = DarlingWebEndpoints.ComposeRunOutcome.BadRequest("bad spec");
+        var outcome = ComposeRunOutcome.BadRequest("bad spec");
 
         var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5, System.Threading.CancellationToken.None);
 
@@ -938,6 +995,18 @@ public sealed class WebExceptionTextCensusTests
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
     }
+
+    /// <summary>#6341: ToHttpResult sweeps its text through the sensitive-statement filter's shared judge first, and that judge
+    /// fails closed on a wall-clock timeout (250 ms per match). On a CPU-starved run it timed out on these tests' plain sentences
+    /// and changed the text, so the status or the log count came out different (200, 400 or a different line count). The tests here
+    /// are about the status mapping and the log line, not the filter, so they hand in a budget over a judge that names nothing.</summary>
+    private static SensitiveStatements.JudgeBudget CleanSweep() =>
+        new(SensitiveStatements.ReadBudget, judge: static _ => SensitiveStatements.Verdict.Clean);
+
+    /// <summary>#6341 round 1: a budget over a judge that names every value, which is what the real judge does once its wall-clock
+    /// budget is spent. A fault's status and log line must come out the same under it as under <see cref="CleanSweep"/>.</summary>
+    private static SensitiveStatements.JudgeBudget WithholdingSweep() =>
+        new(SensitiveStatements.ReadBudget, judge: static _ => SensitiveStatements.Verdict.Named);
 
     /// <summary>Reads an <see cref="IResult"/> built by <c>Results.Json</c>/<c>Results.Text</c> the same way
     /// the pipeline would, via <see cref="DefaultHttpContext"/>'s response body.</summary>

@@ -98,9 +98,15 @@
                     Margin="4,0,0,0" Padding="10,4" MinWidth="70"/>
             <Button Content="Manage Mute Rules…" Click="ManageMuteRules_Click"
                     Margin="8,0,0,0" Padding="10,4" MinWidth="90"/>
+            <Button Content="Alert Rules…" Click="AlertRules_Click"
+                    Margin="8,0,0,0" Padding="10,4" MinWidth="90"
+                    ToolTip="Custom alert rules you write over the collected metrics: add, edit, pause and delete."/>
             <Button x:Name="KnownPatternsButton" Content="Known Patterns…" Click="KnownPatterns_Click"
                     Margin="8,0,0,0" Padding="10,4" MinWidth="90"
                     ToolTip="Notes on patterns you already know about (a nightly job, a planned batch). A matching alert carries the note; it is not muted."/>
+            <Button x:Name="CustomViewsButton" Content="Custom Views…" Click="CustomViews_Click"
+                    Margin="8,0,0,0" Padding="10,4" MinWidth="90"
+                    ToolTip="Manage the dashboards and notebooks the web dashboard shows: folders, edit, import and export."/>
             <TextBlock x:Name="AlertCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
                        FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
             <TextBlock x:Name="LastRefreshedIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"

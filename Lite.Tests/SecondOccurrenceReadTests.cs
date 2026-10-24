@@ -108,7 +108,7 @@ public sealed class SecondOccurrenceReadTests : IClassFixture<SharedDuckDbFixtur
     [InlineData("private async void OnActiveQueriesSlicerChanged(", "GetLatestQuerySnapshotsAsync(_serverId, 0, e.StartUtc, e.EndUtc,")]
     [InlineData("private async void OnQueryStatsSlicerChanged(", "GetTopQueriesByCpuAsync(_serverId, 0, 50, e.StartUtc, e.EndUtc,")]
     [InlineData("private async void OnQueryStoreSlicerChanged(", "GetQueryStoreTopQueriesAsync(_serverId, 0, 50, e.StartUtc, e.EndUtc,")]
-    [InlineData("private async void OnProcStatsSlicerChanged(", "GetTopProceduresByCpuAsync(_serverId, 0, 50, e.StartUtc, e.EndUtc,")]
+    [InlineData("private async void OnProcStatsSlicerChanged(", "ReadTopProceduresAsync(0, e.StartUtc, e.EndUtc)")]
     public void EverySlicerHandler_PassesTheEventsUtcBoundsToItsRead(string signature, string read)
     {
         var source = CodeOnly(ReadSlicersSource());
