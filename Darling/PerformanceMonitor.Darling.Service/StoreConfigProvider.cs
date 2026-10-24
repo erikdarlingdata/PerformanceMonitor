@@ -1601,6 +1601,205 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    /* ---------------- seal the plain text webhook values on the settings row (#6715) ---------------- */
+
+    /// <summary>
+    /// #6715: seals each webhook value on the notification settings row (<c>config_notification</c> id 1) that is still stored as
+    /// plain text: the Teams, Slack and generic URLs, the generic headers and the PagerDuty routing key. The first start's seed
+    /// copies them from darling.json before the password key is loaded, and an older build can have left one too. The reader
+    /// passes a plain value through (<see cref="DarlingWebhookSecrets"/>), so they work, but until now they stayed plain text until
+    /// the next save. The worker runs this on every start, right after the key ring loads and before the first config view.
+    /// <para>Each value is sealed the way <c>update_notification_channels</c> seals it
+    /// (<see cref="NotificationRouteWriter.SealNewSettingsValue"/>, for the channel's proxy; the headers for the generic URL text as it
+    /// will be stored), and written with a compare-and-set: a column changes only while it and what its seal is bound to (its proxy,
+    /// for the headers the generic URL too) still hold what was read. A Viewer, web or MCP save that lands in between wins (the MCP
+    /// and web hosts can take a write before this runs, #5240). The UPDATE fires the row's statement trigger, which bumps
+    /// <c>config_version</c> like every other write; it runs only when there is a value to seal.</para>
+    /// <para>A ring that cannot seal, or a value a save would refuse, leaves the value as it is with one warning that names the
+    /// columns, never a value, and the next start tries again. The generic URL stays plain text while a signing key is saved for
+    /// it (the key is sealed for the URL's stored text), and the headers are sealed only with a sealed (or empty) generic URL.
+    /// Never throws except for cancellation. <paramref name="afterRead"/> is the tests' seam between the read and the write.</para>
+    /// </summary>
+    public async Task SealPlainWebhookSettingsAsync(
+        IPasswordKeyRing ring, CancellationToken cancellationToken, Func<CancellationToken, Task>? afterRead = null)
+    {
+        ArgumentNullException.ThrowIfNull(ring);
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            var v = new string?[9];
+            bool signingSaved;
+            await using (var select = new NpgsqlCommand(
+                "SELECT teams_url, teams_proxy, slack_url, slack_proxy, generic_url, generic_headers, generic_proxy, "
+                + "pagerduty_routing_key, pagerduty_proxy, COALESCE(signing_key, '') <> '' OR COALESCE(previous_signing_key, '') <> '' "
+                + "FROM config_notification WHERE id = 1",
+                connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
+            await using (var reader = await select.ExecuteReaderAsync(cancellationToken))
+            {
+                if (!await reader.ReadAsync(cancellationToken))
+                {
+                    return;
+                }
+
+                for (var i = 0; i < v.Length; i++)
+                {
+                    v[i] = reader.IsDBNull(i) ? null : reader.GetString(i);
+                }
+
+                signingSaved = reader.GetBoolean(9);
+            }
+
+            static bool IsPlain(string? value) => !string.IsNullOrWhiteSpace(value) && !PasswordSeal.IsSealed(value);
+            var plain = new (int Index, string Column)[] { (0, "teams_url"), (2, "slack_url"), (4, "generic_url"), (5, "generic_headers"), (7, "pagerduty_routing_key") }
+                .Where(c => IsPlain(v[c.Index])).Select(c => c.Column).ToList();
+            if (plain.Count == 0)
+            {
+                return;
+            }
+
+            if (!ring.Status.CanSeal)
+            {
+                _logger?.LogWarning(
+                    "The notification settings hold {Columns} as plain text, and the password key cannot seal them at this start ({Reason}). They stay as they are; the next start tries again.",
+                    string.Join(", ", plain), (ring.Status.Reason ?? DarlingPasswordKey.NotReadyReason).TrimEnd('.'));
+                return;
+            }
+
+            var (seal, refusal) = Mcp.DarlingMcpAlertTools.RouteSealer(ring);
+            var parameters = new List<NpgsqlParameter>();
+            var writes = new List<(string Column, string Sealed, string Condition)>();
+            var refused = new List<string>();
+            var kept = new List<string>();
+
+            string P(string? value)
+            {
+                parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)value ?? DBNull.Value });
+                return "$" + parameters.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            string? Seal(string column, string slot, string value, string? proxy, string? boundUrl, string label)
+            {
+                try
+                {
+                    return NotificationRouteWriter.SealNewSettingsValue(slot, value, proxy, boundUrl, label, seal, refusal);
+                }
+                catch (NotificationRouteRefusedException)
+                {
+                    refused.Add(column);
+                    return null;
+                }
+            }
+
+            void SealUrlOrKey(string column, string proxyColumn, string slot, string? value, string? proxy, string label)
+            {
+                if (IsPlain(value) && Seal(column, slot, value!, proxy, null, label) is { } sealedText)
+                {
+                    writes.Add((column, sealedText, $"{column} = {P(value)} AND {proxyColumn} IS NOT DISTINCT FROM {P(proxy)}"));
+                }
+            }
+
+            SealUrlOrKey("teams_url", "teams_proxy", "teams", v[0], v[1], "Teams webhook URL");
+            SealUrlOrKey("slack_url", "slack_proxy", "slack", v[2], v[3], "Slack webhook URL");
+
+            /* The generic URL first, then the headers bound to its text as it will be stored, the order update_notification_channels
+               uses. The headers' condition carries the URL's, so the two land together or not at all. */
+            var (genericUrl, genericHeaders, genericProxy) = (v[4], v[5], v[6]);
+            var urlAfter = genericUrl;
+            string? urlCondition = null;
+            if (IsPlain(genericUrl))
+            {
+                if (signingSaved)
+                {
+                    kept.Add("generic_url");
+                }
+                else if (Seal("generic_url", "generic", genericUrl!, genericProxy, null, "generic webhook URL") is { } sealedUrl)
+                {
+                    urlCondition = $"generic_url = {P(genericUrl)} AND generic_proxy IS NOT DISTINCT FROM {P(genericProxy)} "
+                        + "AND COALESCE(signing_key, '') = '' AND COALESCE(previous_signing_key, '') = ''";
+                    writes.Add(("generic_url", sealedUrl, urlCondition));
+                    urlAfter = sealedUrl;
+                }
+            }
+
+            if (IsPlain(genericHeaders))
+            {
+                if (IsPlain(urlAfter))
+                {
+                    kept.Add("generic_headers");
+                }
+                else if (Seal("generic_headers", "generic_headers", genericHeaders!, genericProxy, urlAfter, "generic webhook headers") is { } sealedHeaders)
+                {
+                    urlCondition ??= $"generic_url IS NOT DISTINCT FROM {P(genericUrl)} AND generic_proxy IS NOT DISTINCT FROM {P(genericProxy)}";
+                    writes.Add(("generic_headers", sealedHeaders, $"generic_headers = {P(genericHeaders)} AND {urlCondition}"));
+                }
+            }
+
+            SealUrlOrKey("pagerduty_routing_key", "pagerduty_proxy", "pagerduty", v[7], v[8], "PagerDuty routing key");
+
+            if (refused.Count > 0)
+            {
+                _logger?.LogWarning(
+                    "The notification settings hold {Columns} as plain text that a save would refuse, so it stays as it is. Enter it again in Settings to seal it.",
+                    string.Join(", ", refused));
+            }
+
+            if (kept.Count > 0)
+            {
+                _logger?.LogWarning(
+                    "The notification settings keep {Columns} as plain text: the generic webhook URL stays plain text while a signing key is saved for its text or a save would refuse it, and the headers are sealed only with a sealed URL.",
+                    string.Join(", ", kept));
+            }
+
+            if (writes.Count == 0)
+            {
+                return;
+            }
+
+            var set = string.Join(", ", writes.Select(w => $"{w.Column} = CASE WHEN {w.Condition} THEN {P(w.Sealed)} ELSE {w.Column} END"));
+            var sql = $"UPDATE config_notification SET {set} WHERE id = 1 AND ({string.Join(" OR ", writes.Select(w => "(" + w.Condition + ")"))}) "
+                + $"RETURNING {string.Join(", ", writes.Select(w => w.Column))}";
+
+            if (afterRead is not null)
+            {
+                await afterRead(cancellationToken);
+            }
+
+            var landed = new List<string>();
+            await using (var update = new NpgsqlCommand(sql, connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
+            {
+                update.Parameters.AddRange(parameters.ToArray());
+                await using var reader = await update.ExecuteReaderAsync(cancellationToken);
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    for (var i = 0; i < writes.Count; i++)
+                    {
+                        if (!reader.IsDBNull(i) && string.Equals(reader.GetString(i), writes[i].Sealed, StringComparison.Ordinal))
+                        {
+                            landed.Add(writes[i].Column);
+                        }
+                    }
+                }
+            }
+
+            if (landed.Count > 0)
+            {
+                _logger?.LogInformation("Sealed {Columns} on the notification settings, which were stored as plain text.", string.Join(", ", landed));
+            }
+
+            var changed = writes.Select(w => w.Column).Except(landed, StringComparer.Ordinal).ToList();
+            if (changed.Count > 0)
+            {
+                _logger?.LogInformation("{Columns} on the notification settings changed while this start was sealing them; the newer save is kept.", string.Join(", ", changed));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(
+                "Could not seal the plain text webhook values on the notification settings at this start; the next start tries again: {Message}",
+                ex.Message);
+        }
+    }
+
     private static async Task SeedMonitoredServersAsync(NpgsqlConnection connection, DarlingConfig config, DateTime now, CancellationToken ct)
     {
         /* Guarded by the caller's COUNT == 0 check — only reached when the registry is empty, so a later

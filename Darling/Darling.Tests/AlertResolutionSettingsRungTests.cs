@@ -304,6 +304,142 @@ public sealed class AlertResolutionSettingsRungTests
         }
     }
 
+    private const string SeedTeams = "https://hooks.example.com/teams";
+    private const string SeedSlack = "https://hooks.example.com/slack";
+    private const string SeedGeneric = "https://hooks.example.com/alert";
+    private const string SeedHeaders = "{\"Authorization\":\"Bearer abc\"}";
+    private const string SeedPagerDuty = "0123456789abcdef0123456789abcdef";
+
+    private static readonly string[] s_webhookColumns = { "teams_url", "slack_url", "generic_url", "generic_headers", "pagerduty_routing_key" };
+
+    private static DarlingConfig WebhookSeedFile() => new()
+    {
+        Webhooks = new WebhooksConfig
+        {
+            TeamsUrl = SeedTeams,
+            TeamsProxy = "http://proxy.example.com:8080",
+            SlackUrl = SeedSlack,
+            GenericUrl = SeedGeneric,
+            GenericHeaders = SeedHeaders,
+            GenericProxy = "http://generic-proxy.example.com:8080",
+            PagerDutyRoutingKey = SeedPagerDuty,
+            PagerDutyProxy = "http://pd-proxy.example.com:8080",
+        },
+    };
+
+    private static async Task<string[]> ReadWebhookColumnsAsync(NpgsqlDataSource dataSource, CancellationToken ct)
+    {
+        await using var command = dataSource.CreateCommand(
+            "SELECT teams_url, slack_url, generic_url, generic_headers, pagerduty_routing_key FROM config_notification WHERE id = 1");
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        return Enumerable.Range(0, s_webhookColumns.Length).Select(reader.GetString).ToArray();
+    }
+
+    private static async Task WithSeededScratchStoreAsync(Func<StoreConfigProvider, NpgsqlDataSource, CancellationToken, Task> body)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await migrate.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(migrate, ct);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bodySucceeded = false;
+        try
+        {
+            var provider = new StoreConfigProvider(dataSource);
+            await provider.SeedIfEmptyAsync(WebhookSeedFile(), ct);
+            await body(provider, dataSource, ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task AfterTheRingLoads_TheStartSealsTheWebhookValuesTheSeedCopiedAsPlainText_AndTheyOpenToTheFileValues()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the #6715 start seal (it mints its own scratch database).");
+        await WithSeededScratchStoreAsync(async (provider, dataSource, ct) =>
+        {
+            Assert.All(await ReadWebhookColumnsAsync(dataSource, ct), value => Assert.False(PasswordSeal.IsSealed(value)));
+
+            using var key = PasswordPrivateKey.Generate();
+            var ring = DarlingPasswordKey.FromPrivateKey(key);
+            await provider.SealPlainWebhookSettingsAsync(ring, ct);
+
+            var stored = await ReadWebhookColumnsAsync(dataSource, ct);
+            for (var i = 0; i < stored.Length; i++)
+            {
+                Assert.True(PasswordSeal.IsSealed(stored[i]), $"{s_webhookColumns[i]} is still plain text after the start's seal.");
+            }
+
+            var view = await provider.LoadViewAsync(new DarlingConfig(), ct);
+            Assert.NotNull(view);
+            var opened = DarlingWebhookSecrets.Open(view.Webhooks, view.NotificationRoutes, ring);
+            Assert.Empty(opened.Failures);
+            Assert.Equal(SeedTeams, opened.Webhooks.TeamsUrl);
+            Assert.Equal(SeedSlack, opened.Webhooks.SlackUrl);
+            Assert.Equal(SeedGeneric, opened.Webhooks.GenericUrl);
+            Assert.Equal(SeedHeaders, opened.Webhooks.GenericHeaders);
+            Assert.Equal(SeedPagerDuty, opened.Webhooks.PagerDutyRoutingKey);
+
+            // A second start finds nothing plain and writes nothing.
+            await provider.SealPlainWebhookSettingsAsync(ring, ct);
+            Assert.Equal(stored, await ReadWebhookColumnsAsync(dataSource, ct));
+        });
+    }
+
+    [Fact]
+    public async Task ARingThatCannotSeal_LeavesTheSeededPlainTextValuesInPlace_AndALaterStartSealsThem()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the #6715 start seal (it mints its own scratch database).");
+        await WithSeededScratchStoreAsync(async (provider, dataSource, ct) =>
+        {
+            await provider.SealPlainWebhookSettingsAsync(DarlingPasswordKey.Refusing(DarlingPasswordKey.NotReadyReason), ct);
+            Assert.Equal(new[] { SeedTeams, SeedSlack, SeedGeneric, SeedHeaders, SeedPagerDuty }, await ReadWebhookColumnsAsync(dataSource, ct));
+
+            using var key = PasswordPrivateKey.Generate();
+            await provider.SealPlainWebhookSettingsAsync(DarlingPasswordKey.FromPrivateKey(key), ct);
+            Assert.All(await ReadWebhookColumnsAsync(dataSource, ct), value => Assert.True(PasswordSeal.IsSealed(value)));
+        });
+    }
+
+    [Fact]
+    public async Task AValueSavedBetweenTheReadAndTheWrite_IsNotOverwritten_AndTheHeadersStayWithTheirUrl()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the #6715 start seal (it mints its own scratch database).");
+        await WithSeededScratchStoreAsync(async (provider, dataSource, ct) =>
+        {
+            const string SavedTeams = "https://hooks.example.com/teams-saved-meanwhile";
+            const string SavedGeneric = "https://hooks.example.com/generic-saved-meanwhile";
+            using var key = PasswordPrivateKey.Generate();
+
+            // A save that lands after the pass read the row: a new Teams URL, and a new generic URL with the old headers kept.
+            await provider.SealPlainWebhookSettingsAsync(DarlingPasswordKey.FromPrivateKey(key), ct, async token =>
+            {
+                await using var save = dataSource.CreateCommand("UPDATE config_notification SET teams_url = $1, generic_url = $2 WHERE id = 1");
+                save.Parameters.AddWithValue(SavedTeams);
+                save.Parameters.AddWithValue(SavedGeneric);
+                Assert.Equal(1, await save.ExecuteNonQueryAsync(token));
+            });
+
+            var stored = await ReadWebhookColumnsAsync(dataSource, ct);
+            Assert.Equal(SavedTeams, stored[0]);
+            Assert.Equal(SavedGeneric, stored[2]);
+            // The headers were sealed for the URL the pass read, so they are not written once that URL changed.
+            Assert.Equal(SeedHeaders, stored[3]);
+            // The values the save did not touch are sealed.
+            Assert.True(PasswordSeal.IsSealed(stored[1]));
+            Assert.True(PasswordSeal.IsSealed(stored[4]));
+        });
+    }
+
     private static async Task AssertOverrideAsync(
         ViewerDataService viewer, StoreConfigProvider provider, NpgsqlDataSource dataSource, int routeId, bool? expected, CancellationToken ct)
     {
