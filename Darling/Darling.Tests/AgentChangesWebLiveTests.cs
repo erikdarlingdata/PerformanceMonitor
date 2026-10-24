@@ -134,6 +134,13 @@ public sealed class AgentChangesWebLiveTests
             var list = await Send("GET", "/api/agent-changes", null);
             Assert.True((bool)list.Body!["can_decide"]!);
 
+            /* No service row yet (#6401): the switch is refused with 409 and the row is not created. */
+            var notSetUp = await Send("PUT", "/api/agent-changes/switch", "application/json", "{\"enabled\":false}");
+            Assert.Equal(409, notSetUp.Status);
+            Assert.Equal("store_not_set_up", (string)notSetUp.Body!["code"]!);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_service", ct));
+            await ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1)", ct);
+
             var called = await CalledIdAsync(owner, "m-web", ct);
             var undone = await Send("PUT", "/api/agent-changes/" + called + "/undo", "application/json");
             Assert.Equal(200, undone.Status);
@@ -189,6 +196,7 @@ public sealed class AgentChangesWebLiveTests
     {
         await WithWebRoutesAsync("admin", async (owner, Send, ct) =>
         {
+            await ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1)", ct);
             var called = await CalledIdAsync(owner, "m-web", ct);
             var undone = await Send("PUT", "/api/agent-changes/" + called + "/undo", "application/json");
             Assert.Equal(200, undone.Status);
@@ -228,6 +236,8 @@ public sealed class AgentChangesWebLiveTests
             Assert.Equal("person:alice", await ScalarAsync(owner,
                 $"SELECT actor FROM config.investigation_journal WHERE event = 'action_undone' AND detail->>'called_id' = '{called}'", ct));
 
+            /* #6401: the switch updates the service row and never creates it, so the store needs its row first. */
+            await ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1)", ct);
             Assert.Equal(200, (await Send("PUT", "/api/agent-changes/switch", "application/json", "{\"enabled\":false}")).Status);
             Assert.Equal("person:alice", await ScalarAsync(owner, "SELECT updated_by FROM config.config_service", ct));
             Assert.Equal("person:alice", await ScalarAsync(owner, "SELECT actor FROM config.investigation_journal WHERE event = 'agent_actions_switched'", ct));

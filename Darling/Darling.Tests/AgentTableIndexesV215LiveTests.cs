@@ -69,5 +69,9 @@ FROM generate_series(1, 73000) AS n", ct);
         await ExecAsync(connection, "DROP INDEX config." + ConditionIndex, ct);
         var without = await ExplainAsync(connection, ct);
         Assert.DoesNotContain(ConditionIndex, without, StringComparison.Ordinal);
+        /* The control that fails on something: once the index is gone the read falls back to V184's (server_id, family, state)
+           index, which reaches every reported request of the server. A plan that names neither means the seed never made the
+           condition index load-bearing. Not a Seq Scan: that other index serves the read, so a Seq Scan would fail on no defect. */
+        Assert.Contains("ix_investigation_requests_server_family", without, StringComparison.Ordinal);
     }
 }
