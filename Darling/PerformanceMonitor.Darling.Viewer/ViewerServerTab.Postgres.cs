@@ -323,12 +323,11 @@ public partial class ViewerServerTab
         var fetched = fetchedTask.Result;
         readFanOut.Release();
 
-        var truncated = fetched.Count > ViewerDataService.PgConfigChangesRowCap;
-        var rows = truncated ? fetched.Take(ViewerDataService.PgConfigChangesRowCap).ToList() : fetched;
+        var (rows, truncated, bannerRowCap) = TrimConfigChanges(fetched);
 
         PgConfigChangesGrid.ItemsSource = rows.Select(PgDisplay.ConfigChange).ToList();
         await ShowEventDataStartAsync(PgConfigChangesDataStartBanner, dataStartTask, "PostgreSQL Configuration Changes", startUtc,
-            rows.Select(r => (DateTime?)r.ChangedAtUtc), ViewerDataService.PgConfigChangesRowCap);
+            rows.Select(r => (DateTime?)r.ChangedAtUtc), bannerRowCap);
 
         PgConfigChangesNote.Text = PanelNote("pg_server_config", rows.Count,
             "No configuration parameter changed value in this window. This compares consecutive snapshots, so an "
@@ -340,6 +339,21 @@ public partial class ViewerServerTab
                   + (truncated
                       ? $"  Showing the newest {ViewerDataService.PgConfigChangesRowCap}; narrow the window to see the rest."
                       : string.Empty));
+    }
+
+    /// <summary>
+    /// The configuration-changes grid's two truncation decisions, made from ONE answer (#6387): the read fetched one row past
+    /// <see cref="ViewerDataService.PgConfigChangesRowCap"/>, so more than the cap means rows were left out, and exactly the cap
+    /// means the window is complete. <c>BannerRowCap</c> is what the "data starts at the oldest row" banner is handed: the cap
+    /// only when the read really had more. <see cref="ViewerEventDataStart.ReadHitCap"/> (<c>count &gt;= cap</c>) over the
+    /// already-trimmed list would otherwise name the oldest row of a complete grid whenever it held exactly the cap.
+    /// </summary>
+    internal static (List<DarlingPgServerConfigReader.PgConfigChangeRow> Rows, bool Truncated, int? BannerRowCap) TrimConfigChanges(
+        List<DarlingPgServerConfigReader.PgConfigChangeRow> fetched)
+    {
+        var truncated = fetched.Count > ViewerDataService.PgConfigChangesRowCap;
+        var rows = truncated ? fetched.Take(ViewerDataService.PgConfigChangesRowCap).ToList() : fetched;
+        return (rows, truncated, truncated ? (int?)ViewerDataService.PgConfigChangesRowCap : null);
     }
 
     /// <summary>

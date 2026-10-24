@@ -244,6 +244,40 @@ public sealed class ViewerConfigChangesDataStartTests
         await Assert.ThrowsAnyAsync<Exception>(() => viewer.GetDatabaseConfigChangesDataStartAsync(1, RangeStart, end, ct));
         await Assert.ThrowsAnyAsync<Exception>(() => viewer.GetTraceFlagChangesDataStartAsync(1, RangeStart, end, ct));
     }
+
+    /// <summary>The Overview tab's grid (#6387) fetches one row past its cap and decides truncation once; the banner is handed
+    /// that answer, not <c>ReadHitCap</c> over the trimmed list. Exactly the cap is a complete window (no banner), one more
+    /// is not (the banner names the oldest row shown). The rows sit hours after the window starts, so only the cap decision
+    /// can raise it; the probe says the store covers the whole window.</summary>
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(99, false)]
+    [InlineData(100, false)]
+    [InlineData(101, true)]
+    [InlineData(250, true)]
+    public void PgConfigChangesGrid_TheBannerAndTheNoteAgreeAtTheCap(int fetchedCount, bool expectTruncated)
+    {
+        var cap = ViewerDataService.PgConfigChangesRowCap;
+        var newest = RangeStart.AddHours(5);
+        var fetched = Enumerable.Range(0, fetchedCount)
+            .Select(i => new DarlingPgServerConfigReader.PgConfigChangeRow(newest.AddMinutes(-i), "work_mem", "4MB", "8MB", null, null, null, null))
+            .ToList();
+
+        var (rows, truncated, bannerRowCap) = ViewerServerTab.TrimConfigChanges(fetched);
+        var banner = DataStartBannerReadout.For(
+            Task.FromResult<DateTime?>(RangeStart), RangeStart, rows.Select(r => (DateTime?)r.ChangedAtUtc), bannerRowCap);
+
+        Assert.Equal(expectTruncated, truncated);
+        Assert.Equal(Math.Min(fetchedCount, cap), rows.Count);
+        if (expectTruncated)
+        {
+            Assert.Equal(DataStartBannerReadout.Since(newest.AddMinutes(-(cap - 1))), banner);
+        }
+        else
+        {
+            Assert.Null(banner);
+        }
+    }
 }
 
 /// <summary>
