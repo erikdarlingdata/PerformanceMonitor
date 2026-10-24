@@ -32,10 +32,10 @@ public partial class AlertDetailWindow : Window
     private bool _shown;
 
     /// <param name="item">The alert-history row.</param>
-    /// <param name="openFullChain">Opens the server's Blocking or Deadlocks view at the alert's time (#5847); null hides
-    /// the link (an alert with no such view, or an opener that cannot navigate there).</param>
+    /// <param name="openFullChain">The link to the server's Blocking or Deadlocks view, or the tab the alert belongs on, at the alert's
+    /// time (#5847): its text names where it opens, since the shell, which knows the engine, chose both; null hides the link.</param>
     /// <param name="sizeStore">Where the window's last size is kept (#5847); null keeps no size.</param>
-    public AlertDetailWindow(ViewerAlertRow item, Action? openFullChain = null, ISizeStore? sizeStore = null)
+    public AlertDetailWindow(ViewerAlertRow item, AlertChainOpener? openFullChain = null, ISizeStore? sizeStore = null)
     {
         InitializeComponent();
         _item = item;
@@ -45,11 +45,10 @@ public partial class AlertDetailWindow : Window
         Closing += OnClosingStoreSize;
 
         /* #5847: the link to the full chain, only for an alert whose view holds more than the shortened fields. */
-        var linkText = AlertChainLink.LinkText(AlertChainLink.ViewFor(item.MetricName));
-        if (openFullChain is not null && linkText is not null)
+        if (openFullChain is not null)
         {
-            _openFullChain = openFullChain;
-            FullChainLinkRun.Text = linkText;
+            _openFullChain = openFullChain.Open;
+            FullChainLinkRun.Text = openFullChain.Text;
             FullChainLinkText.Visibility = Visibility.Visible;
         }
 

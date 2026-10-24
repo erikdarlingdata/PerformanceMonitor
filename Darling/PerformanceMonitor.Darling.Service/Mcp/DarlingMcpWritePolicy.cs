@@ -92,6 +92,7 @@ internal static class DarlingMcpWritePolicy
         "set_notification_route_fallback",
         "create_notification_route",
         "update_notification_route",
+        "update_notification_channels",
         "dismiss_alert_history",
         "restore_alert_history",
         "create_custom_alert_rule",
@@ -127,6 +128,8 @@ internal static class DarlingMcpWritePolicy
         "analyze_now",
         "purge_now",
         "undo_plan_change",
+        "set_agent_actions_enabled",
+        "undo_agent_change",
         "disable_collector",
         "enable_collector",
         "set_collector_frequency",
@@ -137,6 +140,7 @@ internal static class DarlingMcpWritePolicy
         "delete_known_pattern",
         "set_collector_databases",
         "reset_collector_schedules",
+        "update_service_flags",
     };
 
     /// <summary>The darling.json key that offers the investigation tools (#5632 Phase A, ruling R2).</summary>
@@ -179,6 +183,7 @@ internal static class DarlingMcpWritePolicy
         "set_notification_route_fallback",
         "create_notification_route",
         "update_notification_route",
+        "update_notification_channels",
         "dismiss_alert_history",
         "restore_alert_history",
         "create_custom_view",
@@ -221,11 +226,14 @@ internal static class DarlingMcpWritePolicy
         "delete_known_pattern",
         "set_collector_databases",
         "reset_collector_schedules",
+        "update_service_flags",
         "add_servers",
         "remove_server",
         "edit_server",
         "set_server_action",
         "undo_plan_change",
+        "set_agent_actions_enabled",
+        "undo_agent_change",
     };
 
     internal static bool IsWrite(string toolName) => WriteTools.Contains(toolName);
@@ -424,7 +432,7 @@ internal static class DarlingMcpWritePolicy
             ? "The server registry tools are served too, because mcp.allowWrites and mcp.allowServerAdmin are both on."
             : "The server registry tools are not served: they need mcp.allowWrites and mcp.allowServerAdmin both on (both default off).";
         return "This token has the operator role, so it is served the reads and the write tools (alerting, mutes, custom alert rules, " +
-            "Custom Views, collector schedules, collection state), which change only the MONITORING store. " + admin +
+            "Custom Views, collector schedules, service flags, collection state), which change only the MONITORING store. " + admin +
             " The investigation tools are served only to an agent token. An unserved write fails as unknown: ask the operator, " +
             "do not retry. " + Data;
     }
@@ -433,7 +441,7 @@ internal static class DarlingMcpWritePolicy
     /// and that says collected text is data. Kept short: the instructions have a size budget
     /// (<c>DarlingMcpInstructionsBudgetTests</c>).</summary>
     internal const string InstructionsLine =
-        "Its write tools (alerting, mutes, custom alert rules, Custom Views, collector schedules, collection state, the server registry) change only the " +
+        "Its write tools (alerting, mutes, custom alert rules, Custom Views, collector schedules, service flags, collection state, the server registry) change only the " +
         "MONITORING store and are served when darling.json sets mcp.allowWrites (add_servers/edit_server/remove_server " +
         "also need mcp.allowServerAdmin; both default off). An unserved write fails as unknown: ask the operator, do not " +
         "retry. Investigation tools (claim_investigation_request, submit_investigation_report) write only investigation " +

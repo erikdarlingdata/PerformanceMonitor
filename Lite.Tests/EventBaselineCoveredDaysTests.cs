@@ -518,7 +518,7 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
         var early = new DateTime(2026, 3, 4, 1, 0, 0);
         var late = new DateTime(2026, 3, 4, 23, 0, 0);
 
-        foreach (var metric in new[] { MetricNames.Blocking, MetricNames.Deadlock, MetricNames.Cpu, MetricNames.IoLatency })
+        foreach (var metric in new[] { MetricNames.Blocking, MetricNames.Deadlock, MetricNames.Cpu, MetricNames.IoLatency, MetricNames.IoWriteLatency })
         {
             Assert.True(BaselineProvider.IsDailyCacheMetric(metric), metric);
             Assert.Equal(WindowEnd, BaselineProvider.RoundedKeyTime(metric, early));
@@ -572,5 +572,34 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
 
         Assert.NotNull(row);
         Assert.Equal(1.0 / 5.0, row!.Mean, 9);
+    }
+
+    /// <summary>
+    /// #6705: the blocking-per-minute baseline counts the same reports the current window does, so a self-wait (the same
+    /// non-zero blocked and blocking spid) does not make a minute heavier. Each Tuesday has one minute holding a real report
+    /// and a self-wait, and another holding only a self-wait: the first counts 1, the second is not a minute at all, and a
+    /// (0, 0) report still counts.
+    /// </summary>
+    [Fact]
+    public async Task TheBlockingPerMinuteBaseline_LeavesSelfWaitsOut()
+    {
+        async Task Report(DateTime at, int blockedSpid, int blockingSpid) => await ExecAsync(
+            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, event_time, server_id, server_name, wait_time_ms, blocked_spid, blocking_spid) "
+            + "VALUES ($1, $2, $2, $3, 'TestServer', 1000, $4, $5)",
+            _nextId--, at, ServerId, blockedSpid, blockingSpid);
+
+        foreach (var tuesday in Tuesdays)
+        {
+            await Report(tuesday.AddMinutes(10), 55, 66);
+            await Report(tuesday.AddMinutes(10).AddSeconds(20), 77, 77);
+            await Report(tuesday.AddMinutes(20), 88, 88);
+            await Report(tuesday.AddMinutes(30), 0, 0);
+        }
+
+        var row = await RowAsync(MetricNames.BlockingPerMinute, Hour, Tuesday);
+
+        Assert.NotNull(row);
+        Assert.Equal(10L, row!.SampleCount);
+        Assert.Equal(1.0, row.Mean, 9);
     }
 }

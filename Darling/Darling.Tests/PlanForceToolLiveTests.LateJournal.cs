@@ -317,7 +317,7 @@ CREATE CONSTRAINT TRIGGER test_slow_fail_undone AFTER INSERT ON config.investiga
 
             var first = Task.Run(() => UndoAsync(c, called, confirm: true, login: "alice", shown: shown.Statement), c.Ct);
             /* The first undo is inside its commit (the trigger is sleeping) once the server shows a backend in pg_sleep. */
-            for (var i = 0; i < 300 && await PgScalarAsync(c.Connection, "SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep'", c.Ct) == "0"; i++)
+            for (var i = 0; i < 300 && await PgScalarAsync(c.Connection, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event = 'PgSleep'", c.Ct) == "0"; i++)
                 await Task.Delay(100, c.Ct);
             var second = await UndoAsync(c, called, confirm: true, login: "bob", shown: shown.Statement);
             var firstAnswer = await first;

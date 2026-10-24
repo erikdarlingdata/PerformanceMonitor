@@ -5,10 +5,9 @@ PostgreSQL store. It fails the job on a console error, a page error, a failed re
 error strip, or a panel or grid that the seed says must have data and does not. A screenshot and a trace are kept for a
 page that failed. Four pages are also compared with screenshot baselines (see "Screenshot baselines" below).
 
-It runs in `.github/workflows/darling-ui-smoke.yml` ("Darling web UI smoke") on a pull request that touches
-`Darling/PerformanceMonitor.Darling.Service/wwwroot/**`, `tools/ui-smoke/**` or the workflow (draft pull requests are
-skipped until ready), by manual dispatch, and in the nightly (`nightly.yml`, outside `publish`'s `needs`, so a red
-reports and does not stop publishing). It is not a required check: a path-filtered workflow never reports when skipped.
+It runs in `.github/workflows/darling-ui-smoke.yml` ("Darling web UI smoke") by manual dispatch and in the nightly
+(`nightly.yml`, outside `publish`'s `needs`, so a red reports and does not stop publishing). It no longer runs on pull
+requests (#6656), and it is not a required check.
 
 ## Files
 

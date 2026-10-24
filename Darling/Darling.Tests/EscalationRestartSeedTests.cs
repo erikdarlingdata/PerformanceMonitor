@@ -524,7 +524,7 @@ public sealed class EscalationRestartSeedTests
     public void ThePgStoreOverridesTheReader_NotTheInterfaceDefault()
     {
         /* Darling's half; Lite's store is pinned in Lite.Tests (EscalationSeedHistoryStoreTests.TheStoreOverridesTheInterfaceDefault). */
-        var type = typeof(PerformanceMonitor.Darling.Service.PgAlertHistoryStore);
+        var type = typeof(PerformanceMonitor.Darling.Storage.PgAlertHistoryStore);
         var map = type.GetInterfaceMap(typeof(IAlertHistoryStore));
         var method = typeof(IAlertHistoryStore).GetMethod(nameof(IAlertHistoryStore.GetLastFiredTierAsync))!;
         var index = Array.IndexOf(map.InterfaceMethods, method);

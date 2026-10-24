@@ -177,7 +177,7 @@ public sealed class DarlingCustomViewFoldersLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await MigratedScratchAsync(ct);
         await using var dataSource = DataSourceFor(scratch.ConnectionString);
-        var store = new CustomViewStore(dataSource);
+        var store = new CustomViewStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
         var bodySucceeded = false;
         try
         {
@@ -696,7 +696,7 @@ public sealed class DarlingCustomViewFoldersLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await MigratedScratchAsync(ct);
         await using var dataSource = DataSourceFor(scratch.ConnectionString);
-        var store = new CustomViewStore(dataSource);
+        var store = new CustomViewStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
         var bodySucceeded = false;
         try
         {

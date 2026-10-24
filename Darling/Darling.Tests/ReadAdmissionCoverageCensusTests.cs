@@ -25,6 +25,7 @@ using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -141,7 +142,7 @@ public sealed class ReadAdmissionCoverageCensusTests
 
         var web = File.ReadAllText(Path.Combine(ServiceDir, "DarlingWebEndpoints.cs"));
         var runner = web.IndexOf("internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(", StringComparison.Ordinal);
-        var core = web.IndexOf("RunComposedPanelCoreAsync(postgres, body,", runner, StringComparison.Ordinal);
+        var core = web.IndexOf("RunComposedPanelCoreAsync(ComposeHost, postgres, body,", runner, StringComparison.Ordinal);
         Assert.True(runner >= 0 && core > runner);
         Assert.Contains("ReadScope.AdmitAsync(admission, ReadSurface.Compose, composeRoute, composeBand, cancellationToken)", web[runner..core], StringComparison.Ordinal);
 
@@ -250,6 +251,10 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "GET \"/api/collectors/run/{commandId:long}\""] = "definition read: one command row's status and result (a single indexed row, #5941)",
         [WebFile + "GET \"/api/active-queries/live/available\""] = "definition read: whether this seat and store login can queue a live read (one catalog lookup, #6386)",
         [WebFile + "POST \"/api/active-queries/live\""] = "write",
+        [WebFile + "GET \"/api/analyze-now/available\""] = "definition read: whether this seat and store login can queue an analysis run (one catalog lookup, #6389)",
+        [WebFile + "POST \"/api/analyze-now\""] = "write",
+        [WebFile + "GET \"/api/analyze-now/{commandId:long}\""] = "one command row by id: its status words, no result payload (#6389)",
+        [WebFile + "GET \"/api/analysis/ask-ai-prompt\""] = "one server-clock row by server id, then a string (#6389)",
         [WebFile + "GET \"/api/active-queries/live/{commandId:long}\""] = null, // #6386: the result read returns the stored plan XML of a live read, so it is admitted
         [WebFile + "POST \"/api/server-tags\""] = "write",
         [WebFile + "PATCH \"/api/server-tags/{id:int}\""] = "write",

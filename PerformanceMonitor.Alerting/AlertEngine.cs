@@ -1500,7 +1500,7 @@ public sealed class AlertEngine
                 blockingContext, detailText,
                 NumericCurrentValue: effectiveBlockingCount, NumericThresholdValue: blockingThreshold,
                 Muted: isMuted, Severity: blockingContext?.SeverityOverride,
-                ShortMessage: $"{effectiveBlockingCount} blocking session(s)"), ct);
+                ShortMessage: $"{effectiveBlockingCount} blocking {(effectiveBlockingCount == 1 ? "session" : "sessions")}"), ct);
             AfterFire("Blocking Detected", _lastBlockingAlert, key, now, alertCooldown, delivery);
 
             /* #4752: the gate advanced the watermark to this count, and it was saved, BEFORE delivery. A fire
@@ -1843,18 +1843,18 @@ public sealed class AlertEngine
                 AlertSampleAge.Stamp(blockingContext, "blocking wait", current.SnapshotTime, now);
                 var detailText = AlertContextBuilders.ContextToDetailText(blockingContext);
 
-                /* REAL numerics (#1830): the display text is prose ("745s across 3 blocked session(s)"),
+                /* REAL numerics (#1830): the display text is prose ("745s across 3 blocked sessions"),
                    which no history-store parser could turn back into a number — the value has to travel
                    as a number or every history row lands at 0, which is the defect #1830 just fixed. */
                 double totalWaitSeconds = current.TotalWaitSeconds;
                 var delivery = await FireAsync(new AlertOutcome(
                     key, serverName, "Blocking Wait Time",
-                    $"{totalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked session(s)",
+                    $"{totalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked {(current.BlockedSessionCount == 1 ? "session" : "sessions")}",
                     $"{thresholdSeconds}s",
                     blockingContext, detailText,
                     NumericCurrentValue: totalWaitSeconds, NumericThresholdValue: thresholdSeconds,
                     Muted: isMuted, Severity: blockingContext.SeverityOverride,
-                    ShortMessage: $"{totalWaitSeconds:F0}s total blocked wait across {current.BlockedSessionCount} session(s) (threshold: {thresholdSeconds}s)"), ct);
+                    ShortMessage: $"{totalWaitSeconds:F0}s total blocked wait across {current.BlockedSessionCount} {(current.BlockedSessionCount == 1 ? "session" : "sessions")} (threshold: {thresholdSeconds}s)"), ct);
                 AfterFire("Blocking Wait Time", _lastBlockingWaitAlert, key, now, alertCooldown, delivery);
             }
         }
@@ -2014,7 +2014,7 @@ public sealed class AlertEngine
                 deadlockContext, detailText,
                 NumericCurrentValue: effectiveDeadlockCount, NumericThresholdValue: deadlockThreshold,
                 Muted: isMuted, Severity: deadlockContext.SeverityOverride,
-                ShortMessage: $"{effectiveDeadlockCount} deadlock(s) in the last hour"), ct);
+                ShortMessage: $"{effectiveDeadlockCount} {(effectiveDeadlockCount == 1 ? "deadlock" : "deadlocks")} in the last hour"), ct);
             AfterFire("Deadlocks Detected", _lastDeadlockAlert, key, now, alertCooldown, delivery);
 
             /* #4752: the blocking twin above explains it — the watermark moved to this count, and was saved,
@@ -2396,7 +2396,7 @@ public sealed class AlertEngine
     /// <summary>
     /// The Client Timeouts alert (#5640): client attentions (a client cancelled or timed out a query) per minute, from the
     /// attention collector's <c>attention_events</c>, graded Warning at the Warning bar (the higher of the 10 per minute floor and 3 times the baseline by default) and Critical
-    /// at the Critical bar (60), where each bar is the higher of its floor and a multiple of the server's own baseline (#5736). OFF by default. The count model, the rate rule, the not-observed rule and the proportional
+    /// at the Critical bar (60), where each bar is the higher of its floor and a multiple of the server's own baseline (#5736). ON by default since #5736. The count model, the rate rule, the not-observed rule and the proportional
     /// mute are on <see cref="AttentionEvaluator"/>.
     ///
     /// <para>Everything around the grade is Runnable Queue's: a window that is not an observation neither fires nor clears
@@ -2847,7 +2847,7 @@ public sealed class AlertEngine
                     /* :382-392. ShortMessage = the toast body of :374. */
                     var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Long-Running Query",
-                        $"{longRunning.Count} query(s), longest {elapsedMinutes}m",
+                        $"{longRunning.Count} {(longRunning.Count == 1 ? "query" : "queries")}, longest {elapsedMinutes}m",
                         $"{lrqThresholdMinutes}m",
                         lrqContext, detailText,
                         NumericCurrentValue: elapsedMinutes,
@@ -3508,7 +3508,7 @@ public sealed class AlertEngine
                     /* :603-613. ShortMessage = the toast body of :595. */
                     var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Long-Running Job",
-                        $"{anomalousJobs.Count} job(s) exceeding {jobMultiplier}x average",
+                        $"{anomalousJobs.Count} {(anomalousJobs.Count == 1 ? "job" : "jobs")} exceeding {jobMultiplier}x average",
                         $"{jobMultiplier}x historical avg",
                         jobContext, detailText,
                         NumericCurrentValue: (double)(worst.PercentOfAverage ?? 0),
@@ -3619,13 +3619,13 @@ public sealed class AlertEngine
                     /* :698-708. ShortMessage = the toast body of :690. */
                     var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Failed Agent Job",
-                        $"{failedJobs.Count} job failure(s) in last {failedJobLookbackMinutes}m — {jobNames}",
+                        $"{failedJobs.Count} job {(failedJobs.Count == 1 ? "failure" : "failures")} in last {failedJobLookbackMinutes}m — {jobNames}",
                         $"last {failedJobLookbackMinutes}m",
                         failedJobContext, detailText,
                         NumericCurrentValue: failedJobs.Count,
                         NumericThresholdValue: 0,
                         Muted: isMuted, Severity: failedJobContext?.SeverityOverride,
-                        ShortMessage: $"{failedJobs.Count} job failure(s) — {jobNames}"), ct);
+                        ShortMessage: $"{failedJobs.Count} job {(failedJobs.Count == 1 ? "failure" : "failures")} — {jobNames}"), ct);
                     AfterFire("Failed Agent Job", _lastFailedJobAlert, key, now, alertCooldown, delivery);
 
                     /* #4752: the in-memory watermark moved to the newest failure BEFORE the fire; the saved one

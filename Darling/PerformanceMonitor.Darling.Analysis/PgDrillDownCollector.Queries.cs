@@ -992,7 +992,9 @@ AND   NOT EXISTS (SELECT 1 FROM query_store_text AS x
                       WHERE x.server_id = $1
                         AND x.database_name = scored.database_name
                         AND x.query_id = scored.query_id
-                        AND lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
+                        AND (lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"'
+                          -- #6665: or the monitor's own statement (its collector-side drop never fires on Darling)
+                          OR " + PerformanceMonitor.Darling.Storage.QueryStoreSelfStatement.SelfOfStoredText + @"))
 ORDER BY regression_factor DESC
 LIMIT 5";
 
@@ -1165,7 +1167,9 @@ top_five AS
                           WHERE x.server_id = $1
                             AND x.database_name = scored.database_name
                             AND x.query_id = scored.query_id
-                            AND lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
+                            AND (lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"'
+                          -- #6665: or the monitor's own statement (its collector-side drop never fires on Darling)
+                          OR " + PerformanceMonitor.Darling.Storage.QueryStoreSelfStatement.SelfOfStoredText + @"))
     ORDER BY regression_factor DESC
     LIMIT 5
 )
