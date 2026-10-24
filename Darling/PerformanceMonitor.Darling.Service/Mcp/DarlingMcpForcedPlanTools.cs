@@ -73,6 +73,7 @@ public sealed class DarlingMcpForcedPlanTools
         "Reads the forced-plan collector (every 5 minutes) and the stored Query Store runs; never a monitored server. A database is judged by its own newest capture. " +
         "first_seen is the first capture that shows the force, so the real force can be up to one pass (5 minutes by default) earlier. " +
         "Evidence per force: forced_plan executions and last run since first_seen, the other plans' executions and last run since first_seen, failure count and reason. " +
+        "A REMOVED force is no longer in the newest capture, so its runs are not read: runs_read is false and forced_plan, variant_plans, other_plans and unknown_plans (with their totals) are null, which means not measured, not zero runs. " +
         "variant_plans lists plans of the query whose stored plan (read from the plan XML the Query Store collector stored, never from the monitored server) carries UsePlan=\"1\" and no plan guide name: SQL Server recompiled the force under a new plan id, so their runs count as the forced plan running, not as another plan " +
         "(an OPTION (USE PLAN ...) hint in the query's own text also sets UsePlan, which is rare on a forced query). " +
         "plan_guide names a plan guide that covers the forced query (name, enabled, scope), found from the query's object (an OBJECT-scoped guide) or a guide name in the stored XML of a later plan of the query; " +
@@ -201,26 +202,37 @@ public sealed class DarlingMcpForcedPlanTools
         forced_plan_count = c.ForcedPlanCount,
     };
 
-    internal static object ForceNode(ForcedPlanFact p) => new
+    /// <summary>
+    /// One force and its evidence. A REMOVED force has no run evidence (#6598): the reader reads runs only for the forces in a database's newest
+    /// capture, so its run fields are null and <c>runs_read</c> is false, never the zeros and empty lists of a force that was measured and did not run.
+    /// </summary>
+    internal static object ForceNode(ForcedPlanFact p)
     {
-        database_name = p.DatabaseName,
-        query_id = p.QueryId,
-        plan_id = p.PlanId,
-        state = StateName(p.State),
-        first_seen = Format(p.FirstSeen),
-        last_seen = Format(p.LastSeen),
-        forced_at = Format(p.ForcedAt),
-        plan_forcing_type = p.PlanForcingType,
-        force_failure_count = p.FailureCount,
-        last_force_failure_reason = p.FailureReason,
-        forced_plan = new { execution_count = p.ForcedExecutions, last_execution_time = Format(p.ForcedLastExecution) },
-        variant_plans = p.VariantPlans.Take(MaxOtherPlans).Select(o => new { plan_id = o.PlanId, execution_count = o.Executions, last_execution_time = Format(o.LastExecution) }),
-        variant_plans_total = p.VariantPlans.Count,
-        other_plans = p.OtherPlans.Take(MaxOtherPlans).Select(o => new { plan_id = o.PlanId, execution_count = o.Executions, last_execution_time = Format(o.LastExecution) }),
-        other_plans_total = p.OtherPlans.Count,
-        unknown_plans = p.UnknownPlans.Take(MaxOtherPlans).Select(o => new { plan_id = o.PlanId, execution_count = o.Executions, last_execution_time = Format(o.LastExecution) }),
-        unknown_plans_total = p.UnknownPlans.Count,
-        unknown_reason = p.UnknownReason,
-        plan_guide = p.PlanGuide is { } guide ? new { name = guide.Name, enabled = guide.Enabled, scope = guide.Scope } : null,
-    };
+        var read = p.State != ForcedPlanState.Removed;
+        object? Runs(IReadOnlyList<ForcedPlanOtherPlan> plans) =>
+            read ? plans.Take(MaxOtherPlans).Select(o => new { plan_id = o.PlanId, execution_count = o.Executions, last_execution_time = Format(o.LastExecution) }) : null;
+        return new
+        {
+            database_name = p.DatabaseName,
+            query_id = p.QueryId,
+            plan_id = p.PlanId,
+            state = StateName(p.State),
+            first_seen = Format(p.FirstSeen),
+            last_seen = Format(p.LastSeen),
+            forced_at = Format(p.ForcedAt),
+            plan_forcing_type = p.PlanForcingType,
+            force_failure_count = p.FailureCount,
+            last_force_failure_reason = p.FailureReason,
+            runs_read = read,
+            forced_plan = read ? new { execution_count = (long?)p.ForcedExecutions, last_execution_time = Format(p.ForcedLastExecution) } : null,
+            variant_plans = Runs(p.VariantPlans),
+            variant_plans_total = read ? p.VariantPlans.Count : (int?)null,
+            other_plans = Runs(p.OtherPlans),
+            other_plans_total = read ? p.OtherPlans.Count : (int?)null,
+            unknown_plans = Runs(p.UnknownPlans),
+            unknown_plans_total = read ? p.UnknownPlans.Count : (int?)null,
+            unknown_reason = p.UnknownReason,
+            plan_guide = p.PlanGuide is { } guide ? new { name = guide.Name, enabled = guide.Enabled, scope = guide.Scope } : null,
+        };
+    }
 }
