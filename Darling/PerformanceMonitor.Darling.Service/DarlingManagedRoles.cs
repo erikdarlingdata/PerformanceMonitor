@@ -3199,14 +3199,14 @@ BEGIN
    IF p_route_id IS NULL THEN
       UPDATE {config}.config_notification
          SET previous_signing_key = signing_key,
-             previous_signing_key_until = CASE WHEN signing_key <> '' THEN now() + make_interval(days => 7) END,
+             previous_signing_key_until = CASE WHEN signing_key <> '' THEN now() + make_interval(days => {PerformanceMonitor.Notifications.WebhookSigning.RotationOverlapDays}) END,
              signing_key = p_sealed_key
        WHERE id = 1 AND generic_url = p_stored_url AND generic_proxy = p_proxy
       RETURNING previous_signing_key_until INTO v_until;
    ELSE
       UPDATE {config}.config_notification_routes
          SET previous_signing_key = signing_key,
-             previous_signing_key_until = CASE WHEN signing_key <> '' THEN now() + make_interval(days => 7) END,
+             previous_signing_key_until = CASE WHEN signing_key <> '' THEN now() + make_interval(days => {PerformanceMonitor.Notifications.WebhookSigning.RotationOverlapDays}) END,
              signing_key = p_sealed_key
        WHERE route_id = p_route_id AND generic_url = p_stored_url
          AND COALESCE((SELECT n.generic_proxy FROM {config}.config_notification AS n WHERE n.id = 1 FOR SHARE), '') = p_proxy
