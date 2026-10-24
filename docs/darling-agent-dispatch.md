@@ -293,9 +293,9 @@ Darling journals every request. Each change shows as `action_called` (with the o
 
 The Viewer's Investigations window and the web Admin page each have an **Agent changes** tab. Each row is one agent call, with the time, server, kind, tool, agent, reason and result. A call that has neither a "done" nor a "failed" result shows **result unknown**. It has no Undo button.
 
-To undo a change, select **Undo** on its row. Undo restores what the setting was before the agent's change. It works only when nobody changed the setting after the agent. If someone did, Undo says **changed since** and leaves the setting alone. Undo works for 365 days after the change.
+To undo a change, select **Undo** on its row. Undo restores what the setting was before the agent's change. It works only when nobody changed the setting after the agent. If someone did, Undo says **changed since** and leaves the setting alone. Undo works for 365 days after the change. Over MCP (`mcp.allowWrites` and a token), `undo_agent_change` does the same for a change that is not a plan force or unforce. It takes the change's `called_id` from `get_agent_changes`.
 
-To stop all agent changes at once, use **Turn off agent changes** in the Viewer or the web. The gate then refuses every change as `actions_off`. Nothing already made is undone. No MCP tool turns the switch back on.
+To stop all agent changes at once, use **Turn off agent changes** in the Viewer or the web. The gate then refuses every change as `actions_off`. Nothing already made is undone. Over MCP, `set_agent_actions_enabled` can turn the switch off but never back on. A person turns it on in the Viewer or the web.
 
 The web can undo and switch only under the store's admin login. On a managed or compose store, the web signs in as the viewer role, so use the Viewer app there.
 
