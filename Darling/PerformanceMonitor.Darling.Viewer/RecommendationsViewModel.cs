@@ -355,7 +355,7 @@ public sealed class RecommendationCardViewModel
     /// (and starts at a local time that never happened) and one real hour too many across a fall-back change.
     /// </summary>
     internal static (DateTime From, DateTime To) FallbackWindow(ServerClock serverClock, DateTime utcNow)
-        => (serverClock.ToServerLocal(utcNow.AddHours(-2)), serverClock.ToServerLocal(utcNow));
+        => PerformanceMonitor.Analysis.RecommendationAskAiPrompt.FallbackWindow(serverClock, utcNow);
 }
 
 /// <summary>
@@ -782,15 +782,7 @@ public sealed class RecommendationsViewModel
     /// (RecommendationsTab AskAi_Click -> LiteRecommendationsViewModel.BuildAskAiPrompt).
     /// </summary>
     public static string BuildAskAiPrompt(string serverName, string title, DateTime from, DateTime to)
-    {
-        return string.Format(
-            CultureInfo.InvariantCulture,
-            "Using the PerformanceMonitor MCP tools, investigate this finding on server \"{0}\": " +
-            "\"{1}\". It was flagged around {2:yyyy-MM-dd HH:mm}–{3:HH:mm}. Call analyze_server / " +
-            "get_analysis_findings and the relevant wait/blocking/memory tools, then tell me the " +
-            "likely cause and what to do.",
-            serverName, title, from, to);
-    }
+        => PerformanceMonitor.Analysis.RecommendationAskAiPrompt.Build(serverName, title, from, to);
 
     /// <summary>
     /// #6135: the status line with the Overview card's offline sentence after it for an offline server, so findings

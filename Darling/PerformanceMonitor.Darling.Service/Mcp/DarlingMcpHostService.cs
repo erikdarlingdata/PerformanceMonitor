@@ -760,9 +760,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #6281: no marker rides on this connection. The store's tag guard reads a per-transaction setting that each MCP tag write
                sets itself (DarlingStoreConnection.MarkMcpSurfaceAsync), because PgBouncer and RDS Proxy refuse a startup "options" parameter
                and a pooler set to ignore it would drop the marker without a word. */
-            var postgres = NpgsqlDataSource.Create(
-                DarlingStoreConnection.PinSessionTimeZoneUtc(
-                    DarlingStoreConnection.WithApplicationName(storeConnectionString, DarlingManagedPostgres.McpApplicationName)));
+            /* #6630: a store the operator brings gets the worker's collect/config search path the same way (set-if-absent), because the
+               bare names the reads use (servers, config_service, ...) only resolve through it, and the database default is best effort. */
+            var postgres = DarlingWorker.CreateHostStoreDataSource(storeConnectionString, DarlingManagedPostgres.McpApplicationName);
             _appDataSource = postgres;
 
             /* #6263: investigations served, but no route opens a request. A hint, never a refusal: the operator may add the

@@ -854,12 +854,12 @@ public static partial class DarlingCliCommands
     /// lines later cannot throw on it. The build is repeated here rather than handed back because the connection
     /// census tests want the pin and the name on the very call that constructs each verb's connection.</para>
     ///
-    /// <para><paramref name="ensureStoreSearchPath"/> is for a verb that names store tables bare: it gives a
-    /// bring-your-own string the worker's collect/config search path (a managed string already carries it) BEFORE the
+    /// <para><paramref name="ensureStoreSearchPath"/> (on by default since #6630, because most verbs name store tables bare)
+    /// gives a bring-your-own string the worker's collect/config search path (a managed string already carries it) BEFORE the
     /// proof, so the string that is proved is the string that is used.</para>
     /// </summary>
     private static bool TryBuildStoreConnectionString(
-        PostgresConfig? postgres, out string? connectionString, out string? unusable, bool ensureStoreSearchPath = false)
+        PostgresConfig? postgres, out string? connectionString, out string? unusable, bool ensureStoreSearchPath = true)
     {
         connectionString = null;
         unusable = null;
@@ -891,7 +891,7 @@ public static partial class DarlingCliCommands
 
             if (ensureStoreSearchPath && !managedCredential)
             {
-                connectionString = DarlingWorker.EnsureStoreSearchPath(connectionString);
+                connectionString = DarlingStoreConnection.EnsureStoreSearchPath(connectionString);
             }
 
             using var proof = new NpgsqlConnection(

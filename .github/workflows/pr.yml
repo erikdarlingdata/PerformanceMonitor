@@ -7,7 +7,9 @@ name: PR CI
 # verdict sets it, so a run that is cancelled or dies early never passes.
 #
 # Every pull request that is ready for review runs (PR 2 of the rollout removed the `ci-next` label gate); a draft costs
-# the plan job and sets no status.
+# the plan job and sets no status. Whether it is a draft is read live from the pull request API at plan time, not from the
+# event payload: a push to a draft and `gh pr ready` seconds apart start the push run last, it cancels the ready run, and
+# its payload still says draft, which would leave the final head with no `CI result` (#6656).
 # No `labeled` trigger: an unrelated label would cancel and restart the run.
 
 on:
@@ -22,6 +24,7 @@ permissions:
   statuses: write
   issues: write
   pull-requests: read
+  actions: read # the verdict job asks whether a newer run of this workflow exists for the pull request (#6656)
 
 # A new push to a pull request cancels that pull request's earlier run. Dev pushes never cancel a running run: at most one
 # runs and one newest waits, so every run covers every merge up to its SHA.
@@ -61,6 +64,20 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+
+          # The payload's draft flag is as old as the event. A push to a draft and `gh pr ready` seconds apart start the push run
+          # last: it cancels the ready run and its payload still says draft, so it would skip and the head would get no `CI result`.
+          # Read the live state instead; if the call fails, keep the payload's value.
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            if live_draft=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.draft' 2>/dev/null) && [[ "${live_draft}" =~ ^(true|false)$ ]]; then
+              if [ "${live_draft}" != "${IS_DRAFT}" ]; then
+                echo "::notice title=Draft state read live::The pull request is draft=${live_draft} now, but the event payload said draft=${IS_DRAFT}. Using the live state."
+              fi
+              IS_DRAFT="${live_draft}"
+            else
+              echo "::notice title=Draft state read from the payload::The pull request API call failed, so the event payload's draft=${IS_DRAFT} is used."
+            fi
+          fi
 
           # A push runs every area whatever it changed, so it needs no file list.
           : > changed.txt
@@ -122,6 +139,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
+      # #6497: a runner whose processes cannot start (0xC0000142 STATUS_DLL_INIT_FAILED) would otherwise fail one
+      # step at a time and pay each job's own timeout. This is the first step, so such a runner fails here in seconds.
+      - name: Check the runner can start a process
+        timeout-minutes: 2
+        shell: bash
+        run: dotnet --version
+
       - uses: actions/checkout@v7
 
       - name: Setup .NET 10.0
@@ -226,6 +250,13 @@ jobs:
       matrix:
         leg: ${{ fromJSON(needs.plan.outputs.legs_json) }}
     steps:
+      # #6497: a runner whose processes cannot start (0xC0000142 STATUS_DLL_INIT_FAILED) would otherwise fail one
+      # step at a time and pay each job's own timeout. This is the first step, so such a runner fails here in seconds.
+      - name: Check the runner can start a process
+        timeout-minutes: 2
+        shell: bash
+        run: dotnet --version
+
       - uses: actions/checkout@v7
 
       - name: Fetch the build
@@ -350,6 +381,9 @@ jobs:
           BUILD_RESULT: ${{ needs.build.result }}
           TEST_RESULT: ${{ needs.test.result }}
           TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -uo pipefail
 
@@ -368,6 +402,26 @@ jobs:
             want_test=skipped;  [ "${PLAN_LEGS}" != "0" ] && want_test=success
             [ "${BUILD_RESULT}" = "${want_build}" ] || { state=failure; failed="${failed} build (${BUILD_RESULT})"; }
             [ "${TEST_RESULT}" = "${want_test}" ]   || { state=failure; failed="${failed} test (${TEST_RESULT})"; }
+          fi
+          # #6656: a run that a newer push or ready-for-review replaced is cancelled, but cancelled() inside this job reports the
+          # job's own state, so the step cannot tell. Ask the API instead: when a newer run of this workflow exists for this pull
+          # request, it sets CI result and this one posts no failure. A newer run is this pull request's when it comes from this
+          # head repository (a fork's runs list no pull requests, so the repository is what tells two forks that both use
+          # `patch-1` apart) and its pull request list is empty or names this number. -f makes gh URL-encode the branch name. A test
+          # leg that hits its timeout also reports cancelled, but no newer run exists then, so that failure still posts. If the call
+          # fails, post as before.
+          if [ "${state}" = "failure" ] && [ "${EVENT_NAME}" = "pull_request" ]; then
+            newer=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/workflows/pr.yml/runs"               -f event=pull_request -f branch="${HEAD_REF}" -f per_page=20               --jq '[.workflow_runs[]
+                     | select(.id > (env.GITHUB_RUN_ID | tonumber)
+                              and .head_repository.full_name == env.HEAD_REPO
+                              and (((.pull_requests // []) | length) == 0
+                                   or any((.pull_requests // [])[]; (.number | tostring) == env.PR_NUMBER)))] | length' 2>/dev/null) || newer=""
+            if [[ "${newer}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::notice title=CI result left to a newer run::A newer run of this workflow exists on this pull request, so it sets CI result and this run (${failed# }) posts no failure."
+              echo "state=" >> "${GITHUB_OUTPUT}"
+              echo "failed=" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
           fi
           if [ "${state}" = "failure" ] && [ "${PLAN_OUTCOME}" != "train-blocked" ]; then
             desc="CI failed: ${failed# }"

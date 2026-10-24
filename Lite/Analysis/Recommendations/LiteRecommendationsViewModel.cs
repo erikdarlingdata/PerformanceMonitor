@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Services;
@@ -434,16 +433,9 @@ public sealed class LiteRecommendationsViewModel
     /// <summary>
     /// Builds the MCP investigation prompt "Ask AI" copies to the clipboard for a finding. Pure (no
     /// WPF / clock) so the interpolation is unit-testable. The window times are formatted in whatever
-    /// timezone the caller passed (the card passes server-local). Mirrors the Dashboard's prompt.
+    /// timezone the caller passed (the card passes server-local). The text is Darling's too (#6389): one shared
+    /// builder, which keeps collected text inside its quotes.
     /// </summary>
     public static string BuildAskAiPrompt(string serverName, string title, DateTime from, DateTime to)
-    {
-        return string.Format(
-            CultureInfo.InvariantCulture,
-            "Using the PerformanceMonitor MCP tools, investigate this finding on server \"{0}\": " +
-            "\"{1}\". It was flagged around {2:yyyy-MM-dd HH:mm}–{3:HH:mm}. Call analyze_server / " +
-            "get_analysis_findings and the relevant wait/blocking/memory tools, then tell me the " +
-            "likely cause and what to do.",
-            serverName, title, from, to);
-    }
+        => PerformanceMonitor.Analysis.RecommendationAskAiPrompt.Build(serverName, title, from, to);
 }

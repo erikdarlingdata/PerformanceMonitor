@@ -267,7 +267,18 @@ public sealed partial class ViewerDataService
 
             var baselinePlan = await QueryStoreRegressionBaseline.ResolveAsync(
                 connection, transaction, serverId, plan.ClampedStart, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken);
-            await using var command = new NpgsqlCommand(baselinePlan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+            var wideSql = baselinePlan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql;
+
+            /* #5506 step 2: the same measured margin as the MCP read (DarlingQueryStoreRegressionReader.TryGetQueryStoreRegressionsFromTableAsync
+               explains it): the server's longest interval in place of the 26-hour floor, or the 26 hours where it is not known. */
+            var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
+                connection, serverId, plan.ClampedStart, endUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
+            {
+                wideSql = QueryStoreIntervalWide.WithEdgeMargin(wideSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
+            }
+
+            await using var command = new NpgsqlCommand(wideSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
             AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, plan.ClampedStart, baselinePlan);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             return await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);
