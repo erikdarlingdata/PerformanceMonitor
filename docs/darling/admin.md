@@ -141,7 +141,7 @@ With `-PurgeData`:
 
 1. Run `.\uninstall-darling.ps1 -PurgeData`.
 2. The script prints what it will delete. Type `DELETE` to confirm. Any other answer keeps the data.
-3. It then deletes `C:\ProgramData\PerformanceMonitorDarling`. This removes the whole store (all collected history), the generated store credentials and the service logs. You cannot undo this.
+3. It then deletes `C:\ProgramData\PerformanceMonitorDarling`. This removes the store in that folder (all collected history), the generated store credentials and the service logs. You cannot undo this. If `postgres.dataDirectory` in `darling.json` names a folder outside `C:\ProgramData\PerformanceMonitorDarling`, the script leaves that store folder alone. Delete it yourself.
 
 `-PurgeData` does not delete the program folder or `darling.json`. To remove them, delete them yourself. It also does not delete the Viewer's per-user files under `%APPDATA%\PerformanceMonitorDarling`.
 
@@ -155,7 +155,8 @@ For a script run that cannot answer a question, add `-ConfirmPurge` to `-PurgeDa
 | Service logs | `%ProgramData%\PerformanceMonitorDarling\logs\darling-service_<yyyyMMdd>.log`. The service also writes to the Windows Event Log, source `PerformanceMonitor Darling` |
 | Store (the bundled PostgreSQL) | `%ProgramData%\PerformanceMonitorDarling\pg`, unless `postgres.dataDirectory` names another folder |
 | Store credential files | `pg-credential.dpapi`, `pg-admin-credential.dpapi`, `pg-viewer-credential.dpapi` and `pg-mcp-credential.dpapi`, beside the store folder in `%ProgramData%\PerformanceMonitorDarling` |
-| Password key and log-hash key | `password-key.dpapi` and `log-hash-key.dpapi`. See [Who can read `darling.json` and the credentials](../../Darling/README.md#security--least-privilege-roles) for who can open them |
+| Password key | `password-key.dpapi`. See [Who can read `darling.json` and the credentials](../../Darling/README.md#security--least-privilege-roles) for who can open it |
+| Log-hash key | `log-hash-key.dpapi`. A managed store on Windows keeps it beside `pg-credential.dpapi`. An own store (`postgres.managed` off) keeps it in a `darling-keys` folder beside `darling.json`. On Linux the file is `log-hash-key`, and under Docker Compose it is in the `darling-credentials` volume. The service uses the key to hash log text before it stores it. The key is kept outside the store, so someone who can read the store cannot test guesses against the hashes |
 | Rollback backups | `_rollback_manual_<stamp>` folders in the install folder |
 | Viewer log | `%APPDATA%\PerformanceMonitorDarling\logs\darling-viewer_<yyyyMMdd>.log` |
 | Viewer preferences | A small JSON file in `%APPDATA%\PerformanceMonitorDarling` |
