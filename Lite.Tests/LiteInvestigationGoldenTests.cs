@@ -117,6 +117,7 @@ public sealed class LiteInvestigationGoldenTests
         Assert.Equal("get_file_io_trend", calls[0]);
         Assert.Equal("get_file_io_stats", calls[1]);
         Assert.Contains("get_blocked_process_reports", calls);
+        Assert.DoesNotContain("get_job_history", calls);
     }
 
     private static PseudonymKey FixedKey()

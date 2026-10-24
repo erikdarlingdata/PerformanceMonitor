@@ -60,7 +60,7 @@ public sealed class DarlingMcpJobHistoryToolSurfaceTests
             .ToArray();
 
         Assert.Equal(
-            new[] { "server_name", "hours_back", "job_name", "status", "category", "limit", "as_of" },
+            new[] { "server_name", "hours_back", "job_name", "status", "category", "limit", "as_of", "min_duration_seconds" },
             described.Select(p => p.Name).ToArray());
         Assert.All(described, p => Assert.True(p.HasDefaultValue, $"{p.Name} must be optional"));
     }
@@ -165,6 +165,29 @@ public sealed class DarlingMcpJobHistoryToolSurfaceTests
         Assert.Equal("invalid", DarlingMcpTestData.StatusOf(asOf));
         var limit = await DarlingMcpJobTools.GetJobHistory(null!, limit: 0);
         Assert.Equal("invalid", DarlingMcpTestData.StatusOf(limit));
+        var negative = await DarlingMcpJobTools.GetJobHistory(null!, min_duration_seconds: -1);
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(negative));
+    }
+
+    /// <summary>
+    /// #6614: the web dispatch reads <c>min_duration_seconds</c> under a hand-typed key. An unparseable value is answered with
+    /// the refusal that names the parameter, before any store read, so this runs on the PR suite with a data source that points
+    /// nowhere. Revert proof: if the dispatch read a mistyped key (say <c>min_duration_second</c>), the value sent here would
+    /// never be seen, the read would go on to the unreachable store, and the answer would be an error envelope, not
+    /// <c>invalid</c>, so the status and message assertions fail. The live half (a value of 60 drops the short runs) is the
+    /// MCP-path test <c>MinDurationSeconds_KeepsTheLongRunOnTheFirstPage_BeforeTheLimit</c>, which needs DARLING_TEST_PG.
+    /// </summary>
+    [Fact]
+    public async Task ApiRead_RefusesAnUnparseableMinDurationSeconds_ByName_BeforeAnyStoreRead()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var unreachable = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Database=none;Username=none;Timeout=1;Pooling=false");
+        var (status, body) = await DarlingMcpJobHistoryToolLiveTests.WebGetAsync(unreachable, "/api/read/get_job_history?min_duration_seconds=abc", ct);
+
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(body));
+        using var doc = JsonDocument.Parse(body);
+        Assert.Contains("min_duration_seconds", doc.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.Equal(StatusCodes.Status400BadRequest, status);
     }
 }
 
@@ -258,7 +281,7 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         await DarlingMcpTestData.ExecAsync(c, ct, $"DELETE FROM servers WHERE server_id IN ({ids})");
     }
 
-    private static async Task<(int Status, string Body)> WebGetAsync(NpgsqlDataSource postgres, string pathAndQuery, CancellationToken ct)
+    internal static async Task<(int Status, string Body)> WebGetAsync(NpgsqlDataSource postgres, string pathAndQuery, CancellationToken ct)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -323,6 +346,43 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
             Assert.Equal(JsonSerializer.Serialize(expected), JsonSerializer.Serialize(viewerRows));
             /* Alpha's local 08:00 is 13:00 UTC: the conversion survived the move. */
             Assert.Contains(viewerRows, r => r.ServerId == ServerA && r.RunDateTimeUtc == new DateTime(2026, 3, 10, 13, 0, 0));
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    /// <summary>#6614: min_duration_seconds applies before the limit, so one long run among many short ones is on the first page.</summary>
+    [Fact]
+    public async Task MinDurationSeconds_KeepsTheLongRunOnTheFirstPage_BeforeTheLimit()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(c, ServerA, NameA, ct);
+            /* Ten short runs, all newer than the one hour-long run. */
+            await InsertAsync(c, ct, 20, ServerA, NameA, "Index Rebuild", "Maintenance", 0, 1, 3600, new DateTime(2026, 3, 10, 1, 0, 0), null);
+            for (var i = 0; i < 10; i++)
+                await InsertAsync(c, ct, 21 + i, ServerA, NameA, "Heartbeat", "Maintenance", 0, 1, 2, new DateTime(2026, 3, 10, 5, i, 0), null);
+
+            var unfiltered = await DarlingMcpJobTools.GetJobHistory(postgres, NameA, 24, limit: 3, as_of: AsOfText, cancellationToken: ct);
+            using (var doc = JsonDocument.Parse(unfiltered))
+                Assert.DoesNotContain(doc.RootElement.GetProperty("runs").EnumerateArray(), r => r.GetProperty("job_name").GetString() == "Index Rebuild");
+
+            var filtered = await DarlingMcpJobTools.GetJobHistory(postgres, NameA, 24, limit: 3, min_duration_seconds: 60, as_of: AsOfText, cancellationToken: ct);
+            using var filteredDoc = JsonDocument.Parse(filtered);
+            var runs = filteredDoc.RootElement.GetProperty("runs").EnumerateArray().ToList();
+            Assert.Single(runs);
+            Assert.Equal("Index Rebuild", runs[0].GetProperty("job_name").GetString());
+            Assert.Equal(3600, runs[0].GetProperty("duration_seconds").GetInt64());
+            Assert.False(filteredDoc.RootElement.GetProperty("truncated").GetBoolean());
             ok = true;
         }
         finally
@@ -914,7 +974,7 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         try
         {
             await SeedAsync(c, ct);
-            var tool = await DarlingMcpJobTools.GetJobHistory(postgres, NameA, 24, "Nightly ETL", "Failed", null, 10, AsOfText, ct);
+            var tool = await DarlingMcpJobTools.GetJobHistory(postgres, NameA, 24, "Nightly ETL", "Failed", null, 10, AsOfText, cancellationToken: ct);
             var (status, body) = await WebGetAsync(postgres,
                 $"/api/read/get_job_history?server={NameA}&hours=24&job_name=Nightly%20ETL&status=Failed&limit=10&as_of={AsOfText}", ct);
 
