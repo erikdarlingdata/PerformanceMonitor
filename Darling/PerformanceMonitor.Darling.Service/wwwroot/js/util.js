@@ -189,10 +189,12 @@ export function emptyStrip(message) {
 /** #6445: the note a page that lists only shows. The advice depends on the store: a managed store refuses postgres.webConnectionString,
     so it says only that this dashboard lists and the Viewer app makes the change; a store you brought yourself may give the web an
     admin store login. `lists` finishes "so ..." and `toChange` starts the sentence that names the Viewer. The service's own 403
-    sentences come from DarlingWebStoreWrites and say the same. */
-export function listOnlyNote(managedStore, lists, toChange) {
+    sentences come from DarlingWebStoreWrites and say the same. #6600: `adminWritesOff` (the session's admin_writes_off) is true on a managed
+    store whose web.allowAdminWrites is off, and then the note also names that switch, in the 403's words. */
+export function listOnlyNote(managedStore, lists, toChange, adminWritesOff) {
   return managedStore === true
-    ? "This dashboard lists only on this store, so " + lists + ". " + toChange + ", use the Viewer app."
+    ? "This dashboard lists only on this store, so " + lists + ". " + toChange + ", use the Viewer app." +
+      (adminWritesOff === true ? " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service." : "")
     : "This dashboard's store login cannot make changes, so " + lists + ". " + toChange +
       ", use the Viewer app, or give the web an admin store login (set postgres.webConnectionString to an admin login).";
 }
@@ -386,6 +388,20 @@ export function keptWindowStrip(res) {
     return noticeStrip(readLimitText(res.keptHours) + ", so it shows the part of the custom range the store still holds.");
   }
   return noticeStrip(readLimitText(res.keptHours) + ", so it shows the last " + daysText(res.keptHours) + ".");
+}
+
+/**
+ * #6654: the strip over a grid that names `databases_left_out_note` as its `noteKey` (or in `moreNoteKeys`), drawn on an EMPTY answer too. The
+ * populated path already draws a named note; the empty path draws only the read's message, and "no regressions" over a read that left
+ * out a dropped database is not the same statement as "nothing regressed". Null for any other panel, so a note that is not about
+ * omitted databases is not pulled onto an empty answer by this.
+ */
+export function leftOutStrip(data, desc) {
+  if (!desc || !data) return null;
+  const key = "databases_left_out_note";
+  if (desc.noteKey !== key && !(desc.moreNoteKeys || []).includes(key)) return null;
+  const note = data[key];
+  return typeof note === "string" && note.trim() ? noticeStrip(note) : null;
 }
 
 /**

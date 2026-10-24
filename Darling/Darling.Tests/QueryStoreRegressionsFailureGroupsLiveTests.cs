@@ -297,6 +297,17 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
 
         var db = Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, "qsfail", 24, DatabaseFilter.One(Db), 30, false, null, NullLogger.Instance, ct));
         Assert.Equal([20L], db.Ids);
+
+        /* The Viewer grid reads the same way and hands the left-out names back for its banner (#6654 review): with no database chosen
+           the dropped one is named and its query is not listed; naming it reads it as asked and names nothing. */
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+        var viewerStart = now.AddHours(-24);
+        var viewerAll = await viewer.GetQueryStoreRegressionsWithScopeAsync(ServerId, viewerStart, now, cancellationToken: ct);
+        Assert.Equal([20L], viewerAll.Rows.Select(r => r.QueryId).OrderBy(x => x).ToList());
+        Assert.Equal([Gone], viewerAll.DatabasesLeftOut);
+        var viewerNamed = await viewer.GetQueryStoreRegressionsWithScopeAsync(ServerId, viewerStart, now, [Gone], cancellationToken: ct);
+        Assert.Equal([30L], viewerNamed.Rows.Select(r => r.QueryId).OrderBy(x => x).ToList());
+        Assert.Null(viewerNamed.DatabasesLeftOut);
     }
 
     [Fact]

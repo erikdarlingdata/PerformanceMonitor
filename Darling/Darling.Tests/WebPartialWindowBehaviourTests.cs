@@ -98,6 +98,18 @@ public sealed class WebPartialWindowBehaviourTests
     }
 
     [Fact]
+    public void ALeftOutNote_IsDrawnOnAnEmptyAnswer_OnlyForAGridThatNamesIt()
+    {
+        var r = Run();
+        Assert.StartsWith("These databases were left out of this read", S(r, "leftOutNamed"));
+        Assert.StartsWith("These databases were left out of this read", S(r, "leftOutMore"));
+        Assert.Null(S(r, "leftOutUnnamed"));
+        Assert.Null(S(r, "leftOutOtherKey"));
+        Assert.Null(S(r, "leftOutAbsent"));
+        Assert.Null(S(r, "leftOutBlank"));
+    }
+
+    [Fact]
     public void TheServersOwnNote_IsNotDrawnTwice()
     {
         var r = Run();

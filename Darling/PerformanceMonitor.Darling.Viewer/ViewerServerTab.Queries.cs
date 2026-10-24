@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -466,11 +467,12 @@ public partial class ViewerServerTab
            step compares its answer with that window's start. The rows are ranked by added duration, not by time, so they name no
            earlier start and the cap rule does not apply. */
         var floorTask = _dataService.GetQueryStoreRegressionsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var floorReadTask = _dataService.GetQueryStoreRegressionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter,
+        var floorReadTask = _dataService.GetQueryStoreRegressionsWithScopeAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter,
             literalEndUtc: IsCustomRange ? endUtc : null); /* #5809: the interval table gate's clause 4, as the grid passes it (#3953). */
         await AwaitReadWatchingProbeAsync(floorReadTask, floorTask, "Query Store Regressions");
-        var rows = floorReadTask.Result;
-        _queryStoreRegressionsFilterMgr!.UpdateData(rows);
+        var read = floorReadTask.Result;
+        _queryStoreRegressionsFilterMgr!.UpdateData(read.Rows);
+        ShowDatabasesLeftOutBanner(QueryStoreRegressionsLeftOutBanner, read.DatabasesLeftOut);
         await ShowQueryStoreRegressionsDataStartAsync(QueryStoreRegressionsTruncationBanner, floorTask, startUtc);
         SetDefaultSortIfNone(QueryStoreRegressionsGrid, "DurationRegressionPercent", ListSortDirection.Descending);
     }
@@ -483,6 +485,37 @@ public partial class ViewerServerTab
     /// </summary>
     internal const string QueryStoreRegressionsEmptyText =
         "No regressions to show. Each query is compared with the 7 days before the selected range, so a range that reaches back to the start of the stored Query Store data has nothing earlier to compare with.";
+
+    /// <summary>
+    /// The banner text for a grid whose read left databases out (#6654 review), or null when none were left out. The grid has no
+    /// envelope to carry <see cref="DatabasesLeftOut.Note"/>, and without this a store whose only regressions were in a dropped database
+    /// would show the empty text that blames the baseline window. The same rule as <see cref="DatabasesLeftOut"/>: at most
+    /// <see cref="DatabasesLeftOut.MaxNamed"/> names, with the full count when there are more, and the same reason and way out, in
+    /// this grid's words (the database picker, not a tool argument).
+    /// </summary>
+    internal static string? DatabasesLeftOutBannerText(IReadOnlyList<string>? leftOut)
+    {
+        var all = DatabasesLeftOut.Distinct(leftOut);
+        if (all is null)
+        {
+            return null;
+        }
+
+        var named = DatabasesLeftOut.Named(all)!;
+        var more = all.Count > named.Count
+            ? string.Create(CultureInfo.InvariantCulture, $" ({all.Count} in all; the first {DatabasesLeftOut.MaxNamed} are listed)")
+            : string.Empty;
+        return "Left out of this grid: " + string.Join(", ", named) + more + ". The server's newest database snapshot no longer lists "
+            + (all.Count == 1 ? "it" : "them") + " (dropped or detached since an earlier snapshot did). Pick the database in the filter to read its history.";
+    }
+
+    /// <summary>Shows <paramref name="banner"/> with <see cref="DatabasesLeftOutBannerText"/>, or collapses it when no database was left out.</summary>
+    internal static void ShowDatabasesLeftOutBanner(TextBlock banner, IReadOnlyList<string>? leftOut)
+    {
+        var text = DatabasesLeftOutBannerText(leftOut);
+        banner.Text = text ?? string.Empty;
+        banner.Visibility = text is null ? Visibility.Collapsed : Visibility.Visible;
+    }
 
     /// <summary>
     /// Raises or hides the "Showing since" banner of the Query Store Regressions grid (#4966). The read compares the range with

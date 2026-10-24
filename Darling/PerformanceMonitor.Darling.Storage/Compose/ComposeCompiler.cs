@@ -20,7 +20,7 @@ using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
-namespace PerformanceMonitor.Darling.Service;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>The server scope + window + variable bindings a <see cref="PanelPlan"/> compiles against. The
 /// window is naive UTC (Kind=Unspecified is stamped when bound, matching every other Darling read).

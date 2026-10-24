@@ -412,6 +412,28 @@ public sealed partial class PlanForceToolLiveTests
     public Task WithoutTheCredentialSlot_TheCallIsRefused_Journaled_AndWritesNothing() => AssertRefusedAsync(Without.CredentialSlot, "no_remediation_credential");
 
     [Fact]
+    public Task ADryRunWithNoAgentClaim_IsRefusedAsRequired_AndSaysWhyAndThatTheSwitchIsOff() => AssertDryRunRefusalAsync(Without.Switch, "is currently off");
+
+    [Fact]
+    public Task ADryRunWithNoAgentClaim_IsRefusedAsRequired_AndSaysWhyAndThatTheSwitchIsOn() => AssertDryRunRefusalAsync(Without.Nothing, "is currently on.");
+
+    private static async Task AssertDryRunRefusalAsync(Without without, string expected)
+    {
+        await RunAsync(without, async c =>
+        {
+            var (query, planA, _) = await c.Sql.TwoPlansAsync("pfd", c.Ct);
+            var answer = await DarlingMcpPlanForceTools.RunAsync(c.Source, c.Source, c.Log, true, "srv-7", c.Sql.Database, query, planA, null, true, c.Ct);
+            var json = Parse(answer);
+            Assert.Equal("refused", (string?)json["status"]);
+            Assert.Equal("agent_action_required", (string?)json["reason"]);
+            var message = (string?)json["message"];
+            Assert.Contains("A dry run needs it too", message, StringComparison.Ordinal);
+            Assert.Contains(expected, message, StringComparison.Ordinal);
+            Assert.Null(await c.Sql.ForcedPlanAsync(query, c.Ct));
+        });
+    }
+
+    [Fact]
     public async Task APostgreSqlTarget_IsRefusedWithItsOwnReason_AndJournaled()
     {
         await RunAsync(Without.Nothing, async c =>

@@ -16,6 +16,10 @@ using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
+/// <summary>The regressions rows with the databases the read left out (#6654 review): the dropped ones, named for the grid's banner.
+/// <see cref="DatabasesLeftOut"/> is null when none were left out.</summary>
+public sealed record ViewerQueryStoreRegressionsRead(List<ViewerQueryStoreRegressionRow> Rows, IReadOnlyList<string>? DatabasesLeftOut);
+
 /// <summary>
 /// One Query-Store regression row — the viewer copy of the Dashboard's
 /// <c>QueryStoreRegressionItem</c> (Dashboard/Models/QueryStoreRegressionItem.cs), fed by the Postgres
@@ -197,6 +201,16 @@ public sealed partial class ViewerDataService
     /// </summary>
     public async Task<List<ViewerQueryStoreRegressionRow>> GetQueryStoreRegressionsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, DateTime? literalEndUtc = null,
+        CancellationToken cancellationToken = default) =>
+        (await GetQueryStoreRegressionsWithScopeAsync(serverId, startUtc, endUtc, databaseNames, literalEndUtc, cancellationToken)).Rows;
+
+    /// <summary>
+    /// <see cref="GetQueryStoreRegressionsAsync"/> with the databases it left out (#6654 review): the grid has no envelope, so the
+    /// names come back beside the rows for the banner (<c>ViewerServerTab.DatabasesLeftOutBannerText</c>). Null when none were left
+    /// out, as <see cref="DatabasesLeftOut.Distinct"/> answers.
+    /// </summary>
+    public async Task<ViewerQueryStoreRegressionsRead> GetQueryStoreRegressionsWithScopeAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, DateTime? literalEndUtc = null,
         CancellationToken cancellationToken = default)
     {
 
@@ -211,7 +225,7 @@ public sealed partial class ViewerDataService
            queries would otherwise fill the 50-row cap. A database the user picked is read as asked; an unknown set leaves out nothing. */
         var excludedDatabases = databaseNames is { Count: > 0 }
             ? null
-            : (await CurrentDatabaseScope.NarrowAsync(_dataSource, serverId, DatabaseFilter.All, windowStartUtc: baselineStartUtc, cancellationToken: cancellationToken)).ExcludedNames;
+            : (await CurrentDatabaseScope.NarrowAsync(_dataSource, serverId, DatabaseFilter.All, windowStartUtc: baselineStartUtc, logger: ViewerStoreLogger.Instance, cancellationToken: cancellationToken)).ExcludedNames;
 
         /* #5809: the interval table where the Queries grid's own gate allows, raw otherwise. */
         var schemaVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
@@ -221,7 +235,7 @@ public sealed partial class ViewerDataService
                 serverId, startUtc, endUtc, literalEndUtc, databaseNames, baselineStartUtc, cancellationToken, excludedDatabases);
             if (tableRows is not null)
             {
-                return tableRows;
+                return new ViewerQueryStoreRegressionsRead(tableRows, DatabasesLeftOut.Distinct(excludedDatabases));
             }
         }
 
@@ -240,7 +254,7 @@ public sealed partial class ViewerDataService
         await using var command = new NpgsqlCommand(plan.BuiltDayCount > 0 ? QueryStoreRegressionsSql : s_rawLiveSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
         AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, baselineStartUtc, plan, excludedDatabases);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        return await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);
+        return new ViewerQueryStoreRegressionsRead(await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken), DatabasesLeftOut.Distinct(excludedDatabases));
     }
 
     /// <summary>
@@ -275,7 +289,18 @@ public sealed partial class ViewerDataService
 
             var baselinePlan = await QueryStoreRegressionBaseline.ResolveAsync(
                 connection, transaction, serverId, plan.ClampedStart, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken);
-            await using var command = new NpgsqlCommand(baselinePlan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+            var wideSql = baselinePlan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql;
+
+            /* #5506 step 2: the same measured margin as the MCP read (DarlingQueryStoreRegressionReader.TryGetQueryStoreRegressionsFromTableAsync
+               explains it): the server's longest interval in place of the 26-hour floor, or the 26 hours where it is not known. */
+            var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
+                connection, serverId, plan.ClampedStart, endUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
+            {
+                wideSql = QueryStoreIntervalWide.WithEdgeMargin(wideSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
+            }
+
+            await using var command = new NpgsqlCommand(wideSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
             AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, plan.ClampedStart, baselinePlan, excludedDatabases);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             return await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);

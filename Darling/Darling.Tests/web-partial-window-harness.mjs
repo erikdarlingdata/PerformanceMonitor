@@ -31,7 +31,7 @@ globalThis.document = { createElement: (t) => new FakeNode(t), createTextNode: (
 globalThis.location = { hash: "#/server/a/events" };
 
 const root = process.argv[2];
-const { windowFloorStrip, cappedReadNote, partialWindowSubtitle, markPartialSubtitle, localizeIsoText, localizeAlertDetail, emptyStrip, noticeStrip, el, localTime } = await import(pathToFileURL(root + "/util.js").href);
+const { windowFloorStrip, leftOutStrip, cappedReadNote, partialWindowSubtitle, markPartialSubtitle, localizeIsoText, localizeAlertDetail, emptyStrip, noticeStrip, el, localTime } = await import(pathToFileURL(root + "/util.js").href);
 
 const text = (n) => (n ? n.textContent : null);
 const OLDEST = "2026-10-12T13:29:59.5027090Z";
@@ -61,6 +61,15 @@ out.rankedByOther = text(windowFloorStrip({ ...active, order: "total_elapsed" },
 out.noOldest = text(windowFloorStrip({ truncated: true, order: "collection_time_desc" }, { viz: "table" }));
 out.serverNoteWins = text(windowFloorStrip({ ...active, ...serverCapped }, { viz: "table" }));
 out.ownNote = text(windowFloorStrip(active, { viz: "table", noteKey: "truncation_note" }));
+
+/* #6654: the left-out note, drawn on an empty answer only for a grid that names it */
+const leftOutNote = "These databases were left out of this read because the server's newest database snapshot no longer lists them.";
+out.leftOutNamed = text(leftOutStrip({ databases_left_out_note: leftOutNote }, { viz: "table", noteKey: "databases_left_out_note" }));
+out.leftOutMore = text(leftOutStrip({ databases_left_out_note: leftOutNote }, { viz: "table", moreNoteKeys: ["databases_left_out_note"] }));
+out.leftOutUnnamed = text(leftOutStrip({ databases_left_out_note: leftOutNote }, { viz: "table" }));
+out.leftOutOtherKey = text(leftOutStrip({ databases_left_out_note: leftOutNote }, { viz: "table", noteKey: "note" }));
+out.leftOutAbsent = text(leftOutStrip({}, { viz: "table", noteKey: "databases_left_out_note" }));
+out.leftOutBlank = text(leftOutStrip({ databases_left_out_note: "  " }, { viz: "table", noteKey: "databases_left_out_note" }));
 
 /* the heading: a capped panel drops its window label, any other keeps it */
 out.subtitleActive = partialWindowSubtitle(active, { viz: "table" });

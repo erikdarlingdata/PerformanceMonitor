@@ -63,7 +63,9 @@ public sealed class QueryStoreComposeStampRaceLiveTests
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    private const string WritersSql = "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND backend_xid IS NOT NULL AND pid <> pg_backend_pid()";
+    /* Counted for the one backend the test opened (#6563): a count of every backend in the database also picks up a TimescaleDB job worker
+       or autovacuum that holds an xid at that moment, and CI read 2 where the test expected 1. */
+    private static string XidHolderSql(NpgsqlConnection backend) => $"SELECT count(*) FROM pg_stat_activity WHERE pid = {backend.ProcessID} AND backend_xid IS NOT NULL";
 
     [Fact]
     public async Task AnOpenWritingTransactionThatBeganInsideTheMarginWindow_DefersTheHour_AndTheHourBuildsAfterItCommits()
@@ -82,7 +84,7 @@ public sealed class QueryStoreComposeStampRaceLiveTests
             await InsertRowAsync(writer, 1, hour.AddMinutes(10), 9_100_001, ct);
             /* The row is inside the trigger's window, so nothing marked it: no pair of the hour exists, and nothing else is stale. */
             Assert.Equal(0, await CountAsync(connection, $"SELECT count(*) FROM collect.query_store_compose_stamp_built WHERE hour = TIMESTAMP '{At(hour)}'", ct));
-            Assert.Equal(1, await CountAsync(connection, WritersSql, ct));
+            Assert.Equal(1, await CountAsync(connection, XidHolderSql(writer), ct));
 
             Assert.Null(await QueryStoreComposeStamp.BuildHourAsync(builder, hour, DateTime.UtcNow, ct));
             Assert.Equal(0, await HourRowsAsync(connection, hour, ct));
@@ -117,7 +119,7 @@ public sealed class QueryStoreComposeStampRaceLiveTests
             await using (var readOnly = await reader.BeginTransactionAsync(ct))
             {
                 await CountAsync(reader, "SELECT count(*) FROM collect.query_store_interval_wide", ct);
-                Assert.Equal(0, await CountAsync(connection, WritersSql, ct));
+                Assert.Equal(0, await CountAsync(connection, XidHolderSql(reader), ct));
 
                 /* The young hour, whose window is still open: nothing here has written, so nothing defers it. */
                 Assert.NotNull(await QueryStoreComposeStamp.BuildHourAsync(builder, young, DateTime.UtcNow, ct));
@@ -132,7 +134,7 @@ public sealed class QueryStoreComposeStampRaceLiveTests
             await using var writer = await OpenAsync(scratch, ct);
             await using var open = await writer.BeginTransactionAsync(ct);
             await InsertRowAsync(writer, 4, old.AddMinutes(20), 9_100_002, ct);
-            Assert.Equal(1, await CountAsync(connection, WritersSql, ct));
+            Assert.Equal(1, await CountAsync(connection, XidHolderSql(writer), ct));
             Assert.NotNull(await QueryStoreComposeStamp.BuildHourAsync(builder, old, DateTime.UtcNow, ct));
             await open.CommitAsync(ct);
             Assert.Equal(Pair(4, old), await StaleListAsync(connection, ct));

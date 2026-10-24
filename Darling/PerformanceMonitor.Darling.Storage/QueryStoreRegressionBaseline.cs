@@ -573,7 +573,7 @@ public static class QueryStoreRegressionBaseline
             FROM flagged AS f
             WHERE (f.is_cost OR f.is_timeouts OR f.is_errors)
             /* #6654: a dropped database's queries are left out here, before the rank and the cap, so they cannot fill the page. */
-            AND   (@@X::text[] IS NULL OR f.database_name IS NULL OR f.database_name <> ALL(@@X::text[]))
+           {{DatabaseFilter.ExcludeClause("f.database_name", ExcludeToken)}}
             /* #6654: the monitor's own statements are dropped at collection (QueryStoreCollector.SelfQueryMarker), but the text this read
                resolves from query_store_text can still carry the marker, so a candidate whose text does is left out before the cap too.
                The same keyed lookup the output projection makes, with the MAX(query_text) sample as its fallback. */
