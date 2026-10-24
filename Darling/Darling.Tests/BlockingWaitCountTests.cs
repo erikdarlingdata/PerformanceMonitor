@@ -238,6 +238,19 @@ public sealed class BlockingWaitCountTests
         Assert.Equal(102, wait.BlockedSpid);
     }
 
+    /// <summary>#6645 round 1: XE reports that are all a parallel query's self-waits are no XE reports, so the DMV
+    /// waits beside them are the source, as in the SQL read surfaces.</summary>
+    [Fact]
+    public void XeReportsThatAreAllSelfWaits_FallBackToTheDmvWaits()
+    {
+        var rows = OneWait(59, 59, T0, 6);
+        rows.AddRange(OneWait(202, 200, T0.AddMinutes(5), 3, source: BlockedProcessAlertRow.DmvSnapshotSource));
+
+        var wait = Assert.Single(AlertContextBuilders.BlockingWaitRows(rows, Array.Empty<string>()));
+        Assert.Equal(BlockedProcessAlertRow.DmvSnapshotSource, wait.Source);
+        Assert.Equal(200, wait.BlockingSpid);
+    }
+
     [Fact]
     public void NoXeReportsAtAll_CountsTheDmvWaits_OutsideTheExcludedDatabases()
     {
