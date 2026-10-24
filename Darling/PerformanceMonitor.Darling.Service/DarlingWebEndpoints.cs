@@ -4741,9 +4741,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static IResult QueryTagToolResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted,
         int successStatus = StatusCodes.Status200OK)
     {
+        /* #6341 round 1: a ServerError is answered with a fixed body and is not swept; the status and the one log line come from
+           the tool's own result, never from the swept text. */
+        if (ClassifyToolResponse(result) is ToolResponseKind.ServerError)
+        {
+            return ServerTagToolResult(result, route, logger, elapsedMs, requestAborted, successStatus);
+        }
+
         var swept = DarlingWebStatementSweep.Apply(result);
         if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs, requestAborted);
-        return ServerTagToolResult(swept.Text, route, logger, elapsedMs, requestAborted, successStatus);
+        return ServerTagToolResult(result, route, logger, elapsedMs, requestAborted, successStatus, swept.Text);
     }
 
     /// <summary>Parses the request body as one JSON object, or names why it is not.</summary>
@@ -4937,7 +4944,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// handling (the caught-exception sentence never reaches the wire) with <see cref="ServerTagEnvelopeStatus"/>'s
     /// status.</summary>
     internal static IResult ServerTagToolResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted,
-        int successStatus = StatusCodes.Status200OK)
+        int successStatus = StatusCodes.Status200OK, string? writtenBody = null)
     {
         var kind = ClassifyToolResponse(result);
         if (kind is ToolResponseKind.ServerError)
@@ -4945,10 +4952,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             return ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs, requestAborted);
         }
 
+        /* #6341 round 1: the status comes from the tool's own result; writtenBody (the swept text) only replaces what is written. */
         var httpStatus = ServerTagEnvelopeStatus(result, successStatus);
+        var body = writtenBody ?? result;
         return kind is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal
-            ? Results.Text(result, "application/json", statusCode: httpStatus)
-            : ErrorResult(McpHelpers.ErrorMessageOf(result), httpStatus);
+            ? Results.Text(body, "application/json", statusCode: httpStatus)
+            : ErrorResult(McpHelpers.ErrorMessageOf(body), httpStatus);
     }
 
     /// <summary>Reads the raw request body text — what the mute-rule cores parse themselves, so the web layer
@@ -5018,13 +5027,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// 500 otherwise. Any other error (a bare non-JSON string) is still wrapped as <c>{"error": sentence}</c>.</para>
     /// </summary>
     internal static IResult MuteRuleToolResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted,
-        int successStatus = StatusCodes.Status200OK)
+        int successStatus = StatusCodes.Status200OK, SensitiveStatements.JudgeBudget? sweepBudget = null)
     {
-        /* #4348: swept first, like ToHttpResult. A mute rule echoes the pattern it was given, which can be a statement. */
-        var swept = DarlingWebStatementSweep.Apply(result);
-        if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs, requestAborted);
-        result = swept.Text;
-
+        /* #6341 round 1: classified, and the status read, from the tool's own result BEFORE the sweep, like ToHttpResult: the
+           sweep can withhold the status word and must not decide the status or whether the fault is logged. */
         var kind = ClassifyToolResponse(result);
         if (kind is ToolResponseKind.ServerError)
         {
@@ -5032,9 +5038,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
 
         var httpStatus = MuteRuleEnvelopeStatus(result, successStatus);
+
+        /* #4348: swept over the body that is written. A mute rule echoes the pattern it was given, which can be a statement. */
+        var swept = DarlingWebStatementSweep.Apply(result, sweepBudget);
+        if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs, requestAborted);
+
         return kind is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal
-            ? Results.Text(result, "application/json", statusCode: httpStatus)
-            : ErrorResult(McpHelpers.ErrorMessageOf(result), httpStatus);
+            ? Results.Text(swept.Text, "application/json", statusCode: httpStatus)
+            : ErrorResult(McpHelpers.ErrorMessageOf(swept.Text), httpStatus);
     }
 
     /// <summary>The discriminated outcome of <see cref="RunComposedPanelAsync"/>: the <c>{sql, rows,
@@ -9335,18 +9346,25 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static IResult ToHttpResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted,
         SensitiveStatements.JudgeBudget? sweepBudget = null)
     {
-        /* #4348: the statement filter's web sweep. It runs BEFORE ClassifyToolResponse, so the error sentence
-           ServerErrorResult echoes is swept too, and a body it cannot read is never written. */
+        /* #6341 round 1: classified from the tool's own result BEFORE the sweep. The sweep can withhold the status word
+           or the whole sentence (it fails closed when the judge runs out of time), and a classification read off that
+           placeholder answered a store fault 200 or 400 with no log line. The status and the one log line never depend on
+           the sweep. A ServerError is answered with a fixed body and writes none of the tool's text, so it is not swept. */
+        var kind = ClassifyToolResponse(result);
+        if (kind == ToolResponseKind.ServerError)
+        {
+            return ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs, requestAborted);
+        }
+
+        /* #4348: the statement filter's web sweep, over the body that is written; a body it cannot read is never written. */
         var swept = DarlingWebStatementSweep.Apply(result, sweepBudget);
         if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs, requestAborted);
-        result = swept.Text;
 
-        return ClassifyToolResponse(result) switch
+        return kind switch
         {
-            ToolResponseKind.JsonPassthrough => Results.Text(result, "application/json"),
-            ToolResponseKind.Refusal => Results.Text(result, "application/json", statusCode: StatusCodes.Status400BadRequest),
-            ToolResponseKind.ServerError => ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs, requestAborted),
-            _ => Results.Json(new { error = result }, statusCode: StatusCodes.Status400BadRequest),
+            ToolResponseKind.JsonPassthrough => Results.Text(swept.Text, "application/json"),
+            ToolResponseKind.Refusal => Results.Text(swept.Text, "application/json", statusCode: StatusCodes.Status400BadRequest),
+            _ => Results.Json(new { error = swept.Text }, statusCode: StatusCodes.Status400BadRequest),
         };
     }
 
