@@ -153,15 +153,53 @@ public sealed class DarlingMcpPlanForceTools
     /// <summary>
     /// The gate's refusal as an answer (#6455). A dry run asks the same gate a write does, so a call with no agent_action is refused
     /// as <c>agent_action_required</c> before the per-server switch is read. The message now says why a dry run needs the claim, so
-    /// the refusal does not read as if the tool wrongly demanded one for a call that writes nothing.
+    /// the refusal does not read as if the tool wrongly demanded one for a call that writes nothing, and it says what the server's
+    /// switch for this action reads now (<paramref name="switchState"/>, from <see cref="ReadSwitchStateAsync"/>), so the dry run
+    /// still shows whether the real call could run.
     /// </summary>
-    internal static string GateRefusalAnswer(AgentActionRefusal refusal, bool dryRun) =>
+    internal static string GateRefusalAnswer(AgentActionRefusal refusal, bool dryRun, string? switchState = null) =>
         dryRun && refusal.Reason == AgentActionCodes.Required
             ? DarlingAgentActionGate.RefusalAnswer(refusal with
             {
-                Message = refusal.Message + " A dry run needs it too: it signs in to the monitored server with the remediation login and reads that server's action switch, so it is gated like a write, although it writes nothing.",
+                Message = refusal.Message + " A dry run needs it too: it signs in to the monitored server with the remediation login and reads that server's action switch, so it is gated like a write, although it writes nothing."
+                    + (switchState is null ? string.Empty : " " + switchState),
             })
             : DarlingAgentActionGate.RefusalAnswer(refusal);
+
+    /// <summary>
+    /// The refusal answer for a gate refusal, reading the server's switch for the action first when a dry run was refused for want of the
+    /// claim (#6455). The read is <see cref="ServerActionSwitches.ListAsync"/>, the one the switch screens use; it needs no claim. A read
+    /// that fails leaves the note out: the refusal itself must still be answered.
+    /// </summary>
+    private static async Task<string> GateRefusalAnswerAsync(
+        AgentActionRefusal refusal, bool dryRun, NpgsqlDataSource owner, ILogger? logger, int serverId, string serverName, string serverAction, CancellationToken ct) =>
+        GateRefusalAnswer(refusal, dryRun,
+            dryRun && refusal.Reason == AgentActionCodes.Required
+                ? await ReadSwitchStateAsync(owner, logger, serverId, serverName, serverAction, ct)
+                : null);
+
+    /// <summary>One sentence saying whether the server's switch for the action is on or off, or null when it cannot be read.</summary>
+    internal static async Task<string?> ReadSwitchStateAsync(NpgsqlDataSource owner, ILogger? logger, int serverId, string serverName, string serverAction, CancellationToken ct)
+    {
+        try
+        {
+            var rows = await ServerActionSwitches.ListAsync(owner, ct);
+            var state = rows.FirstOrDefault(row => row.ServerId == serverId)?.Actions.FirstOrDefault(a => string.Equals(a.Action, serverAction, StringComparison.Ordinal));
+            if (state is null)
+                return null;
+            return $"For reference, {ServerActionNames.Label(serverAction)} on {serverName} is currently {(state.Enabled ? "on" : "off")}"
+                + (state.Enabled ? "." : $", so the real call would be refused as {AgentActionCodes.SwitchOff} until it is turned on.");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex, "Could not read the {Action} switch for server {ServerId} to add it to a dry-run refusal", serverAction, serverId);
+            return null;
+        }
+    }
 
     /// <summary>
     /// Adds the <c>notice</c> a made change carries (not <c>warnings</c>: evict and kill already answer a list under that key) (#5632, step 13): the store recorded the change late, or could not record it,
@@ -230,7 +268,7 @@ public sealed class DarlingMcpPlanForceTools
             /* 2: the gate, for a dry run too. */
             var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.ForcePlan, agent_action, target, ct, agentTokenName);
             if (decision.Refusal is { } gateRefusal)
-                return GateRefusalAnswer(gateRefusal, dry_run);
+                return await GateRefusalAnswerAsync(gateRefusal, dry_run, owner, logger, target.ServerId, target.ServerName, ServerActionNames.ForcePlan, ct);
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
@@ -405,7 +443,7 @@ public sealed class DarlingMcpPlanForceTools
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, handle, null);
             var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.EvictPlan, agent_action, target, ct, agentTokenName);
             if (decision.Refusal is { } gateRefusal)
-                return GateRefusalAnswer(gateRefusal, dry_run);
+                return await GateRefusalAnswerAsync(gateRefusal, dry_run, owner, logger, target.ServerId, target.ServerName, ServerActionNames.EvictPlan, ct);
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
@@ -529,7 +567,7 @@ public sealed class DarlingMcpPlanForceTools
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, idText, targetDatabase);
             var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.KillSession, agent_action, target, ct, agentTokenName);
             if (decision.Refusal is { } gateRefusal)
-                return GateRefusalAnswer(gateRefusal, dry_run);
+                return await GateRefusalAnswerAsync(gateRefusal, dry_run, owner, logger, target.ServerId, target.ServerName, ServerActionNames.KillSession, ct);
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
@@ -685,7 +723,7 @@ public sealed class DarlingMcpPlanForceTools
         var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, idText, null);
         var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.KillSession, agent_action, target, ct, agentTokenName);
         if (decision.Refusal is { } gateRefusal)
-            return GateRefusalAnswer(gateRefusal, dry_run);
+            return await GateRefusalAnswerAsync(gateRefusal, dry_run, owner, logger, target.ServerId, target.ServerName, ServerActionNames.KillSession, ct);
         var permit = decision.Permit!;
         _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
