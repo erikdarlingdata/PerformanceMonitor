@@ -313,7 +313,7 @@ Everything it can name provably came out of one of our own zips, because the man
 
 The service reports the set once per start with a count, a total and that command — informational while you are within retention, a warning past it. It never deletes one itself: it did not create them.
 
-**The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints the post-start checklist; work it about 10–15 minutes later against the store, and hold the upgrade unverified until every line passes.
+**The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints a post-start checklist. About 10–15 minutes after the start, work it in the Viewer or the web page: every monitored server shows Online, Collectors shows OK with none failing, and the service log has a `Postgres store ready (schema v<N>, ...)` line from this start. N is the store version this build expects. If you connect to the store, `SELECT MAX(version) FROM darling_schema_version` returns the same N. Hold the upgrade unverified until every check passes.
 
 ##### Rolling back to an older build
 

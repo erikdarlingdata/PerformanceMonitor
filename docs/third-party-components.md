@@ -1,5 +1,7 @@
 # Third-Party Components
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 ### sp_WhoIsActive
