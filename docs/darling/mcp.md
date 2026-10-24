@@ -1,5 +1,7 @@
 # Darling MCP setup
 
+Audience: operators.
+
 MCP is the endpoint that an LLM client talks to. It is off by default. This page shows how to turn it on for Darling and how to connect from the same box or another machine. It also lists what to check when a client will not connect.
 
 Install the service first. See [Install Darling](install.md). For the tools, the Lite setup and the shared client notes, see [MCP server](../mcp-server.md). That page covers both Lite and Darling, and this page does not copy it.

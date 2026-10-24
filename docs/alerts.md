@@ -1,5 +1,7 @@
 # Alerts & Notifications
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 Every edition includes a real-time alert engine that monitors for performance issues and sends notifications via system tray balloons (Lite/Dashboard), email, and webhooks.
