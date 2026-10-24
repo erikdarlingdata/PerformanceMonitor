@@ -1,5 +1,7 @@
 # Features and screenshots
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 ## What You Get

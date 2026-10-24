@@ -121,12 +121,17 @@ public sealed record NotificationRouteDecision(
     /// those two, such as a cooldown or a fold — says <see cref="AlertRouteOutcomes.NotAttempted"/>. Without
     /// it the outcome stays null, "this row does not say". Only that word is stored, never the error text: a
     /// webhook failure message can carry the endpoint's URL, which is a secret, so <c>send_error</c> remains
-    /// the one place a reason is written.</para></summary>
-    public AlertRouteDto ToDto(IReadOnlyDictionary<string, AlertChannelOutcome>? outcomes = null) => new(
+    /// the one place a reason is written.</para>
+    ///
+    /// <para>#6718: <paramref name="genericSentKey"/> is the <c>{{dedup_key}}</c> the generic post rendered, stored on the
+    /// generic destination as <see cref="AlertRouteDestinationDto.SentKey"/>. Null leaves it null.</para></summary>
+    public AlertRouteDto ToDto(IReadOnlyDictionary<string, AlertChannelOutcome>? outcomes = null, string? genericSentKey = null) => new(
         Family,
         RouteId,
         All.Where(d => d.IsDelivered)
-           .Select(d => new AlertRouteDestinationDto(d.Channel, d.RouteId, d.Source.ToString(), OutcomeText(d.Channel, outcomes)))
+           .Select(d => new AlertRouteDestinationDto(
+               d.Channel, d.RouteId, d.Source.ToString(), OutcomeText(d.Channel, outcomes),
+               d.Channel == NotificationRouter.GenericChannel ? genericSentKey : null))
            .ToList());
 
     private static string? OutcomeText(string channel, IReadOnlyDictionary<string, AlertChannelOutcome>? outcomes)
