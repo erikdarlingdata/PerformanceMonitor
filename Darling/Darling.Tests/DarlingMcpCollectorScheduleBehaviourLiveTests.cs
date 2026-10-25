@@ -227,7 +227,7 @@ public sealed class DarlingMcpCollectorScheduleBehaviourLiveTests
                 ("enable_collector", l => DarlingMcpCollectorScheduleTools.EnableCollector(source, Delta, "beh-alpha", logger: l, cancellationToken: ct)),
                 ("enable_collector", l => DarlingMcpCollectorScheduleTools.EnableCollector(source, Delta, "beh-alpha", inherit: true, logger: l, cancellationToken: ct)),
                 ("set_collector_frequency", l => DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Delta, 10, false, "beh-alpha", l, ct)),
-                ("set_collector_retention", l => DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Delta, 45, false, "beh-alpha", l, ct)),
+                ("set_collector_retention", l => DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Delta, 45, false, null, l, ct)),
                 ("set_collector_run_at", l => DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, Daily, "03:30", "beh-alpha", l, ct)),
                 ("set_collector_databases", l => DarlingMcpCollectorScheduleTools.SetCollectorDatabases(source, Delta, "Sales", false, "beh-alpha", l, ct)),
                 /* Last: it removes the rows the calls above made, so it has something to remove. */
@@ -249,7 +249,8 @@ public sealed class DarlingMcpCollectorScheduleBehaviourLiveTests
                     Assert.Contains(tool == "set_collector_run_at" ? Daily : Delta, line, StringComparison.Ordinal);
                 }
 
-                Assert.Contains("beh-alpha", line, StringComparison.Ordinal);
+                /* Retention is fleet-wide, so its write names the fleet scope, not the server. */
+                Assert.Contains(tool == "set_collector_retention" ? "fleet" : "beh-alpha", line, StringComparison.OrdinalIgnoreCase);
                 Assert.Contains("client says: " + Caller, line, StringComparison.Ordinal);
             }
 

@@ -366,6 +366,62 @@ public sealed class DarlingStoreLoginsTests
         }
     }
 
+    /// <summary>Whether a 42501 on a route write gets the "re-run provision-roles.sql" sentence. Nobody runs the script on the
+    /// managed store or on the compose distribution's own store, whether this start provisioned its roles or an earlier start
+    /// did; a bring-your-own store, in a container or not, is the operator's.</summary>
+    [Fact]
+    public async Task TheRerunSentence_IsForABringYourOwnStoreOnly_NotTheComposeDistributionsOwnStore()
+    {
+        var previousContainer = Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER");
+        var directory = Path.Combine(Path.GetTempPath(), "darling-rerun-sentence-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var selfManaged = new PostgresConfig { ConnectionString = Owner, Managed = false };
+        var managed = new PostgresConfig { ConnectionString = Owner, Managed = true };
+        try
+        {
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", "true");
+            var ct = TestContext.Current.CancellationToken;
+
+            /* The managed store. */
+            DarlingStoreLogins.ResetMcpLoginSourceForTests();
+            Assert.False(DarlingMcpAlertTools.StoreRolesAreRunByOperator(managed));
+
+            /* The compose store, roles provisioned this start: the host resolves the mcp role. */
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            DarlingStoreLogins.PublishComposeStoreVerdict(Provisioned());
+            Assert.Equal(McpLogin, await DarlingStoreLogins.ResolveUnmanagedAsync(
+                DarlingStoreLogins.Surface.Mcp, selfManaged, NullLogger.Instance, ct));
+            Assert.False(DarlingMcpAlertTools.StoreRolesAreRunByOperator(selfManaged));
+
+            /* The compose store, roles not provisioned this start: the host keeps the mcp role's credential from an earlier
+               start. The verdict is "not provisioned" here, exactly as on a bring-your-own store, so only the login tells them apart. */
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            DarlingStoreLogins.PublishComposeStoreVerdict(DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned("refused", directory));
+            DarlingStoreLogins.RecordMcpLoginSource(DarlingStoreLogins.LoginSource.ComposeStoreRoleFromEarlierStart);
+            Assert.False(DarlingMcpAlertTools.StoreRolesAreRunByOperator(selfManaged));
+
+            /* A bring-your-own store in a container: the same "not provisioned" verdict, no earlier credential, so the owner. */
+            DarlingStoreLogins.ResetMcpLoginSourceForTests();
+            Assert.Equal(Owner, await DarlingStoreLogins.ResolveUnmanagedAsync(
+                DarlingStoreLogins.Surface.Mcp, selfManaged, NullLogger.Instance, ct));
+            Assert.True(DarlingMcpAlertTools.StoreRolesAreRunByOperator(selfManaged));
+
+            /* A bring-your-own store outside a container, and a host that has not resolved a login. */
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", previousContainer);
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            DarlingStoreLogins.ResetMcpLoginSourceForTests();
+            Assert.True(DarlingMcpAlertTools.StoreRolesAreRunByOperator(selfManaged));
+            Assert.True(DarlingMcpAlertTools.StoreRolesAreRunByOperator(null));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", previousContainer);
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            DarlingStoreLogins.ResetMcpLoginSourceForTests();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     /// <summary>A refused or failed start carries the directory the worker provisions from, so the hosts read the
     /// earlier credentials from the same place; a provisioned verdict carries none, since nothing reads it.</summary>
     [Fact]
