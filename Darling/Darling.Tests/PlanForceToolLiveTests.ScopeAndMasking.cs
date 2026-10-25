@@ -8,9 +8,11 @@
 
 using System;
 using System.Globalization;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Remediation;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -44,7 +46,8 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal("database_excluded", (string?)json["reason"]);
             Assert.Contains("is excluded in this server's entry, so Darling does not act in it", (string?)json["message"], StringComparison.Ordinal);
             Assert.Equal(0, await JournalActionRowsAsync(c));
-            Assert.Equal("1", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'database_excluded'", c.Ct));
+            Assert.Equal("1", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'database_excluded' AND actor = 'agent:agent-a' "
+                + "AND request_id = (SELECT request_id FROM config.investigation_requests LIMIT 1)", c.Ct));
         }, storeOnly: true);
     }
 
@@ -59,7 +62,9 @@ public sealed partial class PlanForceToolLiveTests
 
             /* The server row's host is a closed port here, so the tool stops at the before-state read; it was not refused as excluded. */
             var json = Parse(await c.Tool(force, queryId: 11, planId: 22, dryRun: true));
-            Assert.NotEqual("database_excluded", (string?)json["reason"]);
+            Assert.Equal("failed", (string?)json["status"]);
+            Assert.Null((string?)json["reason"]);
+            Assert.DoesNotContain("is excluded in this server's entry", (string?)json["message"], StringComparison.Ordinal);
             Assert.Equal("0", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE reason = 'database_excluded'", c.Ct));
         }, storeOnly: true);
     }
@@ -85,16 +90,32 @@ public sealed partial class PlanForceToolLiveTests
         }, storeOnly: true);
     }
 
-    /// <summary>The before image a plan guide drop journals and answers with: the guide's batch text and hint string hold literals.</summary>
-    private static JsonObject DroppedGuideBefore(Ctx c) => new()
-    {
-        ["database"] = c.Sql.Database,
-        ["guide"] = new JsonObject
+    /// <summary>The before image a plan guide drop journals and answers with: the tool's own <c>GuideImage</c>, serialized the way the tool serializes it. The guide's batch text and hint string hold literals.</summary>
+    private static JsonObject DroppedGuideBefore(Ctx c, PlanGuideDefinition? guide = null) =>
+        JsonNode.Parse(JsonSerializer.Serialize(new
         {
-            ["name"] = "guide_one", ["type"] = "SQL", ["statement"] = GuideBatch, ["module_or_batch"] = GuideBatch,
-            ["params"] = "@p int", ["hints"] = GuideHints, ["is_disabled"] = false,
-        },
-    };
+            database = c.Sql.Database,
+            guide = DarlingMcpPlanForceTools.GuideImage(guide ?? new PlanGuideDefinition("guide_one", "SQL", GuideBatch, GuideBatch, "@p int", GuideHints), disabled: false),
+        }, McpHelpers.JsonOptions))!.AsObject();
+
+    [Theory]
+    [InlineData(McpDataDetail.Full)]
+    [InlineData(McpDataDetail.MaskLiterals)]
+    [InlineData(McpDataDetail.MetadataOnly)]
+    public async Task AnObjectGuidesModuleName_IsKeptAtEveryLevel_WhileItsBatchKeyIsMasked(McpDataDetail mode)
+    {
+        await RunAsync(Without.Nothing, c =>
+        {
+            var guide = new PlanGuideDefinition("guide_obj", "OBJECT", GuideBatch, "[dbo].[proc_one]", null, GuideHints);
+            var answer = new JsonObject { ["status"] = "dry_run", ["before"] = DroppedGuideBefore(c, guide) }.ToJsonString();
+
+            var masked = JsonNode.Parse(McpDataDetailMasker.ForAnswer(mode, PseudonymTestKey.Key).Answer(answer))!["before"]!["guide"]!;
+            Assert.Equal("[dbo].[proc_one]", (string?)masked["module"]);
+            if (mode == McpDataDetail.MetadataOnly)
+                Assert.NotEqual("[dbo].[proc_one]", (string?)masked["module_or_batch"]);
+            return Task.CompletedTask;
+        }, storeOnly: true);
+    }
 
     [Theory]
     [InlineData(McpDataDetail.Full, true)]

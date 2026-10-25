@@ -190,7 +190,7 @@ public sealed partial class PlanForceToolLiveTests
     }
 
     /// <param name="storeOnly">A test whose tool refuses before it reaches the monitored server needs only the store: no SQL Server database is made, and the server row's host is a closed local port.</param>
-    private static async Task RunAsync(Without without, Func<Ctx, Task> body, bool postgresTarget = false, bool storeOnly = false)
+    private static async Task RunAsync(Without without, Func<Ctx, Task> body, bool storeOnly = false)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(StoreConnectionString), "Set DARLING_TEST_PG to run the plan force tool live tests.");
         Assert.SkipWhen(!storeOnly && string.IsNullOrEmpty(SqlHost), "Set DARLING_TEST_SQL (and DARLING_TEST_SQL_USER / DARLING_TEST_SQL_PASSWORD) to run the plan force tool live tests.");

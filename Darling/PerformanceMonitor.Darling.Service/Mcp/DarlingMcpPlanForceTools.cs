@@ -1026,8 +1026,7 @@ public sealed partial class DarlingMcpPlanForceTools
         if (IsExcludedDatabase(row.ExcludedDatabases, facts.Database))
         {
             await session.RecordRefusalAsync(AzureDatabaseExcluded, ct);
-            return PlanUndoAnswer.Refused(AzureDatabaseExcluded, ExcludedDatabaseRefusal(facts.Database).Message.Replace(" Nothing was run.",
-                " Nothing was run. To reverse this change, unforce or force the plan by hand in that database, or remove the database from the server's exclusion list and undo it again.", StringComparison.Ordinal));
+            return PlanUndoAnswer.Refused(AzureDatabaseExcluded, ExcludedDatabaseRefusal(facts.Database, ForceUndoExcludedGuidance).Message);
         }
 
         var executor = new SqlServerRemediationExecutor(facts.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
@@ -1205,8 +1204,16 @@ SELECT EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND d
     }
 
     /// <summary>The refusal for a database the server's entry excludes, shared by the Azure kill, <c>recompile_module</c> and the plan guide tools.</summary>
-    internal static AgentActionRefusal ExcludedDatabaseRefusal(string database) =>
-        new(AzureDatabaseExcluded, $"Database {database} is excluded in this server's entry, so Darling does not act in it. Nothing was run.");
+    internal static AgentActionRefusal ExcludedDatabaseRefusal(string database) => ExcludedDatabaseRefusal(database, null);
+
+    /// <summary>The sentence the force undo adds after the shared refusal, because an undo is a person's way back and the refusal alone leaves them no next step.</summary>
+    internal const string ForceUndoExcludedGuidance =
+        "To reverse this change, unforce or force the plan by hand in that database, or remove the database from the server's exclusion list and undo it again.";
+
+    /// <summary>The shared refusal followed by <paramref name="guidance"/> when there is one.</summary>
+    internal static AgentActionRefusal ExcludedDatabaseRefusal(string database, string? guidance) =>
+        new(AzureDatabaseExcluded, $"Database {database} is excluded in this server's entry, so Darling does not act in it. Nothing was run."
+            + (string.IsNullOrEmpty(guidance) ? "" : " " + guidance));
 
     /// <summary>Whether the server entry's excluded list names <paramref name="database"/>: entries are compared trimmed, and without regard to case (#5632).</summary>
     internal static bool IsExcludedDatabase(string[]? excluded, string database) =>
