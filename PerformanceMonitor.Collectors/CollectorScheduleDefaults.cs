@@ -119,6 +119,9 @@ public static class CollectorScheduleDefaults
            plans themselves, a few rows per database, so the store can say whether each force works. Five minutes is the
            query_store cadence the rows are compared against; 30 days is the retention of the rows it is compared with. */
         ["query_store_forced_plans"] = new(5, 30),
+        /* #6581 Query Store hints (SQL Server 2022 and later). A hint changes a plan as a force does, so it is read on the forced-plans
+           cadence and kept as long: Change Watch compares two complete captures. */
+        ["query_store_hints"] = new(5, 30),
         /* #1951 ADR persistent version store. Cadence and retention deliberately MATCH
            database_size_stats (60/90) rather than the per-minute health tier: PVS size is the same
            kind of slow-moving disk-pressure telemetry, it is read beside database sizes, and pairing

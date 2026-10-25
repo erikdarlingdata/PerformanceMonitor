@@ -71,6 +71,7 @@ public static partial class CustomViewValidation
             ["get_resource_use_by_tag"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("tag", false), new("limit", false), new("as_of", false) },
             ["get_query_store_query_history"] = new ReadPanelParam[] { new("database_name", true), new("query_id", true), new("server", false), new("hours", false), new("as_of", false) },
             ["get_forced_plans"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false), new("database_name", false) },
+            ["get_query_store_hints"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false), new("database_name", false) },
             ["get_plan_force_precheck"] = new ReadPanelParam[] { new("database_name", true), new("query_id", true), new("plan_id", true), new("compare_plan_id", false), new("server", false), new("hours", false), new("as_of", false) },
             ["get_query_store_aborts"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("top", false), new("database_name", false), new("as_of", false), new("full_text", false) },
             ["get_cpu_by_database"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("top", false), new("as_of", false) },

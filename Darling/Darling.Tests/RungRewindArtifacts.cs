@@ -520,6 +520,10 @@ DO $$ BEGIN
         ALTER TABLE config.config_alert_settings ALTER COLUMN client_timeouts_enabled SET DEFAULT FALSE;
     END IF;
 END $$;"),
+        // V217 (#6581): the Query Store hints table. The table is the probe's newest sentinel. The rewind drops it (its indexes go with it), so a
+        // re-run of V217 does everything again. Safe on a store that never had it.
+        new(217, "hasQueryStoreHints",
+            "DROP TABLE IF EXISTS collect.query_store_hints;"),
     ];
 
     /// <summary>

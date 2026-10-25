@@ -128,7 +128,7 @@ public sealed class QueryStoreForcedPlansCollector : CollectorDefinitionBase<Que
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target is not null && target.IsAzureSqlDb;
 
     /// <summary>The same databases <see cref="QueryStoreCollector"/> enumerates, minus its per-database state probe (the per-database statement checks it).</summary>
-    private const string OnPremDatabaseListQueryText = @"
+    internal const string OnPremDatabaseListQueryText = @"
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 

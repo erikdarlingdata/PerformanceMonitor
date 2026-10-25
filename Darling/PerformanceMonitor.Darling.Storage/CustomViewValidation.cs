@@ -79,6 +79,7 @@ public static partial class CustomViewValidation
         "get_resource_use_by_tag",
         "get_query_store_query_history",
         "get_forced_plans",
+        "get_query_store_hints",
         "get_plan_force_precheck",
         "get_query_store_aborts",
         "get_cpu_by_database",

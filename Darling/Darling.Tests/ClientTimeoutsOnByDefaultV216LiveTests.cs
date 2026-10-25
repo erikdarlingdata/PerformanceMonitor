@@ -84,13 +84,13 @@ public sealed class ClientTimeoutsOnByDefaultV216LiveTests
 
         var applied = await PgMigrations.MigrateAsync(connection, ct);
 
-        Assert.Equal(1, applied);
+        Assert.Equal(StorageVersion.SchemaVersion - 215, applied);
         Assert.True(await ScalarAsync<bool>(connection, EnabledSql, ct));
         Assert.Equal("true", await ScalarAsync<string>(connection, DefaultSql, ct));
         Assert.Equal(7, await ScalarAsync<int>(connection, "SELECT client_timeouts_warning_per_minute FROM config.config_alert_settings WHERE id = 1", ct));
         await using (var viewer = new ViewerDataService(scratch.ConnectionString))
         {
-            Assert.Equal(216, await viewer.GetStoreSchemaVersionAsync(ct));
+            Assert.Equal(StorageVersion.SchemaVersion, await viewer.GetStoreSchemaVersionAsync(ct));
         }
 
         /* An operator switches it off after the upgrade, and the next start finds the rung stamped and leaves it. */

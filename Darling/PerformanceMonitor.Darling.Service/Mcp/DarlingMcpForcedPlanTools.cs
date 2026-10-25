@@ -16,6 +16,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -194,6 +195,196 @@ public sealed class DarlingMcpForcedPlanTools
             return McpHelpers.FormatError("get_forced_plans", ex);
         }
     }
+
+    [McpServerTool(Name = "get_query_store_hints"), Description(
+        "Which Query Store hints are in place: one entry per hint in its database's newest capture in the window, with the query, the hint text, where it came from, whether the engine records a failure, and the query's text. <<GUIDE>> " +
+        "A Query Store hint (sys.sp_query_store_set_hints, SQL Server 2022 and later, Azure SQL) changes a query's plan as a forced plan does, and nothing else Darling reads shows one set or cleared. " +
+        "state: FAILING (the engine names a failure reason or counts a failure, last_query_hint_failure_reason and query_hint_failure_count say which) or NO_FAILURE (the engine records no failure; the view has no applied column, so this is the absence of a failure, not proof the hint took effect). " +
+        "Reads the query_store_hints collector (every 5 minutes), never a monitored server. A database is judged by its own newest capture, and a hint absent from it was cleared and is not listed. " +
+        "first_seen is the first capture in the window that shows the hint, so the real set time can be up to one pass (5 minutes by default) earlier, and a hint set before the window reads as first seen at the window's first capture. " +
+        "query_text is the query's stored text cut to 1000 characters (query_text_truncated says when it was cut); it is null when the Query Store collector has not stored that query. " +
+        "Status words: empty (databases were captured and none has a hint), unavailable (no capture in the window: the collector has not run in it, or Query Store is off, in error or a readable secondary in every database), " +
+        "not_collected (the server is older than SQL Server 2022, which has no hints view, or is not a SQL Server). " +
+        "query_store_hints lists FAILING hints first, at most limit (default and most 200) per call: when has_more is true, call again with offset = next_offset. query_id and database_name narrow the read itself, so a hint is found even on a server with more hints than one read holds (2000). " +
+        "total_hints and failing_hints count every hint in the newest captures (and captures[].hint_count every hint of that database); hints_returned is how many the read holds, at most 2000, failing ones first, and read_capped is true when the rest are not listed (truncated is then true too, with has_more false once the list's end is reached).")]
+    public static async Task<string> GetQueryStoreHints(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of captures ending at as_of (default 24).")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
+        [Description("Only the hints of this Query Store query_id. Omit for all.")] long? query_id = null,
+        [Description("Maximum hints to list per call, failing first. Default and most 200.")] int limit = MaxListed,
+        [Description("Hints to skip before listing (a page start). Default 0; use next_offset when has_more is true.")] int offset = 0,
+        CancellationToken cancellationToken = default)
+        => await GetQueryStoreHints(postgres, server_name, hours_back, as_of, DatabaseFilter.One(database_name), query_id, limit, offset, cancellationToken);
+
+    /// <summary>The read over a LIST of databases: the MCP tool passes <c>DatabaseFilter.One</c>, the web route the repeated keys.</summary>
+    internal static Task<string> GetQueryStoreHints(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, DatabaseFilter databases, CancellationToken cancellationToken) =>
+        GetQueryStoreHints(postgres, server_name, hours_back, as_of, databases, null, MaxListed, 0, cancellationToken);
+
+    internal static async Task<string> GetQueryStoreHints(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, DatabaseFilter databases,
+        long? queryId, int limit, int offset, CancellationToken cancellationToken)
+    {
+        if (limit < 1 || limit > MaxListed)
+            return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}'. Must be 1-{MaxListed}.");
+        if (offset < 0)
+            return McpHelpers.Refusal("offset", $"Invalid offset value '{offset}'. Must be 0 or more.");
+
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        if (error != null) return error;
+
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
+        if (validation != null) return validation;
+        var start = windowEnd.AddHours(-hours_back);
+
+        try
+        {
+            var read = await DarlingQueryStoreHintReader.ReadAsync(
+                postgres, resolved.ServerId, databases, queryId, start, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            ReadScope.NoteSource(ReadScope.SourceRaw);
+
+            var scope = databases.Describe();
+            var where = scope is null ? "" : $" for {(databases.Names.Count == 1 ? "database '" + scope + "'" : scope)}";
+            if (read.Captures.Count == 0)
+            {
+                return await HintsNotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken)
+                    ?? McpHelpers.Status("unavailable",
+                        $"No Query Store hint capture{where} in the {hours_back}-hour window ending {Format(windowEnd)}. Either the query_store_hints collector has not run in it, " +
+                        "or Query Store is off, in error or a readable secondary in every database (such a database writes no capture).");
+            }
+
+            if (read.Hints.Count == 0)
+            {
+                return JsonSerializer.Serialize(new Dictionary<string, object?>
+                {
+                    ["server"] = resolved.DisplayName,
+                    ["status"] = "empty",
+                    ["message"] = queryId is not null
+                        ? $"No hint{where} in the newest captures is on query_id {queryId}. Captured databases are listed."
+                        : $"No Query Store hint is in place{where} in the newest capture of each database in the window. Captured databases are listed.",
+                    ["as_of"] = Format(windowEnd),
+                    ["hours_back"] = hours_back,
+                    ["captures"] = read.Captures.Select(HintCaptureNode),
+                }, McpHelpers.JsonOptions);
+            }
+
+            var listed = read.Hints.Skip(offset).Take(limit).ToList();
+            var hasMore = offset + listed.Count < read.Hints.Count;
+            var readCapped = read.ReadCapped;
+            var withText = await DarlingQueryStoreHintReader.WithQueryTextAsync(
+                postgres, resolved.ServerId, listed, start, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            string? pageNote = null;
+            if (hasMore)
+                pageNote = $"Listed {listed.Count} of {read.Hints.Count} hints from offset {offset}. Call again with offset {offset + listed.Count} for the next page, or filter by database_name or query_id.";
+            else if (offset >= read.Hints.Count)
+                pageNote = $"offset {offset} is past the {read.Hints.Count} hints.";
+            if (readCapped)
+                pageNote = (pageNote is null ? "" : pageNote + " ") +
+                    $"The read holds at most {DarlingQueryStoreHintReader.MaxHints} hints, failing ones first, and this answer has {read.TotalHints}: the last {read.TotalHints - read.Hints.Count} (healthy ones, since failing hints sort first) are not listed. Filter by database_name or query_id to reach them.";
+            return JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["server"] = resolved.DisplayName,
+                ["as_of"] = Format(windowEnd),
+                ["hours_back"] = hours_back,
+                ["total_hints"] = read.TotalHints,
+                ["failing_hints"] = read.FailingHints,
+                ["hints_returned"] = read.Hints.Count,
+                ["read_capped"] = readCapped,
+                ["offset"] = offset,
+                ["limit"] = limit,
+                ["query_store_hints"] = withText.Select(HintNode),
+                ["truncated"] = hasMore || readCapped,
+                ["has_more"] = hasMore,
+                ["next_offset"] = hasMore ? offset + listed.Count : null,
+                ["page_note"] = pageNote,
+                ["captures"] = read.Captures.Select(HintCaptureNode),
+                ["note"] = "first_seen is the first capture in the window that shows the hint. Query Store keeps no set time, so the real one can be up to one collector pass earlier (5 minutes by default).",
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_query_store_hints", ex);
+        }
+    }
+
+    /// <summary>
+    /// $1 server_id. The registry facts the hints collector's gate asks about: edition, SQL major, engine kind, and the PostgreSQL major
+    /// (EngineAwareVersionLabelTests: a SQL major of 0 on a PostgreSQL target or 12 on an Azure SQL Database must never be read without the engine).
+    /// </summary>
+    internal const string HintsTargetFactsSql = "SELECT sql_engine_edition, sql_major_version, engine_kind, postgres_major_version FROM servers WHERE server_id = $1";
+
+    /// <summary>
+    /// The <c>not_collected</c> envelope when the hints collector does not run on this server, or <c>null</c> when it does (or when the
+    /// registry cannot be read, so the caller keeps its own answer). The engine and readable-secondary reasons come from
+    /// <see cref="DarlingEngineCapability.NotCollectedStatusAsync"/>; the version floor is asked of the collector itself
+    /// (<see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/>), which is the gate that stops it running.
+    /// </summary>
+    internal static async Task<string?> HintsNotCollectedStatusAsync(NpgsqlDataSource postgres, int serverId, string serverName, CancellationToken cancellationToken)
+    {
+        var engine = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, serverName, "query_store_hints", cancellationToken);
+        if (engine is not null)
+            return engine;
+
+        try
+        {
+            await using var command = postgres.CreateCommand(HintsTargetFactsSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+                return null;
+            var edition = reader.IsDBNull(0) ? 0 : reader.GetInt32(0);
+            var major = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
+            var kind = reader.IsDBNull(2) ? null : reader.GetString(2);
+            var postgresMajor = reader.IsDBNull(3) ? 0 : reader.GetInt32(3);
+            var target = new CollectorTargetInfo
+            {
+                Engine = MonitoredEngineKind.EngineOf(kind) ?? CollectorTargetEngine.SqlServer,
+                IsAzureSqlDb = edition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition,
+                IsAzureManagedInstance = edition == CollectorEngineCapability.AzureManagedInstanceEngineEdition,
+                SqlMajorVersion = major,
+                PostgresMajorVersion = postgresMajor,
+            };
+            /* The SQL Server version floor says nothing about another engine: its reason is the engine one asked above, never "version too old". */
+            if (target.Engine != CollectorTargetEngine.SqlServer || CollectorCatalog.AppliesTo(QueryStoreHintsCollector.Instance, target))
+                return null;
+
+            return McpHelpers.Status("not_collected",
+                $"{serverName} runs SQL Server major version {major}. Query Store hints (sys.query_store_query_hints) exist from SQL Server 2022 (major version {QueryStoreHintsCollector.FirstMajorVersion}), " +
+                "so the query_store_hints collector does not run on this server, and no hint can be set or read there. " +
+                "This is a permanent version gap until the server is upgraded, not a collection outage: checking collection health or enabling a collector cannot change it.");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    private static object HintCaptureNode(QueryStoreHintCapture c) => new
+    {
+        database_name = c.DatabaseName,
+        newest_capture = Format(c.NewestCapture),
+        hint_count = c.HintCount,
+    };
+
+    internal static object HintNode(QueryStoreHintFact h) => new
+    {
+        database_name = h.DatabaseName,
+        query_id = h.QueryId,
+        query_hint_id = h.HintId,
+        state = h.Failing ? "FAILING" : "NO_FAILURE",
+        query_hint_text = h.HintText,
+        source = h.Source,
+        last_query_hint_failure_reason = h.FailureReason,
+        query_hint_failure_count = h.FailureCount,
+        first_seen = Format(h.FirstSeen),
+        last_seen = Format(h.LastSeen),
+        query_text = h.QueryText,
+        query_text_truncated = h.QueryTextTruncated,
+    };
 
     private static object CaptureNode(ForcedPlanCapture c) => new
     {
