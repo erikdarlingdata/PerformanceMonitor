@@ -2076,11 +2076,28 @@ function New-DarlingMinimalConfigText([bool]$EnableWebDashboard = $false, [strin
 }
 
 # Writes the minimal file as UTF-8 without a byte-order mark, so every reader (the service's, this script's
-# regexes, Windows PowerShell 5.1) sees the same bytes.
+# regexes, Windows PowerShell 5.1) sees the same bytes. The file is created with a protected DACL (SYSTEM and Administrators
+# only) instead of inheriting the install tree's, because the -WebDashboard file holds the encrypted web token and step 4b only
+# restricts it much later: a run that stopped before then would leave a file the Users group can read, and the next run reuses it.
+# Step 4b rebuilds the DACL to add the service account and the operator group.
 function Write-DarlingMinimalConfig([string]$path, [bool]$EnableWebDashboard = $false) {
     $token = ''
     if ($EnableWebDashboard) { $token = New-DarlingWebEncryptedToken }
-    [System.IO.File]::WriteAllText($path, (New-DarlingMinimalConfigText $EnableWebDashboard $token), (New-Object System.Text.UTF8Encoding($false)))
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes((New-DarlingMinimalConfigText $EnableWebDashboard $token))
+    $wk = [System.Security.Principal.WellKnownSidType]
+    $acl = New-Object System.Security.AccessControl.FileSecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($kind in @($wk::LocalSystemSid, $wk::BuiltinAdministratorsSid)) {
+        $sid = New-Object System.Security.Principal.SecurityIdentifier($kind, $null)
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow)))
+    }
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        $stream = [System.IO.FileSystemAclExtensions]::Create((New-Object System.IO.FileInfo($path)), [System.IO.FileMode]::CreateNew, [System.Security.AccessControl.FileSystemRights]::Write, [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::None, $acl)
+    }
+    else {
+        $stream = [System.IO.File]::Create($path, 4096, [System.IO.FileOptions]::None, $acl)
+    }
+    try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
 }
 
 # Only a missing darling.json is written. An existing one (an upgrade or a re-run) is left exactly as it is, web token included.
@@ -3511,6 +3528,12 @@ if ($operatorSid) {
     $null = Invoke-DarlingOperatorStep $operatorGroupName $AddOperator ([bool]($NoOperatorPrompt -or $MsiPhase)) $configPath $storeFolder
 }
 
+# True when darling.json's "web" block turns the dashboard on. The match stays inside that block (nested braces one level deep, such as
+# network, are skipped over; the braces are hex escapes so a brace counter reading this function stays balanced), so a later block's "enabled": true (alerts, analysis, mcp) cannot answer for a web block that says false.
+function Test-DarlingWebEnabledText([string]$configText) {
+    return [bool]($configText -match '(?s)"web"\s*:\s*\x7B(?:[^\x7B\x7D]|\x7B[^\x7B\x7D]*\x7D)*?"enabled"\s*:\s*true')
+}
+
 # -- 8. Next steps (#6470) --------------------------------------------------------------------------
 # What the web dashboard's address is comes from the service's own log line for this start. The web host starts a few seconds
 # after the store is ready, so when darling.json turns the dashboard on, wait for that line briefly.
@@ -3519,7 +3542,7 @@ $webAddress = Get-DarlingWebAddress $entriesNow
 $webEnabledInConfig = $false
 if (-not $startupProblem -and -not $webAddress -and (Test-Path -LiteralPath $configPath -PathType Leaf)) {
     $configText = Get-Content -LiteralPath $configPath -Raw -ErrorAction SilentlyContinue
-    if ($configText -match '(?s)"web"\s*:\s*\{.*?"enabled"\s*:\s*true') {
+    if (Test-DarlingWebEnabledText $configText) {
         $webEnabledInConfig = $true
         for ($waited = 0; $waited -lt 15 -and -not $webAddress; $waited += 3) {
             Start-Sleep -Seconds 3
