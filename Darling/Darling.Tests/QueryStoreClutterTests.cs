@@ -628,7 +628,7 @@ public sealed class QueryStoreClutterTests
     [Fact]
     public void TheDarlingReadme_DescribesTheTool_WithTheReplicaRuleAndTheCaptureMode()
     {
-        var readme = ReadRepoFile("Darling", "README.md");
+        var readme = ReadRepoFile("docs", "darling", "configuration-mcp.md"); // #6416: moved from Darling/README.md
         Assert.Contains("`get_query_store_clutter` (#3797)", readme, StringComparison.Ordinal);
         Assert.Contains("excluded by architecture", readme, StringComparison.Ordinal);
         Assert.Contains("`query_capture_mode` is the V137 (#3796) column read verbatim", readme, StringComparison.Ordinal);

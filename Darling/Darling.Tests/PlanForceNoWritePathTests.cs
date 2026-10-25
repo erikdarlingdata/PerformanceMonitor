@@ -109,9 +109,9 @@ public sealed class PlanForceNoWritePathTests
     {
         string darling = Path.Combine(RepoRoot(), "Darling");
         string agents = File.ReadAllText(Path.Combine(darling, "AGENTS.example.md"));
-        string section = MarkdownSection(File.ReadAllText(Path.Combine(darling, "README.md")), "Hand an alert to your own agent");
+        string section = MarkdownSection(File.ReadAllText(Path.Combine(RepoRoot(), "docs", "darling", "agents-and-alert-sources.md")), "Hand an alert to your own agent"); // #6416: moved from Darling/README.md
 
-        foreach (var (name, text) in new[] { ("Darling/AGENTS.example.md", agents), ("Darling/README.md \"Hand an alert to your own agent\"", section) })
+        foreach (var (name, text) in new[] { ("Darling/AGENTS.example.md", agents), ("docs/darling/agents-and-alert-sources.md \"Hand an alert to your own agent\"", section) })
         {
             foreach (var statement in WriteStatements)
             {
