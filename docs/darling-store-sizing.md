@@ -38,7 +38,7 @@ The load test's compression step compresses a copy of one day of the wide table,
 
 ## The retention horizons behind these numbers
 
-The sizes above assume the default retention horizons. If you change a horizon, the size per server changes with it. The [Retention](../Darling/README.md#retention) section of the Darling README is the full list.
+The sizes above assume the default retention horizons. If you change a horizon, the size per server changes with it. The [Retention](darling/operations.md#retention) section of the Darling operations page is the full list.
 
 | Data | Horizon |
 |---|---|

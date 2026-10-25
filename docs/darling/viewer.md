@@ -100,7 +100,7 @@ Re-run `--export-viewer-config` and copy the folder again after a credential rot
 
 For the person sitting at a machine with **nothing installed on it**, whose only goal is looking at a Darling service that already runs somewhere else. Three steps, nothing to hand-edit.
 
-**The one service-side prerequisite.** The store has to be reachable from your LAN — a `postgres.network` block on the service host, which the `--configure-network` wizard writes for you. A store still on its loopback default accepts no remote viewer at all, and no amount of viewer-side configuration changes that. See [Store endpoint (viewer over the LAN)](../../Darling/README.md#store-endpoint-viewer-over-the-lan) for that side; everything below assumes it is done.
+**The one service-side prerequisite.** The store has to be reachable from your LAN — a `postgres.network` block on the service host, which the `--configure-network` wizard writes for you. A store still on its loopback default accepts no remote viewer at all, and no amount of viewer-side configuration changes that. See [Store endpoint (viewer over the LAN)](network-endpoints.md#store-endpoint-viewer-over-the-lan) for that side; everything below assumes it is done.
 
 ### 1. Export the handoff folder (on the service host)
 
@@ -137,7 +137,7 @@ That is the whole setup. Re-run the export after a credential or certificate rot
 
 ### If it does not connect
 
-The failure window carries a **Configuration this viewer used** block naming the `darling.json` it actually read, which rule picked it, and the host, port, username, database, SSL mode, search path and certificate path it parsed — with a **Copy details** button, and the same lines in `%APPDATA%\PerformanceMonitorDarling\logs\darling-viewer_yyyyMMdd.log`. Read it before changing anything: it separates *the viewer read a different file than you edited* from *it read your file and a value in it is wrong*. It never contains a password. See [Troubleshooting](../../Darling/README.md#troubleshooting) for the individual failures.
+The failure window carries a **Configuration this viewer used** block naming the `darling.json` it actually read, which rule picked it, and the host, port, username, database, SSL mode, search path and certificate path it parsed — with a **Copy details** button, and the same lines in `%APPDATA%\PerformanceMonitorDarling\logs\darling-viewer_yyyyMMdd.log`. Read it before changing anything: it separates *the viewer read a different file than you edited* from *it read your file and a value in it is wrong*. It never contains a password. See [Troubleshooting](troubleshooting.md) for the individual failures.
 
 ### Manual configuration (fallback)
 

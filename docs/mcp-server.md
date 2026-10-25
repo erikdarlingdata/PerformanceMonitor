@@ -45,7 +45,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/ 
 }
 ```
 
-   On Windows, use `encryptedToken`, which holds the output of `--encrypt-password`. `mcp.network.token` takes the token itself, or an `env:NAME` or `file:PATH` reference, and suits Linux and the compose container, where there is no DPAPI. Leave `mcp.network.listen` out to keep the server on loopback. `--configure-network` makes a 32-character token, and the [Darling README](../Darling/README.md#mcp-endpoint-assistant-over-the-lan) has a PowerShell command that makes one. If you lose the token, run `--print-mcp-token` elevated on the service host.
+   On Windows, use `encryptedToken`, which holds the output of `--encrypt-password`. `mcp.network.token` takes the token itself, or an `env:NAME` or `file:PATH` reference, and suits Linux and the compose container, where there is no DPAPI. Leave `mcp.network.listen` out to keep the server on loopback. `--configure-network` makes a 32-character token, and the [Darling network endpoints page](darling/network-endpoints.md#mcp-endpoint-assistant-over-the-lan) has a PowerShell command that makes one. If you lose the token, run `--print-mcp-token` elevated on the service host.
 
    To serve local clients with no token, set `mcp.allowTokenlessLoopback` to `true`. Darling then serves the read tools only, and logs a line at every start saying so.
 3. Register with Claude Code. Send the token as a header on every request:
@@ -54,7 +54,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/ 
 claude mcp add --transport http --scope user sql-monitor-darling http://localhost:5152/ --header "Authorization: Bearer <token>"
 ```
 
-   Replace `<token>` with your token. A project's `.mcp.json` must read the token from an environment variable, because project files get committed. The [Darling README](../Darling/README.md#mcp) shows how.
+   Replace `<token>` with your token. A project's `.mcp.json` must read the token from an environment variable, because project files get committed. The [Darling MCP configuration page](darling/configuration-mcp.md#mcp) shows how.
 
 #### Ask a question
 
@@ -84,7 +84,7 @@ Darling has its own switches, under `mcp` in `darling.json`. All of them default
 - `mcp.allowInvestigations` serves `claim_investigation_request`, `submit_investigation_report` and the agent action tools. It works only while `mcp.allowWrites` is off.
 - `mcp.dataDetail` sets how much collected data the answers hand out: `full` (the default), `maskLiterals` or `metadataOnly`. These mean the same as Lite's `mcp_data_detail`.
 
-The write tools and the investigation tools need the token, and every request must present it, loopback included. Without a token that is at least 16 characters with 6 different ones, they stay off, and the service log says why. While a switch is off, a call to its tools fails as an unknown tool. The [Darling README](../Darling/README.md#mcp) lists each key.
+The write tools and the investigation tools need the token, and every request must present it, loopback included. Without a token that is at least 16 characters with 6 different ones, they stay off, and the service log says why. While a switch is off, a call to its tools fails as an unknown tool. The [Darling MCP configuration page](darling/configuration-mcp.md#mcp) lists each key.
 
 #### Investigation tools (Lite)
 

@@ -169,5 +169,5 @@ The exact statements are in the Darling operator guide, in [Permissions on a Pos
 
 Darling can use two more logins, each with its own grants. Neither is part of the grant block above. The monitoring login stays read-only.
 
-- The remediation login runs the changes that an operator or an agent starts. These are: force or unforce a Query Store plan, evict a cached plan, and kill a session. Its grants are in the Darling operator guide, in [Configuration Reference](../Darling/README.md#servers-array-at-least-one-entry), under "Least privilege for the remediation credential".
-- The "Test an index" login is for PostgreSQL targets only. The check never runs under the monitoring login. The setup is in [Testing an index on PostgreSQL](../Darling/README.md#testing-an-index-on-postgresql).
+- The remediation login runs the changes that an operator or an agent starts. These are: force or unforce a Query Store plan, evict a cached plan, and kill a session. Its grants are in the Darling operator guide, in [Configuration Reference](darling/configuration.md#servers-array-at-least-one-entry), under "Least privilege for the remediation credential".
+- The "Test an index" login is for PostgreSQL targets only. The check never runs under the monitoring login. The setup is in [Testing an index on PostgreSQL](darling/configuration.md#testing-an-index-on-postgresql).

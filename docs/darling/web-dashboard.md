@@ -22,7 +22,7 @@ First, give it a token. An enabled dashboard with no token does not start. The s
 }
 ```
 
-To make a token, use [the PowerShell one-liner in the README](../../Darling/README.md#mcp-endpoint-assistant-over-the-lan). On Windows, keep the token in `encryptedToken`. `web.network.token` also takes the token itself, an `env:NAME` or a `file:PATH`. The references are for the compose and Linux setups.
+To make a token, use [the PowerShell one-liner on the network endpoints page](network-endpoints.md#mcp-endpoint-assistant-over-the-lan). On Windows, keep the token in `encryptedToken`. `web.network.token` also takes the token itself, an `env:NAME` or a `file:PATH`. The references are for the compose and Linux setups.
 
 To serve local browsers with no token instead, set `"allowTokenlessLoopback": true` in the `web` block. The dashboard then serves reads only, and every start logs a line that says so.
 
