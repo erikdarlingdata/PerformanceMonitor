@@ -30,13 +30,13 @@ Each Darling install has an eight-character id. The service makes it at start an
 
 ### The old shared session
 
-Earlier versions shared one session, `PerformanceMonitor_LongQueryCompletions`, between all installs. An upgraded install drops it once for each registration and database. It then records that drop and never touches the session again. If an older install creates it again later, the service logs one Information line per start and leaves the session alone. To remove it, see [Drop the Extended Events sessions a removed server left behind](../../Darling/README.md#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions).
+Earlier versions shared one session, `PerformanceMonitor_LongQueryCompletions`, between all installs. An upgraded install drops it once for each registration and database. It then records that drop and never touches the session again. If an older install creates it again later, the service logs one Information line per start and leaves the session alone. To remove it, see [Drop the Extended Events sessions a removed server left behind](collector-settings.md#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions).
 
 ### Removing a server
 
 Removing a server drops this install's sessions on it. These are the long-query session and its own deadlock and blocked-process fallbacks. The service makes one attempt, within 15 seconds. A failed drop is logged and never stops the removal.
 
-The service leaves a session that another registration of this install keeps. On premises, it also leaves the session when it cannot tell whether another registration of this install shares the instance. That happens when the instance name of this server is not known. The service logs the reason. The two shared sessions stay on the server. The [`--drop-xe-sessions`](../../Darling/README.md#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions) section shows how to drop them.
+The service leaves a session that another registration of this install keeps. On premises, it also leaves the session when it cannot tell whether another registration of this install shares the instance. That happens when the instance name of this server is not known. The service logs the reason. The two shared sessions stay on the server. The [`--drop-xe-sessions`](collector-settings.md#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions) section shows how to drop them.
 
 ### Registrations that share an instance
 

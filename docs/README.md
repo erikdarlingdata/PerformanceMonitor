@@ -21,6 +21,8 @@ Each page starts with an `Audience:` line under its title. The line tells you if
 - [The WPF viewer](darling/viewer.md): open the desktop viewer on the service host or on another machine.
 - [The web dashboard](darling/web-dashboard.md): turn on the browser view and reach it from another machine.
 - [Darling MCP setup](darling/mcp.md): turn on the MCP endpoint for an LLM client.
+- [Darling operations](darling/operations.md): the store, TimescaleDB, retention, the logs, restarts and watching the service from outside.
+- [Darling troubleshooting](darling/troubleshooting.md): every Darling service log line and what it means.
 - [Back up, restore and move the store](darling-store-backup.md): protect and relocate a Darling store.
 - [Darling store sizing](darling-store-sizing.md): disk, RAM and vCPU for a store host.
 - [Clearing a Retention Held alert](retention-hold-runbook.md): steps to resume a paused retention policy.
@@ -36,6 +38,17 @@ Each page starts with an `Audience:` line under its title. The line tells you if
 - [Signed webhooks](signed-webhooks.md): check that a generic webhook post came from Darling.
 - [MCP server](mcp-server.md): the MCP tools, setup and client notes for both editions.
 - [Lite Extended Events sessions](lite-extended-events.md): the sessions Lite creates, and how to remove them.
+- [Darling and your monitored servers](darling/monitored-servers.md): what the Darling service does on each SQL Server, and the permissions it needs.
+- [Darling PostgreSQL targets](darling/postgresql-targets.md): monitor a PostgreSQL server with Darling.
+- [Managed bundled PostgreSQL](darling/managed-postgresql.md): the store that the Darling service runs for itself.
+- [Darling configuration reference](darling/configuration.md): where each `darling.json` setting lives, `postgres`, `servers`, `peers`, `heartbeat` and `reads`.
+- [Darling alert and notification settings](darling/alerts-and-notifications.md): the `alerts`, `analysis`, `smtp` and `webhooks` blocks, and the notification routes.
+- [Darling agents and alert sources](darling/agents-and-alert-sources.md): hand an alert to your own agent, practice requests, and logins for systems that send alerts.
+- [Darling MCP configuration](darling/configuration-mcp.md): the `mcp` block of `darling.json`.
+- [Darling web dashboard configuration](darling/configuration-web.md): the `web` block of `darling.json`.
+- [Darling collector schedules and switches](darling/collector-settings.md): the verbs and tools that turn a collector on or off and set when it runs.
+- [Darling security and agent changes](darling/security.md): the store's schemas and roles, the agent change list, and Level 2.
+- [Darling network endpoints](darling/network-endpoints.md): reach the store, MCP and the web dashboard over the LAN.
 
 ## Monitor your servers
 

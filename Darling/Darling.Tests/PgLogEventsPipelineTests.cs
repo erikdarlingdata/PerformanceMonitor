@@ -2621,9 +2621,7 @@ public sealed class PgLogEventsRungTests
         var runbook = RepoFile.ReadRepoFile("docs", "postgres-first-target-runbook.md");
         Assert.Contains("| `get_pg_log_events` |", runbook, StringComparison.Ordinal);
         Assert.Contains("| `pg_log_events` | 5 min | 5 min |", runbook, StringComparison.Ordinal);
-
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
-        Assert.Contains("| **V129** — PostgreSQL log events |", readme, StringComparison.Ordinal);
+        /* #6416: the README's hand-kept migration table is gone; the ladder fixtures are the source of truth for the rungs. */
     }
 }
 

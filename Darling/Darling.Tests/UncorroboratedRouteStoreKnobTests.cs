@@ -365,7 +365,7 @@ public sealed class UncorroboratedRouteStoreKnobTests
         Assert.Contains($"config_alert_settings.{RouteColumn} column", sample, StringComparison.Ordinal);
         Assert.DoesNotContain("FILE-LEVEL like web.publicBaseUrl", sample, StringComparison.Ordinal);
 
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "alerts-and-notifications.md"); // #6416: moved from Darling/README.md
         Assert.Contains("**The file half of a two-home knob** since V137", readme, StringComparison.Ordinal);
         Assert.Contains("analysis.uncorroborated_route_source", readme, StringComparison.Ordinal);
         Assert.DoesNotContain("`update_alert_settings` refuses it by name; edit the file and restart", readme, StringComparison.Ordinal);

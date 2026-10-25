@@ -889,7 +889,7 @@ public sealed class DarlingWebSignInHardeningTests
     public void TheHstsComment_AndTheReadme_SayItCoversTheWholeHostNameOnEveryPort()
     {
         var headers = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebSecurityHeaders.cs");
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "network-endpoints.md"); // #6416: moved from Darling/README.md
 
         Assert.Contains("HSTS is kept per HOST NAME and ignores the port", headers, StringComparison.Ordinal);
         Assert.DoesNotContain("an address:port of its own", headers, StringComparison.Ordinal);

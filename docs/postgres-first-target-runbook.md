@@ -28,7 +28,7 @@ each collector does; this is the ordered procedure for getting one collecting an
 |---|---|---|
 | A target | Aurora PostgreSQL, or self-managed PostgreSQL 10 or later. An older version stores NULL for a column it lacks, and `pg_io_stats` needs 16 (see [Oldest PostgreSQL version per collector](darling/postgresql-targets.md#oldest-postgresql-version-per-collector)) | `SELECT version();` |
 | A login on it | `pg_monitor`, password auth | step 1 |
-| A store | Managed (bundled) or your own PostgreSQL | README [The Store](../Darling/README.md#the-store) |
+| A store | Managed (bundled) or your own PostgreSQL | Operations, [The Store](darling/operations.md#the-store) |
 | The service | A current release, installed as [Install as a Windows Service](darling/install.md#install-as-a-windows-service) describes | `PerformanceMonitor.Darling.Service.exe --version` |
 | Network | The service host must reach the target's port 5432 | `nc -z <host> 5432` |
 
@@ -417,7 +417,7 @@ carries any older store to the newest version. `StorageVersion.SchemaVersion` is
 settings. Nearly every collector table becomes a hypertable. The required
 numbers move whenever collectors are added, and undersizing does not error — it silently stops
 compression and retention from running. See
-[Background workers](../Darling/README.md#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont);
+[Background workers](darling/operations.md#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont);
 this build's first start migrates the store and can add hypertables. After that start, count your hypertables and continuous aggregates with the two queries there and work its formula. For example, a store with 72 hypertables and 29 continuous aggregates gets 128 and 139 on an 8 GB host. It gets 74 and 85 at 4 GB or less, and 177 and 188 at 12 GB or more. Both settings need a server restart. Managed mode does this itself.
 
 ## 5. First start, in console mode
@@ -806,7 +806,7 @@ layered over it (Settings → Notifications → Manage Notification Routes…, r
 namesakes, an exact-metric route on `PostgreSQL Wraparound Risk` moves that one alone, and an empty
 channel on a route inherits the parent's. The pre-routes workaround — a generic-webhook template branching
 on `{{metric}}` in an external router — still works. The Darling README's
-[notification routes](../Darling/README.md#notification-routes--sending-alert-families-to-different-channels)
+[notification routes](darling/alerts-and-notifications.md#notification-routes--sending-alert-families-to-different-channels)
 section has the taxonomy and the resolution order.
 
 **Proof on a healthy target is silence**, which is unfalsifiable, so verify the path rather than the

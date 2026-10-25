@@ -2113,7 +2113,7 @@ public sealed class AlertEngineTests
     [Fact]
     public void TheDarlingReadmeStatesTheBlockingWaitGateItActuallyUses()
     {
-        var readme = ReadRepoFile("Darling", "README.md");
+        var readme = ReadRepoFile("docs", "darling", "alerts-and-notifications.md"); // #6416: moved from Darling/README.md
 
         var row = readme
             .Split('\n')

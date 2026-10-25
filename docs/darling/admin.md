@@ -44,7 +44,7 @@ There is no command line verb that removes a server. Use the Viewer or MCP.
 
 What removal changes:
 
-- **On the monitored server:** the service drops this install's own Extended Events sessions on it, with one attempt within 15 seconds. It does not drop the shared sessions, and it does not drop a session that another registration of this install keeps. If the attempt failed, run `.\PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql` and run the statements it prints on the server. See [Drop the Extended Events sessions a removed server left behind](../../Darling/README.md#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions).
+- **On the monitored server:** the service drops this install's own Extended Events sessions on it, with one attempt within 15 seconds. It does not drop the shared sessions, and it does not drop a session that another registration of this install keeps. If the attempt failed, run `.\PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql` and run the statements it prints on the server. See [Drop the Extended Events sessions a removed server left behind](collector-settings.md#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions).
 - **In the store:** the server's definition is deleted. The history that Darling already collected stays.
 - **The monitoring login:** removal does not touch it. If you no longer need it, drop it on the server yourself.
 
@@ -61,7 +61,7 @@ For a server you added with the Viewer, `--add-server` or MCP:
 3. Type the new password and save.
 4. Check the server's **Collection Health** tab after the next pass.
 
-A saved password is sealed to the service's password key and to the connection it was saved with. If you also change the host, port, database, login or encryption setting, enter the password again in the same edit. See [The password key](../../Darling/README.md#security--least-privilege-roles).
+A saved password is sealed to the service's password key and to the connection it was saved with. If you also change the host, port, database, login or encryption setting, enter the password again in the same edit. See [The password key](security.md#security--least-privilege-roles).
 
 For a server that still takes its password from `darling.json` (`encryptedPassword`):
 
@@ -72,13 +72,13 @@ For a server that still takes its password from `darling.json` (`encryptedPasswo
 
 The blob is bound to the machine. Make it on the machine that runs the service.
 
-If you reset the password key with `--reset-password-key`, every password saved in the store has to be entered again. See [Make a new password key](../../Darling/README.md#make-a-new-password-key---reset-password-key).
+If you reset the password key with `--reset-password-key`, every password saved in the store has to be entered again. See [Make a new password key](collector-settings.md#make-a-new-password-key---reset-password-key).
 
 ## Rotate the web or MCP token
 
 The token is a secret in `darling.json`. The `web.network` and `mcp.network` blocks are read from the file only, so a change needs a restart.
 
-1. Make a new token. It must have at least 16 characters, at least 6 of them different. To make one, use the PowerShell one-liner under [MCP endpoint](../../Darling/README.md#mcp-endpoint-assistant-over-the-lan).
+1. Make a new token. It must have at least 16 characters, at least 6 of them different. To make one, use the PowerShell one-liner under [MCP endpoint](network-endpoints.md#mcp-endpoint-assistant-over-the-lan).
 2. On the service host, run `.\PerformanceMonitor.Darling.Service.exe --encrypt-password`. Paste the token when it asks. The verb prints a blob.
 3. In `darling.json`, replace the blob in `web.network.encryptedToken` (the dashboard) or `mcp.network.encryptedToken` (MCP).
 4. Restart the service.
@@ -233,7 +233,7 @@ For a script run that cannot answer a question, add `-ConfirmPurge` to `-PurgeDa
 | Service logs | `%ProgramData%\PerformanceMonitorDarling\logs\darling-service_<yyyyMMdd>.log`. The service also writes to the Windows Event Log, source `PerformanceMonitor Darling` |
 | Store (the bundled PostgreSQL) | `%ProgramData%\PerformanceMonitorDarling\pg`, unless `postgres.dataDirectory` names another folder |
 | Store credential files | `pg-credential.dpapi`, `pg-admin-credential.dpapi`, `pg-viewer-credential.dpapi` and `pg-mcp-credential.dpapi`, beside the store folder in `%ProgramData%\PerformanceMonitorDarling` |
-| Password key | `password-key.dpapi`. See [Who can read `darling.json` and the credentials](../../Darling/README.md#security--least-privilege-roles) for who can open it |
+| Password key | `password-key.dpapi`. See [Who can read `darling.json` and the credentials](security.md#security--least-privilege-roles) for who can open it |
 | Log-hash key | `log-hash-key.dpapi`. A managed store on Windows keeps it beside `pg-credential.dpapi`. An own store (`postgres.managed` off) keeps it in a `darling-keys` folder beside `darling.json`. On Linux the file is `log-hash-key`, and under Docker Compose it is in the `darling-credentials` volume. The service uses the key to hash log text before it stores it. The key is kept outside the store, so someone who can read the store cannot test guesses against the hashes |
 | Rollback backups | `_rollback_manual_<stamp>` folders in the install folder |
 | Viewer log | `%APPDATA%\PerformanceMonitorDarling\logs\darling-viewer_<yyyyMMdd>.log` |

@@ -41,7 +41,7 @@ public sealed class DarlingCollectorToggleExitCodeTests
         Assert.Equal(1, DarlingCliCommands.CollectorToggleExitCode.UsageOrConfig);
         Assert.Equal(2, DarlingCliCommands.CollectorToggleExitCode.StoreUnavailable);
 
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "collector-settings.md"); // #6416: moved from Darling/README.md
         /* A wrong password is the store's answer, so it exits 2: the README must not say the codes separate a
            script's own mistake from a store that is down. */
         Assert.Contains("`2` when the store cannot be reached, refuses the login, or refuses the change", readme, StringComparison.Ordinal);

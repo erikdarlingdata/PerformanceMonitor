@@ -38,7 +38,7 @@ And this command shows a listener on port 5152:
 Get-NetTCPConnection -State Listen | Where-Object LocalPort -eq 5152
 ```
 
-Then register the server with your client. MCP needs a bearer token on loopback too. Before you turn MCP on, add a `network` block with only a token to `mcp`, and restart the service. Use `"encryptedToken": "<output of --encrypt-password>"`, or `"token"` with the token itself, an `env:NAME` or a `file:PATH`. On Windows, use `encryptedToken`. The references are for the compose and Linux setups. To make a token, use [the PowerShell one-liner in the README](../../Darling/README.md#mcp-endpoint-assistant-over-the-lan).
+Then register the server with your client. MCP needs a bearer token on loopback too. Before you turn MCP on, add a `network` block with only a token to `mcp`, and restart the service. Use `"encryptedToken": "<output of --encrypt-password>"`, or `"token"` with the token itself, an `env:NAME` or a `file:PATH`. On Windows, use `encryptedToken`. The references are for the compose and Linux setups. To make a token, use [the PowerShell one-liner on the network endpoints page](network-endpoints.md#mcp-endpoint-assistant-over-the-lan).
 
 With no token, an enabled MCP server does not start, and the service log names these settings. To serve local clients with no token instead, set `"allowTokenlessLoopback": true` in the `mcp` block. The write and investigation tools then stay off, and every start logs a line that says so.
 
