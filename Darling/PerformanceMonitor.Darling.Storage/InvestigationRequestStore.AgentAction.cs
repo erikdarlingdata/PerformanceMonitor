@@ -21,7 +21,7 @@ namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>One Level 2 change, as a tool hands it to the gate (#5912): the tool, the kind of change (the journal's word,
 /// e.g. <c>mute</c>), the validated <c>agent_action</c> and the target.</summary>
-public sealed record AgentActionCall(string Tool, string Kind, AgentAction Action, AgentActionTarget Target);
+public sealed record AgentActionCall(string Tool, string Kind, AgentAction Action, AgentActionTarget Target, string? TokenName = null);
 
 /// <summary>The journal events one agent action writes (#6569): the call, then its result. Only the store owner journals them, as
 /// <c>server_action_switched</c> is (#6269): <see cref="InvestigationRequestStore.RunAgentActionAsync"/>, a person's undo through the
@@ -191,7 +191,7 @@ RETURNING journal_id";
     /// 5 <c>not_level_2</c> (the stamped level, and every metric of the request re-resolved over the live routes; the lowest
     /// wins), 6 <c>other_server</c>, 7 the kind rule, 8 <c>journal_capped</c>. Check 1 (the argument) is the caller's, through
     /// <c>InvestigationToolCore.ParseAgentAction</c>, before the gate. The first failing check answers its refusal, changes
-    /// nothing, and is journaled <c>refused</c> at most once per request, tool, code and hour. On a pass the gate reads the
+    /// nothing, and is journaled <c>refused</c> at most once per request, verified token, tool, code and hour. On a pass the gate reads the
     /// before image and commits <c>action_called</c> first, which drops the lock; the change then runs in its own
     /// transaction, which takes the row <c>FOR SHARE</c> again and re-checks 3, 5 and 6 before it writes, and journals
     /// <c>action_done</c> with it, or <c>action_failed</c>. No row holds the claim id: the journal names the claim by its
@@ -249,7 +249,7 @@ RETURNING journal_id";
             if (refusal is not null)
             {
                 await JournalRefusedAsync(connection, transaction, now, request is null ? null : action.RequestId,
-                    request?.ServerId, actor, call.Tool, refusal.Reason, cancellationToken);
+                    request?.ServerId, actor, call.TokenName, call.Tool, refusal.Reason, cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
                 return new AgentActionResult(refusal, null, null);
             }
@@ -408,10 +408,13 @@ RETURNING journal_id";
 
     /// <summary>
     /// Journals a refusal the gate's caller made before the gate (#5912, check 1, or the tool's own refusal): <c>refused</c>,
-    /// at most once per request, actor, tool, code and hour. An unparsed request id journals with no request, once per actor, tool, code
-    /// and hour, so two agents' refusals are two rows. An actor the agent id rule refuses is journaled as <see cref="InvestigationRules.InvalidAgentId"/>.
+    /// at most once per request, verified token, tool, code and hour. An unparsed request id journals with no request, once per verified
+    /// token, tool, code and hour. The key is the named agent token's name (<paramref name="tokenName"/>), else <see cref="RefusalUnboundKey"/>, never the
+    /// agent id the caller typed: with no named token a new agent id is free text, and a key built on it would write a new row on every call.
+    /// The row's actor is the agent id (the token's name when there is one). An actor the agent id rule refuses is journaled as
+    /// <see cref="InvestigationRules.InvalidAgentId"/>.
     /// </summary>
-    public async Task RecordAgentActionRefusalAsync(Guid? requestId, string? agentId, string tool, string code,
+    public async Task RecordAgentActionRefusalAsync(Guid? requestId, string? agentId, string tool, string code, string? tokenName,
         CancellationToken cancellationToken = default)
     {
         var actor = "agent:" + (InvestigationRules.IsValidAgentId(agentId) ? agentId : InvestigationRules.InvalidAgentId);
@@ -429,7 +432,7 @@ RETURNING journal_id";
             }
         }
 
-        await JournalRefusedAsync(connection, transaction, Now(), known, serverId, actor, tool, code, cancellationToken);
+        await JournalRefusedAsync(connection, transaction, Now(), known, serverId, actor, tokenName, tool, code, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
     }
 
@@ -587,11 +590,14 @@ RETURNING journal_id";
         return row with { Metrics = metrics };
     }
 
+    /// <summary>The once-key segment of a refusal that no named agent token made (the legacy token, or a named operator token).</summary>
+    internal const string RefusalUnboundKey = "unbound";
+
     private Task<int> JournalRefusedAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
-        Guid? requestId, int? serverId, string actor, string tool, string code, CancellationToken cancellationToken)
+        Guid? requestId, int? serverId, string actor, string? tokenName, string tool, string code, CancellationToken cancellationToken)
     {
         var onceKey = string.Create(CultureInfo.InvariantCulture,
-            $"agent_refused:{(requestId is Guid id ? id.ToString() : "unknown")}:{actor}:{tool}:{code}:{now:yyyy-MM-ddTHH}");
+            $"agent_refused:{(requestId is Guid id ? id.ToString() : "unknown")}:{tokenName ?? RefusalUnboundKey}:{tool}:{code}:{now:yyyy-MM-ddTHH}");
         return JournalAsync(connection, transaction, now, requestId, null, serverId, "refused", actor, code,
             new JsonObject { ["tool"] = tool }.ToJsonString(), onceKey, cancellationToken);
     }

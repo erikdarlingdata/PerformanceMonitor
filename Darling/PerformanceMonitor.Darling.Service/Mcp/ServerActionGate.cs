@@ -71,7 +71,7 @@ internal static class ServerActionGate
         {
             /* A refused argument still journals under the named token, or the agent_id it carried when it names one. */
             await store.RecordAgentActionRefusalAsync(DarlingAgentActionGate.LooseRequestId(agentAction),
-                agentTokenName ?? DarlingAgentActionGate.LooseAgentId(agentAction), tool, problem.Reason, cancellationToken);
+                agentTokenName ?? DarlingAgentActionGate.LooseAgentId(agentAction), tool, problem.Reason, agentTokenName, cancellationToken);
             return new ServerActionDecision(null, problem);
         }
 
@@ -79,7 +79,7 @@ internal static class ServerActionGate
         if (agentTokenName is not null && !string.Equals(action!.AgentId, agentTokenName, StringComparison.Ordinal))
         {
             await store.RecordAgentActionRefusalAsync(action.RequestId, agentTokenName, tool, DarlingMcpInvestigationTools.AgentIdNotToken,
-                cancellationToken);
+                agentTokenName, cancellationToken);
             return new ServerActionDecision(null, new AgentActionRefusal(DarlingMcpInvestigationTools.AgentIdNotToken,
                 DarlingMcpInvestigationTools.AgentIdNotTokenMessage(agentTokenName)));
         }
@@ -89,6 +89,6 @@ internal static class ServerActionGate
             LoadLevels = (connection, _, ct) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, ct),
             ReadCredential = (serverId, ct) => store.ReadServerCredentialStateAsync(ownerSource, serverId, ct),
         };
-        return await store.AuthorizeServerActionAsync(new ServerActionCall(tool, serverAction, action!, target), hooks, cancellationToken);
+        return await store.AuthorizeServerActionAsync(new ServerActionCall(tool, serverAction, action!, target, agentTokenName), hooks, cancellationToken);
     }
 }

@@ -16,7 +16,7 @@ namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>One server action a caller asks the gate about (#5632, step 5): the tool, the action (one of <see cref="ServerActionNames"/>),
 /// the validated <c>agent_action</c> and the server it would run on.</summary>
-public sealed record ServerActionCall(string Tool, string ServerAction, AgentAction Action, AgentActionTarget Target);
+public sealed record ServerActionCall(string Tool, string ServerAction, AgentAction Action, AgentActionTarget Target, string? TokenName = null);
 
 /// <summary>The caller's part of a server-action check (#5632, step 5): the live routes (as <see cref="AgentActionHooks.LoadLevels"/>) and
 /// the server's credential classification. The credential read is the caller's because the <c>remediation_encrypted_password</c> column is
@@ -79,7 +79,7 @@ public sealed partial class InvestigationRequestStore
     /// server's row for that action is present and enabled; no row is off), 4 <c>no_remediation_credential</c> or
     /// <c>credential_not_reference</c> (a login name and an <c>env:</c> or <c>file:</c> reference; a stored password is refused).
     /// <c>mcp.allowWrites</c> is not an input and no flag skips a check. A refusal is journaled <c>refused</c>, at most once per
-    /// request, tool, code and hour, as the Level 2 gate journals it. <b>Nothing calls this yet:</b> steps 7, 10 and 12 will.
+    /// request, verified token, tool, code and hour, as the Level 2 gate journals it. <b>Nothing calls this yet:</b> steps 7, 10 and 12 will.
     /// Null means every condition holds; the secret was not read or resolved.
     /// </summary>
     public async Task<AgentActionRefusal?> CheckServerActionAsync(ServerActionCall call, ServerActionHooks hooks,
@@ -98,7 +98,7 @@ public sealed partial class InvestigationRequestStore
         var refusal = await ServerActionChecksAsync(connection, transaction, request, call, hooks, now, cancellationToken);
         if (refusal is not null)
             await JournalRefusedAsync(connection, transaction, now, request is null ? null : action.RequestId,
-                request?.ServerId, actor, call.Tool, refusal.Reason, cancellationToken);
+                request?.ServerId, actor, call.TokenName, call.Tool, refusal.Reason, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return refusal;
     }

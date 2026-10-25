@@ -35,6 +35,11 @@ public sealed class AgentTokenIdentityGateLiveTests
     private const string Token = "triage-bot";
     private const string Other = "someone-else";
 
+    /* A fixed clock for every store a refusal goes through: the once-key ends in the hour, so a run that crossed an hour between two
+       calls would write a second row. The same way AgentActionGateTests fixes _now. */
+    private static readonly DateTime Fixed = new(2026, 10, 1, 12, 30, 0, DateTimeKind.Utc);
+    private static DateTime FixedNow() => Fixed;
+
     private static readonly DarlingMcpWritePolicy.Effective AgentPolicy = new(false, false, true, Token);
 
     private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Connection, string RequestId, string ClaimId, CancellationToken Ct, string ConnectionString = "")
@@ -208,12 +213,85 @@ public sealed class AgentTokenIdentityGateLiveTests
         });
     }
 
-    private static Task<string> CallBadAsync(Ctx c, string tool, string server, string tokenName)
+    private const string ValidHandle = "0x06000700AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    /// <summary>A call whose agent_action does not parse (no evidence), on the store clock <see cref="Fixed"/>. <paramref name="handle"/> picks
+    /// the evict path: a valid handle reaches the server action gate, a bad one is refused before it.</summary>
+    private static Task<string> CallBadAsync(Ctx c, string tool, string server, string? tokenName, string agentId = Other, string handle = ValidHandle)
     {
-        var bad = new JsonObject { ["request_id"] = c.RequestId, ["claim_id"] = c.ClaimId, ["agent_id"] = Other, ["reason"] = "x" }.ToJsonString();
+        var bad = new JsonObject { ["request_id"] = c.RequestId, ["claim_id"] = c.ClaimId, ["agent_id"] = agentId, ["reason"] = "x" }.ToJsonString();
         return tool == DarlingMcpPlanForceTools.ForceToolName
-            ? DarlingMcpPlanForceTools.RunAsync(c.Source, c.Source, null, true, server, "AppDb", 11, 2, bad, true, c.Ct, tokenName)
-            : DarlingMcpPlanForceTools.RunEvictAsync(c.Source, c.Source, null, server, "0x06000700AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", bad, true, c.Ct, tokenName);
+            ? DarlingMcpPlanForceTools.RunAsync(c.Source, c.Source, null, true, server, "AppDb", 11, 2, bad, true, c.Ct, tokenName, FixedNow)
+            : DarlingMcpPlanForceTools.RunEvictAsync(c.Source, c.Source, null, server, handle, bad, true, c.Ct, tokenName, FixedNow);
+    }
+
+    private static Task<string?> RefusedRowsAsync(Ctx c, string tool, string extraWhere = "") =>
+        ScalarAsync(c.Connection,
+            $"SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND detail ->> 'tool' = '{tool}' {extraWhere}", c.Ct);
+
+    /// <summary>With no named agent token (the legacy token, or a named operator token) the agent_id is free text, so the once-key must not
+    /// be built on it: refused calls that differ only in the agent_id they carry journal ONE row for the hour, not one per id.</summary>
+    [Theory]
+    [InlineData(DarlingMcpPlanForceTools.ForceToolName, ValidHandle)]
+    [InlineData(DarlingMcpPlanForceTools.EvictToolName, ValidHandle)]
+    [InlineData(DarlingMcpPlanForceTools.EvictToolName, "not-a-handle")]
+    public async Task RefusedCalls_WithNoNamedToken_AndDifferentAgentIds_AreOneJournalRow(string tool, string handle)
+    {
+        await RunAsync(async c =>
+        {
+            await CallBadAsync(c, tool, "srv-7", null, "agent-one", handle);
+            await CallBadAsync(c, tool, "srv-7", null, "agent-two", handle);
+            await CallBadAsync(c, tool, "srv-7", null, "agent-three", handle);
+
+            Assert.Equal("1", await RefusedRowsAsync(c, tool));
+        });
+    }
+
+    /// <summary>With no token name, a refused argument that does not parse still journals the agent_id and the request id it carried: the
+    /// fallbacks at ServerActionGate and the two places in DarlingMcpPlanForceTools. Dropping the agent_id fallback writes the invalid-actor
+    /// placeholder; dropping the request id fallback writes a row with no request.</summary>
+    [Theory]
+    [InlineData(DarlingMcpPlanForceTools.ForceToolName, ValidHandle)]
+    [InlineData(DarlingMcpPlanForceTools.EvictToolName, ValidHandle)]
+    [InlineData(DarlingMcpPlanForceTools.EvictToolName, "not-a-handle")]
+    public async Task ARefusedBadAgentAction_WithNoToken_IsJournaledUnderTheAgentIdAndRequestItCarried(string tool, string handle)
+    {
+        await RunAsync(async c =>
+        {
+            var answer = await CallBadAsync(c, tool, "srv-7", null, Other, handle);
+
+            Assert.Equal("1", await RefusedRowsAsync(c, tool, $"AND reason = '{ReasonOf(answer)}' AND actor = 'agent:{Other}' AND request_id = '{c.RequestId}'"));
+        });
+    }
+
+    /// <summary>The two store paths (Level 2 gate and server action gate) take the token name from the call: with none, refusals that differ
+    /// only in the agent_id journal one row, each under its own agent_id; with a named token they stay one row per token.</summary>
+    [Fact]
+    public async Task TheStorePaths_KeyARefusalOnTheVerifiedToken_NotOnTheAgentId()
+    {
+        await RunAsync(async c =>
+        {
+            var store = new InvestigationRequestStore(c.Source, 30, FixedNow);
+            var unbound = new DarlingMcpWritePolicy.Effective(false, false, true, null);
+            foreach (var agentId in new[] { "agent-one", "agent-two" })
+            {
+                var outcome = await DarlingAgentActionGate.RunAsync(unbound, c.Source, store, NullLogger.Instance, "update_mute_rule", MuteRuleImage.Kind,
+                    c.Arg(agentId), new AgentActionTarget(7, "srv-7", null, null), null,
+                    (_, _, _) => Task.FromResult<string?>(null), (_, _, _) => Task.FromResult<string?>("{}"), c.Ct);
+                Assert.NotNull(outcome.Refusal);
+            }
+
+            Assert.Equal("1", await RefusedRowsAsync(c, "update_mute_rule"));
+
+            foreach (var agentId in new[] { "agent-one", "agent-two" })
+            {
+                var decision = await ServerActionGate.AuthorizeAsync(store, c.Source, NullLogger.Instance, DarlingMcpPlanForceTools.ForceToolName,
+                    ServerActionNames.ForcePlan, c.Arg(agentId), new AgentActionTarget(7, "srv-7", "2", "AppDb"), c.Ct);
+                Assert.NotNull(decision.Refusal);
+            }
+
+            Assert.Equal("1", await RefusedRowsAsync(c, DarlingMcpPlanForceTools.ForceToolName));
+        });
     }
 
     /// <summary>L3 of the #6593 review: each kill refusal made before the gate journals the token's name, not the agent_id passed. A case fails
