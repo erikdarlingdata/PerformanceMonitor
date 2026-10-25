@@ -181,20 +181,6 @@ Both tab registries branch on it: `serverTabsFor(card)` on the web and `ViewerPo
 
 One consequence: a SQL Server read that targets a PostgreSQL server now answers `not_collected` and names the engine ("...runs Aurora PostgreSQL. The system_health_events collector is written against SQL Server..."). It no longer answers `unavailable` with advice to check that collection is running. That applies to the reads that use the capability helper, which is not every read yet.
 
-#### Data with no read endpoint at all: this list is now empty
-
-It used to hold ten viewer surfaces, tracked as [#2484](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2484):
-
-- Query Store regressions
-- the query heatmap
-- three of the four Performance Trends charts
-- the blocking-duration and deadlock-severity statistics
-- the lock-wait, waiting-task and blocked-session trends
-- the raw collection log
-- the month range of the daily summary
-
-Every one of them is now a read on both surfaces. The data was always collected, so each was a missing endpoint and not a missing collection. One correction came out of the work. The execution-count trend of the viewer duplicated a number that `get_query_duration_trend` already returned, so it did not become an eleventh read. It got `executions_per_second` beside the truncated integer count. A server that runs 0.4 executions a second used to report zero and read as idle.
-
 #### Desktop features that a web imitation would make worse
 
 - There is no graphical plan viewer.
