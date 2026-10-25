@@ -157,9 +157,11 @@ public sealed class DarlingMcpCollectorScheduleRoleLiveTests
             Assert.Equal("changed", (string?)frequency["status"]);
             Assert.Equal((null, 10, null), await RowAsync(owner, ServerB, Delta, ct));
 
-            var retention = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(mcp, Delta, 45, false, "role-beta", cancellationToken: ct));
+            /* Retention is fleet-wide: the fleet row, written with the same grant. A per-server value is refused. */
+            var retention = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(mcp, Delta, 45, false, null, cancellationToken: ct));
             Assert.Equal("changed", (string?)retention["status"]);
-            Assert.Equal((null, 10, 45), await RowAsync(owner, ServerB, Delta, ct));
+            Assert.Equal(45, (await RowAsync(owner, null, Delta, ct))?.Retention);
+            await ExecAsync(owner, $"UPDATE config.config_collector_schedules SET retention_days = 45 WHERE server_id = {ServerB} AND collector_name = '{Delta}'", ct);
 
             /* clear=true goes through the same UPDATE grant. */
             await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(mcp, Delta, null, true, "role-beta", cancellationToken: ct);

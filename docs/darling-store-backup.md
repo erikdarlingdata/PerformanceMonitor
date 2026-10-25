@@ -265,7 +265,7 @@ The [store sizing guide](darling-store-sizing.md#the-retention-horizons-behind-t
 
 Retention is not a setting in `darling.json`. It is the column `retention_days` of the table `config.config_collector_schedules`, one value for each collector. A row that is not there means the default above. Change it in one of three ways.
 
-- The command line: `PerformanceMonitor.Darling.Service.exe --set-collector-retention <collector> <days|default> [--server <server>]`. The days are 1 to 3650. The word `default` removes the override. Without `--server`, the change covers the whole fleet.
+- The command line: `PerformanceMonitor.Darling.Service.exe --set-collector-retention <collector> <days|default> [--server <server>]`. The days are 1 to 3650. The word `default` removes the override. Retention is fleet-wide: the purge reads one value for each collector, so a number with `--server` is refused. `--server` with `default` removes a per-server value that an older build stored.
 - The Collector Schedules window in the Viewer.
 - The MCP tool `set_collector_retention`, when `mcp.allowWrites` is on.
 

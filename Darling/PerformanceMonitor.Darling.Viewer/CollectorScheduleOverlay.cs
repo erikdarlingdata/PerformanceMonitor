@@ -319,8 +319,12 @@ public static class CollectorScheduleOverlay
                distinction is the resolver's documented contract. */
             /* #4938: the run time does not ride these rows (ToRunTimeChanges writes it to its own table), so this Save
                carries no run time and leaves every one as it was. */
+            /* Retention is a fleet setting: the purge and the resolver read it from the fleet row, and the Keep (days) cell is
+               read-only at a server scope, so a per-server row carries NULL here (the MCP tools and CLI refuse a per-server
+               retention for the same reason). Writing the grid's value would store today's fleet retention on every row. A
+               load of such a row leaves the fleet value on the grid (ApplyScope skips a NULL retention). */
             .Select(item => new CollectorScheduleRow(
-                serverId, item.Name, item.FrequencyMinutes, item.RetentionDays, item.EnabledInherited ? null : item.Enabled,
+                serverId, item.Name, item.FrequencyMinutes, null, item.EnabledInherited ? null : item.Enabled,
                 ParseDatabases(item.DatabasesText)))
             .ToList();
     }
