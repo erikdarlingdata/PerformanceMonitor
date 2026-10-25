@@ -2,7 +2,7 @@
 
 Audience: operators.
 
-This guide gives the disk, RAM and vCPU counts for a Darling store host, by the number of monitored servers. The numbers come from three production stores that we measured on 2026-10-14. A load test on a restored copy of a store ([#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794)) went to 210 servers in one store. It ran twice and is done. The test copy is torn down. This guide stays based on what was measured. The harness and its runbook are in [`Darling/loadtest/`](../Darling/loadtest/README.md).
+This guide gives the disk, RAM and vCPU counts for a Darling store host, by the number of monitored servers. The numbers come from three production stores that we measured on 2026-10-14. A load test on a restored copy of a store ([#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794)) went to 210 servers in one store. It ran three times and is done. The test hosts are torn down. This guide stays based on what was measured. The harness and its runbook are in [`Darling/loadtest/`](../Darling/loadtest/README.md).
 
 To back up, restore or move a store, and to see how much disk it uses, see [Back up, restore and move the store](darling-store-backup.md).
 
@@ -90,10 +90,11 @@ Of the stores we measured, the one with Query Store collected has 43 servers, so
 
 The test copy held N copies of one production store with 42 servers. N=3 is 126 servers and N=5 is 210 servers, about 1 TB. In runs 1 and 2, the host had 8 vCPUs, 64 GB of RAM and a gp3 disk at 6,000 IOPS and 250 MB/s. Run 3 kept the run 2 build and data and changed the host (see [Run 3: larger hosts](#run-3-larger-hosts)). A reader is one client that reads at the same time as the others. K is the number of readers. All numbers below are measured.
 
-| | Run 1 | Run 2 |
-|---|---|---|
-| Date | 2026-10-21 | 2026-10-24 |
-| Build | An older build, before the read fixes | `dev` at `d659bef1a`, with [#6686](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6686) and the later read fixes |
+| | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| Date | 2026-10-21 | 2026-10-24 | 2026-10-24 and 2026-10-25 |
+| Build | An older build, before the read fixes | `dev` at `d659bef1a`, with [#6686](https://github.com/erikdarlingdata/PerformanceMonitor/pull/6686) and the later read fixes | The run 2 build |
+| Host | 8 vCPUs, 64 GB, 250 MB/s disk | 8 vCPUs, 64 GB, 250 MB/s disk | 64 GB, 128 GB and 256 GB, faster disk |
 
 **The finding: a host with 8 vCPUs and 64 GB takes the writes and the hourly jobs for 210 servers. The reads are the limit. In run 3, one reader needed about 256 GB. With ten readers, every host that we tested refused many calls.**
 
@@ -131,7 +132,7 @@ Run 3 ran on 2026-10-24 and 2026-10-25, with the run 2 build and the same 210 se
 | 8 vCPUs, 64 GB, 250 MB/s disk (run 2) | 48,384 MB, Darling's value | Most | 34.8 s | 25% | Timed out at 60 s |
 | 8 vCPUs, 64 GB, faster disk | 48,384 MB, Darling's value | About 6 | 17.2 s | 46% | Timed out at 60 s |
 | 16 vCPUs, 128 GB, faster disk | 48,384 MB, half of Darling's value | About 7 | 14.5 s | 29% | Timed out at 60 s |
-| 16 vCPUs, 128 GB, faster disk | 96,768 MB, Darling's value | 2 | 10.6 s | 61% | Timed out at 60 s |
+| 16 vCPUs, 128 GB, faster disk | 96,768 MB, Darling's value | 2, the 168 h regressions reads (10.6 s MCP, 9.2 s web) | 10.6 s | 61% | Timed out at 60 s |
 | 32 vCPUs, 256 GB, faster disk | 48,384 MB, a quarter of Darling's value | 3 | 7.0 s | 55% | Timed out at 60 s |
 | 32 vCPUs, 256 GB, faster disk | 193,536 MB, Darling's value | 0 in the second phase, 3 in the first | 3.3 s in the second phase, 12.7 s in the first | 49% | Refused before it ran. Not measured. |
 
