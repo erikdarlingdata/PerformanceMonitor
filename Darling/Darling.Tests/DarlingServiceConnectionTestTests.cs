@@ -12,6 +12,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
 namespace Darling.Tests;
@@ -365,6 +366,25 @@ public sealed class DarlingServiceConnectionTestTests
         Assert.Equal("C:\\x\\darling.json", config);
         Assert.Equal(new DarlingCliCommands.AddServerFlags("sql01", "Prod", "sql", "svc"), flags);
         Assert.True(flags.Any);
+    }
+
+    /* --grant-script takes "integrated", --add-server took only "windows": the same word now works on both, and reaches the shared
+       server rules as Windows authentication. */
+    [Theory]
+    [InlineData("windows", "windows")]
+    [InlineData("integrated", "windows")]
+    [InlineData("Integrated", "windows")]
+    [InlineData("sql", "sql")]
+    public void TheAuthWords_WindowsAndIntegrated_AreTheSameOnTheAddServerVerb(string word, string expected)
+    {
+        Assert.True(DarlingCliCommands.TryParseAddServerArgs(new[] { "--host", "sql01", "--auth", word }, out _, out var flags, out var error));
+        Assert.Null(error);
+        Assert.Equal(expected, flags.Auth);
+
+        var (json, problem) = DarlingCliCommands.BuildAddServerJson(flags with { Username = "svc" }, _ => "pw");
+        Assert.Null(problem);
+        Assert.NotNull(json);
+        Assert.Null(DarlingMcpServerAdminTools.ResolveAuth(flags.Auth).Error);
     }
 
     [Fact]

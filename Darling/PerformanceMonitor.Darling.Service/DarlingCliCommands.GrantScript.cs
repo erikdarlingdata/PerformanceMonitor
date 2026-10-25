@@ -34,12 +34,19 @@ public static partial class DarlingCliCommands
         "  --grant-script <server-name> [--finops] [--azure] [--service-account <account>] [--config <path>]" + Environment.NewLine +
         "      Print the T-SQL that creates the monitoring login and grants what Darling needs, for a server this install monitors." + Environment.NewLine +
         "      The principal follows the server entry: its SQL login, or for Windows authentication the account the service runs as." + Environment.NewLine +
-        "  --grant-script --host <host> [--auth sql|integrated|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--service-account <account>]" + Environment.NewLine +
+        "  --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--service-account <account>]" + Environment.NewLine +
         "      The same for a host not yet added. Connects to no monitored server." + Environment.NewLine +
         "  --finops adds the per-database grants the FinOps Index Analysis tab needs. --azure (implied by a *.database.windows.net host)" + Environment.NewLine +
         "  prints the Azure SQL Database form: a contained user and database-scoped grants. --service-account names the account the service" + Environment.NewLine +
         "  runs as when it is a domain account or a gMSA and this machine cannot tell. Run the output as a sysadmin; it is safe to run twice." + Environment.NewLine +
         "The script never holds a password: a SQL login gets a placeholder to replace.";
+
+    /// <summary>The <c>--auth</c> word as the registry stores it: lower case, with "windows" (the word <c>--add-server</c> takes) read as "integrated".</summary>
+    internal static string GrantScriptAuthWord(string value)
+    {
+        var word = value.Trim().ToLowerInvariant();
+        return word == "windows" ? "integrated" : word;
+    }
 
     /// <summary>Parses <c>--grant-script</c>'s arguments strictly: one bare server name or <c>--host</c>, the flags, and the options that take
     /// a value. Anything else that starts with '-' is refused.</summary>
@@ -74,7 +81,7 @@ public static partial class DarlingCliCommands
                             host = value;
                             break;
                         case "--auth":
-                            auth = value.ToLowerInvariant();
+                            auth = GrantScriptAuthWord(value);
                             break;
                         case "--username":
                             username = value;
@@ -113,7 +120,7 @@ public static partial class DarlingCliCommands
 
         if (auth is not null and not ("sql" or "integrated" or "serviceprincipal" or "managedidentity"))
         {
-            errorMessage = $"--auth must be sql, integrated, serviceprincipal or managedidentity; got '{auth}'.";
+            errorMessage = $"--auth must be sql, integrated (or windows), serviceprincipal or managedidentity; got '{auth}'.";
             return false;
         }
 

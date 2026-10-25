@@ -100,6 +100,52 @@ public static class QueryStoreRegressionBaseline
     {
         /// <summary>How many days came from the daily totals.</summary>
         public int BuiltDayCount => RunDays.Length;
+
+        /// <summary>The table arms' three Regular arms read <c>query_store_interval_latest</c> instead of the wide table
+        /// (#5506, <see cref="LatestCoversRegularArms"/>). False on every fallback, so the arms read the wide table as before.</summary>
+        public bool RegularFromLatest { get; init; }
+    }
+
+    /// <summary>
+    /// Whether the table arms may take their three Regular arms from <c>query_store_interval_latest</c> (#5506). That table
+    /// holds the same latest snapshot per Regular interval as the wide table, at about a third of the row width, so a cold
+    /// read takes about a third of the disk reads. It may answer only where its coverage claim reaches the whole read: a
+    /// coverage row (<paramref name="filledSince"/>) at or before the baseline start, and no pending batch (a batch that
+    /// stored raw and wide but missed latest is not in the claim). Otherwise the arms read the wide table, today's read.
+    /// The same two inputs as the built-days gate (<see cref="QueryStoreIntervalLatest.ReadSourceInputsSql"/>).
+    /// It has no table-floor check like the wide gate's (<see cref="QueryStoreIntervalWide.UseTable"/>, clause 3), and
+    /// <paramref name="filledSince"/> is a write-side claim that says nothing of what retention has removed since. That is
+    /// safe only because of an order kept in other files: latest keeps 15 days
+    /// (<c>DarlingRetention.QueryStoreIntervalLatestRetentionDays</c>) against the wide table's 10
+    /// (<see cref="QueryStoreIntervalPartitions.WideHorizonDays"/>), both purge oldest first on <c>first_execution_time</c>, and
+    /// the baseline start passed here is already the wide gate's clamp. So latest still holds every row the arms reach. If
+    /// latest's retention ever falls to the wide table's or below, this gate under-reads with no error.
+    /// <c>QueryStoreIntervalLatestWriterTests.Retention_DropsIntervalsPastFifteenDays_AndStalePendingRows_AndKeepsTheRest</c>
+    /// pins the 15 days.
+    /// </summary>
+    public static bool LatestCoversRegularArms(DateTime? filledSince, bool hasPending, DateTime baselineStart) =>
+        !hasPending && filledSince is DateTime f && f <= DateTime.SpecifyKind(baselineStart, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// The high live range's start raised from the last run day's midnight to the next midnight minus
+    /// <paramref name="edgeMargin"/> (#5506), on the latest form only. A row of the high range has its last execution on a
+    /// day after the run, so at or after that next midnight, and its first execution is within one interval before its last
+    /// (both inside one Query Store interval, on the monitored server's clock). The measured margin
+    /// (<see cref="QueryStoreIntervalWide.ResolveEdgeMarginAsync"/>) is at least the server's longest interval, so no row of
+    /// the high range starts below the raised bound. Never below today's bound, so the full 26-hour margin leaves it as it
+    /// is. Not applied to the wide form: measured on a production store, the narrower range flipped the wide table's plan
+    /// from a bitmap scan to a slower plain index scan, while on latest it cut the last run day's node from about 116 MB to
+    /// 12 MB read cold, the plan unchanged.
+    /// </summary>
+    public static Plan WithMeasuredHighStart(Plan plan, TimeSpan edgeMargin)
+    {
+        if (!plan.RegularFromLatest || plan.BuiltDayCount == 0)
+        {
+            return plan;
+        }
+
+        var raised = plan.HighStart.AddDays(1) - edgeMargin;
+        return raised > plan.HighStart ? plan with { HighStart = raised } : plan;
     }
 
     /// <summary>The plan that reads nothing from the daily totals: the whole baseline is live.</summary>
@@ -126,6 +172,10 @@ public static class QueryStoreRegressionBaseline
     /// <c>effective_start</c> says so; a whole day below that floor must not come from the totals, or the baseline would hold
     /// days the notice says were not read. The start is raised to the floor (the same <c>query_store_stats</c> chunk catalog
     /// <c>RawChunkFloorSql</c> reads). The wide arm already passes the gate's clamped start.</para>
+    ///
+    /// <para><b>The Regular arms' table.</b> The same inputs also decide <see cref="Plan.RegularFromLatest"/>
+    /// (<see cref="LatestCoversRegularArms"/>): a pending batch, or latest's coverage starting after the baseline start, sends
+    /// the table arms back to the wide table, and so does any fault here (the all-live plan).</para>
     /// </summary>
     public static async Task<Plan> ResolveAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime baselineStart, DateTime windowStart,
@@ -133,9 +183,11 @@ public static class QueryStoreRegressionBaseline
     {
         const string savepoint = "qs_regression_built_days";
         List<PlanRegressionDaily.BuiltDay> built;
+        bool regularFromLatest;
         await transaction.SaveAsync(savepoint, cancellationToken);
         try
         {
+            DateTime? filledSince;
             bool hasPending;
             bool hasTimescale;
             await using (var inputs = new NpgsqlCommand(QueryStoreIntervalLatest.ReadSourceInputsSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds })
@@ -143,6 +195,7 @@ public static class QueryStoreRegressionBaseline
                 inputs.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = serverId });
                 await using var reader = await inputs.ExecuteReaderAsync(cancellationToken);
                 await reader.ReadAsync(cancellationToken);
+                filledSince = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
                 hasPending = reader.GetBoolean(1);
                 hasTimescale = reader.GetBoolean(2);
             }
@@ -153,6 +206,9 @@ public static class QueryStoreRegressionBaseline
                 return AllLive(windowStart);
             }
 
+            /* Decided on the start the caller passed (the wide gate's clamp on the table arm), before any raw clamp below:
+               the raw arm reads no latest rows. */
+            regularFromLatest = LatestCoversRegularArms(filledSince, hasPending, baselineStart);
             if (clampToRawFloor && hasTimescale)
             {
                 await using var floors = new NpgsqlCommand(QueryStoreIntervalLatest.RawChunkFloorSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
@@ -176,7 +232,7 @@ public static class QueryStoreRegressionBaseline
             await transaction.RollbackAsync(savepoint, CancellationToken.None);
         }
 
-        return Choose(built, baselineStart, windowStart);
+        return Choose(built, baselineStart, windowStart) with { RegularFromLatest = regularFromLatest };
     }
 
     /// <summary>The selection of <see cref="ResolveAsync"/>, over the built days it read.</summary>
@@ -320,12 +376,36 @@ public static class QueryStoreRegressionBaseline
     /// touched; the date test inside each range is what decides membership. The recent arm keeps the interval's
     /// <c>last_execution_time</c> at or after the window start, the same line the baseline stops at.
     /// </summary>
-    public static readonly string WideArmsSql = $$"""
+    public static readonly string WideArmsSql = TableArms(regularFromLatest: false);
+
+    /// <summary>
+    /// <see cref="WideArmsSql"/> with its three Regular arms on <c>query_store_interval_latest</c> (#5506), used where
+    /// <see cref="Plan.RegularFromLatest"/> holds. That table keeps one row per Regular interval identity, its latest
+    /// snapshot (the wide table's identity minus <c>execution_type_desc</c>, which is always Regular there), so the arms read
+    /// the same rows without the <c>execution_type_desc</c> filter, at about 400 bytes a row against about 1.1 KB, through
+    /// the same <c>(server_id, first_execution_time)</c> btree per day partition. The Aborted and Exception arm stays on the
+    /// wide table: latest holds none of those rows.
+    /// </summary>
+    public static readonly string LatestArmsSql = TableArms(regularFromLatest: true);
+
+    /// <summary><see cref="LatestArmsSql"/> or <see cref="WideArmsSql"/>.</summary>
+    public static string TableArmsSql(bool regularFromLatest) => regularFromLatest ? LatestArmsSql : WideArmsSql;
+
+    private static string TableArms(bool regularFromLatest)
+    {
+        var regular = regularFromLatest ? QueryStoreIntervalLatest.TableName : QueryStoreIntervalWide.TableName;
+        /* Latest holds Regular rows only, so its arms carry no outcome filter. */
+        var onlyRegular = regularFromLatest ? "" : "\n    AND   execution_type_desc = 'Regular'";
+        /* On latest the recent arm is MATERIALIZED (#5506, measured on a production store). Inlined, its narrower rows made the
+           planner feed recent_performance's GROUP BY from the (server_id, database_name, query_id, first_execution_time) index
+           in key order, one random heap read per row: a cold 168-hour read took 60.6 s. Materialized, it scans the
+           (server_id, first_execution_time) range and sorts, the wide table's plan shape: 10.9 s. The wide text is unchanged. */
+        var recentCte = regularFromLatest ? "deduped_recent AS MATERIALIZED (" : "deduped_recent AS (";
+        return $$"""
         WITH deduped_baseline AS (
             SELECT database_name, query_id, plan_id, execution_count, avg_duration_us, avg_cpu_time_us, 1 AS rn
-            FROM query_store_interval_wide
-            WHERE server_id = $1
-            AND   execution_type_desc = 'Regular'
+            FROM {{regular}}
+            WHERE server_id = $1{{onlyRegular}}
             AND   first_execution_time >= @@B - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time < @@LOW
             AND   last_execution_time >= @@B
@@ -336,9 +416,8 @@ public static class QueryStoreRegressionBaseline
             UNION ALL
 
             SELECT database_name, query_id, plan_id, execution_count, avg_duration_us, avg_cpu_time_us, 1 AS rn
-            FROM query_store_interval_wide
-            WHERE server_id = $1
-            AND   execution_type_desc = 'Regular'
+            FROM {{regular}}
+            WHERE server_id = $1{{onlyRegular}}
             AND   first_execution_time >= @@HIGH
             AND   first_execution_time < $2
             AND   last_execution_time >= @@B
@@ -346,11 +425,10 @@ public static class QueryStoreRegressionBaseline
             AND   NOT (CAST(last_execution_time AS date) = ANY(@@DAYS))
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ),
-        deduped_recent AS (
+        {{recentCte}}
             SELECT database_name, query_id, plan_id, query_text, execution_count, avg_duration_us, avg_cpu_time_us, last_execution_time, 1 AS rn
-            FROM query_store_interval_wide
-            WHERE server_id = $1
-            AND   execution_type_desc = 'Regular'
+            FROM {{regular}}
+            WHERE server_id = $1{{onlyRegular}}
             AND   collection_time >= @@B
             AND   collection_time <= $3
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
@@ -375,6 +453,7 @@ public static class QueryStoreRegressionBaseline
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ),
         """;
+    }
 
     /// <summary>The run days' per-plan totals from <c>plan_regression_daily</c> (#5448), as <c>baseline_parts</c>' first part.
     /// Every day read here is a whole valid build, and the live arm holds every other row of the baseline window, so no

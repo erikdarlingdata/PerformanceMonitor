@@ -98,7 +98,7 @@ With `mcp.allowWrites` on (and a token), seven MCP tools change collector schedu
 | `disable_collector` / `enable_collector` | Sets the collector's enabled flag. Data already collected stays. |
 | `set_collector_frequency` | Sets `frequency_minutes` (0 = once when the server loads), or `clear: true` to remove the override. |
 | `set_collector_run_at` | Sets the time of day a once-a-day collector starts (`HH:MM`, `none` or `default`), as `--set-collector-run-at` does. |
-| `set_collector_retention` | Sets `retention_days`, or `clear: true` to remove the override. |
+| `set_collector_retention` | Sets `retention_days` for the whole fleet, or `clear: true` to remove the override. Retention is fleet-wide, so a number with `server_name` is refused. `clear: true` with `server_name` removes a per-server value an older build stored. |
 | `set_collector_databases` | Sets the collector's database scope (the editor's Databases column) from a comma-separated `databases` list, or `clear: true`. On a server, `databases: ""` is the explicit "no scope" that stops a fleet-wide scope reaching it. Only the collectors that fan out per database read it. |
 | `reset_collector_schedules` | The editor's Reset to Defaults: deletes every override row and run time of one scope (the fleet-wide rows with no `server_name`, else that server's), and lists what it removed. The other scope is left alone. |
 | `get_collector_schedules` | Lists the stored overrides (enabled, frequency, retention, run time, database scope), for one collector or all, fleet-wide and per server. A read: served without `mcp.allowWrites`. |

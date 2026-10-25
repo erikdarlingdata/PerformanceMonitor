@@ -199,11 +199,13 @@ public partial class CollectorScheduleEditorWindow : Window
 
         var isServerScope = _scopeServerId is not null;
         UseDefaultCheckBox.Visibility = isServerScope ? Visibility.Visible : Visibility.Collapsed;
+        /* The purge reads one retention per collector for every server, so a server scope does not edit it. */
+        KeepColumn.IsReadOnly = isServerScope;
 
         if (isServerScope)
         {
             HeaderText.Text = $"Collector Schedules — {(ScopeCombo.SelectedItem as ComboBoxItem)?.Content}";
-            SubHeaderText.Text = "This server's custom schedule. Uncheck 'Use default schedule' to override the fleet-wide defaults for it.";
+            SubHeaderText.Text = "This server's custom schedule. Uncheck 'Use default schedule' to override the fleet-wide defaults for it. Keep (days) is fleet-wide: change it under All servers.";
             var hasOverride = CollectorScheduleOverlay.ServerHasOverride(_allOverrides, _runTimes, _scopeServerId!.Value);
 
             _suppressPresetChange = true;
