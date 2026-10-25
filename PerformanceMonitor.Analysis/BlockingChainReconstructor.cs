@@ -119,6 +119,10 @@ internal sealed class ReconstructedChain
     public int VictimCount { get; init; }
     public long MaxWaitMs { get; init; }
     public double Magnitude { get; init; }
+    /// <summary>The BLOCKING_CHAIN grade for this chain (<see cref="FactScorer.ScoreBlockingChainShape"/>): structure
+    /// and the longest wait. <see cref="Magnitude"/> (structure only) keeps ordering <see cref="BlockingReconstruction.Chains"/>
+    /// and the viewer tree; the fact's worst-chain pick and both drill-downs rank by this, so they agree.</summary>
+    public double Grade { get; init; }
     public IReadOnlyList<ChainLevel> Levels { get; init; } = Array.Empty<ChainLevel>();
 }
 
@@ -282,6 +286,7 @@ internal static class BlockingChainReconstructor
                 VictimCount = victimCount,
                 MaxWaitMs = maxWait,
                 Magnitude = magnitude,
+                Grade = FactScorer.ScoreBlockingChainShape(depth, victimCount, maxWait),
                 Levels = levels
             });
         }

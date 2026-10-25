@@ -265,7 +265,7 @@ LIMIT 5000";
         var reconstruction = BlockingChainReconstructor.Reconstruct(
             rows, maxDepth: 50, maxPairs: 5000, stepBudget: 100_000, scopeByMonitorLoop: false);
 
-        var shownChains = reconstruction.Chains.Take(3).ToList();
+        var shownChains = BlockingChainFactBuilder.DrillDownChains(reconstruction, 3);
 
         /* #5361: whole statement text for the levels that print, by event key, one read per source. A level whose
            row is gone by now (retention) reads as empty text. The text is judged and cut below, as before. */

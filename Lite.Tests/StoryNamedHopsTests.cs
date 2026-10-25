@@ -255,7 +255,8 @@ public class StoryNamedHopsTests
             new() { Source = "blocking", Key = "BLOCKING_CHAIN", Value = 3, ServerId = 1, Metadata = new()
                 {
                     ["worst_chain_depth"] = 3, ["worst_chain_victim_count"] = 2, ["worst_apex_spid"] = 57, ["worst_apex_sleeping"] = 1,
-                    ["worst_chain_max_wait_ms"] = 45_000, ["total_reconstructed_chains"] = 1, ["deepest_chain_overall"] = 3,
+                    // Under the 30 s duration mark, so the depth-3 structure (0.5, x1.4 for the sleeping head) is what grades.
+                    ["worst_chain_max_wait_ms"] = 20_000, ["total_reconstructed_chains"] = 1, ["deepest_chain_overall"] = 3,
                     ["max_victim_count_overall"] = 2, ["depth_capped"] = 0, ["traversal_truncated"] = 0, ["cycle_detected"] = 0,
                 } },
         };
