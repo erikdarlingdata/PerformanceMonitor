@@ -1746,14 +1746,17 @@ GRANT UPDATE ({McpMonitoredServerUpdateColumns})
 {BuildCustomAlertResolveFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) TO {viewer}, {mcp};
 -- #6334: the known-pattern entries' writes. The web editor (viewer) and the Viewer (admin) write config.config_known_patterns only
---     through these three functions; no role holds a direct INSERT/UPDATE/DELETE on the table, and mcp gets neither the functions nor a write
---     (no MCP tool writes an entry: they are operator-written context). Owned by the store owner, pinned search_path, no dynamic SQL; created and
+--     through these three functions, and the MCP create_known_pattern / update_known_pattern / delete_known_pattern tools (#6398) call the same
+--     functions as mcp; no role holds a direct INSERT/UPDATE/DELETE on the table. Owned by the store owner, pinned search_path, no dynamic SQL; created and
 --     REVOKEd from PUBLIC by the shared builder. The reads need no grant: the schema-wide SELECT covers the table. The beacon trigger runs as
 --     the function's owner, so no config_service grant is needed either. NOT a versioned migration, for the same reason as the edit function.
 {BuildKnownPatternFunctionsSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.insert_known_pattern({InsertKnownPatternSignature}) TO {admin}, {viewer};
+GRANT EXECUTE ON FUNCTION {config}.insert_known_pattern({InsertKnownPatternSignature}) TO {mcp};
 GRANT EXECUTE ON FUNCTION {config}.update_known_pattern({UpdateKnownPatternSignature}) TO {admin}, {viewer};
+GRANT EXECUTE ON FUNCTION {config}.update_known_pattern({UpdateKnownPatternSignature}) TO {mcp};
 GRANT EXECUTE ON FUNCTION {config}.delete_known_pattern(bigint) TO {admin}, {viewer};
+GRANT EXECUTE ON FUNCTION {config}.delete_known_pattern(bigint) TO {mcp};
 -- #5240: the edit write. The web edit route (viewer) and the MCP edit_server tool (mcp) call
 --     {config}.edit_monitored_server for their one UPDATE of a config_monitored_servers row. It locks the row, checks
 --     the expected modified_at, and refuses a change of host or port that keeps the stored secret on a SQL or
@@ -2492,8 +2495,7 @@ FROM (
     /// <summary>
     /// The <c>SECURITY DEFINER</c> functions (#6334) that are the writes of the known-pattern entries
     /// (<c>config.config_known_patterns</c>): <c>insert_known_pattern</c>, <c>update_known_pattern</c> and <c>delete_known_pattern</c>. The
-    /// web editor (viewer) and the Viewer (admin) call them; the table itself carries NO direct write grant for any reader role, and the
-    /// MCP role (mcp) gets neither the functions nor a write, because entries are operator-written context and no MCP tool writes them.
+    /// web editor (viewer), the Viewer (admin) and the MCP write tools (mcp, #6398) call them; the table itself carries NO direct write grant for any reader role.
     /// Returns the <c>CREATE OR REPLACE FUNCTION</c> statements plus the <c>REVOKE ALL ... FROM PUBLIC</c> of each (a new function is
     /// EXECUTE-able by PUBLIC); the caller adds the <c>GRANT EXECUTE</c>. Because the body runs as the owner, the table's
     /// <c>config_version</c> trigger bumps the beacon as the owner, so the caller needs no grant on <c>config_service</c>. Pinned
@@ -2518,9 +2520,14 @@ SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
    v_id bigint;
+   v_count bigint;
 BEGIN
    IF p_server_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_server_id) THEN
       RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   SELECT count(*) INTO v_count FROM {config}.config_known_patterns;
+   IF v_count >= {PerformanceMonitor.Common.KnownPatterns.KnownPatternMatcher.MaxEntries} THEN
+      RAISE EXCEPTION 'Known patterns are capped at {PerformanceMonitor.Common.KnownPatterns.KnownPatternMatcher.MaxEntries} entries and % exist. Delete entries you no longer need to make room.', v_count USING ERRCODE = 'DL409';
    END IF;
    INSERT INTO {config}.config_known_patterns
       (server_id, metric_name, time_of_day, time_zone, window_minutes, note, created_by, expires_at_utc)

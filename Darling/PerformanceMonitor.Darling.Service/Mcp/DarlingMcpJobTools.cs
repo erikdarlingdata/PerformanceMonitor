@@ -126,11 +126,13 @@ public sealed class DarlingMcpJobTools
         [Description("Exact job category name, case-insensitive.")] string? category = null,
         [Description("Maximum number of runs to return. Default 100.")] int limit = 100,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Only runs of at least this many seconds. Omit for all runs.")] int? min_duration_seconds = null,
         CancellationToken cancellationToken = default)
     {
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd)
             ?? McpHelpers.ValidateTop(limit)
-            ?? McpHelpers.ValidateChoice(status, HistoryStatuses, "status");
+            ?? McpHelpers.ValidateChoice(status, HistoryStatuses, "status")
+            ?? (min_duration_seconds < 0 ? McpHelpers.Refusal("min_duration_seconds", $"Invalid min_duration_seconds value '{min_duration_seconds}'. Must be zero or a positive number of seconds.") : null);
         if (validation != null) return validation;
 
         try
@@ -151,7 +153,8 @@ public sealed class DarlingMcpJobTools
                 string.IsNullOrWhiteSpace(job_name) ? null : job_name.Trim(),
                 string.IsNullOrWhiteSpace(status) ? null : Array.FindIndex(HistoryStatuses, s => string.Equals(s, status.Trim(), StringComparison.OrdinalIgnoreCase)),
                 string.IsNullOrWhiteSpace(category) ? null : category.Trim(),
-                windowEnd);
+                windowEnd,
+                min_duration_seconds);
 
             var requestedStart = windowEnd.AddHours(-hours_back);
             var fetched = await DarlingJobHistoryReader.GetAsync(

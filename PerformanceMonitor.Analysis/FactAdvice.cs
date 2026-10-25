@@ -1637,6 +1637,7 @@ public static class FactAdvice
         if (distinct is > 0)
             inv.Append($", across {Plural(distinct.Value, "distinct query")}");
         inv.Append(". A spill means a query's memory grant was too small for its sort or hash operation, so the overflow went to tempdb — disk-speed work in place of memory-speed.");
+        inv.Append(NamedQueriesSentence(facts, "QUERY_SPILLS", "Most spilled", o => SpilledPagesText(o.Value)));
 
         var rem =
             "Spills are a symptom of under-estimated memory grants, almost always from stale or skewed " +
@@ -1652,6 +1653,16 @@ public static class FactAdvice
             Investigation = inv.ToString(),
             Remediation = rem
         };
+    }
+
+    /// <summary>#6640: " Label: name (figure), name (figure)." for the queries a fact ranks, subject first, or empty when the
+    /// fact ranked none. Unlike <see cref="NameTheRestList"/> it includes entry [0], because these cards have no other sentence
+    /// that names the subject.</summary>
+    private static string NamedQueriesSentence(IReadOnlyDictionary<string, Fact> facts, string key, string label, Func<RankedObject, string> figure)
+    {
+        if (!facts.TryGetValue(key, out var f) || f.Ranked.Count == 0)
+            return string.Empty;
+        return $" {label}: " + string.Join(", ", f.Ranked.Select(o => $"{o.ObjectName} ({figure(o)})")) + ".";
     }
 
     /// <summary>"1,234 pages (9.6 MB)" for a <c>total_spills</c> value: the DMV column counts 8 KB pages, so the
@@ -1712,6 +1723,7 @@ public static class FactAdvice
                 : grantDiv
                     ? " Memory grants diverged sharply across executions — a single plan's grant being wrong for the other parameter values."
                     : " Some executions spilled and others did not — a single plan's grant being wrong for the other parameter values.");
+        inv.Append(NamedQueriesSentence(facts, "PARAMETER_SENSITIVITY", "Worst plans (database/query_hash/query_plan_hash)", o => $"{o.Value:0.#}×"));
 
         var rem =
             "Do NOT force one of these plans — that locks in the wrong shape for the other parameter values. " +

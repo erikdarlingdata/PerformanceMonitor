@@ -1069,19 +1069,27 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
        metric's last alert on the same server. A resolution row's context_json names the metric it resolves in its top-level
        Resolves member; the candidate rows come back and C# parses each context (a text match would miss the escapings).
        A metric with no candidate comes back once with a NULL context, so a request with an uncleared metric is unresolved.
-       Read through v_config_alert_log (live plus archive) so an archived resolution still counts. */
+       Read through v_config_alert_log (live plus archive) so an archived resolution still counts.
+       The bound on h.alert_time is the oldest last alert among the candidates. It saves the per-row work (the Resolves test
+       and the join) on every older row, live or archived; the rows are still read, and the saving was measured on Darling's
+       PostgreSQL store only. A live follow-up can pull the oldest last alert back by up to 30 days, so the saving is smaller
+       while one is open. It drops no candidate: a resolution row a candidate can use is after that candidate's last alert,
+       so after the oldest one. It is not the clock minus a fixed window, because a follow-up opens now but copies its
+       source's alert rows with their original times, so its last alert can be weeks old. */
     internal const string ResolveCandidatesSql = @"
+WITH m AS (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS last_alert
+           FROM investigation_request_alerts AS a
+           WHERE a.request_id IN (SELECT r.request_id
+                                  FROM investigation_requests AS r
+                                  WHERE r.state IN ('open', 'claimed', 'reported')
+                                    AND r.opened_at > $1 - INTERVAL 2 DAY)
+           GROUP BY a.request_id, a.server_id, a.metric_name)
 SELECT m.request_id, m.metric_name, h.context_json
-FROM (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS last_alert
-      FROM investigation_request_alerts AS a
-      WHERE a.request_id IN (SELECT r.request_id
-                             FROM investigation_requests AS r
-                             WHERE r.state IN ('open', 'claimed', 'reported')
-                               AND r.opened_at > $1 - INTERVAL 2 DAY)
-      GROUP BY a.request_id, a.server_id, a.metric_name) AS m
+FROM m
 LEFT JOIN v_config_alert_log AS h
        ON h.server_id = m.server_id
       AND h.alert_time > m.last_alert
+      AND h.alert_time > (SELECT min(last_alert) FROM m)
       AND strpos(h.context_json, 'Resolves') > 0";
 
     /* Journals resolved once per request (once key resolved:<request_id>); the state is checked again under the write lock. */

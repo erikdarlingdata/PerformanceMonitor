@@ -161,7 +161,7 @@ public static partial class CustomViewValidation
             ["get_cpu_scheduler_pressure"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false) },
             ["get_plan_cache_bloat"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false) },
             ["get_running_jobs"] = new ReadPanelParam[] { new("server", false) },
-            ["get_job_history"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("job_name", false), new("status", false), new("category", false), new("limit", false), new("as_of", false) },
+            ["get_job_history"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("job_name", false), new("status", false), new("category", false), new("limit", false), new("min_duration_seconds", false), new("as_of", false) },
             ["get_plan_xml"] = new ReadPanelParam[] { new("query_hash", true), new("server", false), new("database_name", false) },
             ["get_query_store_plan_xml"] = new ReadPanelParam[] { new("database_name", true), new("query_id", true), new("server", false), new("plan_id", false) },
             ["get_procedure_plan_xml"] = new ReadPanelParam[] { new("sql_handle", true), new("server", false) },

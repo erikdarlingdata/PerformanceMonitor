@@ -124,14 +124,21 @@ public sealed record NotificationRouteDecision(
     /// the one place a reason is written.</para>
     ///
     /// <para>#6718: <paramref name="genericSentKey"/> is the <c>{{dedup_key}}</c> the generic post rendered, stored on the
-    /// generic destination as <see cref="AlertRouteDestinationDto.SentKey"/>. Null leaves it null.</para></summary>
-    public AlertRouteDto ToDto(IReadOnlyDictionary<string, AlertChannelOutcome>? outcomes = null, string? genericSentKey = null) => new(
+    /// generic destination as <see cref="AlertRouteDestinationDto.SentKey"/>. Null leaves it null.</para>
+    ///
+    /// <para><paramref name="pagerDutySentKey"/> is the <c>dedup_key</c> the PagerDuty trigger carried, stored the same way on
+    /// the PagerDuty destination. Null leaves it null.</para></summary>
+    public AlertRouteDto ToDto(
+        IReadOnlyDictionary<string, AlertChannelOutcome>? outcomes = null, string? genericSentKey = null,
+        string? pagerDutySentKey = null) => new(
         Family,
         RouteId,
         All.Where(d => d.IsDelivered)
            .Select(d => new AlertRouteDestinationDto(
                d.Channel, d.RouteId, d.Source.ToString(), OutcomeText(d.Channel, outcomes),
-               d.Channel == NotificationRouter.GenericChannel ? genericSentKey : null))
+               d.Channel == NotificationRouter.GenericChannel ? genericSentKey
+                   : d.Channel == NotificationRouter.PagerDutyChannel ? pagerDutySentKey
+                   : null))
            .ToList());
 
     private static string? OutcomeText(string channel, IReadOnlyDictionary<string, AlertChannelOutcome>? outcomes)

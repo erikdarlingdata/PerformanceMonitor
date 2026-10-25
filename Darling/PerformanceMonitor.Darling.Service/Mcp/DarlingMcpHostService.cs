@@ -1703,6 +1703,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpChangeWatchTools>()
             /* The known-pattern read - get_known_patterns (#6334) - the operator-written entries that get_alert_history rows carry the matches of. */
             .WithGeminiCompatibleTools<DarlingMcpKnownPatternTools>()
+            /* The known-pattern writes - create_known_pattern / update_known_pattern / delete_known_pattern (#6398) - admin writes over the same store
+               functions the web editor calls; write tools (mcp.allowWrites), never offered to an investigation agent. */
+            .WithGeminiCompatibleTools<DarlingMcpKnownPatternWriteTools>()
             /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
                _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
                _severe_errors / _significant_waits / _system_health — the same names the Dashboard
