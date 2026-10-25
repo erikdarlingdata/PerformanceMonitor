@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
@@ -29,9 +30,17 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 public sealed class DarlingMcpServedPolicy
 {
-    internal DarlingMcpServedPolicy(DarlingMcpWritePolicy.Effective policy) => Policy = policy;
+    internal DarlingMcpServedPolicy(DarlingMcpWritePolicy.Effective policy, IReadOnlySet<string>? namedAgentNames = null)
+    {
+        Policy = policy;
+        NamedAgentNames = namedAgentNames ?? new HashSet<string>();
+    }
 
     internal DarlingMcpWritePolicy.Effective Policy { get; }
+
+    /// <summary>The names of the named agent tokens this host serves (#6542), empty when it serves none. A legacy-token call may not
+    /// claim as one of them: the journal would credit that named agent with a claim it never made.</summary>
+    internal IReadOnlySet<string> NamedAgentNames { get; }
 }
 
 /// <summary>

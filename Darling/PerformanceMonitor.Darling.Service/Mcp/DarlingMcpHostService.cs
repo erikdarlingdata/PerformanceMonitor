@@ -1334,7 +1334,7 @@ public sealed class DarlingMcpHostService : BackgroundService
         /* #5916: set_alert_threshold_override is a Level 2 action tool offered under both arms and takes the served policy as a
            service parameter to tell them apart. */
         if (perRequest)
-            services.AddTransient<DarlingMcpServedPolicy>(sp => new DarlingMcpServedPolicy(PolicyOf(sp)));
+            services.AddTransient<DarlingMcpServedPolicy>(sp => new DarlingMcpServedPolicy(PolicyOf(sp), tokens!.AgentNames));
         else
             services.AddSingleton<DarlingMcpServedPolicy>(new DarlingMcpServedPolicy(writes));
 

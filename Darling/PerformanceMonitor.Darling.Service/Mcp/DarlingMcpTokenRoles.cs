@@ -55,6 +55,12 @@ internal sealed class DarlingMcpTokenSet
 
     internal IReadOnlyList<Entry> Named { get; }
 
+    /// <summary>The names of the served named tokens that hold the agent role (#6542): each is an agent's identity in the journal, so a
+    /// legacy-token call may not claim under one of them.</summary>
+    internal IReadOnlySet<string> AgentNames =>
+        Named.Where(e => !string.Equals(e.Role, McpTokenEntry.OperatorRole, StringComparison.Ordinal))
+            .Select(e => e.Name).ToHashSet(StringComparer.Ordinal);
+
     /// <summary>True when at least one named token is served, so each request's tool set follows its token.</summary>
     internal bool HasNamed => Named.Count > 0;
 
