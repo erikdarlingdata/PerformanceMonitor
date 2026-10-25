@@ -131,6 +131,8 @@ Most of what the viewer shows is also on the web. What is missing falls into the
 
 These are `get_database_scoped_config` and `get_store_metrics`. The table renderer cannot draw the `databases[].settings[]` shape of `get_database_scoped_config`. `get_store_metrics` is store-wide and has no per-server home.
 
+`get_query_trend` was on that list until [#2520](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2520). It was the only entry in this section that was missing UI and not a stated boundary. The read needs a `query_hash` and a `database_name`, and nothing on the web supplied either. The Top Queries table on the Queries tab now has a picker. The query that you pick gets a chart of its average CPU and average duration over the window, and a grid of its snapshots for each collection. The picker offers exactly the queries that the table shows. It indexes into the rows rendered directly above it and does not read a second, wider list.
+
 #### Every PostgreSQL capture path is on both surfaces
 
 [#2530](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2530) landed the web tabs first and the WPF viewer second. The desktop set has the same names and the same grouping as the web set, so the two front ends do not teach one engine two shapes. The one difference is Configuration, which only the web set has. The desktop panels are grids and not charts. The desktop Overview is the collection report for each collector: which collectors ran, when, with what result, and why one cannot run here. A PostgreSQL operator wants that answer first, and the web splits it across tiles.
