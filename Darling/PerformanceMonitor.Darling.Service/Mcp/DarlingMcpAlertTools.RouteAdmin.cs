@@ -564,11 +564,19 @@ public sealed partial class DarlingMcpAlertTools
         return await command.ExecuteScalarAsync(cancellationToken) as string ?? "";
     }
 
-    /// <summary>The refusal a route function raised (its own DL400, DL403 or DL404 sentence), or null for any other error.</summary>
+    /// <summary>The fixed answer when the store has no route, signing-key or default-channel function the calling role may run: a
+    /// self-managed store whose roles were provisioned by an older build (3.12 added and changed these functions, and only
+    /// provision-roles.sql creates them). Never PostgreSQL's own text. The web dashboard's route save says the same.</summary>
+    internal const string RouteStoreNeedsRolesText =
+        "This store's roles predate this route, signing key or notification channel write: re-run Darling/tools/provision-roles.sql on the store, then try again.";
+
+    /// <summary>The refusal a route function raised (its own DL400, DL403 or DL404 sentence), the re-run sentence when the store lacks
+    /// the function or the role may not run it (42883, 42501), or null for any other error.</summary>
     private static string? RouteFunctionOutcome(PostgresException ex) => ex.SqlState switch
     {
         "DL400" or "DL404" => Outcome("invalid", ex.MessageText),
         "DL403" => Outcome("refused", ex.MessageText),
+        "42883" or "42501" => Outcome("refused", RouteStoreNeedsRolesText),
         _ => null,
     };
 

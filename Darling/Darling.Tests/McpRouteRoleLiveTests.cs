@@ -65,6 +65,49 @@ public sealed class McpRouteRoleLiveTests
         });
     }
 
+    /* A self-managed store upgraded from 3.11 without re-running provision-roles.sql holds the 3.11 update function (no actor argument), so
+       the 3.12 call finds no function of that shape (42883). The tool says what to do, in its own sentence, and raises nothing. */
+    [Fact]
+    public async Task AStoreStillHoldingTheOlderUpdateFunction_AnswersTheReRunSentence_NotAnException()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var created = await DarlingMcpAlertTools.CreateNotificationRoute(asMcp, "Blocking", send_resolutions: "never", cancellationToken: ct);
+            var routeId = JsonDocument.Parse(created).RootElement.GetProperty("route").GetProperty("route_id").GetInt32();
+
+            await ExecAsync(owner,
+                "DO $$ DECLARE f regprocedure; BEGIN FOR f IN SELECT p.oid::regprocedure FROM pg_proc p WHERE p.proname = 'update_notification_route' " +
+                "AND p.pronamespace = 'config'::regnamespace LOOP EXECUTE 'DROP FUNCTION ' || f; END LOOP; END $$", ct);
+            await ExecAsync(owner,
+                "CREATE FUNCTION config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) " +
+                "RETURNS void LANGUAGE sql AS 'SELECT'", ct);
+
+            var edited = await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, metric_match: "Deadlocks", cancellationToken: ct);
+
+            Assert.Equal("refused", Status(edited));
+            Assert.Equal(DarlingMcpAlertTools.RouteStoreNeedsRolesText, JsonDocument.Parse(edited).RootElement.GetProperty("message").GetString());
+            Assert.Contains("provision-roles.sql", DarlingMcpAlertTools.RouteStoreNeedsRolesText, StringComparison.Ordinal);
+            await using var read = owner.CreateCommand("SELECT metric_match FROM config.config_notification_routes WHERE route_id = $1");
+            read.Parameters.AddWithValue(routeId);
+            Assert.Equal("Blocking", await read.ExecuteScalarAsync(ct));
+        });
+    }
+
+    /* The signing-key and default-channel functions are new in 3.12 and only provision-roles.sql creates them: the harness store has none,
+       as a self-managed store upgraded from 3.11 has none. */
+    [Fact]
+    public async Task AStoreWithoutTheSigningKeyFunctions_AnswersTheReRunSentence_NotAnException()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var removed = await DarlingMcpAlertTools.RemoveWebhookSigningKey(asMcp, null, cancellationToken: ct);
+
+            Assert.Equal("refused", Status(removed));
+            Assert.Equal(DarlingMcpAlertTools.RouteStoreNeedsRolesText, JsonDocument.Parse(removed).RootElement.GetProperty("message").GetString());
+            await Task.CompletedTask;
+        });
+    }
+
     [Theory]
     [InlineData("SELECT teams_url FROM config.config_notification_routes")]
     [InlineData("SELECT slack_url, generic_url FROM config.config_notification_routes")]

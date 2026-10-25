@@ -114,19 +114,19 @@ public sealed class DarlingMcpCollectorScheduleTools
         ApplyAsync(postgres, new Edit(Change.RunAt, "set_collector_run_at", collector_name, server_name, null, false, run_at), logger, cancellationToken);
 
     [McpServerTool(Name = "set_collector_retention"), Description(
-        "Sets, or clears, how many days one collector's data is kept, fleet-wide (no server_name) or for ONE server. clear=true removes the override so the next level applies (the fleet row for a server, else the code default). Same bound as the Viewer's schedule editor: at least 1 day. Only retention changes; the enabled flag and frequency on the row are kept, and a new row never switches a collector on or off. A shorter retention lets the next purge delete older rows. The answer gives the previous value and the exact call that undoes it. Needs mcp.allowWrites; never offered to an investigation agent.")]
+        "Sets, or clears, how many days one collector's data is kept. Retention is fleet-wide: the purge reads one value per collector for every server, so a number with server_name is refused (frequency and enabled can still be set per server). clear=true removes the fleet-wide override so the code default applies; clear=true with server_name removes a per-server value an older build stored, which the purge never used. Same bound as the Viewer's schedule editor: at least 1 day. Only retention changes; the enabled flag and frequency on the row are kept, and a new row never switches a collector on or off. A shorter retention lets the next purge delete older rows on every server. The answer gives the previous value and the exact call that undoes it. Needs mcp.allowWrites; never offered to an investigation agent.")]
     public static Task<string> SetCollectorRetention(
         NpgsqlDataSource postgres,
         [Description("Collector name, as get_collection_health reports it.")] string collector_name,
         [Description("Days to keep, 1 or more. Omit when clear is true.")] int? retention_days = null,
         [Description("True to clear the override instead of setting a value.")] bool clear = false,
-        [Description("Optional server name or display name. Omit to change the fleet-wide row.")] string? server_name = null,
+        [Description("Only with clear=true, to remove a per-server value an older build stored. A number with server_name is refused: retention is fleet-wide. Omit to change the fleet-wide row.")] string? server_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
         ApplyAsync(postgres, new Edit(Change.Retention, "set_collector_retention", collector_name, server_name, retention_days, clear, null), logger, cancellationToken);
 
     [McpServerTool(Name = "get_collector_schedules"), Description(
-        "Lists the schedule overrides stored for one collector, or for every collector: enabled, frequency_minutes, retention_days, run_at and the database scope, fleet-wide or per server. A server's own value wins over the fleet-wide one, column by column; a missing value means the next level applies, and the code default applies where there is no row; an enabled flag stored as NULL shows as inherited. With collector_name the answer also gives that collector's code default. Use it before and after disable_collector / enable_collector / set_collector_frequency / set_collector_run_at / set_collector_retention. Read only.")]
+        "Lists the schedule overrides stored for one collector, or for every collector: enabled, frequency_minutes, retention_days, run_at and the database scope, fleet-wide or per server (the purge applies only the fleet-wide retention_days). A server's own value wins over the fleet-wide one, column by column, for the other columns; a missing value means the next level applies, and the code default applies where there is no row; an enabled flag stored as NULL shows as inherited. With collector_name the answer also gives that collector's code default. Use it before and after disable_collector / enable_collector / set_collector_frequency / set_collector_run_at / set_collector_retention. Read only.")]
     public static async Task<string> GetCollectorSchedules(
         NpgsqlDataSource postgres,
         [Description("Optional collector name. Omit to list every collector that has an override.")] string? collector_name = null,
@@ -317,6 +317,11 @@ public sealed class DarlingMcpCollectorScheduleTools
             {
                 var column = edit.Kind == Change.Frequency ? "frequency_minutes" : "retention_days";
                 return Refuse(edit.Tool, "invalid", $"{edit.Tool} needs either {column} (a whole number) or clear=true, not both and not neither. Nothing was changed.");
+            }
+
+            if (DarlingCliCommands.PerServerRetentionRefusal(edit.Kind == Change.Retention, edit.Clear, edit.Server) is { } perServerRefusal)
+            {
+                return Refuse(edit.Tool, "invalid", perServerRefusal);
             }
 
             /* The executor's own plan first, for a fleet scope: it refuses a bad value in its own words before the store is touched. */
@@ -537,6 +542,12 @@ public sealed class DarlingMcpCollectorScheduleTools
                 }
 
                 changed = before != after;
+                if (!freq && serverId is not null)
+                {
+                    /* Only a clear reaches here (a number with a server is refused). Putting the value back would be a per-server set, which is refused. */
+                    notes.Add("The purge never used this per-server value, so clearing it changes no retention. It is not put back by an undo, because a per-server retention is refused.");
+                }
+
                 what = after is int a
                     ? $"{collector} {name} is now {a} {scopeText}."
                     : $"{collector} {name} override cleared {scopeText}; the {(serverId is null ? "code default" : "fleet-wide value, else the code default")} applies.";
@@ -553,7 +564,9 @@ public sealed class DarlingMcpCollectorScheduleTools
                         .Select(NoteNameOf).ToList();
                     if (own.Count > 0)
                     {
-                        notes.Add($"These servers have their own {name}, which wins over the fleet-wide one: {string.Join(", ", own)}.");
+                        notes.Add(freq
+                            ? $"These servers have their own {name}, which wins over the fleet-wide one: {string.Join(", ", own)}."
+                            : $"These servers have their own {name} stored, which the purge does not use (retention is fleet-wide): {string.Join(", ", own)}. set_collector_retention with clear=true and a server_name removes one.");
                     }
                 }
 
@@ -595,7 +608,7 @@ public sealed class DarlingMcpCollectorScheduleTools
             ["what_changed"] = what,
             ["previous"] = JsonSerializer.SerializeToNode(previous),
             ["current"] = JsonSerializer.SerializeToNode(current),
-            ["undo"] = new JsonObject { ["tool"] = tool, ["arguments"] = undoArgs },
+            ["undo"] = edit.Kind == Change.Retention && serverId is not null ? null : new JsonObject { ["tool"] = tool, ["arguments"] = undoArgs },
             ["notes"] = new JsonArray(notes.Select(n => (JsonNode?)JsonValue.Create(n)).ToArray()),
             ["takes_effect"] = TakesEffect,
         }.ToJsonString();
