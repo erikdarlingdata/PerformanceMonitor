@@ -75,6 +75,27 @@ public sealed class WebAdminArm : IDisposable
         return new WebAdminArm(() => DarlingManagedPostgres.TryBuildWebAdminConnectionStringFromStoredCredential(postgres));
     }
 
+    /// <summary>The start-up warning for OIDC sign-in with no role mapping (<c>web.network.oidc.roleClaim</c> unset): every user who signs in at the
+    /// identity provider then holds the edit seat. What that reaches depends on the store: on the managed store it is the Admin writes while
+    /// <paramref name="adminArm"/> exists, and nothing while it does not; on a store you bring it is whatever the web login's own grants allow
+    /// (<c>postgres.webConnectionString</c>), which the service cannot see from here. Logs nothing when there is no OIDC sign-in or a role mapping
+    /// exists (viewer-only included). Returns whether it warned.</summary>
+    internal static bool WarnWhenOidcHasNoRoleMapping(DarlingWebOidcClient? oidc, bool managedStore, WebAdminArm? adminArm, ILogger logger)
+    {
+        if (oidc is null || oidc.Options.RoleClaim is not null)
+        {
+            return false;
+        }
+
+        var effect = !managedStore
+            ? "On this store you brought, what they can change depends on the web login's grants (postgres.webConnectionString): with a login that can write, every one of them can change thresholds, routes, webhook URLs and the agent switch."
+            : adminArm is not null
+                ? "web.allowAdminWrites is on, so every user who signs in can make the dashboard's Admin writes."
+                : "web.allowAdminWrites is off, so the dashboard stays list-only for them.";
+        logger.LogWarning("web.network.oidc has no role mapping, so every user who signs in has the edit seat. {Effect} Set web.network.oidc.roleClaim with adminRoles and viewerRoles to limit who can edit.", effect);
+        return true;
+    }
+
     /// <summary>The admin pool, built on first use, or null while its credential is not stored yet (or after disposal).</summary>
     internal NpgsqlDataSource? Source
     {

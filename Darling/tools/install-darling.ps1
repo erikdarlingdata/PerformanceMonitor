@@ -2062,16 +2062,18 @@ function New-DarlingMinimalConfigText([bool]$EnableWebDashboard = $false, [strin
   "servers": []
 }
 '@
-    # -WebDashboard (the MSI's WEBDASHBOARD=1, #6480): the dashboard starts on its loopback address and asks for the token below.
-    # The block goes ahead of "servers". Tokenless loopback stays off: it would let every local user read the collected data.
-    if ($EnableWebDashboard) {
-        $webBlock = '  "web": {' + "`r`n" + '    "enabled": true'
-        if ($WebEncryptedToken) {
-            $webBlock += ',' + "`r`n" + '    "network": {' + "`r`n" + '      "encryptedToken": "' + $WebEncryptedToken + '"' + "`r`n" + '    }'
-        }
-        $webBlock += "`r`n" + '  },' + "`r`n"
-        $text = $text -replace '(?m)^  "servers": \[\]', ($webBlock.Replace('$', '$$') + '  "servers": []')
+    # The "web" block goes ahead of "servers". allowAdminWrites is written true in every NEW file: a darling.json without the key keeps the
+    # web admin writes off (so an upgrade from 3.11 changes nothing), and a new install keeps them on, as before.
+    # -WebDashboard (the MSI's WEBDASHBOARD=1, #6480): the dashboard also starts on its loopback address and asks for the token below.
+    # Tokenless loopback stays off: it would let every local user read the collected data.
+    $webBlock = '  "web": {' + "`r`n"
+    if ($EnableWebDashboard) { $webBlock += '    "enabled": true,' + "`r`n" }
+    $webBlock += '    "allowAdminWrites": true'
+    if ($EnableWebDashboard -and $WebEncryptedToken) {
+        $webBlock += ',' + "`r`n" + '    "network": {' + "`r`n" + '      "encryptedToken": "' + $WebEncryptedToken + '"' + "`r`n" + '    }'
     }
+    $webBlock += "`r`n" + '  },' + "`r`n"
+    $text = $text -replace '(?m)^  "servers": \[\]', ($webBlock.Replace('$', '$$') + '  "servers": []')
     return $text
 }
 
