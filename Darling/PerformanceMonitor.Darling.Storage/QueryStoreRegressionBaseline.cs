@@ -113,6 +113,15 @@ public static class QueryStoreRegressionBaseline
     /// coverage row (<paramref name="filledSince"/>) at or before the baseline start, and no pending batch (a batch that
     /// stored raw and wide but missed latest is not in the claim). Otherwise the arms read the wide table, today's read.
     /// The same two inputs as the built-days gate (<see cref="QueryStoreIntervalLatest.ReadSourceInputsSql"/>).
+    /// It has no table-floor check like the wide gate's (<see cref="QueryStoreIntervalWide.UseTable"/>, clause 3), and
+    /// <paramref name="filledSince"/> is a write-side claim that says nothing of what retention has removed since. That is
+    /// safe only because of an order kept in other files: latest keeps 15 days
+    /// (<c>DarlingRetention.QueryStoreIntervalLatestRetentionDays</c>) against the wide table's 10
+    /// (<see cref="QueryStoreIntervalPartitions.WideHorizonDays"/>), both purge oldest first on <c>first_execution_time</c>, and
+    /// the baseline start passed here is already the wide gate's clamp. So latest still holds every row the arms reach. If
+    /// latest's retention ever falls to the wide table's or below, this gate under-reads with no error.
+    /// <c>QueryStoreIntervalLatestWriterTests.Retention_DropsIntervalsPastFifteenDays_AndStalePendingRows_AndKeepsTheRest</c>
+    /// pins the 15 days.
     /// </summary>
     public static bool LatestCoversRegularArms(DateTime? filledSince, bool hasPending, DateTime baselineStart) =>
         !hasPending && filledSince is DateTime f && f <= DateTime.SpecifyKind(baselineStart, DateTimeKind.Unspecified);
