@@ -85,11 +85,15 @@ public sealed class WebAdminArmTests
     }
 
     [Fact]
-    public void TheSwitchDefaultsToOn_AndTheArmExistsOnlyOnTheManagedStoreWithTheSwitchOn()
+    public void TheSwitchDefaultsToOff_AMissingKeyKeepsItOff_AndTheArmExistsOnlyOnTheManagedStoreWithTheSwitchOn()
     {
-        Assert.True(new WebConfig().AllowAdminWrites);
-        Assert.True(System.Text.Json.JsonSerializer.Deserialize<WebConfig>("{}")!.AllowAdminWrites);
+        // An upgrade from 3.11 has no key: it must keep 3.11's web scope (no admin pool) until the operator sets it.
+        Assert.False(new WebConfig().AllowAdminWrites);
+        Assert.False(System.Text.Json.JsonSerializer.Deserialize<WebConfig>("{}")!.AllowAdminWrites);
+        Assert.False(DarlingConfig.Parse("{\"web\": {\"enabled\": true}}").Web.AllowAdminWrites);
         Assert.False(System.Text.Json.JsonSerializer.Deserialize<WebConfig>("{\"allowAdminWrites\": false}")!.AllowAdminWrites);
+        Assert.True(System.Text.Json.JsonSerializer.Deserialize<WebConfig>("{\"allowAdminWrites\": true}")!.AllowAdminWrites);
+        Assert.True(DarlingConfig.Parse("{\"web\": {\"allowAdminWrites\": true}}").Web.AllowAdminWrites);
 
         if (!OperatingSystem.IsWindows())
         {
@@ -100,6 +104,51 @@ public sealed class WebAdminArmTests
         Assert.NotNull(managedOn);
         Assert.Null(WebAdminArm.ForHost(new PostgresConfig { Managed = true }, false, NullLogger.Instance));
         Assert.Null(WebAdminArm.ForHost(new PostgresConfig { Managed = false }, true, NullLogger.Instance));
+    }
+
+    [Fact]
+    public void TheFilesWrittenForANewInstall_SetTheSwitchOnExplicitly()
+    {
+        var sample = DarlingConfig.Parse(System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "darling.sample.json")));
+        Assert.True(sample.Web.AllowAdminWrites);
+    }
+
+    private static DarlingWebOidcClient OidcClient(string? roleClaim) =>
+        new(new DarlingWebOidcClient.ResolvedOptions(
+            "https://idp.example.test", "client-id", null, "openid", null, roleClaim,
+            roleClaim is null ? Array.Empty<string>() : new[] { "admins" }, Array.Empty<string>()));
+
+    [Theory]
+    [InlineData(true, null, true, true, "Admin writes")]
+    [InlineData(true, null, false, true, "list-only")]
+    [InlineData(false, null, false, true, "depends on the web login's grants")]
+    [InlineData(true, "groups", true, false, null)]
+    [InlineData(false, "groups", false, false, null)]
+    public void TheOidcWarning_FiresForOidcWithNoRoleMapping_OnEveryStoreKind_AndNotWhenARoleMappingExists(
+        bool managedStore, string? roleClaim, bool armBuilt, bool warns, string? effect)
+    {
+        using var oidc = OidcClient(roleClaim);
+        using var arm = armBuilt ? new WebAdminArm(() => null) : null;
+        var log = new ListLogger();
+        Assert.Equal(warns, WebAdminArm.WarnWhenOidcHasNoRoleMapping(oidc, managedStore, arm, log));
+        if (!warns)
+        {
+            Assert.Empty(log.Lines);
+            return;
+        }
+
+        var line = Assert.Single(log.Lines);
+        Assert.Contains("no role mapping", line, StringComparison.Ordinal);
+        Assert.Contains(effect!, line, StringComparison.Ordinal);
+        Assert.Contains("web.network.oidc.roleClaim", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheOidcWarning_StaysQuietWithNoOidcSignIn()
+    {
+        var log = new ListLogger();
+        Assert.False(WebAdminArm.WarnWhenOidcHasNoRoleMapping(null, true, new WebAdminArm(() => null), log));
+        Assert.Empty(log.Lines);
     }
 
     [Fact]
