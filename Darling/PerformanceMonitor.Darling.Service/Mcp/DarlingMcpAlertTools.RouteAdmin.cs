@@ -574,11 +574,18 @@ public sealed partial class DarlingMcpAlertTools
     internal const string RouteStoreNeedsRolesText =
         "This store's roles predate this route, signing key or notification channel write: re-run Darling/tools/provision-roles.sql on the store, then try again.";
 
-    /// <summary>Whether the operator runs provision-roles.sql on this store: false on the managed store and on a compose store whose roles
-    /// this service provisioned, where the script is never run by hand. A host with no config is treated as self-managed.</summary>
+    /// <summary>Whether the operator runs provision-roles.sql on this store: false on the managed store and on the compose
+    /// distribution's own store (the MCP host connects as a role the service provisioned, this start or an earlier one), where
+    /// the script is never run by hand. True on a bring-your-own store, in a container or not, and for a host with no config.</summary>
     internal static bool StoreRolesAreRunByOperator(PostgresConfig? postgresConfig) =>
-        !DarlingWebStoreWrites.IsManaged(postgresConfig)
-        && !(Hosting.DarlingHostBinding.IsRunningInContainer && DarlingStoreLogins.ReadComposeStoreVerdict() is { Provisioned: true });
+        RolesAreRunByOperator(
+            DarlingWebStoreWrites.IsManaged(postgresConfig), DarlingStoreLogins.McpLoginIsComposeStoreRole());
+
+    /// <summary>The decision, pure. The compose store is told by the login the MCP host resolved, not by whether this start
+    /// provisioned the roles: provisioning that failed or was refused still leaves the host on the role's credential from an
+    /// earlier start, and nobody runs the script on that store either.</summary>
+    internal static bool RolesAreRunByOperator(bool managedStore, bool mcpLoginIsComposeStoreRole) =>
+        !managedStore && !mcpLoginIsComposeStoreRole;
 
     /// <summary>The refusal a route function raised (its own DL400, DL403 or DL404 sentence), the re-run sentence when the store lacks
     /// the function (42883) or, on a self-managed store, the role may not run it (42501), or null for any other error. A 42501 on a managed
