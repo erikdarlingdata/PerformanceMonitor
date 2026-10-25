@@ -348,8 +348,8 @@ public static class ServerActionNames
     /// <summary>Every server action, the table's CHECK list.</summary>
     public static readonly IReadOnlyList<string> All = new[] { ForcePlan, EvictPlan, KillSession, RecompileModule, CreatePlanGuide, DropPlanGuide };
 
-    /// <summary>SERVERPROPERTY('EngineEdition') for an Azure SQL Database, as <c>collect.servers.sql_engine_edition</c> stores it (#6727).</summary>
-    public const int AzureSqlDatabaseEdition = 5;
+    /// <summary>SERVERPROPERTY('EngineEdition') for an Azure SQL Database, as <c>collect.servers.sql_engine_edition</c> stores it (#6727). One spelling: it is <see cref="PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition"/>.</summary>
+    public const int AzureSqlDatabaseEdition = PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition;
 
     /// <summary>SERVERPROPERTY('EngineEdition') for an Azure SQL Managed Instance (#6727).</summary>
     public const int AzureManagedInstanceEdition = 8;
