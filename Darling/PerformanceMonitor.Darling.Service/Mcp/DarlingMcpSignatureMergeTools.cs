@@ -109,7 +109,7 @@ public sealed class DarlingMcpSignatureMergeTools
                         mergeId = await DeadlockSignatureStore.InsertMergeAsync(connection, transaction, resolved.ServerId, signature, merged_into,
                             action.Reason, by.Length > 64 ? by[..64] : by, token);
                         return JsonSerializer.Serialize(new SignatureMergeImage(mergeId, signature, merged_into));
-                    }, ct);
+                    }, ct, seat.NamedAgentNames);
                 if (outcome.Refusal is { } refusal)
                     return DarlingAgentActionGate.RefusalAnswer(refusal);
                 return Answer(resolved.DisplayName, resolved.ServerId, signature, merged_into, mergeId);

@@ -55,6 +55,12 @@ internal sealed class DarlingMcpTokenSet
 
     internal IReadOnlyList<Entry> Named { get; }
 
+    /// <summary>The names of the served named tokens that hold the agent role (#6542): each is an agent's identity in the journal, so a
+    /// legacy-token call may not claim under one of them.</summary>
+    internal IReadOnlySet<string> AgentNames =>
+        Named.Where(e => !string.Equals(e.Role, McpTokenEntry.OperatorRole, StringComparison.Ordinal))
+            .Select(e => e.Name).ToHashSet(StringComparer.Ordinal);
+
     /// <summary>True when at least one named token is served, so each request's tool set follows its token.</summary>
     internal bool HasNamed => Named.Count > 0;
 
@@ -128,8 +134,18 @@ internal sealed class DarlingMcpTokenSet
     /// <summary>The caller of the request in flight, through the accessor; null when there is none.</summary>
     internal static McpCaller? CallerOf(IHttpContextAccessor? accessor) => CallerOf(accessor?.HttpContext);
 
-    /// <summary>True when <paramref name="name"/> is a valid token name: the agent id rule, 1 to 64 of <c>A-Za-z0-9._:-</c>.</summary>
-    internal static bool IsValidName(string? name) => InvestigationRules.IsValidAgentId(name);
+    /// <summary>True when <paramref name="name"/> is a valid token name: the agent id rule, 1 to 64 of <c>A-Za-z0-9._:-</c>, and not one of
+    /// <see cref="ReservedNames"/>.</summary>
+    internal static bool IsValidName(string? name) =>
+        InvestigationRules.IsValidAgentId(name) && !IsReservedName(name);
+
+    /// <summary>The two names a refusal row is journaled under when no agent made the call: <c>invalid</c> (an agent_id that was refused)
+    /// and <c>unclaimed</c> (a claim_id no claim holds). A token with either name would make its own rows read as those placeholders.</summary>
+    internal static readonly string[] ReservedNames = { InvestigationRules.InvalidAgentId, InvestigationToolCore.UnclaimedAgent };
+
+    /// <summary>True when <paramref name="name"/> is a reserved placeholder actor, compared case-insensitively.</summary>
+    internal static bool IsReservedName(string? name) =>
+        name is not null && ReservedNames.Contains(name, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The one <see cref="Check"/> sentence that is advice about a supported setup, not a token left unserved: the start logs it
     /// at Warning, every other sentence at Critical.</summary>
@@ -166,6 +182,13 @@ internal sealed class DarlingMcpTokenSet
             var label = "mcp.tokens[" + i.ToString(System.Globalization.CultureInfo.InvariantCulture) + "]";
             if (entry is null)
             {
+                continue;
+            }
+
+            if (IsReservedName(entry.Name))
+            {
+                problems.Add(label + " is named " + entry.Name + ", which is reserved: invalid and unclaimed (in any case) are the names refusal rows " +
+                    "are journaled under when no agent made the call. Rename the token. The token is not served.");
                 continue;
             }
 

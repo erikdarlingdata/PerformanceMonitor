@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.Json;
 using System.Threading;
@@ -45,7 +46,7 @@ public sealed partial class DarlingMcpPlanForceTools
     /// <summary>The create tool body (#6569), so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
     internal static async Task<string> RunCreatePlanGuideAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, string? server_name, string? database_name,
         string? name, string? statement, string? type, string? module_or_batch, string? parameters, string? hints, string? agent_action, bool dry_run, CancellationToken ct,
-        string? agentTokenName = null)
+        string? agentTokenName = null, IReadOnlySet<string>? namedAgentNames = null)
     {
         const string tool = CreatePlanGuideToolName;
         logger ??= NullLogger.Instance;
@@ -92,7 +93,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
             /* 3: the gate, for a dry run too. The permit's Id is the guide's name and its Database is the database. */
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, definition.Name, database);
-            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.CreatePlanGuide, agent_action, target, ct, agentTokenName);
+            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.CreatePlanGuide, agent_action, target, ct, agentTokenName, namedAgentNames);
             if (decision.Refusal is { } gateRefusal)
                 return await GateRefusalAnswerAsync(gateRefusal, dry_run, owner, logger, resolved.ServerId, resolved.ServerName, ServerActionNames.CreatePlanGuide, ct);
             var permit = decision.Permit!;
@@ -306,7 +307,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
     /// <summary>The drop tool body (#6569, slice 2b), so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
     internal static async Task<string> RunDropPlanGuideAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, string? server_name, string? database_name,
-        string? name, string? agent_action, bool dry_run, CancellationToken ct, string? agentTokenName = null)
+        string? name, string? agent_action, bool dry_run, CancellationToken ct, string? agentTokenName = null, IReadOnlySet<string>? namedAgentNames = null)
     {
         const string tool = DropPlanGuideToolName;
         logger ??= NullLogger.Instance;
@@ -352,7 +353,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
             /* 3: the gate, for a dry run too. The permit's Id is the guide's name and its Database is the database. */
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, guideName, database);
-            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.DropPlanGuide, agent_action, target, ct, agentTokenName);
+            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.DropPlanGuide, agent_action, target, ct, agentTokenName, namedAgentNames);
             if (decision.Refusal is { } gateRefusal)
                 return await GateRefusalAnswerAsync(gateRefusal, dry_run, owner, logger, resolved.ServerId, resolved.ServerName, ServerActionNames.DropPlanGuide, ct);
             var permit = decision.Permit!;
@@ -553,7 +554,7 @@ public sealed partial class DarlingMcpPlanForceTools
         DarlingMcpServedPolicy? served = null,
         CancellationToken cancellationToken = default) =>
         RunCreatePlanGuideAsync(postgres, ownerSource?.Read(), logger, server_name, database_name, name, statement, type, module_or_batch, @params, hints, agent_action, dry_run, cancellationToken,
-            served?.Policy.AgentTokenName);
+            served?.Policy.AgentTokenName, served?.NamedAgentNames);
 
     [McpServerTool(Name = "drop_plan_guide"), Description(
         "Agent arm, SQL Server only (an Azure SQL target is refused as engine_not_supported): drops ONE plan guide by name with sys.sp_control_plan_guide N'DROP', so the statement it applied to runs without the guide's hints again. Dry run by default: reads the guide and returns the exact statement and the whole definition that would be journaled, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's drop_plan_guide switch and remediation login (with ALTER on the module for an OBJECT guide, ALTER on the database for a SQL guide); ships off. " +
@@ -572,5 +573,5 @@ public sealed partial class DarlingMcpPlanForceTools
         ILogger? logger = null,
         DarlingMcpServedPolicy? served = null,
         CancellationToken cancellationToken = default) =>
-        RunDropPlanGuideAsync(postgres, ownerSource?.Read(), logger, server_name, database_name, name, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName);
+        RunDropPlanGuideAsync(postgres, ownerSource?.Read(), logger, server_name, database_name, name, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName, served?.NamedAgentNames);
 }
