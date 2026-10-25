@@ -259,14 +259,8 @@ public sealed class McpInvestigationTools
         /* #5914/#6004 (ported by #6011): links, family_of and queries_run ride after the other fields, in Darling's order. */
         if (InvestigationReportLinks.Validate(links, out var reportLinks) is { } linkProblem)
             problems.Add("links: " + linkProblem);
-        Guid? familyOf = null;
-        if (!string.IsNullOrWhiteSpace(family_of))
-        {
-            if (Guid.TryParse(family_of, out var parsedFamily))
-                familyOf = parsedFamily;
-            else
-                problems.Add("family_of: not a request id.");
-        }
+        if (InvestigationReportFields.ValidateFamilyOf(family_of, out var familyOf) is { } familyProblem)
+            problems.Add("family_of: " + familyProblem);
 
         if (InvestigationReportFields.Validate(queries_run, out var queriesRunJson) is { } queriesProblem)
             problems.Add("queries_run: " + queriesProblem);

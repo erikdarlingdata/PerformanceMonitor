@@ -623,14 +623,8 @@ public sealed partial class DarlingMcpInvestigationTools
         if (InvestigationReportLinks.Validate(links, out var reportLinks) is { } linkProblem)
             problems.Add("links: " + linkProblem);
         /* #6004: family_of and queries_run after links, for the same reason. A family_of that parses is checked against the store below. */
-        Guid? familyOf = null;
-        if (!string.IsNullOrWhiteSpace(family_of))
-        {
-            if (Guid.TryParse(family_of, out var parsedFamily))
-                familyOf = parsedFamily;
-            else
-                problems.Add("family_of: not a request id.");
-        }
+        if (InvestigationReportFields.ValidateFamilyOf(family_of, out var familyOf) is { } familyProblem)
+            problems.Add("family_of: " + familyProblem);
 
         if (InvestigationReportFields.Validate(queries_run, out var queriesRunJson) is { } queriesProblem)
             problems.Add("queries_run: " + queriesProblem);
