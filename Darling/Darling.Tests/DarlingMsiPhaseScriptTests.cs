@@ -8,7 +8,9 @@
 
 using System;
 using System.IO;
+using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using static Darling.Tests.DarlingInstallerConfigStepTests;
 using static Darling.Tests.RepoFile;
@@ -110,11 +112,13 @@ public sealed class DarlingMsiPhaseScriptTests
     }
 
     /// <summary>
-    /// -WebDashboard (the MSI's WEBDASHBOARD=1) seeds web.enabled in the minimal darling.json the installer writes, and the service's own
-    /// loader reads it; without the switch the file is the one it always was (no web block).
+    /// -WebDashboard (the MSI's WEBDASHBOARD=1) seeds web.enabled and an encrypted web token in the minimal darling.json the installer
+    /// writes: the web host refuses to start without a token, so web.enabled alone gave a dashboard that never started. The service's own
+    /// loader and token check accept the file, tokenless loopback stays off, and a second run leaves the first token alone. Without the
+    /// switch the file is the one it always was (no web block).
     /// </summary>
     [Fact]
-    public void WebDashboard_SeedsWebEnabled_InTheMinimalConfig_AndOtherwiseNothingChanges()
+    public void WebDashboard_SeedsAnEncryptedWebToken_ThatTheWebHostAccepts_AndOtherwiseNothingChanges()
     {
         var folder = Directory.CreateTempSubdirectory("darling-msi-config-").FullName;
         try
@@ -122,18 +126,36 @@ public sealed class DarlingMsiPhaseScriptTests
             var withWeb = Path.Combine(folder, "with-web.json");
             var without = Path.Combine(folder, "without.json");
             var lines = RunWindowsPowerShell(
-                ExtractFunction(Install, "New-DarlingMinimalConfigText") + "\n"
+                ExtractFunction(Install, "New-DarlingWebEncryptedToken") + "\n"
+                + ExtractFunction(Install, "New-DarlingMinimalConfigText") + "\n"
                 + ExtractFunction(Install, "Write-DarlingMinimalConfig") + "\n"
-                + $"Write-DarlingMinimalConfig '{withWeb}' $true\n"
-                + $"Write-DarlingMinimalConfig '{without}'\n"
-                + "'written'\n");
-            Assert.Equal(["written"], lines);
+                + ExtractFunction(Install, "Initialize-DarlingMinimalConfig") + "\n"
+                + $"'first-wrote=' + (Initialize-DarlingMinimalConfig '{withWeb}' $true)\n"
+                + GrantTestAccountRead(withWeb)
+                + $"$firstText = [System.IO.File]::ReadAllText('{withWeb}')\n"
+                + $"'second-wrote=' + (Initialize-DarlingMinimalConfig '{withWeb}' $true)\n"
+                + $"'second-keeps-file=' + ($firstText -ceq [System.IO.File]::ReadAllText('{withWeb}'))\n"
+                + $"'plain-wrote=' + (Initialize-DarlingMinimalConfig '{without}' $false)\n"
+                + GrantTestAccountRead(without));
+            Assert.Equal(["first-wrote=True", "second-wrote=False", "second-keeps-file=True", "plain-wrote=True"], lines);
 
             var seeded = DarlingConfig.Parse(File.ReadAllText(withWeb));
             Assert.True(seeded.Web.Enabled);
+            Assert.False(seeded.Web.AllowTokenlessLoopback);
             Assert.Empty(seeded.Servers);
             Assert.True(seeded.Postgres.Managed);
             Assert.Empty(seeded.Validate());
+            Assert.False(string.IsNullOrWhiteSpace(seeded.Web.Network?.EncryptedToken));
+            Assert.True(string.IsNullOrWhiteSpace(seeded.Web.Network?.Token));
+
+            // The service decrypts it with its own DPAPI entropy and the web host starts on it: no refusal, no missing-token line.
+            var resolved = DarlingWebHostService.ResolveLoopbackOnlyToken(
+                seeded.Web.Network, seeded.Web.AllowTokenlessLoopback, NullLogger.Instance);
+            Assert.False(resolved.Refuse);
+            Assert.False(resolved.MissingToken);
+            Assert.Null(resolved.TokenProblem);
+            Assert.Equal(32, resolved.Token.Length);
+            Assert.Equal(resolved.Token, DarlingSecrets.Unprotect(seeded.Web.Network!.EncryptedToken!));
 
             var plain = DarlingConfig.Parse(File.ReadAllText(without));
             Assert.False(plain.Web.Enabled);
@@ -143,6 +165,54 @@ public sealed class DarlingMsiPhaseScriptTests
         {
             Directory.Delete(folder, recursive: true);
         }
+    }
+
+    /// <summary>
+    /// The minimal darling.json is created with a protected DACL holding SYSTEM and Administrators only, so the encrypted web token in it is
+    /// never readable through the install tree's inherited Users read, even when the run stops before step 4b rebuilds the ACL.
+    /// </summary>
+    [Fact]
+    public void TheMinimalConfig_IsCreatedProtected_WithNoUsersOrEveryoneEntry()
+    {
+        var folder = Directory.CreateTempSubdirectory("darling-msi-acl-").FullName;
+        try
+        {
+            var path = Path.Combine(folder, "darling.json");
+            var lines = RunWindowsPowerShell(
+                ExtractFunction(Install, "New-DarlingWebEncryptedToken") + "\n"
+                + ExtractFunction(Install, "New-DarlingMinimalConfigText") + "\n"
+                + ExtractFunction(Install, "Write-DarlingMinimalConfig") + "\n"
+                + $"Write-DarlingMinimalConfig '{path}' $true\n"
+                + $"$acl = Get-Acl -LiteralPath '{path}'\n"
+                + "$sids = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Sort-Object)\n"
+                + "'protected=' + $acl.AreAccessRulesProtected\n"
+                + "'sids=' + ($sids -join ';')\n"
+                + "'broad=' + @($sids | Where-Object { $_ -in 'S-1-5-32-545', 'S-1-1-0', 'S-1-5-11', 'S-1-5-4' }).Count\n");
+            Assert.Equal(["protected=True", "sids=S-1-5-18;S-1-5-32-544", "broad=0"], lines);
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The closing summary treats the dashboard as on only when the "web" block itself says enabled true. A web block with enabled false
+    /// followed by another block's enabled true (alerts, analysis, mcp) is off, and a web block with a nested network object still counts.
+    /// </summary>
+    [Fact]
+    public void TheWebEnabledCheck_ReadsOnlyTheWebBlock()
+    {
+        var lines = RunWindowsPowerShell(
+            ExtractFunction(Install, "Test-DarlingWebEnabledText") + "\n"
+            + "'off-then-other-on=' + (Test-DarlingWebEnabledText '{ \"web\": { \"enabled\": false }, \"alerts\": { \"enabled\": true } }')\n"
+            + "'off-with-network-then-other-on=' + (Test-DarlingWebEnabledText '{ \"web\": { \"network\": { \"port\": 1 }, \"enabled\": false }, \"mcp\": { \"enabled\": true } }')\n"
+            + "'on=' + (Test-DarlingWebEnabledText '{ \"web\": { \"enabled\": true }, \"servers\": [] }')\n"
+            + "'on-after-network=' + (Test-DarlingWebEnabledText '{ \"web\": { \"network\": { \"port\": 1 }, \"enabled\": true } }')\n"
+            + "'no-web=' + (Test-DarlingWebEnabledText '{ \"mcp\": { \"enabled\": true } }')\n");
+        Assert.Equal(
+            ["off-then-other-on=False", "off-with-network-then-other-on=False", "on=True", "on-after-network=True", "no-web=False"],
+            lines);
     }
 
     /// <summary>

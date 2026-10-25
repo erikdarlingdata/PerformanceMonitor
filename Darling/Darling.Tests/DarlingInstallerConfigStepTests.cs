@@ -40,7 +40,9 @@ public class DarlingInstallerConfigStepTests
             var answers = RunWindowsPowerShell(
                 ExtractFunction(InstallScript, "New-DarlingMinimalConfigText") + "\n"
                 + ExtractFunction(InstallScript, "Write-DarlingMinimalConfig") + "\n"
-                + $"Write-DarlingMinimalConfig '{path.Replace("'", "''")}'\n'written'\n");
+                + $"Write-DarlingMinimalConfig '{path.Replace("'", "''")}'\n"
+                + GrantTestAccountRead(path)
+                + "'written'\n");
             Assert.Equal(["written"], answers);
 
             var bytes = File.ReadAllBytes(path);
@@ -148,6 +150,15 @@ public class DarlingInstallerConfigStepTests
                 answers);
         }
     }
+
+    /// <summary>
+    /// PowerShell that lets the test's own account read a file the installer function created with a SYSTEM-and-Administrators-only DACL. The
+    /// installer runs elevated and reads it as Administrators; a test run that is not elevated needs this one grant before it reads the file
+    /// back. The owner can always change the DACL, so no elevation is needed for the grant itself.
+    /// </summary>
+    internal static string GrantTestAccountRead(string path) =>
+        "$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value\n"
+        + $"icacls '{path}' /grant \"*${{me}}:F\" | Out-Null\n";
 
     /// <summary>Runs a script under Windows PowerShell 5.1 and returns its non-blank output lines.</summary>
     internal static List<string> RunWindowsPowerShell(string script)

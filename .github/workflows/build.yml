@@ -317,11 +317,23 @@ jobs:
         shell: bash
         run: bash .github/scripts/check-web-js.sh
 
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        if: steps.fastpath.outputs.engaged != 'true'
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Setup .NET 10.0
         if: steps.fastpath.outputs.engaged != 'true'
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: global.json
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
@@ -1167,11 +1179,23 @@ jobs:
             echo "Changed files, none of them in the gate: ${ALL_FILES:-[]}"
           fi
 
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        if: github.event_name == 'release' || steps.filter.outputs.darling == 'true'
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Setup .NET 10.0
         if: github.event_name == 'release' || steps.filter.outputs.darling == 'true'
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: global.json
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
