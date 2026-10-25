@@ -278,15 +278,31 @@ public class BlockingChainDurationTests : IClassFixture<SharedDuckDbFixture>
         Assert.Contains("right now", liveAdvice.Remediation);
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(null)]
-    public void Advice_ChainThatEndedEarlier_KeepsTheClearedText(bool? open)
+    [Fact]
+    public void Advice_ChainThatEndedEarlier_KeepsTheClearedText()
     {
-        var advice = Advice(open);
+        var advice = Advice(open: false);
 
         Assert.Contains("cleared long ago", advice.Remediation);
         Assert.DoesNotContain("still blocking at the end of the window", advice.Headline + advice.Investigation + advice.Remediation);
+    }
+
+    [Fact]
+    public void Advice_ChainWithAnUnknownEnd_SaysTheCollectorIsTooCoarse_NotClearedAndNotKill()
+    {
+        // A live window whose collector interval is above the ceiling carries no open-at-end key: the data cannot
+        // say the chain cleared, nor that it is still open.
+        var end = new DateTime(2026, 10, 25, 12, 0, 0);
+        var rows = new List<BlockingPairRow> { Pair(end.AddHours(-4), 501, 500, 780_000), Pair(end.AddHours(-4), 502, 500, 780_000) };
+        var daily = Build(rows, end, intervalMinutes: CollectorScheduleDefaults.OnLoadRecaptureMinutes);
+        var advice = FactAdvice.Compose("BLOCKING_CHAIN", new[] { daily }.ToFactLookup())!;
+
+        Assert.DoesNotContain("worst_chain_open_at_end", daily.Metadata.Keys);
+        Assert.Contains("too seldom to tell whether this chain is still open", advice.Remediation);
+        Assert.Contains("current blocking", advice.Remediation);
+        Assert.DoesNotContain("cleared long ago", advice.Remediation);
+        Assert.DoesNotContain("KILL", advice.Remediation);
+        Assert.DoesNotContain("still blocking at the end of the window", advice.Headline + advice.Investigation);
     }
 
     /* ── collected from Lite's DuckDB store ── */
