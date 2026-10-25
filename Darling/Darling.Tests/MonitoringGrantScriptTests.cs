@@ -332,6 +332,21 @@ public sealed class MonitoringGrantScriptTests
         Assert.Equal(ok, DarlingCliCommands.TryParseGrantScriptArgs(
             line.Split(' ', StringSplitOptions.RemoveEmptyEntries), out _, out _));
 
+    /* --add-server takes "windows", --grant-script took only "integrated": the same word now works on both. The registry stores
+       "integrated", and the principal rules compare against that. */
+    [Theory]
+    [InlineData("windows", "integrated")]
+    [InlineData("Windows", "integrated")]
+    [InlineData("integrated", "integrated")]
+    [InlineData("INTEGRATED", "integrated")]
+    [InlineData("sql", "sql")]
+    public void TheAuthWords_WindowsAndIntegrated_AreTheSameOnTheGrantScriptVerb(string word, string expected)
+    {
+        Assert.True(DarlingCliCommands.TryParseGrantScriptArgs(new[] { "--host", "sql01", "--auth", word }, out var parsed, out var error));
+        Assert.Null(error);
+        Assert.Equal(expected, parsed!.Auth);
+    }
+
     [Fact]
     public async Task Verb_ForAHostNotYetAdded_PrintsTheScript_AndConnectsToNothing()
     {

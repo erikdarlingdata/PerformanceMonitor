@@ -499,11 +499,11 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --set-collector-run-at <collector> <HH:MM|none|default> [--server <server>] [--config <path>]   Set the time of day (the monitored server's own clock) a collector that runs once a day or less often starts; none stops a fixed time, default clears the row's time so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the run time changes. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --set-collector-frequency <collector> <minutes|default> [--server <server>] [--config <path>]   Set how often a collector runs, in minutes (0 = once when the server loads, at most " + CollectorScheduleDefaults.MaxFrequencyMinutes + "); default clears the row's value so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the frequency is written: the enabled flag, retention and database scope on the row are kept, and a new row stores no enabled flag of its own." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --set-collector-retention <collector> <days|default> [--server <server>] [--config <path>]   Set how many days a collector's data is kept (1 to " + CollectorScheduleDefaults.MaxRetentionDays + "); default clears the row's value so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the retention is written." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --set-collector-retention <collector> <days|default> [--server <server>] [--config <path>]   Set how many days a collector's data is kept (1 to " + CollectorScheduleDefaults.MaxRetentionDays + "); default clears the row's value so the next level applies. Retention is fleet-wide: --server is accepted only with default, to remove a value an older build stored. Only the retention is written." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling created on a server this service still monitors (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", and this install's own, whichever exist). Removing a server drops only this install's own sessions, so run this just before you remove the server to drop the shared ones too. It also lists the sessions of other installs and never drops them. --dry-run lists them and drops nothing." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for the shared sessions, and a query that lists every install's sessions with their DROP statements, in both scopes. It connects to nothing, so use it for a server that is no longer configured or that a removal could not reach." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --grant-script <server-name> [--finops] [--azure] [--config <path>]   Print the T-SQL that creates the monitoring login and grants what Darling needs on a monitored server (the SQL login the entry uses, or the service account for Windows authentication). Safe to run twice. Connects to no monitored server." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --grant-script --host <host> [--auth sql|integrated|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure]   The same for a host not yet added." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure]   The same for a host not yet added." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -6534,6 +6534,11 @@ public static partial class DarlingCliCommands
             || Engine is not null || Database is not null;
     }
 
+    /// <summary>The <c>--auth</c> word <c>--add-server</c> hands on: "integrated" (the word <c>--grant-script</c> takes) is Windows authentication,
+    /// so it becomes "windows". Any other word goes on as typed, for the shared server rules to judge.</summary>
+    internal static string AddServerAuthWord(string value) =>
+        value.Trim().Equals("integrated", StringComparison.OrdinalIgnoreCase) ? "windows" : value;
+
     /// <summary>
     /// Parses the arguments after <c>--add-server</c> (#6476): at most one bare argument, the config path (as before), or
     /// <c>--config &lt;path&gt;</c>, and the flags <c>--host</c>, <c>--name</c>, <c>--auth</c>, <c>--username</c> (or <c>--login</c>),
@@ -6598,7 +6603,7 @@ public static partial class DarlingCliCommands
                     case "--config": configPath = value; break;
                     case "--host": host = value; break;
                     case "--name": displayName = value; break;
-                    case "--auth": auth = value; break;
+                    case "--auth": auth = AddServerAuthWord(value); break;
                     case "--username":
                     case "--login": username = value; break;
                     case "--engine": engine = value; break;
@@ -6731,7 +6736,7 @@ public static partial class DarlingCliCommands
         "  cmd:         type servers.json | PerformanceMonitor.Darling.Service.exe --add-server" + Environment.NewLine +
         Environment.NewLine +
         "For ONE server, no JSON is needed; give the non-secret fields as flags and a SQL login is asked for its password with nothing echoed:" + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --auth windows" + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --auth windows      (integrated means the same)" + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --auth sql --username darling_monitor [--name <display name>] [--database <db>] [--engine postgres]" + Environment.NewLine +
         "There is no password flag. A Windows-authentication server is tested by the running service, as the account it runs under." + Environment.NewLine +
         Environment.NewLine +
@@ -6861,7 +6866,7 @@ public static partial class DarlingCliCommands
 
         if (fromFlags && string.IsNullOrWhiteSpace(flags!.Host))
         {
-            error.WriteLine("--host is required when a server is given as flags: --add-server --host <host> [--name <name>] [--auth windows|sql] [--username <login>]");
+            error.WriteLine("--host is required when a server is given as flags: --add-server --host <host> [--name <name>] [--auth windows|integrated|sql|serviceprincipal|managedidentity] [--username <login>]");
             return 1;
         }
 
@@ -8454,14 +8459,28 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
                 ? $"<minutes> is how often the collector runs: a whole number from 0 to {CollectorScheduleDefaults.MaxFrequencyMinutes} (one year), where 0 means once when the server loads."
                 : $"<days> is how many days the collector's data is kept: a whole number from 1 to {CollectorScheduleDefaults.MaxRetentionDays} (ten years).") + Environment.NewLine +
             "default clears the row's value, so the next level applies again (a server's row falls back to the fleet-wide value, the fleet-wide row to the code default)." + Environment.NewLine +
-            "Without --server the change is FLEET-WIDE (the schedule row with no server); --server <server> writes that server's own row" + Environment.NewLine +
-            "instead (its display name or storage name, as the Viewer and the MCP tools show it)." + Environment.NewLine +
+            (frequency
+                ? "Without --server the change is FLEET-WIDE (the schedule row with no server); --server <server> writes that server's own row" + Environment.NewLine +
+                  "instead (its display name or storage name, as the Viewer and the MCP tools show it)." + Environment.NewLine
+                : "Retention is FLEET-WIDE: the purge reads one value per collector for every server. --server <server> is accepted only with default," + Environment.NewLine +
+                  "to remove a retention an older build stored for that server (its display name or storage name); a number with --server is refused." + Environment.NewLine) +
             "Only this one value is written: the other columns on the row are kept, and a row the verb creates stores no enabled flag of its" + Environment.NewLine +
             "own, so it follows the fleet-wide row and the code default." + Environment.NewLine +
             Environment.NewLine +
             "Collectors:" + Environment.NewLine +
             KnownCollectorsText(_ => true);
     }
+
+    /// <summary>The refusal for a retention value set for ONE server. The purge reads only the fleet-wide retention (a per-server value
+    /// cannot apply to a table every server shares), so a per-server value would be stored and never used. Clearing one stays allowed,
+    /// so a value an older build stored can still be removed.</summary>
+    internal const string PerServerRetentionRefusalText =
+        "Collector retention is fleet-wide: one value per collector applies to every server, so a retention set for one server would change nothing. "
+        + "Set it without a server to change the fleet-wide retention (frequency and enabled can still be set per server). Nothing was changed.";
+
+    /// <summary>The refusal when retention is set (not cleared) with a server named, else null. Shared by the CLI verb and the MCP tool. Pure.</summary>
+    internal static string? PerServerRetentionRefusal(bool isRetention, bool clears, string? serverName) =>
+        isRetention && !clears && !string.IsNullOrWhiteSpace(serverName) ? PerServerRetentionRefusalText : null;
 
     /// <summary>
     /// Parses <c>--set-collector-frequency</c> / <c>--set-collector-retention</c>'s trailing arguments STRICTLY, as
@@ -8588,6 +8607,14 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
         {
             error.WriteLine(argError);
             output.WriteLine(CollectorColumnUsageText(column));
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        var valueWord = valueText!.Trim();
+        var clearsValue = valueWord.Equals("default", StringComparison.OrdinalIgnoreCase) || valueWord.Equals("none", StringComparison.OrdinalIgnoreCase);
+        if (PerServerRetentionRefusal(column == CollectorScheduleColumn.RetentionDays, clearsValue, serverName) is { } perServerRefusal)
+        {
+            error.WriteLine(perServerRefusal);
             return CollectorToggleExitCode.UsageOrConfig;
         }
 

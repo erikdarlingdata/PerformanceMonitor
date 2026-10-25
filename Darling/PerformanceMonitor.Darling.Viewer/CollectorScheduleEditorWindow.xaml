@@ -89,7 +89,8 @@
                      time on this server, which stops a fleet-wide time). The line under the grid says what the selected
                      row's time means in server time and UTC. -->
                 <DataGridTextColumn Header="Run at" Binding="{Binding RunAtText}" Width="90"/>
-                <DataGridTextColumn Header="Keep (days)" Binding="{Binding RetentionDays}" Width="90"/>
+                <!-- Retention is fleet-wide: the purge reads one value per collector for every server, so a server scope shows it read-only. -->
+                <DataGridTextColumn x:Name="KeepColumn" Header="Keep (days)" Binding="{Binding RetentionDays}" Width="90"/>
                 <!-- The #3477 per-collector database scope: comma-separated names (the excluded-databases
                      entry format), blank = every database. Only the per-database fan-out collectors read
                      it; excluded databases still win. -->
