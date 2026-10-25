@@ -119,9 +119,9 @@ public sealed partial class ViewerDataService
     /// (text[]), $5 baseline start (window start minus <see cref="BaselineLookbackDays"/>), $6 the baseline days read from the
     /// daily totals (date[]), $7 and $8 the live half's <c>first_execution_time</c> bounds, $9 the databases left out (#6654, text[] or NULL).
     /// </summary>
-    internal static string BuildQueryStoreRegressionsSql(bool wide, bool useDailyTotals) =>
+    internal static string BuildQueryStoreRegressionsSql(bool wide, bool useDailyTotals, bool regularFromLatest = false) =>
         QueryStoreRegressionBaseline.Bind(
-            (wide ? QueryStoreRegressionBaseline.WideArmsSql : QueryStoreRegressionBaseline.RawArmsSql)
+            (wide ? QueryStoreRegressionBaseline.TableArmsSql(regularFromLatest) : QueryStoreRegressionBaseline.RawArmsSql)
             + "\n" + QueryStoreRegressionBaseline.AggregatesSql(useDailyTotals) + "\n" + QueryStoreRegressionBaseline.SuffixSql,
             "$5", "$6", "$7", "$8", "50", "$9");
 
@@ -160,6 +160,17 @@ public sealed partial class ViewerDataService
     private static readonly string s_rawLiveSql = BuildQueryStoreRegressionsSql(wide: false, useDailyTotals: false);
 
     private static readonly string s_wideLiveSql = BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: false);
+
+    /* #5506: the table forms with the Regular arms on query_store_interval_latest, where the baseline plan's gate allows. */
+    private static readonly string s_latestDailySql = BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: true, regularFromLatest: true);
+
+    private static readonly string s_latestLiveSql = BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: false, regularFromLatest: true);
+
+    /// <summary>The table form for a resolved baseline plan, as the MCP read's <c>TableSqlFor</c> picks it (#5506).</summary>
+    internal static string QueryStoreRegressionsTableSqlFor(QueryStoreRegressionBaseline.Plan plan) =>
+        plan.RegularFromLatest
+            ? (plan.BuiltDayCount > 0 ? s_latestDailySql : s_latestLiveSql)
+            : (plan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql);
 
     /// <summary>
     /// The regression read over <c>query_store_interval_wide</c> (#5809), with the baseline's closed days from the daily
@@ -288,7 +299,7 @@ public sealed partial class ViewerDataService
 
             var baselinePlan = await QueryStoreRegressionBaseline.ResolveAsync(
                 connection, transaction, serverId, plan.ClampedStart, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken);
-            var wideSql = baselinePlan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql;
+            var wideSql = QueryStoreRegressionsTableSqlFor(baselinePlan);
 
             /* #5506 step 2: the same measured margin as the MCP read (DarlingQueryStoreRegressionReader.TryGetQueryStoreRegressionsFromTableAsync
                explains it): the server's longest interval in place of the 26-hour floor, or the 26 hours where it is not known. */
@@ -298,6 +309,9 @@ public sealed partial class ViewerDataService
             {
                 wideSql = QueryStoreIntervalWide.WithEdgeMargin(wideSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
             }
+
+            /* #5506: the latest form's high live range starts at the next midnight minus the margin, as in the MCP read. */
+            baselinePlan = QueryStoreRegressionBaseline.WithMeasuredHighStart(baselinePlan, edgeMargin);
 
             await using var command = new NpgsqlCommand(wideSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
             AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, plan.ClampedStart, baselinePlan, excludedDatabases);
