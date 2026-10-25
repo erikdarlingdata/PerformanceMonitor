@@ -372,6 +372,8 @@ public sealed class DarlingMcpNamedTokenTests
         yield return new object?[] { "a name with spaces", "valid-token-value-0123456789abcdef", "agent", "no valid name" };
         yield return new object?[] { "", "valid-token-value-0123456789abcdef", "agent", "no valid name" };
         yield return new object?[] { new string('a', 65), "valid-token-value-0123456789abcdef", "agent", "no valid name" };
+        yield return new object?[] { "invalid", "valid-token-value-0123456789abcdef", "agent", "reserved" };
+        yield return new object?[] { "Unclaimed", "valid-token-value-0123456789abcdef", "operator", "reserved" };
         yield return new object?[] { "bad-role", "valid-token-value-0123456789abcdef", "admin", "no valid role" };
         yield return new object?[] { "no-role", "valid-token-value-0123456789abcdef", null, "no valid role" };
         yield return new object?[] { "short-one", "tooshort", "agent", "shorter than" };
