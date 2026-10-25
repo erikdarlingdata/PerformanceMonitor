@@ -101,6 +101,9 @@ public partial class FleetSweepsTab : UserControl
         }
         catch (Exception ex)
         {
+            /* A load the operator has moved past does not report its failure over the newer load's status. */
+            if (_loads.Superseded(nameof(LoadTimelineAsync), gen)) return;
+
             StatusChanged?.Invoke($"failed to load the fleet sweep timeline: {ex.Message}");
         }
         finally
@@ -141,6 +144,9 @@ public partial class FleetSweepsTab : UserControl
         }
         catch (Exception ex)
         {
+            /* A load the operator has moved past does not report its failure over the newer load's status. */
+            if (_loads.Superseded(nameof(LoadDetailAsync), gen)) return;
+
             StatusChanged?.Invoke($"failed to load the fleet sweep: {ex.Message}");
         }
     }
@@ -203,6 +209,9 @@ public partial class FleetSweepsTab : UserControl
         }
         catch (Exception ex)
         {
+            /* A load the operator has moved past does not report its failure over the newer load's status. */
+            if (_loads.Superseded(nameof(LoadWatchItemsAsync), gen)) return;
+
             StatusChanged?.Invoke($"failed to load the fleet sweep watch items: {ex.Message}");
         }
     }

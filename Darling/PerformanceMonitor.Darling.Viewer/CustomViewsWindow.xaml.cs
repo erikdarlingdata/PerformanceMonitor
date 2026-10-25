@@ -213,6 +213,13 @@ public partial class CustomViewsWindow : Window
         }
         catch (Exception ex)
         {
+            /* The success path's test, for the same reason: a read that failed after the operator moved on must not pop an error
+               over the view the newer selection loaded. */
+            if (_loads.Superseded(nameof(ViewsGrid_SelectionChanged), gen) || !ReferenceEquals(ViewsGrid.SelectedItem, row))
+            {
+                return;
+            }
+
             ShowError("Could not read the custom view", ex);
         }
     }
