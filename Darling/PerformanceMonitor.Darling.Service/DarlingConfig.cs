@@ -1903,8 +1903,8 @@ public sealed class WebConfig
 
     /// <summary>
     /// Default OFF; a darling.json without the key keeps it off, so an upgrade from 3.11 keeps that release's web scope until the
-    /// operator turns it on. The files this product writes for a NEW install (the MSI's minimal darling.json, darling.sample.json and
-    /// the compose sample) set it to true explicitly (#6600). On the managed store the dashboard signs in as the read-only <c>viewer</c> role, so
+    /// operator turns it on. The files this product writes for a NEW install (the MSI's minimal darling.json and darling.sample.json) set
+    /// it to true explicitly (#6600). On the managed store the dashboard signs in as the read-only <c>viewer</c> role, so
     /// its Admin writes were list-only. On, the dashboard opens a second, small connection pool that signs in as the managed <c>admin</c> role
     /// (the Viewer's login) and uses it only for those writes and their access checks, and only for a person signed in as an admin; every read
     /// stays on <c>viewer</c>. Off keeps the dashboard list-only on the managed store. A store you bring yourself is unchanged either way.

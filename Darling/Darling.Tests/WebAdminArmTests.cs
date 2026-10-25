@@ -111,25 +111,26 @@ public sealed class WebAdminArmTests
     {
         var sample = DarlingConfig.Parse(System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "darling.sample.json")));
         Assert.True(sample.Web.AllowAdminWrites);
-
-        // The compose sample names container secret files, so it is read as JSON rather than resolved through the config loader.
-        using var compose = System.Text.Json.JsonDocument.Parse(
-            System.IO.File.ReadAllText(System.IO.Path.Combine(RepoRoot(), "Darling", "compose", "darling.sample.json")));
-        Assert.True(compose.RootElement.GetProperty("web").GetProperty("allowAdminWrites").GetBoolean());
     }
 
-    private static string RepoRoot([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
-        => System.IO.Path.GetFullPath(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(thisFile)!, "..", ".."));
+    private static DarlingWebOidcClient OidcClient(string? roleClaim) =>
+        new(new DarlingWebOidcClient.ResolvedOptions(
+            "https://idp.example.test", "client-id", null, "openid", null, roleClaim,
+            roleClaim is null ? Array.Empty<string>() : new[] { "admins" }, Array.Empty<string>()));
 
     [Theory]
-    [InlineData(true, false, true, true)]
-    [InlineData(false, false, true, false)]
-    [InlineData(true, true, true, false)]
-    [InlineData(true, false, false, false)]
-    public void TheOidcWarning_FiresOnlyWithOidcOn_NoRoleMapping_AndAdminWritesOn(bool oidcOn, bool roleMappingSet, bool adminWritesOn, bool warns)
+    [InlineData(true, null, true, true, "Admin writes")]
+    [InlineData(true, null, false, true, "list-only")]
+    [InlineData(false, null, false, true, "depends on the web login's grants")]
+    [InlineData(true, "groups", true, false, null)]
+    [InlineData(false, "groups", false, false, null)]
+    public void TheOidcWarning_FiresForOidcWithNoRoleMapping_OnEveryStoreKind_AndNotWhenARoleMappingExists(
+        bool managedStore, string? roleClaim, bool armBuilt, bool warns, string? effect)
     {
+        using var oidc = OidcClient(roleClaim);
+        using var arm = armBuilt ? new WebAdminArm(() => null) : null;
         var log = new ListLogger();
-        Assert.Equal(warns, WebAdminArm.WarnWhenEveryOidcUserIsAnAdmin(oidcOn, roleMappingSet, adminWritesOn, log));
+        Assert.Equal(warns, WebAdminArm.WarnWhenOidcHasNoRoleMapping(oidc, managedStore, arm, log));
         if (!warns)
         {
             Assert.Empty(log.Lines);
@@ -137,8 +138,17 @@ public sealed class WebAdminArmTests
         }
 
         var line = Assert.Single(log.Lines);
-        Assert.Contains("every user who signs in is an admin", line, StringComparison.Ordinal);
+        Assert.Contains("no role mapping", line, StringComparison.Ordinal);
+        Assert.Contains(effect!, line, StringComparison.Ordinal);
         Assert.Contains("web.network.oidc.roleClaim", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheOidcWarning_StaysQuietWithNoOidcSignIn()
+    {
+        var log = new ListLogger();
+        Assert.False(WebAdminArm.WarnWhenOidcHasNoRoleMapping(null, true, new WebAdminArm(() => null), log));
+        Assert.Empty(log.Lines);
     }
 
     [Fact]
