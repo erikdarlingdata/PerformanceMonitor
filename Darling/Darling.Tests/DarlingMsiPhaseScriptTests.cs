@@ -115,7 +115,7 @@ public sealed class DarlingMsiPhaseScriptTests
     /// -WebDashboard (the MSI's WEBDASHBOARD=1) seeds web.enabled and an encrypted web token in the minimal darling.json the installer
     /// writes: the web host refuses to start without a token, so web.enabled alone gave a dashboard that never started. The service's own
     /// loader and token check accept the file, tokenless loopback stays off, and a second run leaves the first token alone. Without the
-    /// switch the file is the one it always was (no web block).
+    /// switch the web block holds only allowAdminWrites (a new install keeps the web admin writes on).
     /// </summary>
     [Fact]
     public void WebDashboard_SeedsAnEncryptedWebToken_ThatTheWebHostAccepts_AndOtherwiseNothingChanges()
@@ -141,6 +141,7 @@ public sealed class DarlingMsiPhaseScriptTests
 
             var seeded = DarlingConfig.Parse(File.ReadAllText(withWeb));
             Assert.True(seeded.Web.Enabled);
+            Assert.True(seeded.Web.AllowAdminWrites);
             Assert.False(seeded.Web.AllowTokenlessLoopback);
             Assert.Empty(seeded.Servers);
             Assert.True(seeded.Postgres.Managed);
@@ -158,8 +159,9 @@ public sealed class DarlingMsiPhaseScriptTests
             Assert.Equal(resolved.Token, DarlingSecrets.Unprotect(seeded.Web.Network!.EncryptedToken!));
 
             var plain = DarlingConfig.Parse(File.ReadAllText(without));
+            // A new install keeps web admin writes on even when the dashboard is switched on later: the key is written, the dashboard stays off.
             Assert.False(plain.Web.Enabled);
-            Assert.DoesNotContain("\"web\"", File.ReadAllText(without), StringComparison.Ordinal);
+            Assert.True(plain.Web.AllowAdminWrites);
         }
         finally
         {

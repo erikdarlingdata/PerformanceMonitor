@@ -188,7 +188,7 @@ internal static class DiagnosticsBundle
             ["web_enabled"] = config.Web?.Enabled ?? false,
             ["web_network_exposed"] = WebNetworkExposed(config),
             ["web_allow_tokenless_loopback"] = config.Web?.AllowTokenlessLoopback ?? false,
-            ["web_allow_admin_writes"] = config.Web?.AllowAdminWrites ?? true,
+            ["web_allow_admin_writes"] = config.Web?.AllowAdminWrites ?? false,
             ["analyzer_present"] = config.Analyzer is not null,
             /* #5506 part 3: the read-admission limit, a plain number; a busy answer is only readable beside it (0 means the limit is off). */
             ["reads_max_heavy_reads"] = config.Reads?.MaxHeavyReads,
