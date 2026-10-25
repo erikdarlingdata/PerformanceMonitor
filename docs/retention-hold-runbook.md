@@ -6,8 +6,6 @@ The `Retention Held` self-alert (#2813) means a retention policy has been **paus
 tier it governs has grown past its configured horizon. Warning fires at 2.0x that horizon by default,
 Critical at 4.0x; both are settable — see [Adjusting the thresholds](#adjusting-the-thresholds).
 
-Reported from the field in #3296, where the command sequence below came from the reporter.
-
 ## What the alert is telling you
 
 Raw data is rolled up into continuous aggregates, and retention may only drop raw history once a rollup has

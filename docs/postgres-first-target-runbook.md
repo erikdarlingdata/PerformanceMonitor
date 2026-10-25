@@ -751,12 +751,7 @@ the bloat estimate reports `estimate_unavailable`, and every other collector is 
 
 ## 9. Alerting
 
-Eight alert families fire on a PostgreSQL target, in two groups that are tuned differently. This section
-used to open with "the three outage predictors alert; the other 24 collectors are read-only signals",
-which stopped being true when #2711 and #2719 landed five more, and the sentence after it — thresholds
-"not yet configurable" — stopped being true for two of those five at #3444. Both were the kind of
-understatement #3608 was filed about, so here is the current shape, re-derived from `DarlingWorker`'s
-PostgreSQL alert pass.
+Eight alert families fire on a PostgreSQL target, in two groups that are tuned differently.
 
 **The three Tier 0 outage predictors** — `PostgreSQL Wraparound Risk`, `PostgreSQL Vacuum Horizon
 Blocked` and `PostgreSQL Replication Slot Retention`, reading `pg_wraparound_stats`, `pg_xmin_horizon`
