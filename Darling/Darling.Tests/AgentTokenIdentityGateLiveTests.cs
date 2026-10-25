@@ -168,6 +168,54 @@ public sealed class AgentTokenIdentityGateLiveTests
         });
     }
 
+    /// <summary>An agent_action the gate cannot parse (no evidence) is refused at each place that reads it first, and the row names the
+    /// token, not the agent_id the argument carried and not the invalid-actor placeholder.</summary>
+    [Theory]
+    [InlineData(DarlingMcpPlanForceTools.ForceToolName, "srv-7")]
+    [InlineData(DarlingMcpPlanForceTools.ForceToolName, "srv-8")]
+    [InlineData(DarlingMcpPlanForceTools.EvictToolName, "srv-7")]
+    [InlineData(DarlingMcpPlanForceTools.EvictToolName, "srv-8")]
+    public async Task ARefusedBadAgentAction_IsJournaledUnderTheTokensName(string tool, string server)
+    {
+        await RunAsync(async c =>
+        {
+            var answer = await CallBadAsync(c, tool, server, Token);
+
+            Assert.Equal("1|0", await RefusedActorsAsync(c, tool, ReasonOf(answer)!));
+            Assert.Equal("0", await ScalarAsync(c.Connection, $"SELECT count(*) FROM config.investigation_journal WHERE actor = 'agent:{InvestigationRules.InvalidAgentId}'", c.Ct));
+        });
+    }
+
+    [Theory]
+    [InlineData(DarlingMcpPlanForceTools.ForceToolName, "srv-7")]
+    [InlineData(DarlingMcpPlanForceTools.ForceToolName, "srv-8")]
+    [InlineData(DarlingMcpPlanForceTools.EvictToolName, "srv-7")]
+    [InlineData(DarlingMcpPlanForceTools.EvictToolName, "srv-8")]
+    public async Task TwoTokensRefusedBadAgentActions_AreTwoJournalRows(string tool, string server)
+    {
+        await RunAsync(async c =>
+        {
+            var first = await CallBadAsync(c, tool, server, Token);
+            await CallBadAsync(c, tool, server, "second-bot");
+            await CallBadAsync(c, tool, server, Token);
+
+            Assert.Equal(
+                "2",
+                await ScalarAsync(c.Connection,
+                    $"SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = '{ReasonOf(first)}' AND detail ->> 'tool' = '{tool}'", c.Ct));
+            Assert.Equal("1", await ScalarAsync(c.Connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND actor = 'agent:second-bot' AND detail ->> 'tool' = '{tool}'", c.Ct));
+        });
+    }
+
+    private static Task<string> CallBadAsync(Ctx c, string tool, string server, string tokenName)
+    {
+        var bad = new JsonObject { ["request_id"] = c.RequestId, ["claim_id"] = c.ClaimId, ["agent_id"] = Other, ["reason"] = "x" }.ToJsonString();
+        return tool == DarlingMcpPlanForceTools.ForceToolName
+            ? DarlingMcpPlanForceTools.RunAsync(c.Source, c.Source, null, true, server, "AppDb", 11, 2, bad, true, c.Ct, tokenName)
+            : DarlingMcpPlanForceTools.RunEvictAsync(c.Source, c.Source, null, server, "0x06000700AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", bad, true, c.Ct, tokenName);
+    }
+
     /// <summary>L3 of the #6593 review: each kill refusal made before the gate journals the token's name, not the agent_id passed. A case fails
     /// when its call site drops agentTokenName: the row then names agent:someone-else.</summary>
     [Theory]

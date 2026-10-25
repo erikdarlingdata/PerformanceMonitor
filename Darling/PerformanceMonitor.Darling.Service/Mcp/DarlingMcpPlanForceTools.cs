@@ -249,7 +249,8 @@ public sealed partial class DarlingMcpPlanForceTools
                 var problem = InvestigationToolCore.ParseAgentAction(agent_action, out var parsed);
                 if (problem is not null)
                 {
-                    await store.RecordAgentActionRefusalAsync(null, null, tool, problem.Reason, ct);
+                    await store.RecordAgentActionRefusalAsync(DarlingAgentActionGate.LooseRequestId(agent_action),
+                        agentTokenName ?? DarlingAgentActionGate.LooseAgentId(agent_action), tool, problem.Reason, ct);
                     return DarlingAgentActionGate.RefusalAnswer(problem);
                 }
 
@@ -920,7 +921,8 @@ public sealed partial class DarlingMcpPlanForceTools
         var problem = InvestigationToolCore.ParseAgentAction(agentAction, out var parsed);
         if (problem is not null)
         {
-            await store.RecordAgentActionRefusalAsync(null, null, tool, problem.Reason, ct);
+            await store.RecordAgentActionRefusalAsync(DarlingAgentActionGate.LooseRequestId(agentAction),
+                agentTokenName ?? DarlingAgentActionGate.LooseAgentId(agentAction), tool, problem.Reason, ct);
             return DarlingAgentActionGate.RefusalAnswer(problem);
         }
 

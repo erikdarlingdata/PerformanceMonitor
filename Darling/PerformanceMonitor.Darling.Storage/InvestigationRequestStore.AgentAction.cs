@@ -408,8 +408,8 @@ RETURNING journal_id";
 
     /// <summary>
     /// Journals a refusal the gate's caller made before the gate (#5912, check 1, or the tool's own refusal): <c>refused</c>,
-    /// at most once per request, tool, code and hour. An unparsed request id journals with no request, once per tool, code
-    /// and hour. An actor the agent id rule refuses is journaled as <see cref="InvestigationRules.InvalidAgentId"/>.
+    /// at most once per request, actor, tool, code and hour. An unparsed request id journals with no request, once per actor, tool, code
+    /// and hour, so two agents' refusals are two rows. An actor the agent id rule refuses is journaled as <see cref="InvestigationRules.InvalidAgentId"/>.
     /// </summary>
     public async Task RecordAgentActionRefusalAsync(Guid? requestId, string? agentId, string tool, string code,
         CancellationToken cancellationToken = default)
@@ -591,7 +591,7 @@ RETURNING journal_id";
         Guid? requestId, int? serverId, string actor, string tool, string code, CancellationToken cancellationToken)
     {
         var onceKey = string.Create(CultureInfo.InvariantCulture,
-            $"agent_refused:{(requestId is Guid id ? id.ToString() : "unknown")}:{tool}:{code}:{now:yyyy-MM-ddTHH}");
+            $"agent_refused:{(requestId is Guid id ? id.ToString() : "unknown")}:{actor}:{tool}:{code}:{now:yyyy-MM-ddTHH}");
         return JournalAsync(connection, transaction, now, requestId, null, serverId, "refused", actor, code,
             new JsonObject { ["tool"] = tool }.ToJsonString(), onceKey, cancellationToken);
     }

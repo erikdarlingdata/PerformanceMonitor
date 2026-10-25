@@ -112,10 +112,10 @@ internal static class DarlingAgentActionGate
     }
 
     /// <summary>The request id of a refused argument, when one parses, so its refusal is journaled with its request.</summary>
-    private static Guid? LooseRequestId(string? agentAction) =>
+    internal static Guid? LooseRequestId(string? agentAction) =>
         LooseText(agentAction, "request_id") is { } text && Guid.TryParse(text, out var id) ? id : null;
 
-    private static string? LooseAgentId(string? agentAction) => LooseText(agentAction, "agent_id");
+    internal static string? LooseAgentId(string? agentAction) => LooseText(agentAction, "agent_id");
 
     private static string? LooseText(string? json, string key)
     {
