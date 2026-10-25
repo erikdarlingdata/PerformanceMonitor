@@ -8,11 +8,11 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -42,8 +42,13 @@ public sealed class CustomViewRow
     /// <summary>The save time in UTC, the column's sort key (the displayed text would sort as text).</summary>
     public DateTime UpdatedUtc => DateTime.SpecifyKind(Summary.UpdatedAt, DateTimeKind.Utc);
 
-    public string UpdatedDisplay =>
-        UpdatedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture)
+    /// <summary>The save time and who saved it. A view belongs to the whole fleet, so the time is fleet-wide text in the display mode
+    /// (this machine's zone for Local, UTC otherwise) with its zone label, never the active server tab's clock.</summary>
+    public string UpdatedDisplay => UpdatedText(ViewerTimeHelper.CurrentDisplayMode);
+
+    /// <summary><see cref="UpdatedDisplay"/> for an explicit display mode.</summary>
+    public string UpdatedText(TimeDisplayMode mode) =>
+        ViewerTimeHelper.FormatFleetWide(UpdatedUtc, "yyyy-MM-dd HH:mm", mode)
         + (string.IsNullOrEmpty(Summary.UpdatedBy) ? string.Empty : " by " + Summary.UpdatedBy);
 }
 
