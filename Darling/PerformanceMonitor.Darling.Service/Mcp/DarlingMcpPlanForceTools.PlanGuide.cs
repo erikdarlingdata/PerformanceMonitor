@@ -93,7 +93,7 @@ public sealed partial class DarlingMcpPlanForceTools
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, definition.Name, database);
             var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.CreatePlanGuide, agent_action, target, ct, agentTokenName);
             if (decision.Refusal is { } gateRefusal)
-                return GateRefusalAnswer(gateRefusal, dry_run);
+                return await GateRefusalAnswerAsync(gateRefusal, dry_run, owner, logger, resolved.ServerId, resolved.ServerName, ServerActionNames.CreatePlanGuide, ct);
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
@@ -341,7 +341,7 @@ public sealed partial class DarlingMcpPlanForceTools
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, guideName, database);
             var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.DropPlanGuide, agent_action, target, ct, agentTokenName);
             if (decision.Refusal is { } gateRefusal)
-                return GateRefusalAnswer(gateRefusal, dry_run);
+                return await GateRefusalAnswerAsync(gateRefusal, dry_run, owner, logger, resolved.ServerId, resolved.ServerName, ServerActionNames.DropPlanGuide, ct);
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 

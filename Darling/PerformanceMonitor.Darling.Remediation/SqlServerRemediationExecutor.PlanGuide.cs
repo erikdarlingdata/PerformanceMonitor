@@ -399,8 +399,10 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
             }
 
             /* A login without ALTER on the database does not see a SQL guide in sys.plan_guides (catalog views show a login what it holds a permission on), so for it a guide that
-               is not found may be one it cannot see: say that, with the permission sentence, instead of claiming the guide is gone. */
-            if (!found && !grantedDb)
+               is not found may be one it cannot see: say that, with the permission sentence, instead of claiming the guide is gone. An OBJECT guide is listed to a login that holds
+               ALTER on its object (checked on SQL Server 2019, no database ALTER), so when the journaled type is OBJECT a guide not found is gone, and database ALTER is not the grant
+               to ask for (#6635). A drop action has no journaled type and keeps the permission answer. */
+            if (!found && !grantedDb && !string.Equals(expected?.Type, "OBJECT", StringComparison.Ordinal))
                 return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.GuidePermissionDenied,
                     $"Darling could not find plan guide {guideName} in {database}. If it exists, the remediation login cannot see it: it does not hold ALTER on the database {database}, which sp_control_plan_guide needs for a SQL guide, and a SQL guide is not listed for a login without it. Nothing was changed.") with { Statement = statement };
             if (!found)

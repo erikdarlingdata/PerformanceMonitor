@@ -364,6 +364,30 @@ public sealed partial class PlanForceToolLiveTests
     }
 
     [Fact]
+    public async Task ALoginWithAlterOnTheProcedureOnly_UndoingAnObjectGuideThatIsAlreadyGone_SaysItIsGone_NotThatTheGuideIsHidden()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var name = "p_" + Guid.NewGuid().ToString("N")[..8];
+            var guide = "g_" + name;
+            await MakeProcedureAsync(c, name);
+            await TurnGuideOnAsync(c);
+            await AdminExecAsync(c, $"ALTER ROLE db_owner DROP MEMBER [{c.Sql.Login}]; GRANT ALTER ON OBJECT::dbo.[{name}] TO [{c.Sql.Login}];");
+            var created = Parse(await CreateGuideAsync(c, guide, dryRun: false, moduleOrBatch: "dbo." + name));
+            Assert.Equal("done", (string?)created["status"]);
+            await AdminExecAsync(c, $"EXEC sys.sp_control_plan_guide N'DROP', N'{guide}';");
+
+            /* #6635: an OBJECT guide is listed to a login with ALTER on its object, so one that is not found is gone; asking for database ALTER would be the wrong advice. */
+            var undone = await UndoAsync(c, (long)created["journal_id"]!, confirm: true);
+            Assert.Equal(PlanUndoAnswer.RefusedStatus, undone.Status);
+            Assert.Equal("guide_not_found", undone.Code);
+            Assert.Contains("already gone", undone.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("ALTER on the database", undone.Message, StringComparison.Ordinal);
+            Assert.Empty(await RowsAsync(c, "action_undone"));
+        });
+    }
+
+    [Fact]
     public async Task WithoutTheGuideSwitch_TheCreateIsRefused_ForADryRunAndAWrite_AndNothingIsCreated()
     {
         await RunAsync(Without.Nothing, async c =>
