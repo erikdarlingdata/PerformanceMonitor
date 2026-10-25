@@ -176,6 +176,110 @@ public sealed class DarlingStartWithNoServersLiveTests
         }
     }
 
+    /// <summary>
+    /// A stop that lands while a pass is waiting on the store ends the collection loop cleanly. The config beacon read and the
+    /// external alert pass are both held on a table lock, then the service is stopped: the loop must return without raising, only
+    /// after the background loops have drained, so no pass in flight meets a store source that was already disposed, and nothing
+    /// at Warning or above reaches the log. Before the loop's pass body was inside the stop handler, the cancelled beacon read left
+    /// the method by exception, skipping the drain and disposing the store sources under the alert loop.
+    /// </summary>
+    [Fact]
+    public async Task AStopWhilePassesWaitOnTheStore_EndsTheLoopCleanly_AfterTheBackgroundLoopsDrain()
+    {
+        var baseConnectionString = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live stop-during-a-pass test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var configFolder = Directory.CreateTempSubdirectory("darling-stop-pass-").FullName;
+        var previousConfig = Environment.GetEnvironmentVariable("DARLING_CONFIG");
+        var bodySucceeded = false;
+        try
+        {
+            var configPath = Path.Combine(configFolder, "darling.json");
+            await File.WriteAllTextAsync(
+                configPath,
+                "{ \"postgres\": { \"managed\": false, \"connectionString\": \"" + scratch.ConnectionString.Replace("\\", "\\\\") + "\" } }",
+                ct);
+            Environment.SetEnvironmentVariable("DARLING_CONFIG", configPath);
+            var config = DarlingConfig.Load();
+
+            var logger = new RecordingLogger();
+            var worker = new DarlingWorker(
+                logger, NullLoggerFactory.Instance, new McpRuntimeState(), new WebRuntimeState(), new MonitoredServerRegistryState(),
+                new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache(), new ReadLatencyAccumulator());
+            var loop = typeof(DarlingWorker).GetMethod("RunCollectionLoopAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            stop.CancelAfter(TimeSpan.FromMinutes(3));
+            var task = (Task)loop.Invoke(
+                worker, [config, scratch.ConnectionString, null, null, null, null, false, null, null, stop.Token])!;
+
+            while (!logger.Lines.Any(l => l.Contains("No monitored servers are configured yet", StringComparison.Ordinal))
+                && !task.IsCompleted)
+            {
+                await Task.Delay(100, ct);
+            }
+
+            Assert.False(task.IsCompleted, "the loop ended before the test could hold it");
+
+            /* From here every read of the config beacon and every external alert statement waits on a lock this connection holds. */
+            await using var holder = new NpgsqlConnection(scratch.ConnectionString);
+            await holder.OpenAsync(ct);
+            await using (var begin = new NpgsqlCommand(
+                "BEGIN; LOCK TABLE config.config_service IN ACCESS EXCLUSIVE MODE; LOCK TABLE config.external_alert_pending IN ACCESS EXCLUSIVE MODE;",
+                holder))
+            {
+                await begin.ExecuteNonQueryAsync(ct);
+            }
+
+            /* Both loops tick every 15 seconds, so each is waiting on a lock within that time. */
+            await using var probe = new NpgsqlConnection(scratch.ConnectionString);
+            await probe.OpenAsync(ct);
+            var deadline = DateTime.UtcNow.AddSeconds(45);
+            var held = false;
+            while (!held && DateTime.UtcNow < deadline)
+            {
+                await using var look = new NpgsqlCommand(
+                    "SELECT (SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%config_version%')"
+                    + ", (SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%external_alert%')", probe);
+                await using var reader = await look.ExecuteReaderAsync(ct);
+                await reader.ReadAsync(ct);
+                held = reader.GetInt64(0) > 0 && reader.GetInt64(1) > 0;
+                if (!held)
+                {
+                    await Task.Delay(50, ct);
+                }
+            }
+
+            Assert.True(held, "the beacon read and the external alert pass were not both waiting on the lock within 45 seconds");
+
+            stop.Cancel();
+            var finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(60), ct));
+            Assert.True(ReferenceEquals(finished, task), "the loop did not finish within 60 seconds of the stop");
+            await task;
+
+            Assert.True(
+                !Faults(logger).Any(),
+                "nothing at Warning or above may be logged: " + string.Join(" || ", Faults(logger).Select(e => e.Level + " " + e.Message)));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DARLING_CONFIG", previousConfig);
+            try
+            {
+                Directory.Delete(configFolder, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
     /* A store the test borrows can carry settings of its own that the service rightly warns about (pg_stat_statements.track_utility on
        a plain cluster). Those say nothing about the server list, so they are the one kind left out. */
     private static IEnumerable<(LogLevel Level, string Message)> Faults(RecordingLogger logger) =>

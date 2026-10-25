@@ -3833,92 +3833,632 @@ LIMIT 1";
            was built: the store retries and migrations before this point can take minutes. */
         _collectionPressure.MarkCollectionStarted();
 
-        while (!stoppingToken.IsCancellationRequested)
+        /* A stop that lands where a pass awaits the store (the config beacon, the password key check, a version stamp)
+           raises OperationCanceledException from the pass itself. It must end the loop and fall to the drain below, as the
+           two delay arms do: leaving by the exception disposes the store sources while the command, external alert,
+           investigation, backfill and heartbeat loops are still running, and a pass of theirs in flight then fails on a
+           disposed source and logs a false warning. */
+        try
         {
-            /* #4732: tells the skipped-slot count when this loop was not running. First thing in the pass and on the
-               wall clock the collectors' due stamps are written on, so a sleep, a stall or a clock step of either sign
-               since the previous pass raises the floor before this pass launches any body. */
-            _skipCreditFloor.Tick(DateTime.UtcNow);
-
-            /* #5366: the password key check, once per pass: the store still publishes the key this service holds and the key
-               tables still have all their triggers. A change turns the ring to refusing until the start fixes it; the check
-               never throws and costs two small reads. */
-            if (_passwordKeyRuntime is not null)
+            while (!stoppingToken.IsCancellationRequested)
             {
-                await _passwordKeyRuntime.SweepCheckAsync(stoppingToken);
-            }
+                /* #4732: tells the skipped-slot count when this loop was not running. First thing in the pass and on the
+                   wall clock the collectors' due stamps are written on, so a sleep, a stall or a clock step of either sign
+                   since the previous pass raises the floor before this pass launches any body. */
+                _skipCreditFloor.Tick(DateTime.UtcNow);
 
-            /* #5655: a service version write that failed at the start is tried again here on every pass until it succeeds, the way
-               the pin step above is, so the viewers do not say "unknown (older than 3.11)" about this service until the next restart. */
-            if (serviceVersionWriter.Pending)
-            {
-                await serviceVersionWriter.TryAsync(stoppingToken);
-            }
-
-            /* Control-plane reload beacon: poll config_version at a SAFE point (top of the sweep, never
-               mid-collection). On change, re-read the store and hot-swap the live config: the alert /
-               SMTP / webhook / capture / analysis settings (via the by-reference DarlingAlertSettings
-               seam + the runner's capture provider), the monitored-server set (add/remove/replace
-               ServerLoopState), the per-collector schedule overrides + NextDue, and the mute-rule cache. */
-            var configVersion = await configProvider.ReadConfigVersionAsync(stoppingToken);
-            if (configVersion.HasValue && configVersion.Value != _lastConfigVersion)
-            {
-                /* The watermark advances AFTER the reload applies, not on detecting the bump. Assigning it
-                   first meant a reload whose store read failed had already recorded the version as applied:
-                   the operator's change stayed live in the store, absent from this process, and unreported
-                   until some LATER write bumped config_version again. Nothing retried it, because the
-                   beacon's next tick compared equal.
-
-                   That ordering is why a deadline on this thread is not merely a delay — it DISCARDS the
-                   change — which is the asymmetry ServiceCommandDeadlines.SerialLoopSeconds is floored
-                   against. Fixing the bound without fixing the ordering would have left the silent-loss
-                   path intact and only made it rarer.
-
-                   Failing to apply now leaves the watermark behind, so the very next tick re-detects the
-                   same bump and retries. That is right for the transient case this guards (a store restart,
-                   a failover, a blip) and is bounded work — one single-row beacon read plus one view read
-                   per 15 s tick. StoreConfigProvider rate-limits its own failure log across the streak so a
-                   PERSISTENTLY unreachable store does not turn the retry into a log flood.
-
-                   Deliberately NOT a retry POLICY: #2936 owns that question for the adjacent migrate path,
-                   where it is a real design decision (which failures are retryable, bounded or forever,
-                   re-enter or resume) because that path has no loop of its own and its failure is terminal.
-                   This path already re-runs every tick by construction and its failure is recoverable, so
-                   the only defect here was the ordering. */
-                /* Stamped from the version the reload ACTUALLY applied, not from the beacon's own earlier
-                   read. ReloadFromStoreAsync re-reads config_version inside LoadViewAsync, so a write
-                   landing in the window between the two makes the applied view NEWER than
-                   configVersion.Value — and recording the older number would leave the watermark behind a
-                   config that is already live, costing one redundant idempotent re-apply on the next tick.
-                   Self-healing rather than lossy, but it is the same class of imprecision as the defect
-                   above ("the version recorded as applied must be the version that was applied"), and the
-                   startup path at :1179 already does it this way. */
-                var appliedVersion = await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, runner, stoppingToken);
-                if (appliedVersion.HasValue)
+                /* #5366: the password key check, once per pass: the store still publishes the key this service holds and the key
+                   tables still have all their triggers. A change turns the ring to refusing until the start fixes it; the check
+                   never throws and costs two small reads. */
+                if (_passwordKeyRuntime is not null)
                 {
-                    _lastConfigVersion = appliedVersion.Value;
-
-                    /* #2170: the reload swapped the knob into the live config; move the gate to match. Safe
-                       here by construction — top of the sweep, and narrowing never preempts a running body.
-                       Inside the success branch because a reload that applied nothing changed no knob. */
-                    var reloadedSweepWidth = StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps);
-                    ReconcileSweepGate(serverSweepGate, reloadedSweepWidth, stoppingToken);
-
-                    /* #4999: the daily-run cap is derived from the sweep width, so every reload recomputes it from the
-                       width just applied. A width that moves the cap changes the log once, and one that does not
-                       leaves both alone. */
-                    ApplyDailyRunCap(StorePoolMaxSize(postgres), reloadedSweepWidth);
+                    await _passwordKeyRuntime.SweepCheckAsync(stoppingToken);
                 }
-            }
 
-            /* Stage 2 pause gate (Lite's IsPaused): while paused, skip ALL collection/alert/analysis/purge
-               work but keep looping — the reload beacon above still runs (so a resume, applied via the same
-               reload, un-pauses on the very next tick) and the command loop keeps draining commands. A
-               resume that reloaded THIS iteration already flipped _paused to false above, so it takes effect
-               immediately, not a sweep later. */
-            if (!ShouldRunCollection(_paused))
-            {
-                pausedSinceLastRun = true;
+                /* #5655: a service version write that failed at the start is tried again here on every pass until it succeeds, the way
+                   the pin step above is, so the viewers do not say "unknown (older than 3.11)" about this service until the next restart. */
+                if (serviceVersionWriter.Pending)
+                {
+                    await serviceVersionWriter.TryAsync(stoppingToken);
+                }
+
+                /* Control-plane reload beacon: poll config_version at a SAFE point (top of the sweep, never
+                   mid-collection). On change, re-read the store and hot-swap the live config: the alert /
+                   SMTP / webhook / capture / analysis settings (via the by-reference DarlingAlertSettings
+                   seam + the runner's capture provider), the monitored-server set (add/remove/replace
+                   ServerLoopState), the per-collector schedule overrides + NextDue, and the mute-rule cache. */
+                var configVersion = await configProvider.ReadConfigVersionAsync(stoppingToken);
+                if (configVersion.HasValue && configVersion.Value != _lastConfigVersion)
+                {
+                    /* The watermark advances AFTER the reload applies, not on detecting the bump. Assigning it
+                       first meant a reload whose store read failed had already recorded the version as applied:
+                       the operator's change stayed live in the store, absent from this process, and unreported
+                       until some LATER write bumped config_version again. Nothing retried it, because the
+                       beacon's next tick compared equal.
+
+                       That ordering is why a deadline on this thread is not merely a delay — it DISCARDS the
+                       change — which is the asymmetry ServiceCommandDeadlines.SerialLoopSeconds is floored
+                       against. Fixing the bound without fixing the ordering would have left the silent-loss
+                       path intact and only made it rarer.
+
+                       Failing to apply now leaves the watermark behind, so the very next tick re-detects the
+                       same bump and retries. That is right for the transient case this guards (a store restart,
+                       a failover, a blip) and is bounded work — one single-row beacon read plus one view read
+                       per 15 s tick. StoreConfigProvider rate-limits its own failure log across the streak so a
+                       PERSISTENTLY unreachable store does not turn the retry into a log flood.
+
+                       Deliberately NOT a retry POLICY: #2936 owns that question for the adjacent migrate path,
+                       where it is a real design decision (which failures are retryable, bounded or forever,
+                       re-enter or resume) because that path has no loop of its own and its failure is terminal.
+                       This path already re-runs every tick by construction and its failure is recoverable, so
+                       the only defect here was the ordering. */
+                    /* Stamped from the version the reload ACTUALLY applied, not from the beacon's own earlier
+                       read. ReloadFromStoreAsync re-reads config_version inside LoadViewAsync, so a write
+                       landing in the window between the two makes the applied view NEWER than
+                       configVersion.Value — and recording the older number would leave the watermark behind a
+                       config that is already live, costing one redundant idempotent re-apply on the next tick.
+                       Self-healing rather than lossy, but it is the same class of imprecision as the defect
+                       above ("the version recorded as applied must be the version that was applied"), and the
+                       startup path at :1179 already does it this way. */
+                    var appliedVersion = await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, runner, stoppingToken);
+                    if (appliedVersion.HasValue)
+                    {
+                        _lastConfigVersion = appliedVersion.Value;
+
+                        /* #2170: the reload swapped the knob into the live config; move the gate to match. Safe
+                           here by construction — top of the sweep, and narrowing never preempts a running body.
+                           Inside the success branch because a reload that applied nothing changed no knob. */
+                        var reloadedSweepWidth = StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps);
+                        ReconcileSweepGate(serverSweepGate, reloadedSweepWidth, stoppingToken);
+
+                        /* #4999: the daily-run cap is derived from the sweep width, so every reload recomputes it from the
+                           width just applied. A width that moves the cap changes the log once, and one that does not
+                           leaves both alone. */
+                        ApplyDailyRunCap(StorePoolMaxSize(postgres), reloadedSweepWidth);
+                    }
+                }
+
+                /* Stage 2 pause gate (Lite's IsPaused): while paused, skip ALL collection/alert/analysis/purge
+                   work but keep looping — the reload beacon above still runs (so a resume, applied via the same
+                   reload, un-pauses on the very next tick) and the command loop keeps draining commands. A
+                   resume that reloaded THIS iteration already flipped _paused to false above, so it takes effect
+                   immediately, not a sweep later. */
+                if (!ShouldRunCollection(_paused))
+                {
+                    pausedSinceLastRun = true;
+                    try
+                    {
+                        await Task.Delay(s_sweepInterval, stoppingToken);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+
+                    continue;
+                }
+
+                /* #4732: the first pass to run collection after a pause. The ticks kept coming through the pause, so Tick
+                   saw no gap, but nothing was collected and no due stamp moved (a reload never moves one forward): left
+                   alone, the first run would count every slot that came due during the pause as skipped. */
+                if (pausedSinceLastRun)
+                {
+                    _skipCreditFloor.Resume(DateTime.UtcNow);
+                    pausedSinceLastRun = false;
+                }
+
+                /* P1: snapshot the server list under the lock so the fire-and-track launch loop below iterates a
+                   STABLE array while the command loop reconciles the list concurrently (this also keeps the
+                   deliverer's / plan-fetcher's own locked Find/Select provably race-free). Taken AFTER the reload
+                   above so this sweep launches against the freshly reconciled set. */
+                ServerLoopState[] sweepTargets;
+                lock (_serversLock)
+                {
+                    sweepTargets = servers.ToArray();
+                }
+
+                /* #5479: the per-server self-alerts (Collection Stopped and its siblings) and the custom-alert rules, evaluated
+                   by ONE tracked task per pass over this snapshot, launched without awaiting it and skipped while the previous
+                   pass still runs. They live here, after the operator-pause `continue` above (a deliberate pause stays silent,
+                   as it always did) and BEFORE the launch loop below, so they run whether or not any collection body launches:
+                   a launch guard that holds the bodies off, or a body that never finishes, no longer silences them. Each
+                   server keeps its own cadence stamps, which only this pass reads and writes, so no server is evaluated by two
+                   threads at once. */
+                TryStartSelfAlertPass(
+                    sweepTargets, stoppingToken, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps),
+                    engine, config, notificationService);
+
+                /* Fire-and-track launch loop (#1553 D2/D2b): LAUNCH each server's collection body WITHOUT awaiting
+                   it, so one slow or hung server can no longer stall the fleet or the fleet-level steps below (the
+                   old foreach awaited every step inline — the 24-server field incident). At most N=4 bodies open a
+                   connection at once (serverSweepGate, acquired inside the body). All tracking / skip-log state
+                   (InFlightSweep, SweepStartedUtc, WarnedThisEpisode) is written ONLY here on the outer sweep thread
+                   — the body never touches it, so there is no cross-thread tear on these fields. */
+
+                /* Memory launch guard (#1556, #5479): before launching ANY new bodies this pass, ask the guard. Over the
+                   line it launches NOTHING this pass so the in-flight bodies drain, and it runs a decommitting full
+                   garbage collection itself (a drained process allocates nothing, so none would run otherwise), then
+                   measures again in the same pass and releases when the figure is back under the line. The purge /
+                   disk-pressure / delay steps below keep running. The guard logs the trip, each collection, the hold
+                   and the release. */
+                var inFlightBodies = 0;
+                foreach (var target in sweepTargets)
+                {
+                    if (target.InFlightSweep is { IsCompleted: false })
+                    {
+                        inFlightBodies++;
+                    }
+                }
+
+                var mayLaunchSweeps = _launchMemoryGuard.MayLaunch(inFlightBodies);
+
+                foreach (var server in sweepTargets)
+                {
+                    /* D3: the per-sweep cancellation check HOISTS here from the old inline body — a bare `break`
+                       inside the extracted async body would not compile (CS0139), and this launch loop is the loop
+                       it belongs to. */
+                    if (stoppingToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
+                    /* Working-set guard tripped this tick: stop launching new bodies (evaluated once, before the
+                       loop, so the decision applies uniformly to every server this sweep). */
+                    if (!mayLaunchSweeps)
+                    {
+                        /* #5479: a held pass records no slot, so the slots that come due while the guard holds are counted
+                           here, once each within a pass of their due time (a held slot is a skipped slot). Without it the
+                           hour's count read "0 ran, 0 skipped" and Collection Falling Behind cleared an hour into an outage. */
+                        heldSinceLastLaunch = true;
+                        CountHeldSlots(sweepTargets, DateTime.UtcNow);
+                        break;
+                    }
+
+                    /* #5479: the first launch after a hold. The held slots were counted above as they came due, and no due
+                       stamp moved, so the first bodies would step over every one of them again (101,774 of 101,881 in the
+                       field). Raise the floor to now, exactly as the first pass after an operator pause does (#4732). Before
+                       any body launches: this is the first statement the launch loop runs once the guard lets it. */
+                    if (heldSinceLastLaunch)
+                    {
+                        _skipCreditFloor.Resume(DateTime.UtcNow);
+                        heldSinceLastLaunch = false;
+                    }
+
+                    /* #1581 cold-start stagger: hold this server's FIRST sweep body (InFlightSweep still null) until
+                       its deterministic per-server offset elapses, so a service restart does not launch all N
+                       servers' initial catch-up bodies in ONE tick — the field herd where 24 servers stamped
+                       SweepStartedUtc together, queued behind the N=4 gate, and every one that waited past 60s logged
+                       "collection body has not completed after 60s". The offset is bounded by ColdStartSpreadSeconds,
+                       so no first launch is deferred beyond that window; once a body has launched (InFlightSweep
+                       non-null) this no longer applies, so the relaunch path below and steady-state cadence are
+                       untouched. A reconcile-added server has FirstSweepDueUtc == MinValue and launches immediately.
+                       #4732: the stamp is the start plus at most ColdStartSpreadSeconds, so it is read through StampIsDue
+                       with that span: a wall clock corrected backwards inside the window (a fast clock fixed at boot)
+                       leaves the stamp more than one span ahead, and a raw compare would hold every server that has not
+                       launched yet for as long as the step, with no connect, collection or alert. */
+                    if (server.InFlightSweep is null
+                        && !StampIsDue(server.FirstSweepDueUtc, TimeSpan.FromSeconds(ColdStartSpreadSeconds), DateTime.UtcNow))
+                    {
+                        continue;
+                    }
+
+                    if (server.InFlightSweep is { IsCompleted: false })
+                    {
+                        /* Still in flight: do NOT relaunch (INV-2, one body per server). The field incident was
+                           HANGS, not throws, and the body's catch-all (D3) only covers throws — so the stall is
+                           surfaced HERE. The EPISODE (SweepStartedUtc, stamped at launch) still spans queue + run,
+                           because a body queued behind the gate genuinely is unserved. But the two halves get
+                           DIFFERENT channels: RunStartedTicks is 0 until the body acquires the concurrency gate, so
+                           a body merely waiting its turn is CAPACITY pressure, never a hang. Attributing queue time
+                           to the hang watchdog fired it ~82 times/hour at 24 servers behind the N=4 gate on a
+                           demonstrably healthy fleet, which buried the one signal this warning exists to raise. */
+                        var episodeSeconds = (DateTime.UtcNow - server.SweepStartedUtc).TotalSeconds;
+                        var runStartedTicks = Interlocked.Read(ref server.RunStartedTicks);
+                        var running = runStartedTicks != 0;
+                        var runningSeconds = running
+                            ? (DateTime.UtcNow - new DateTime(runStartedTicks, DateTimeKind.Utc)).TotalSeconds
+                            : 0;
+
+                        /* #4710: a body that has not started running is either inside its connect attempt, which runs
+                           BEFORE the fleet permit, or waiting for that permit. Only the first is not the fleet
+                           limit's doing, so its wording must not blame the limit. Read only when the body is not
+                           running: once the permit is held the connect stage is over. */
+                        var connectStartedTicks = running ? 0 : Interlocked.Read(ref server.ConnectStartedTicks);
+                        var connecting = connectStartedTicks != 0;
+                        var connectSeconds = connecting
+                            ? (DateTime.UtcNow - new DateTime(connectStartedTicks, DateTimeKind.Utc)).TotalSeconds
+                            : 0;
+
+                        _logger.LogDebug(
+                            "[{Server}] collection body still in flight after {Elapsed:F0}s ({State}) — skipping this sweep",
+                            server.Config.DisplayName,
+                            episodeSeconds,
+                            SweepInFlightWording.DebugState(running, runningSeconds, connecting, connectSeconds));
+
+                        switch (ClassifySweepEpisode(
+                            episodeSeconds, running, runningSeconds, server.WarnedThisEpisode, server.QueuedInfoThisEpisode))
+                        {
+                            /* HANG — the body is actually EXECUTING and has not finished. ONE Warning per episode.
+                               This is the channel that must stay quiet on a healthy fleet so a real stall is seen. */
+                            case SweepEpisodeSignal.Hang:
+                                server.WarnedThisEpisode = true;
+                                _logger.LogWarning(
+                                    "[{Server}] collection body has not completed after {Elapsed:F0}s of execution — skipping relaunch",
+                                    server.Config.DisplayName, runningSeconds);
+                                break;
+
+                            /* CAPACITY — still QUEUED behind the gate, so nothing is wrong with this server: the
+                               fleet is simply wider than the configured sweep width at this moment. Info, once.
+                               Reports the EFFECTIVE width, not the compile-time default (#2170 review catch):
+                               this line is what an operator reads while deciding whether to raise the knob, so
+                               printing 4 after they raised it to 12 would send them chasing a limit that is no
+                               longer in force. #4710: a body still inside its connect attempt has not asked for
+                               a slot yet, so it gets the connect stage's wording instead, with the connect
+                               attempt's own clock and the connect gate's width. */
+                            case SweepEpisodeSignal.Queued:
+                                server.QueuedInfoThisEpisode = true;
+                                _logger.LogInformation(
+                                    SweepInFlightWording.NotStartedInfoTemplate(connecting),
+                                    server.Config.DisplayName,
+                                    connecting ? connectSeconds : episodeSeconds,
+                                    connecting ? ServerConnectProbe.GateWidth : EffectiveSweepWidth);
+                                break;
+                        }
+
+                        continue;
+                    }
+
+                    /* The body is null (never launched) or has completed since the last sweep. If we surfaced EITHER
+                       channel for this episode, log its resolution with the total elapsed and re-arm before
+                       relaunching — the re-arm happens HERE on observing IsCompleted, never in the body's finally
+                       (which would race this launch loop). A body that finished under both thresholds was never
+                       surfaced, so it simply relaunches. */
+                    if (server.WarnedThisEpisode || server.QueuedInfoThisEpisode)
+                    {
+                        var ranForSeconds = (DateTime.UtcNow - server.SweepStartedUtc).TotalSeconds;
+                        _logger.LogInformation(
+                            "[{Server}] collection body completed after {Elapsed:F0}s (episode, including any queue wait)",
+                            server.Config.DisplayName, ranForSeconds);
+                        server.WarnedThisEpisode = false;
+                        server.QueuedInfoThisEpisode = false;
+                    }
+
+                    /* Stamp the launch time BEFORE launching — time spent QUEUED on the gate is part of this
+                       episode — and clear the run and connect stamps so this episode starts as QUEUED. The reset must
+                       precede the call: ProcessServerSweepAsync runs synchronously up to its first await, so with a
+                       free permit the body may stamp RunStartedTicks (or, on its way into a connect attempt,
+                       ConnectStartedTicks) before this statement returns, and resetting after would erase it. Then
+                       fire-and-track: assign the Task to InFlightSweep (so it is observed and
+                       the next sweep + the shutdown drain can see it) but do NOT await it here. */
+                    server.SweepStartedUtc = DateTime.UtcNow;
+                    Interlocked.Exchange(ref server.RunStartedTicks, 0);
+                    Interlocked.Exchange(ref server.ConnectStartedTicks, 0);
+                    server.InFlightSweep = ProcessServerSweepAsync(
+                        server, engine, runner, planFetcher, notificationService, config, serverSweepGate, stoppingToken);
+                }
+
+                /* #4999: the hang watchdog above reads only the per-server bodies, and a daily run no longer runs in
+                   one: it is detached and can go for hours, so a stuck one showed up only as stale data. The same goes
+                   for the three runs detached by name (query_store, plan_correction, pg_wait_sampling). Same tick, the
+                   same kind of Warning, one per run, naming the server and collector; the threshold is its own, 15
+                   minutes (DailyRunWatchdogSeconds), where the bodies' is 60 seconds. After the launch loop and outside
+                   it, because a detached run belongs to no single body and the loop may leave early. */
+                WatchDailyRuns(DateTime.UtcNow);
+
+                /* #4130: fire-and-track, exactly like the per-server sweeps just above and the oversized-plan
+                   backlog just below — see TryStartScheduledPurge's doc for why the inline await was the
+                   defect. */
+                TryStartScheduledPurge(
+                    DateTime.UtcNow,
+                    token => RunScheduledPurgeAsync(postgres, config, token),
+                    stoppingToken);
+
+                /* #3392: drain the oversized-plan backlog. Its own low-frequency cadence off this loop, beside
+                   the purge, and deliberately NOT inside the per-server collector rotation: fetching a plan the
+                   capture cap declined is worth doing eventually and worth nothing if it competes with a live
+                   collection cycle for that server's wall-clock budget.
+
+                   FIRE-AND-TRACK, not awaited — the #1553 launch-loop shape rather than the purge's. The purge
+                   is awaited because it talks only to the store with bounded statements; this pass opens a
+                   connection to every monitored server, and its worst case is
+                   fleet width * MaxPlansPerServerPerTick * PerPlanBudget, which on a 42-server fleet whose
+                   targets are all timing out is 105 minutes. Awaited, that is 105 minutes in which this loop
+                   launches no collection bodies at all — the 24-server field incident's exact shape, one
+                   maintenance step over. Launched and tracked, a slow pass costs only its own next slots.
+
+                   sweepTargets is this tick's snapshot, already taken under the servers lock, so the pass
+                   iterates a stable set. RunAsync is failure-isolated per server and returns quietly on
+                   cancellation, so the task can complete unobserved without an unhandled fault. */
+                /* #4732: the span is the longest delay NextSweepDelay returns, which is the delay the stamp below is written with. */
+                if (StampIsDue(_nextOversizedPlanSweepUtc, OversizedPlanBacklogSweep.LongestSweepDelay, DateTime.UtcNow)
+                    && (_oversizedPlanSweep is null || _oversizedPlanSweep.IsCompleted))
+                {
+                    /* #3405: count BOTH populations, because an empty target list has two causes that mean
+                       opposite things and the pass itself cannot tell them apart. sweepableTargets is the
+                       registrations that could ever carry a runtime this pass would visit — read off the
+                       registration, since Runtime is null both mid-connect and forever. backlogTargets is the
+                       ones carrying one now. Counted in one walk rather than two so the pair describes the same
+                       snapshot. */
+                    var backlogTargets = new List<ServerRuntime>(sweepTargets.Length);
+                    var sweepableTargets = 0;
+                    foreach (var target in sweepTargets)
+                    {
+                        if (!OversizedPlanBacklogSweep.IsSweepableTarget(target.Config))
+                        {
+                            continue;
+                        }
+
+                        sweepableTargets++;
+
+                        if (target.Runtime is { } runtime)
+                        {
+                            backlogTargets.Add(runtime);
+                        }
+                    }
+
+                    /* Stamped BEFORE the launch, like every other cadence on this loop: the IsCompleted guard
+                       above is what keeps a slow pass from stacking, and it only works against a stamp that has
+                       already moved. The delay itself is the sweep's decision, not this loop's. */
+                    var (sweepDelay, connectWaits) = OversizedPlanBacklogSweep.NextSweepDelay(
+                        sweepableTargets, backlogTargets.Count, _oversizedPlanSweepConnectWaits);
+                    _oversizedPlanSweepConnectWaits = connectWaits;
+                    _nextOversizedPlanSweepUtc = DateTime.UtcNow.Add(sweepDelay);
+
+                    _oversizedPlanSweep = OversizedPlanBacklogSweep.RunAsync(
+                        postgres, backlogTargets, _logger, stoppingToken);
+                }
+
+                /* #5985: the query-tag map step. Rebuilds every listed server's map when a tag, assignment or rule changed
+                   (rules_version ahead of built_version), otherwise extends it for the keys sighted since the last pass,
+                   capped per server per pass, and flushes the runner's in-memory sightings first. Fire-and-track like the
+                   sweep above: it only talks to the store, but a rebuild over a large sighting history can run long and must not
+                   hold the launch loop. The builder is failure-isolated per server; only a cancellation (shutdown) escapes it, and
+                   the tracked task is never awaited, so that ends the task quietly. */
+                if (StampIsDue(_nextQueryTagMapPassUtc, s_queryTagMapPassInterval, DateTime.UtcNow)
+                    && (_queryTagMapPass is null || _queryTagMapPass.IsCompleted))
+                {
+                    _nextQueryTagMapPassUtc = DateTime.UtcNow.Add(s_queryTagMapPassInterval);
+                    var mapServerIds = new List<int>(sweepTargets.Length);
+                    foreach (var target in sweepTargets)
+                    {
+                        mapServerIds.Add(target.Config.ServerId);
+                    }
+
+                    _queryTagMapBuilder ??= new QueryTagMapBuilder(postgres, _logger, sightings: runner.QueryTagSightings);
+                    _queryTagMapPass = _queryTagMapBuilder.RunMapPassAsync(mapServerIds, stoppingToken);
+                }
+
+                /* Stage 4 fleet-level self-alert: the store disk-pressure backstop. The daily purge is the ONLY
+                   other maintenance cadence and it is purely time-based (no disk-free check), so on its own the
+                   store can still fill between purges — this edge-fired condition is the flagship-appropriate
+                   backstop. Own slow cadence; the master alerts gate + edge-trigger live inside the evaluator. */
+                /* #4732: the stamp below is written as now + s_diskCheckInterval, so that is the span. */
+                if (StampIsDue(_nextDiskCheckUtc, s_diskCheckInterval, DateTime.UtcNow))
+                {
+                    _nextDiskCheckUtc = DateTime.UtcNow.Add(s_diskCheckInterval);
+                    await EvaluateStoreDiskPressureAsync(config, stoppingToken);
+                }
+
+                /* #3304: the custom-alert-rule integrity check. A stored rule silently stops compiling when a
+                   measure drifts out of the catalog (the incremental pg_* buildout), and a rule can compile yet
+                   never fire (scope resolves to no monitored server, or its measure is always-NULL). Nobody
+                   "opens" a rule, so a silent gap = an alert an operator believes is armed. Fleet-level, own slow
+                   cadence; both evaluators are null on deployments without a viewer pool, and each Evaluate* half
+                   is failure-isolated so a throw never stops the fleet loop. */
+                /* #4732: the stamp below is written as now + s_customAlertHealthInterval, so that is the span. */
+                if (_customAlertEvaluator is not null && _selfAlerts is not null
+                    && StampIsDue(_nextCustomAlertHealthCheckUtc, s_customAlertHealthInterval, DateTime.UtcNow))
+                {
+                    _nextCustomAlertHealthCheckUtc = DateTime.UtcNow.Add(s_customAlertHealthInterval);
+                    await EvaluateCustomAlertRuleHealthAsync(servers, stoppingToken);
+
+                    /* #3305: on the same cadence, reconcile persisted state — force-resolve + clean the state of
+                       disabled rules (which the enabled-only sweep would orphan) and of servers that have left a
+                       rule's scope. Deleted rules are resolved on the delete path (their state cascades away). */
+                    await ReconcileCustomAlertStateAsync(servers, stoppingToken);
+                }
+
+                /* #3306: a mute rule that has outlived its reason. A mute is a deliberate blind spot, and this is
+                   the only surface that reports one exists, how old it is, and whether it will ever expire —
+                   otherwise the only way to find one is to already suspect it and call get_mute_rules. Without it
+                   a rule created to stop a false-positive flood keeps suppressing the alert after the fix ships,
+                   and the symptom is silence. Judged on the CONJUNCTION (still in force, no expiry, past every expiry the
+                   product offers), never on permanence alone, which the dialog offers on purpose. Reads the live
+                   MuteRuleService cache the engine matches against — so it sees exactly what is suppressing
+                   alerts right now, and needs no store read of its own. Fleet-level, own slow cadence; the
+                   Evaluate* wrapper is failure-isolated so a throw never stops the fleet loop. */
+                /* #4732: the stamp below is written as now + s_staleMuteCheckInterval, so that is the span. */
+                if (_selfAlerts is not null && StampIsDue(_nextStaleMuteCheckUtc, s_staleMuteCheckInterval, DateTime.UtcNow))
+                {
+                    _nextStaleMuteCheckUtc = DateTime.UtcNow.Add(s_staleMuteCheckInterval);
+                    await _selfAlerts.EvaluateStaleMuteRulesAsync(muteRuleService.GetRules(), stoppingToken);
+                }
+
+                /* #5654: external alerts the drain gave up on (expired, interrupted or failed every send). A source that queues
+                   an alert believes it was delivered, and nothing else reports that it was not. The count is one store read per
+                   tick; a failed read holds the standing alert rather than resolving it. Fleet-level, own slow cadence; the
+                   Evaluate* wrapper is failure-isolated so a throw never stops the fleet loop. */
+                /* #4732: the stamp below is written as now + s_externalAlertsCheckInterval, so that is the span. */
+                if (_selfAlerts is not null && StampIsDue(_nextExternalAlertsCheckUtc, s_externalAlertsCheckInterval, DateTime.UtcNow))
+                {
+                    _nextExternalAlertsCheckUtc = DateTime.UtcNow.Add(s_externalAlertsCheckInterval);
+                    await EvaluateExternalAlertsAsync(externalAlertStore, stoppingToken);
+                }
+
+                /* #4750: a webhook channel that has failed three times in a row. A channel can fail for weeks while
+                   another one delivers every alert, and nothing else reports it. The counts are the webhook
+                   service's own in-memory tallies, so the read costs nothing and it rides every sweep tick with no
+                   cadence of its own; the evaluator is an edge (one alert when a count reaches three, one
+                   resolution when it is back at 0), so a channel that stays broken does not repeat. Fleet-level,
+                   master-gated inside, and the Evaluate* wrapper is failure-isolated so a throw never stops the
+                   fleet loop. */
+                if (_selfAlerts is not null)
+                {
+                    await _selfAlerts.EvaluateNotificationChannelsAsync(stoppingToken);
+                }
+
+                /* #3514: the web-dashboard TLS certificate expiry self-alert. The web host loads the certificate
+                   once at start and publishes its served expiry to WebTlsCertificateState; a headless service can
+                   run for months without a restart, so the worker re-evaluates that fixed expiry against the clock
+                   on its own slow cadence and the evaluator warns 30 days out / Critical once lapsed — and Critical
+                   at once when the snapshot carries the host's not-yet-valid refusal (#3517: the dashboard is
+                   loopback-only from the start, and the host does not re-decide when the date passes). A null
+                   snapshot means no LAN TLS certificate to watch. Fleet-level, and the Evaluate* wrapper is
+                   failure-isolated so a throw never stops the fleet loop. */
+                /* #5288: the MCP endpoint's certificate rides the same hourly gate (one stamp, no new field): the
+                   MCP host publishes its served expiry to McpTlsCertificateState exactly as the web host does, and
+                   the evaluator keeps the two alerts apart by key and metric, so the call sits right beside the web
+                   one. Each Evaluate* wrapper is failure-isolated on its own, so a throw in the web half cannot
+                   skip the MCP half. */
+                /* #4732: the stamp below is written as now + s_webTlsCheckInterval, so that is the span. */
+                if (_selfAlerts is not null && StampIsDue(_nextWebTlsCheckUtc, s_webTlsCheckInterval, DateTime.UtcNow))
+                {
+                    _nextWebTlsCheckUtc = DateTime.UtcNow.Add(s_webTlsCheckInterval);
+                    await _selfAlerts.EvaluateWebTlsCertificateAsync(
+                        BuildWebTlsCertReport(_webTlsCertState.Read()), stoppingToken);
+                    if (_mcpTlsCertState is not null)
+                    {
+                        await _selfAlerts.EvaluateMcpTlsCertificateAsync(
+                            BuildWebTlsCertReport(_mcpTlsCertState.Read()), stoppingToken);
+                    }
+                }
+
+                /* #4732: the fleet gate's last-hour counts, once a minute: the "Collection Falling Behind" self-alert
+                   (fleet-level, master-gated inside, failure-isolated inside) and the service log's hourly summary line,
+                   which also runs with no alert engine. Before this a collector slot that came due while its run was
+                   late was skipped with one Info line, and how long a body queued for a gate slot was never measured. */
+                /* #4732: the stamp below is written as now + s_fleetGateCheckInterval, so that is the span. */
+                if (StampIsDue(_nextFleetGateCheckUtc, s_fleetGateCheckInterval, DateTime.UtcNow))
+                {
+                    _nextFleetGateCheckUtc = DateTime.UtcNow.Add(s_fleetGateCheckInterval);
+                    await CheckFleetGateAsync(stoppingToken);
+                }
+
+                /* #4215: the managed-store settings self-alert — darling-managed.conf fell back to the
+                   last-good copy, is hand-edited and kept in force, or PostgreSQL rejected one or more owned
+                   settings outright. Every
+                   fact but the rejected-setting list is this start's own in-process state, carried down from
+                   ExecuteAsync exactly like managedConfWriteResult already is — never re-read, because the writer
+                   runs on every start and the state is re-derived after a restart. The rejected list is the one
+                   fact that is store-backed (collect.managed_conf_verdicts, V146), read fresh each tick so a value
+                   fixed by a later start clears without this process restarting. Fleet-level, own slow cadence;
+                   the Evaluate* wrapper is failure-isolated so a throw never stops the fleet loop. */
+                /* #4732: the stamp below is written as now + s_storeSettingsCheckInterval, so that is the span. */
+                if (_selfAlerts is not null && StampIsDue(_nextStoreSettingsCheckUtc, s_storeSettingsCheckInterval, DateTime.UtcNow))
+                {
+                    _nextStoreSettingsCheckUtc = DateTime.UtcNow.Add(s_storeSettingsCheckInterval);
+                    await EvaluateStoreSettingsAsync(config, managedConfWriteResult, managedUsedLastGoodConf, managedConfVerification, stoppingToken);
+                }
+
+                /* #1581: the compression-job self-heal backstop. TimescaleDB compression policy jobs can silently
+                   die (next_start = -infinity) or hang, halting the store's archival tier so uncompressed data grows
+                   without bound until the disk fills and collection stops for the WHOLE fleet (the field incident).
+                   Timescale-only — gated one level in since #3815 put the availability re-probe ahead of it on
+                   this same tick; own hourly cadence; failure-isolated inside EvaluateCompressionJobHealthAsync.
+
+                   The next due time is SNAPPED to the wall clock rather than taken from this fire (#3575). The
+                   dead-job arm the check judges reads next_start = -infinity, which is also what the scheduler
+                   writes for the few milliseconds at either edge of every healthy run before the worker is, or
+                   after it stops being, visible as Running — and the policies run at :MM:00 on a fixed schedule,
+                   so a check that re-anchored itself as "UtcNow + 1 h" on every fire crept a few seconds per hour
+                   across those instants until, on a production store, it sampled one 53 ms into a 63 ms run and
+                   paged. NextCompressionCheckUtc puts every steady-state sample at :30 past its minute instead,
+                   half the grid step from every policy's start in both directions. The read itself now confirms
+                   a -infinity trip with a second read five seconds later (ReadStuckPolicyJobsAsync), so the
+                   phase is hardening on top of the fix, not the fix. */
+                /* #4732: NextCompressionCheckUtc writes at most one interval plus its 30 s phase ahead (CompressionCheckSpan). */
+                if (StampIsDue(_nextCompressionCheckUtc, CompressionCheckSpan, DateTime.UtcNow))
+                {
+                    _nextCompressionCheckUtc = TimescaleSupport.NextCompressionCheckUtc(DateTime.UtcNow, s_compressionCheckInterval);
+                    TryStartStoreMaintenanceTick(token => RunStoreMaintenanceTickAsync(token), stoppingToken);
+                }
+
+                /* #2068: the store self-metrics sweep. Capacity forecasting previously required ad-hoc
+                   archaeology over the TimescaleDB chunk catalog, whose raw window is 4 days — a measured 3x
+                   daily-ingest jump was only visible because the catalog still held both eras. This persists
+                   the store's own size/compression/growth series (per-hypertable, per-dimension, whole-store)
+                   into the plain collect.store_metrics table hourly, retention bounded by the sweep's own
+                   DELETE. Every store shape (the hypertable arm gates on _timescaleAvailable INSIDE);
+                   failure-isolated inside SweepStoreSelfMetricsAsync like the two checks above. */
+                /* #3466 (lane 2): the fleet sweep — the scheduled, stateful whole-fleet report. FIRE-AND-TRACK
+                   like the oversized-plan backlog, not awaited like the purge: the sweep reads only the loopback
+                   store, but it reads it once per monitored server, and a stalled store would otherwise hold
+                   this loop for minutes — the field-herd shape one maintenance step over. Launched and tracked,
+                   a slow sweep costs only its own next slots (the IsCompleted guard), and RunAsync never faults
+                   (catch-all inside, quiet on cancellation), so the task can complete unobserved.
+
+                   Gated on the sweep's OWN switch and deliberately NOT on config.Alerts.Enabled: sweeps under
+                   master-off are the muted-mode contract's whole point — the report keeps publishing, carries
+                   the mute in its header, and writes the would-have-paged ledger. The engine makes no delivery
+                   call anywhere (delivery is lane 4's daily rollup), so the master-switch census has nothing of
+                   this path's to count. The cadence is read ONCE into the local that both the stamp and the
+                   engine's span math use, so a store reload swapping config mid-tick cannot make the document
+                   claim a span the schedule never used — the retention-hold read-once discipline. Stamped
+                   BEFORE the launch, like every cadence on this loop. */
+                if (config.Alerts.FleetSweepEnabled
+                    && StampIsDue(_nextFleetSweepUtc, FleetSweepStampSpan, DateTime.UtcNow)
+                    && (_fleetSweep is null || _fleetSweep.IsCompleted))
+                {
+                    /* #4732: this interval is read at the fire and can differ from the one the stamp was last written with, so the
+                       guard above spans the largest interval ClampIntervalMinutes allows, never this fire's value. */
+                    var fleetSweepMinutes = FleetSweepEngine.ClampIntervalMinutes(config.Alerts.FleetSweepIntervalMinutes);
+                    _nextFleetSweepUtc = NextGridStamp(_nextFleetSweepUtc, DateTime.UtcNow, TimeSpan.FromMinutes(fleetSweepMinutes));
+
+                    /* The whole registered population, connected or not — a sweep is about the fleet, and a
+                       server that cannot be reached is exactly the kind of fact it must carry (its store rows
+                       go quiet, which the engine bands and explains) rather than skip. */
+                    var fleetSweepServers = new List<(int ServerId, string ServerName)>(sweepTargets.Length);
+                    foreach (var target in sweepTargets)
+                    {
+                        fleetSweepServers.Add((target.Config.ServerId, target.Config.DisplayName));
+                    }
+
+                    /* #4925: an Azure SQL Database master's signals count only its own blocking and deadlocks. A target
+                       whose list cannot be built reads unscoped (null), never fails the sweep. */
+                    var fleetSweepSeparate = new Dictionary<int, IReadOnlyList<string>?>();
+                    foreach (var target in sweepTargets)
+                    {
+                        try
+                        {
+                            /* A master that is disconnected when the sweep fires has no runtime to ask, so its list comes from the
+                               stored edition and the registry, the same way the MCP and web hosts get it; reading it unscoped
+                               would count its earlier events twice in the sweep band. */
+                            fleetSweepSeparate[target.Config.ServerId] = target.Runtime is null
+                                ? await AnalysisSeparatelyMonitoredDatabasesAsync(target.Config.ServerId, _registryState?.Read(), postgres, stoppingToken)
+                                : AnalysisSeparatelyMonitoredDatabases(target.Runtime);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            _logger.LogWarning(ex, "Fleet sweep could not list the separately monitored databases for server {ServerId}; reading it unscoped", target.Config.ServerId);
+                            fleetSweepSeparate[target.Config.ServerId] = null;
+                        }
+                    }
+
+                    _fleetSweep = FleetSweepEngine.RunAsync(
+                        postgres, fleetSweepServers, TimeSpan.FromMinutes(fleetSweepMinutes),
+                        config.Alerts.Enabled, _logger, fleetSweepSeparate, stoppingToken);
+                }
+
+                /* #4823: the once-a-minute checkpointer sync-time sample, AHEAD of the hourly tick below so the sample taken
+                   on a tick's own pass is inside the window that tick takes. #4834: whether or not a self-alert evaluator
+                   exists, because the hourly checkpointer row stores the window's maximum either way. A failed read is a
+                   Debug line and a skipped minute inside SampleCheckpointSyncAsync, never a stopped loop. */
+                /* #4732: NextGridStamp writes at most one interval ahead, and s_checkpointSyncSampleInterval is the one it uses. */
+                if (StampIsDue(_nextCheckpointSyncSampleUtc, s_checkpointSyncSampleInterval, DateTime.UtcNow))
+                {
+                    _nextCheckpointSyncSampleUtc = NextGridStamp(_nextCheckpointSyncSampleUtc, DateTime.UtcNow, s_checkpointSyncSampleInterval);
+                    await SampleCheckpointSyncAsync(stoppingToken);
+                }
+
+                /* #4732: NextGridStamp writes at most one interval ahead, and s_storeMetricsInterval is the one it uses. */
+                if (StampIsDue(_nextStoreMetricsUtc, s_storeMetricsInterval, DateTime.UtcNow))
+                {
+                    /* #4012's review: the deadlock re-mask inside the sweep keys an alert whose report is gone under the
+                       same log-hash key the runner's log-event runs share. */
+                    _pgDeadlockRemaskKey = runner.LogHashKey;
+                    TryStartStoreMetricsTick(DateTime.UtcNow, _checkpointSyncSampler.TakeWindowMax, (window, token) => RunStoreMetricsTickAsync(window, token), stoppingToken);
+                }
+
                 try
                 {
                     await Task.Delay(s_sweepInterval, stoppingToken);
@@ -3927,539 +4467,11 @@ LIMIT 1";
                 {
                     break;
                 }
-
-                continue;
             }
-
-            /* #4732: the first pass to run collection after a pause. The ticks kept coming through the pause, so Tick
-               saw no gap, but nothing was collected and no due stamp moved (a reload never moves one forward): left
-               alone, the first run would count every slot that came due during the pause as skipped. */
-            if (pausedSinceLastRun)
-            {
-                _skipCreditFloor.Resume(DateTime.UtcNow);
-                pausedSinceLastRun = false;
-            }
-
-            /* P1: snapshot the server list under the lock so the fire-and-track launch loop below iterates a
-               STABLE array while the command loop reconciles the list concurrently (this also keeps the
-               deliverer's / plan-fetcher's own locked Find/Select provably race-free). Taken AFTER the reload
-               above so this sweep launches against the freshly reconciled set. */
-            ServerLoopState[] sweepTargets;
-            lock (_serversLock)
-            {
-                sweepTargets = servers.ToArray();
-            }
-
-            /* #5479: the per-server self-alerts (Collection Stopped and its siblings) and the custom-alert rules, evaluated
-               by ONE tracked task per pass over this snapshot, launched without awaiting it and skipped while the previous
-               pass still runs. They live here, after the operator-pause `continue` above (a deliberate pause stays silent,
-               as it always did) and BEFORE the launch loop below, so they run whether or not any collection body launches:
-               a launch guard that holds the bodies off, or a body that never finishes, no longer silences them. Each
-               server keeps its own cadence stamps, which only this pass reads and writes, so no server is evaluated by two
-               threads at once. */
-            TryStartSelfAlertPass(
-                sweepTargets, stoppingToken, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps),
-                engine, config, notificationService);
-
-            /* Fire-and-track launch loop (#1553 D2/D2b): LAUNCH each server's collection body WITHOUT awaiting
-               it, so one slow or hung server can no longer stall the fleet or the fleet-level steps below (the
-               old foreach awaited every step inline — the 24-server field incident). At most N=4 bodies open a
-               connection at once (serverSweepGate, acquired inside the body). All tracking / skip-log state
-               (InFlightSweep, SweepStartedUtc, WarnedThisEpisode) is written ONLY here on the outer sweep thread
-               — the body never touches it, so there is no cross-thread tear on these fields. */
-
-            /* Memory launch guard (#1556, #5479): before launching ANY new bodies this pass, ask the guard. Over the
-               line it launches NOTHING this pass so the in-flight bodies drain, and it runs a decommitting full
-               garbage collection itself (a drained process allocates nothing, so none would run otherwise), then
-               measures again in the same pass and releases when the figure is back under the line. The purge /
-               disk-pressure / delay steps below keep running. The guard logs the trip, each collection, the hold
-               and the release. */
-            var inFlightBodies = 0;
-            foreach (var target in sweepTargets)
-            {
-                if (target.InFlightSweep is { IsCompleted: false })
-                {
-                    inFlightBodies++;
-                }
-            }
-
-            var mayLaunchSweeps = _launchMemoryGuard.MayLaunch(inFlightBodies);
-
-            foreach (var server in sweepTargets)
-            {
-                /* D3: the per-sweep cancellation check HOISTS here from the old inline body — a bare `break`
-                   inside the extracted async body would not compile (CS0139), and this launch loop is the loop
-                   it belongs to. */
-                if (stoppingToken.IsCancellationRequested)
-                {
-                    break;
-                }
-
-                /* Working-set guard tripped this tick: stop launching new bodies (evaluated once, before the
-                   loop, so the decision applies uniformly to every server this sweep). */
-                if (!mayLaunchSweeps)
-                {
-                    /* #5479: a held pass records no slot, so the slots that come due while the guard holds are counted
-                       here, once each within a pass of their due time (a held slot is a skipped slot). Without it the
-                       hour's count read "0 ran, 0 skipped" and Collection Falling Behind cleared an hour into an outage. */
-                    heldSinceLastLaunch = true;
-                    CountHeldSlots(sweepTargets, DateTime.UtcNow);
-                    break;
-                }
-
-                /* #5479: the first launch after a hold. The held slots were counted above as they came due, and no due
-                   stamp moved, so the first bodies would step over every one of them again (101,774 of 101,881 in the
-                   field). Raise the floor to now, exactly as the first pass after an operator pause does (#4732). Before
-                   any body launches: this is the first statement the launch loop runs once the guard lets it. */
-                if (heldSinceLastLaunch)
-                {
-                    _skipCreditFloor.Resume(DateTime.UtcNow);
-                    heldSinceLastLaunch = false;
-                }
-
-                /* #1581 cold-start stagger: hold this server's FIRST sweep body (InFlightSweep still null) until
-                   its deterministic per-server offset elapses, so a service restart does not launch all N
-                   servers' initial catch-up bodies in ONE tick — the field herd where 24 servers stamped
-                   SweepStartedUtc together, queued behind the N=4 gate, and every one that waited past 60s logged
-                   "collection body has not completed after 60s". The offset is bounded by ColdStartSpreadSeconds,
-                   so no first launch is deferred beyond that window; once a body has launched (InFlightSweep
-                   non-null) this no longer applies, so the relaunch path below and steady-state cadence are
-                   untouched. A reconcile-added server has FirstSweepDueUtc == MinValue and launches immediately.
-                   #4732: the stamp is the start plus at most ColdStartSpreadSeconds, so it is read through StampIsDue
-                   with that span: a wall clock corrected backwards inside the window (a fast clock fixed at boot)
-                   leaves the stamp more than one span ahead, and a raw compare would hold every server that has not
-                   launched yet for as long as the step, with no connect, collection or alert. */
-                if (server.InFlightSweep is null
-                    && !StampIsDue(server.FirstSweepDueUtc, TimeSpan.FromSeconds(ColdStartSpreadSeconds), DateTime.UtcNow))
-                {
-                    continue;
-                }
-
-                if (server.InFlightSweep is { IsCompleted: false })
-                {
-                    /* Still in flight: do NOT relaunch (INV-2, one body per server). The field incident was
-                       HANGS, not throws, and the body's catch-all (D3) only covers throws — so the stall is
-                       surfaced HERE. The EPISODE (SweepStartedUtc, stamped at launch) still spans queue + run,
-                       because a body queued behind the gate genuinely is unserved. But the two halves get
-                       DIFFERENT channels: RunStartedTicks is 0 until the body acquires the concurrency gate, so
-                       a body merely waiting its turn is CAPACITY pressure, never a hang. Attributing queue time
-                       to the hang watchdog fired it ~82 times/hour at 24 servers behind the N=4 gate on a
-                       demonstrably healthy fleet, which buried the one signal this warning exists to raise. */
-                    var episodeSeconds = (DateTime.UtcNow - server.SweepStartedUtc).TotalSeconds;
-                    var runStartedTicks = Interlocked.Read(ref server.RunStartedTicks);
-                    var running = runStartedTicks != 0;
-                    var runningSeconds = running
-                        ? (DateTime.UtcNow - new DateTime(runStartedTicks, DateTimeKind.Utc)).TotalSeconds
-                        : 0;
-
-                    /* #4710: a body that has not started running is either inside its connect attempt, which runs
-                       BEFORE the fleet permit, or waiting for that permit. Only the first is not the fleet
-                       limit's doing, so its wording must not blame the limit. Read only when the body is not
-                       running: once the permit is held the connect stage is over. */
-                    var connectStartedTicks = running ? 0 : Interlocked.Read(ref server.ConnectStartedTicks);
-                    var connecting = connectStartedTicks != 0;
-                    var connectSeconds = connecting
-                        ? (DateTime.UtcNow - new DateTime(connectStartedTicks, DateTimeKind.Utc)).TotalSeconds
-                        : 0;
-
-                    _logger.LogDebug(
-                        "[{Server}] collection body still in flight after {Elapsed:F0}s ({State}) — skipping this sweep",
-                        server.Config.DisplayName,
-                        episodeSeconds,
-                        SweepInFlightWording.DebugState(running, runningSeconds, connecting, connectSeconds));
-
-                    switch (ClassifySweepEpisode(
-                        episodeSeconds, running, runningSeconds, server.WarnedThisEpisode, server.QueuedInfoThisEpisode))
-                    {
-                        /* HANG — the body is actually EXECUTING and has not finished. ONE Warning per episode.
-                           This is the channel that must stay quiet on a healthy fleet so a real stall is seen. */
-                        case SweepEpisodeSignal.Hang:
-                            server.WarnedThisEpisode = true;
-                            _logger.LogWarning(
-                                "[{Server}] collection body has not completed after {Elapsed:F0}s of execution — skipping relaunch",
-                                server.Config.DisplayName, runningSeconds);
-                            break;
-
-                        /* CAPACITY — still QUEUED behind the gate, so nothing is wrong with this server: the
-                           fleet is simply wider than the configured sweep width at this moment. Info, once.
-                           Reports the EFFECTIVE width, not the compile-time default (#2170 review catch):
-                           this line is what an operator reads while deciding whether to raise the knob, so
-                           printing 4 after they raised it to 12 would send them chasing a limit that is no
-                           longer in force. #4710: a body still inside its connect attempt has not asked for
-                           a slot yet, so it gets the connect stage's wording instead, with the connect
-                           attempt's own clock and the connect gate's width. */
-                        case SweepEpisodeSignal.Queued:
-                            server.QueuedInfoThisEpisode = true;
-                            _logger.LogInformation(
-                                SweepInFlightWording.NotStartedInfoTemplate(connecting),
-                                server.Config.DisplayName,
-                                connecting ? connectSeconds : episodeSeconds,
-                                connecting ? ServerConnectProbe.GateWidth : EffectiveSweepWidth);
-                            break;
-                    }
-
-                    continue;
-                }
-
-                /* The body is null (never launched) or has completed since the last sweep. If we surfaced EITHER
-                   channel for this episode, log its resolution with the total elapsed and re-arm before
-                   relaunching — the re-arm happens HERE on observing IsCompleted, never in the body's finally
-                   (which would race this launch loop). A body that finished under both thresholds was never
-                   surfaced, so it simply relaunches. */
-                if (server.WarnedThisEpisode || server.QueuedInfoThisEpisode)
-                {
-                    var ranForSeconds = (DateTime.UtcNow - server.SweepStartedUtc).TotalSeconds;
-                    _logger.LogInformation(
-                        "[{Server}] collection body completed after {Elapsed:F0}s (episode, including any queue wait)",
-                        server.Config.DisplayName, ranForSeconds);
-                    server.WarnedThisEpisode = false;
-                    server.QueuedInfoThisEpisode = false;
-                }
-
-                /* Stamp the launch time BEFORE launching — time spent QUEUED on the gate is part of this
-                   episode — and clear the run and connect stamps so this episode starts as QUEUED. The reset must
-                   precede the call: ProcessServerSweepAsync runs synchronously up to its first await, so with a
-                   free permit the body may stamp RunStartedTicks (or, on its way into a connect attempt,
-                   ConnectStartedTicks) before this statement returns, and resetting after would erase it. Then
-                   fire-and-track: assign the Task to InFlightSweep (so it is observed and
-                   the next sweep + the shutdown drain can see it) but do NOT await it here. */
-                server.SweepStartedUtc = DateTime.UtcNow;
-                Interlocked.Exchange(ref server.RunStartedTicks, 0);
-                Interlocked.Exchange(ref server.ConnectStartedTicks, 0);
-                server.InFlightSweep = ProcessServerSweepAsync(
-                    server, engine, runner, planFetcher, notificationService, config, serverSweepGate, stoppingToken);
-            }
-
-            /* #4999: the hang watchdog above reads only the per-server bodies, and a daily run no longer runs in
-               one: it is detached and can go for hours, so a stuck one showed up only as stale data. The same goes
-               for the three runs detached by name (query_store, plan_correction, pg_wait_sampling). Same tick, the
-               same kind of Warning, one per run, naming the server and collector; the threshold is its own, 15
-               minutes (DailyRunWatchdogSeconds), where the bodies' is 60 seconds. After the launch loop and outside
-               it, because a detached run belongs to no single body and the loop may leave early. */
-            WatchDailyRuns(DateTime.UtcNow);
-
-            /* #4130: fire-and-track, exactly like the per-server sweeps just above and the oversized-plan
-               backlog just below — see TryStartScheduledPurge's doc for why the inline await was the
-               defect. */
-            TryStartScheduledPurge(
-                DateTime.UtcNow,
-                token => RunScheduledPurgeAsync(postgres, config, token),
-                stoppingToken);
-
-            /* #3392: drain the oversized-plan backlog. Its own low-frequency cadence off this loop, beside
-               the purge, and deliberately NOT inside the per-server collector rotation: fetching a plan the
-               capture cap declined is worth doing eventually and worth nothing if it competes with a live
-               collection cycle for that server's wall-clock budget.
-
-               FIRE-AND-TRACK, not awaited — the #1553 launch-loop shape rather than the purge's. The purge
-               is awaited because it talks only to the store with bounded statements; this pass opens a
-               connection to every monitored server, and its worst case is
-               fleet width * MaxPlansPerServerPerTick * PerPlanBudget, which on a 42-server fleet whose
-               targets are all timing out is 105 minutes. Awaited, that is 105 minutes in which this loop
-               launches no collection bodies at all — the 24-server field incident's exact shape, one
-               maintenance step over. Launched and tracked, a slow pass costs only its own next slots.
-
-               sweepTargets is this tick's snapshot, already taken under the servers lock, so the pass
-               iterates a stable set. RunAsync is failure-isolated per server and returns quietly on
-               cancellation, so the task can complete unobserved without an unhandled fault. */
-            /* #4732: the span is the longest delay NextSweepDelay returns, which is the delay the stamp below is written with. */
-            if (StampIsDue(_nextOversizedPlanSweepUtc, OversizedPlanBacklogSweep.LongestSweepDelay, DateTime.UtcNow)
-                && (_oversizedPlanSweep is null || _oversizedPlanSweep.IsCompleted))
-            {
-                /* #3405: count BOTH populations, because an empty target list has two causes that mean
-                   opposite things and the pass itself cannot tell them apart. sweepableTargets is the
-                   registrations that could ever carry a runtime this pass would visit — read off the
-                   registration, since Runtime is null both mid-connect and forever. backlogTargets is the
-                   ones carrying one now. Counted in one walk rather than two so the pair describes the same
-                   snapshot. */
-                var backlogTargets = new List<ServerRuntime>(sweepTargets.Length);
-                var sweepableTargets = 0;
-                foreach (var target in sweepTargets)
-                {
-                    if (!OversizedPlanBacklogSweep.IsSweepableTarget(target.Config))
-                    {
-                        continue;
-                    }
-
-                    sweepableTargets++;
-
-                    if (target.Runtime is { } runtime)
-                    {
-                        backlogTargets.Add(runtime);
-                    }
-                }
-
-                /* Stamped BEFORE the launch, like every other cadence on this loop: the IsCompleted guard
-                   above is what keeps a slow pass from stacking, and it only works against a stamp that has
-                   already moved. The delay itself is the sweep's decision, not this loop's. */
-                var (sweepDelay, connectWaits) = OversizedPlanBacklogSweep.NextSweepDelay(
-                    sweepableTargets, backlogTargets.Count, _oversizedPlanSweepConnectWaits);
-                _oversizedPlanSweepConnectWaits = connectWaits;
-                _nextOversizedPlanSweepUtc = DateTime.UtcNow.Add(sweepDelay);
-
-                _oversizedPlanSweep = OversizedPlanBacklogSweep.RunAsync(
-                    postgres, backlogTargets, _logger, stoppingToken);
-            }
-
-            /* #5985: the query-tag map step. Rebuilds every listed server's map when a tag, assignment or rule changed
-               (rules_version ahead of built_version), otherwise extends it for the keys sighted since the last pass,
-               capped per server per pass, and flushes the runner's in-memory sightings first. Fire-and-track like the
-               sweep above: it only talks to the store, but a rebuild over a large sighting history can run long and must not
-               hold the launch loop. The builder is failure-isolated per server; only a cancellation (shutdown) escapes it, and
-               the tracked task is never awaited, so that ends the task quietly. */
-            if (StampIsDue(_nextQueryTagMapPassUtc, s_queryTagMapPassInterval, DateTime.UtcNow)
-                && (_queryTagMapPass is null || _queryTagMapPass.IsCompleted))
-            {
-                _nextQueryTagMapPassUtc = DateTime.UtcNow.Add(s_queryTagMapPassInterval);
-                var mapServerIds = new List<int>(sweepTargets.Length);
-                foreach (var target in sweepTargets)
-                {
-                    mapServerIds.Add(target.Config.ServerId);
-                }
-
-                _queryTagMapBuilder ??= new QueryTagMapBuilder(postgres, _logger, sightings: runner.QueryTagSightings);
-                _queryTagMapPass = _queryTagMapBuilder.RunMapPassAsync(mapServerIds, stoppingToken);
-            }
-
-            /* Stage 4 fleet-level self-alert: the store disk-pressure backstop. The daily purge is the ONLY
-               other maintenance cadence and it is purely time-based (no disk-free check), so on its own the
-               store can still fill between purges — this edge-fired condition is the flagship-appropriate
-               backstop. Own slow cadence; the master alerts gate + edge-trigger live inside the evaluator. */
-            /* #4732: the stamp below is written as now + s_diskCheckInterval, so that is the span. */
-            if (StampIsDue(_nextDiskCheckUtc, s_diskCheckInterval, DateTime.UtcNow))
-            {
-                _nextDiskCheckUtc = DateTime.UtcNow.Add(s_diskCheckInterval);
-                await EvaluateStoreDiskPressureAsync(config, stoppingToken);
-            }
-
-            /* #3304: the custom-alert-rule integrity check. A stored rule silently stops compiling when a
-               measure drifts out of the catalog (the incremental pg_* buildout), and a rule can compile yet
-               never fire (scope resolves to no monitored server, or its measure is always-NULL). Nobody
-               "opens" a rule, so a silent gap = an alert an operator believes is armed. Fleet-level, own slow
-               cadence; both evaluators are null on deployments without a viewer pool, and each Evaluate* half
-               is failure-isolated so a throw never stops the fleet loop. */
-            /* #4732: the stamp below is written as now + s_customAlertHealthInterval, so that is the span. */
-            if (_customAlertEvaluator is not null && _selfAlerts is not null
-                && StampIsDue(_nextCustomAlertHealthCheckUtc, s_customAlertHealthInterval, DateTime.UtcNow))
-            {
-                _nextCustomAlertHealthCheckUtc = DateTime.UtcNow.Add(s_customAlertHealthInterval);
-                await EvaluateCustomAlertRuleHealthAsync(servers, stoppingToken);
-
-                /* #3305: on the same cadence, reconcile persisted state — force-resolve + clean the state of
-                   disabled rules (which the enabled-only sweep would orphan) and of servers that have left a
-                   rule's scope. Deleted rules are resolved on the delete path (their state cascades away). */
-                await ReconcileCustomAlertStateAsync(servers, stoppingToken);
-            }
-
-            /* #3306: a mute rule that has outlived its reason. A mute is a deliberate blind spot, and this is
-               the only surface that reports one exists, how old it is, and whether it will ever expire —
-               otherwise the only way to find one is to already suspect it and call get_mute_rules. Without it
-               a rule created to stop a false-positive flood keeps suppressing the alert after the fix ships,
-               and the symptom is silence. Judged on the CONJUNCTION (still in force, no expiry, past every expiry the
-               product offers), never on permanence alone, which the dialog offers on purpose. Reads the live
-               MuteRuleService cache the engine matches against — so it sees exactly what is suppressing
-               alerts right now, and needs no store read of its own. Fleet-level, own slow cadence; the
-               Evaluate* wrapper is failure-isolated so a throw never stops the fleet loop. */
-            /* #4732: the stamp below is written as now + s_staleMuteCheckInterval, so that is the span. */
-            if (_selfAlerts is not null && StampIsDue(_nextStaleMuteCheckUtc, s_staleMuteCheckInterval, DateTime.UtcNow))
-            {
-                _nextStaleMuteCheckUtc = DateTime.UtcNow.Add(s_staleMuteCheckInterval);
-                await _selfAlerts.EvaluateStaleMuteRulesAsync(muteRuleService.GetRules(), stoppingToken);
-            }
-
-            /* #5654: external alerts the drain gave up on (expired, interrupted or failed every send). A source that queues
-               an alert believes it was delivered, and nothing else reports that it was not. The count is one store read per
-               tick; a failed read holds the standing alert rather than resolving it. Fleet-level, own slow cadence; the
-               Evaluate* wrapper is failure-isolated so a throw never stops the fleet loop. */
-            /* #4732: the stamp below is written as now + s_externalAlertsCheckInterval, so that is the span. */
-            if (_selfAlerts is not null && StampIsDue(_nextExternalAlertsCheckUtc, s_externalAlertsCheckInterval, DateTime.UtcNow))
-            {
-                _nextExternalAlertsCheckUtc = DateTime.UtcNow.Add(s_externalAlertsCheckInterval);
-                await EvaluateExternalAlertsAsync(externalAlertStore, stoppingToken);
-            }
-
-            /* #4750: a webhook channel that has failed three times in a row. A channel can fail for weeks while
-               another one delivers every alert, and nothing else reports it. The counts are the webhook
-               service's own in-memory tallies, so the read costs nothing and it rides every sweep tick with no
-               cadence of its own; the evaluator is an edge (one alert when a count reaches three, one
-               resolution when it is back at 0), so a channel that stays broken does not repeat. Fleet-level,
-               master-gated inside, and the Evaluate* wrapper is failure-isolated so a throw never stops the
-               fleet loop. */
-            if (_selfAlerts is not null)
-            {
-                await _selfAlerts.EvaluateNotificationChannelsAsync(stoppingToken);
-            }
-
-            /* #3514: the web-dashboard TLS certificate expiry self-alert. The web host loads the certificate
-               once at start and publishes its served expiry to WebTlsCertificateState; a headless service can
-               run for months without a restart, so the worker re-evaluates that fixed expiry against the clock
-               on its own slow cadence and the evaluator warns 30 days out / Critical once lapsed — and Critical
-               at once when the snapshot carries the host's not-yet-valid refusal (#3517: the dashboard is
-               loopback-only from the start, and the host does not re-decide when the date passes). A null
-               snapshot means no LAN TLS certificate to watch. Fleet-level, and the Evaluate* wrapper is
-               failure-isolated so a throw never stops the fleet loop. */
-            /* #5288: the MCP endpoint's certificate rides the same hourly gate (one stamp, no new field): the
-               MCP host publishes its served expiry to McpTlsCertificateState exactly as the web host does, and
-               the evaluator keeps the two alerts apart by key and metric, so the call sits right beside the web
-               one. Each Evaluate* wrapper is failure-isolated on its own, so a throw in the web half cannot
-               skip the MCP half. */
-            /* #4732: the stamp below is written as now + s_webTlsCheckInterval, so that is the span. */
-            if (_selfAlerts is not null && StampIsDue(_nextWebTlsCheckUtc, s_webTlsCheckInterval, DateTime.UtcNow))
-            {
-                _nextWebTlsCheckUtc = DateTime.UtcNow.Add(s_webTlsCheckInterval);
-                await _selfAlerts.EvaluateWebTlsCertificateAsync(
-                    BuildWebTlsCertReport(_webTlsCertState.Read()), stoppingToken);
-                if (_mcpTlsCertState is not null)
-                {
-                    await _selfAlerts.EvaluateMcpTlsCertificateAsync(
-                        BuildWebTlsCertReport(_mcpTlsCertState.Read()), stoppingToken);
-                }
-            }
-
-            /* #4732: the fleet gate's last-hour counts, once a minute: the "Collection Falling Behind" self-alert
-               (fleet-level, master-gated inside, failure-isolated inside) and the service log's hourly summary line,
-               which also runs with no alert engine. Before this a collector slot that came due while its run was
-               late was skipped with one Info line, and how long a body queued for a gate slot was never measured. */
-            /* #4732: the stamp below is written as now + s_fleetGateCheckInterval, so that is the span. */
-            if (StampIsDue(_nextFleetGateCheckUtc, s_fleetGateCheckInterval, DateTime.UtcNow))
-            {
-                _nextFleetGateCheckUtc = DateTime.UtcNow.Add(s_fleetGateCheckInterval);
-                await CheckFleetGateAsync(stoppingToken);
-            }
-
-            /* #4215: the managed-store settings self-alert — darling-managed.conf fell back to the
-               last-good copy, is hand-edited and kept in force, or PostgreSQL rejected one or more owned
-               settings outright. Every
-               fact but the rejected-setting list is this start's own in-process state, carried down from
-               ExecuteAsync exactly like managedConfWriteResult already is — never re-read, because the writer
-               runs on every start and the state is re-derived after a restart. The rejected list is the one
-               fact that is store-backed (collect.managed_conf_verdicts, V146), read fresh each tick so a value
-               fixed by a later start clears without this process restarting. Fleet-level, own slow cadence;
-               the Evaluate* wrapper is failure-isolated so a throw never stops the fleet loop. */
-            /* #4732: the stamp below is written as now + s_storeSettingsCheckInterval, so that is the span. */
-            if (_selfAlerts is not null && StampIsDue(_nextStoreSettingsCheckUtc, s_storeSettingsCheckInterval, DateTime.UtcNow))
-            {
-                _nextStoreSettingsCheckUtc = DateTime.UtcNow.Add(s_storeSettingsCheckInterval);
-                await EvaluateStoreSettingsAsync(config, managedConfWriteResult, managedUsedLastGoodConf, managedConfVerification, stoppingToken);
-            }
-
-            /* #1581: the compression-job self-heal backstop. TimescaleDB compression policy jobs can silently
-               die (next_start = -infinity) or hang, halting the store's archival tier so uncompressed data grows
-               without bound until the disk fills and collection stops for the WHOLE fleet (the field incident).
-               Timescale-only — gated one level in since #3815 put the availability re-probe ahead of it on
-               this same tick; own hourly cadence; failure-isolated inside EvaluateCompressionJobHealthAsync.
-
-               The next due time is SNAPPED to the wall clock rather than taken from this fire (#3575). The
-               dead-job arm the check judges reads next_start = -infinity, which is also what the scheduler
-               writes for the few milliseconds at either edge of every healthy run before the worker is, or
-               after it stops being, visible as Running — and the policies run at :MM:00 on a fixed schedule,
-               so a check that re-anchored itself as "UtcNow + 1 h" on every fire crept a few seconds per hour
-               across those instants until, on a production store, it sampled one 53 ms into a 63 ms run and
-               paged. NextCompressionCheckUtc puts every steady-state sample at :30 past its minute instead,
-               half the grid step from every policy's start in both directions. The read itself now confirms
-               a -infinity trip with a second read five seconds later (ReadStuckPolicyJobsAsync), so the
-               phase is hardening on top of the fix, not the fix. */
-            /* #4732: NextCompressionCheckUtc writes at most one interval plus its 30 s phase ahead (CompressionCheckSpan). */
-            if (StampIsDue(_nextCompressionCheckUtc, CompressionCheckSpan, DateTime.UtcNow))
-            {
-                _nextCompressionCheckUtc = TimescaleSupport.NextCompressionCheckUtc(DateTime.UtcNow, s_compressionCheckInterval);
-                TryStartStoreMaintenanceTick(token => RunStoreMaintenanceTickAsync(token), stoppingToken);
-            }
-
-            /* #2068: the store self-metrics sweep. Capacity forecasting previously required ad-hoc
-               archaeology over the TimescaleDB chunk catalog, whose raw window is 4 days — a measured 3x
-               daily-ingest jump was only visible because the catalog still held both eras. This persists
-               the store's own size/compression/growth series (per-hypertable, per-dimension, whole-store)
-               into the plain collect.store_metrics table hourly, retention bounded by the sweep's own
-               DELETE. Every store shape (the hypertable arm gates on _timescaleAvailable INSIDE);
-               failure-isolated inside SweepStoreSelfMetricsAsync like the two checks above. */
-            /* #3466 (lane 2): the fleet sweep — the scheduled, stateful whole-fleet report. FIRE-AND-TRACK
-               like the oversized-plan backlog, not awaited like the purge: the sweep reads only the loopback
-               store, but it reads it once per monitored server, and a stalled store would otherwise hold
-               this loop for minutes — the field-herd shape one maintenance step over. Launched and tracked,
-               a slow sweep costs only its own next slots (the IsCompleted guard), and RunAsync never faults
-               (catch-all inside, quiet on cancellation), so the task can complete unobserved.
-
-               Gated on the sweep's OWN switch and deliberately NOT on config.Alerts.Enabled: sweeps under
-               master-off are the muted-mode contract's whole point — the report keeps publishing, carries
-               the mute in its header, and writes the would-have-paged ledger. The engine makes no delivery
-               call anywhere (delivery is lane 4's daily rollup), so the master-switch census has nothing of
-               this path's to count. The cadence is read ONCE into the local that both the stamp and the
-               engine's span math use, so a store reload swapping config mid-tick cannot make the document
-               claim a span the schedule never used — the retention-hold read-once discipline. Stamped
-               BEFORE the launch, like every cadence on this loop. */
-            if (config.Alerts.FleetSweepEnabled
-                && StampIsDue(_nextFleetSweepUtc, FleetSweepStampSpan, DateTime.UtcNow)
-                && (_fleetSweep is null || _fleetSweep.IsCompleted))
-            {
-                /* #4732: this interval is read at the fire and can differ from the one the stamp was last written with, so the
-                   guard above spans the largest interval ClampIntervalMinutes allows, never this fire's value. */
-                var fleetSweepMinutes = FleetSweepEngine.ClampIntervalMinutes(config.Alerts.FleetSweepIntervalMinutes);
-                _nextFleetSweepUtc = NextGridStamp(_nextFleetSweepUtc, DateTime.UtcNow, TimeSpan.FromMinutes(fleetSweepMinutes));
-
-                /* The whole registered population, connected or not — a sweep is about the fleet, and a
-                   server that cannot be reached is exactly the kind of fact it must carry (its store rows
-                   go quiet, which the engine bands and explains) rather than skip. */
-                var fleetSweepServers = new List<(int ServerId, string ServerName)>(sweepTargets.Length);
-                foreach (var target in sweepTargets)
-                {
-                    fleetSweepServers.Add((target.Config.ServerId, target.Config.DisplayName));
-                }
-
-                /* #4925: an Azure SQL Database master's signals count only its own blocking and deadlocks. A target
-                   whose list cannot be built reads unscoped (null), never fails the sweep. */
-                var fleetSweepSeparate = new Dictionary<int, IReadOnlyList<string>?>();
-                foreach (var target in sweepTargets)
-                {
-                    try
-                    {
-                        /* A master that is disconnected when the sweep fires has no runtime to ask, so its list comes from the
-                           stored edition and the registry, the same way the MCP and web hosts get it; reading it unscoped
-                           would count its earlier events twice in the sweep band. */
-                        fleetSweepSeparate[target.Config.ServerId] = target.Runtime is null
-                            ? await AnalysisSeparatelyMonitoredDatabasesAsync(target.Config.ServerId, _registryState?.Read(), postgres, stoppingToken)
-                            : AnalysisSeparatelyMonitoredDatabases(target.Runtime);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogWarning(ex, "Fleet sweep could not list the separately monitored databases for server {ServerId}; reading it unscoped", target.Config.ServerId);
-                        fleetSweepSeparate[target.Config.ServerId] = null;
-                    }
-                }
-
-                _fleetSweep = FleetSweepEngine.RunAsync(
-                    postgres, fleetSweepServers, TimeSpan.FromMinutes(fleetSweepMinutes),
-                    config.Alerts.Enabled, _logger, fleetSweepSeparate, stoppingToken);
-            }
-
-            /* #4823: the once-a-minute checkpointer sync-time sample, AHEAD of the hourly tick below so the sample taken
-               on a tick's own pass is inside the window that tick takes. #4834: whether or not a self-alert evaluator
-               exists, because the hourly checkpointer row stores the window's maximum either way. A failed read is a
-               Debug line and a skipped minute inside SampleCheckpointSyncAsync, never a stopped loop. */
-            /* #4732: NextGridStamp writes at most one interval ahead, and s_checkpointSyncSampleInterval is the one it uses. */
-            if (StampIsDue(_nextCheckpointSyncSampleUtc, s_checkpointSyncSampleInterval, DateTime.UtcNow))
-            {
-                _nextCheckpointSyncSampleUtc = NextGridStamp(_nextCheckpointSyncSampleUtc, DateTime.UtcNow, s_checkpointSyncSampleInterval);
-                await SampleCheckpointSyncAsync(stoppingToken);
-            }
-
-            /* #4732: NextGridStamp writes at most one interval ahead, and s_storeMetricsInterval is the one it uses. */
-            if (StampIsDue(_nextStoreMetricsUtc, s_storeMetricsInterval, DateTime.UtcNow))
-            {
-                /* #4012's review: the deadlock re-mask inside the sweep keys an alert whose report is gone under the
-                   same log-hash key the runner's log-event runs share. */
-                _pgDeadlockRemaskKey = runner.LogHashKey;
-                TryStartStoreMetricsTick(DateTime.UtcNow, _checkpointSyncSampler.TakeWindowMax, (window, token) => RunStoreMetricsTickAsync(window, token), stoppingToken);
-            }
-
-            try
-            {
-                await Task.Delay(s_sweepInterval, stoppingToken);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            /* Expected on shutdown. */
         }
 
         /* Shutdown drain for the fire-and-track bodies (#1553): the launch loop does NOT await the per-server
