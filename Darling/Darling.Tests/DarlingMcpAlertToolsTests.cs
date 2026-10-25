@@ -61,11 +61,13 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
            the set_mute_rule_enabled / delete_mute_rule shape. */
         "delete_notification_route",
         "dismiss_alert_history",
+        "generate_webhook_signing_key",
         "get_alert_history",
         "get_alert_settings",
         "get_mute_rules",
         "get_notification_routes",
         "purge_expired_mute_rules",
+        "remove_webhook_signing_key",
         "restore_alert_history",
         "set_mute_rule_enabled",
         "set_notification_route_enabled",
