@@ -355,7 +355,7 @@ if (args.Length > 0 && DarlingCliCommands.IsListAlertSourcesVerb(args[0]))
    login and grants what Darling needs. Connects to no SQL Server; prints no password. */
 if (args.Length > 0 && DarlingCliCommands.IsGrantScriptVerb(args[0]))
 {
-    return await DarlingCliCommands.GrantScriptAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+    return await DarlingCliCommands.GrantScriptAsync(args[1..], DarlingCliCommands.OpenGrantScriptOutput(), Console.Error, CancellationToken.None);
 }
 
 if (args.Length > 0 && DarlingCliCommands.IsExportInvestigationsVerb(args[0]))

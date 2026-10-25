@@ -206,6 +206,24 @@ public sealed class MonitoringGrantScriptTests
     }
 
     [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    public void ANameWithANewline_StaysInsideEveryBracketAndLiteralItIsWrittenIn(string newline)
+    {
+        /* The name is "x", a newline, then text that would be a statement if the newline ended the line it sits in. It is one identifier
+           and one string literal in each place; the only other place a name is written is a block comment, which flattens the newline. */
+        var name = "x" + newline + "DROP LOGIN sa;--";
+        var principal = new GrantPrincipal(GrantPrincipalKind.SqlLogin, name, Array.Empty<string>());
+        var script = MonitoringGrantScript.Build(principal, finOps: true, azureSqlDatabase: false, serverLabel: name);
+
+        Assert.Contains("CREATE LOGIN [" + name + "] WITH PASSWORD", script);
+        Assert.Contains("GRANT VIEW SERVER STATE TO [" + name + "];", script);
+        Assert.Contains("@login sysname = N'" + name + "',", script);
+        Assert.DoesNotContain("\nDROP LOGIN sa;--\n", script);   /* never alone on a line outside the brackets and the literal */
+        Assert.DoesNotContain("/* Performance Monitor Darling: the login and grants for x" + newline, script);
+    }
+
+    [Theory]
     [InlineData("contoso.database.windows.net", true)]
     [InlineData("tcp:contoso.database.windows.net,1433", true)]
     [InlineData("sql01", false)]

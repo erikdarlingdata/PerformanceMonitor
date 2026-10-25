@@ -371,8 +371,8 @@ public static class MonitoringGrantScript
     private static void AppendFinOps(StringBuilder sb, string name)
     {
         /* The block docs/permissions.md gives for "all databases", built from the list: a cursor over the online read-write user
-           databases (not sp_MSforeachdb, which can skip databases and replaces every question mark in the batch, one inside the
-           login's name too). The login goes in as a parameter of each database's sp_executesql and is quoted there with QUOTENAME,
+           databases that are not single-user and that the caller can open, each one in a TRY/CATCH that prints the error and goes on (not
+           sp_MSforeachdb, which can skip databases and replaces every question mark in the batch, one inside the login's name too). The login goes in as a parameter of each database's sp_executesql and is quoted there with QUOTENAME,
            so its name is never spliced into the per-database text. The per-database text sits inside a string, so each quote in it
            doubles once. */
         string InString(string t) => t.Replace("'", "''", StringComparison.Ordinal);
@@ -401,6 +401,8 @@ public static class MonitoringGrantScript
         sb.Append("    WHERE d.database_id > 4\n");
         sb.Append("    AND   d.state = 0\n");
         sb.Append("    AND   DATABASEPROPERTYEX(d.name, N'Updateability') = N'READ_WRITE'\n");
+        sb.Append("    AND   d.user_access <> 1\n");
+        sb.Append("    AND   HAS_DBACCESS(d.name) = 1\n");
         sb.Append("    ORDER BY\n        d.database_id;\n\n");
         sb.Append("OPEN database_cursor;\n\n");
         sb.Append("FETCH NEXT\nFROM database_cursor\nINTO @database_name;\n\n");
@@ -408,10 +410,15 @@ public static class MonitoringGrantScript
         sb.Append("BEGIN\n");
         sb.Append("    PRINT N'Granting in ' + QUOTENAME(@database_name);\n");
         sb.Append("    SET @procedure = QUOTENAME(@database_name) + N'.sys.sp_executesql';\n");
-        sb.Append("    EXECUTE @procedure\n");
-        sb.Append("        @sql,\n");
-        sb.Append("        N'@login sysname',\n");
-        sb.Append("        @login = @login;\n\n");
+        sb.Append("    BEGIN TRY\n");
+        sb.Append("        EXECUTE @procedure\n");
+        sb.Append("            @sql,\n");
+        sb.Append("            N'@login sysname',\n");
+        sb.Append("            @login = @login;\n");
+        sb.Append("    END TRY\n");
+        sb.Append("    BEGIN CATCH\n");
+        sb.Append("        PRINT N'Skipped ' + QUOTENAME(@database_name) + N': ' + ERROR_MESSAGE();\n");
+        sb.Append("    END CATCH;\n\n");
         sb.Append("    FETCH NEXT\n    FROM database_cursor\n    INTO @database_name;\n");
         sb.Append("END;\n\n");
         sb.Append("CLOSE database_cursor;\n");

@@ -94,7 +94,7 @@ GRANT VIEW DEFINITION                           TO [YourLogin];
 GRANT SELECT ON sys.sql_expression_dependencies TO [YourLogin];
 ```
 
-Or apply it to every online, writable user database with a cursor over `sys.databases`. Set `@login` to your login's name at the top. Each database receives the name as a parameter, so a name with a quote, a bracket or a question mark in it still works:
+Or apply it to every online, writable user database with a cursor over `sys.databases`. It skips single-user databases and databases your login cannot open. If a database still fails, the script prints a `Skipped` message for it and goes on to the next. Set `@login` to your login's name at the top, and double any `'` in the name inside `N'...'`. Each database receives the name as a parameter, so a bracket or a question mark in the name needs no other escaping:
 
 ```sql
 DECLARE
@@ -131,6 +131,8 @@ DECLARE
     WHERE d.database_id > 4
     AND   d.state = 0
     AND   DATABASEPROPERTYEX(d.name, N'Updateability') = N'READ_WRITE'
+    AND   d.user_access <> 1
+    AND   HAS_DBACCESS(d.name) = 1
     ORDER BY
         d.database_id;
 
@@ -144,10 +146,15 @@ WHILE @@FETCH_STATUS = 0
 BEGIN
     PRINT N'Granting in ' + QUOTENAME(@database_name);
     SET @procedure = QUOTENAME(@database_name) + N'.sys.sp_executesql';
-    EXECUTE @procedure
-        @sql,
-        N'@login sysname',
-        @login = @login;
+    BEGIN TRY
+        EXECUTE @procedure
+            @sql,
+            N'@login sysname',
+            @login = @login;
+    END TRY
+    BEGIN CATCH
+        PRINT N'Skipped ' + QUOTENAME(@database_name) + N': ' + ERROR_MESSAGE();
+    END CATCH;
 
     FETCH NEXT
     FROM database_cursor
