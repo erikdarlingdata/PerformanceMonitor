@@ -189,17 +189,21 @@ public sealed partial class PlanForceToolLiveTests
             DarlingMcpPlanForceTools.RunAsync(Source, Source, Log, force, server, Sql.Database, queryId, planId, Arg, dryRun, Ct);
     }
 
-    private static async Task RunAsync(Without without, Func<Ctx, Task> body, bool postgresTarget = false)
+    /// <param name="storeOnly">A test whose tool refuses before it reaches the monitored server needs only the store: no SQL Server database is made, and the server row's host is a closed local port.</param>
+    private static async Task RunAsync(Without without, Func<Ctx, Task> body, bool storeOnly = false)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(StoreConnectionString), "Set DARLING_TEST_PG to run the plan force tool live tests.");
-        Assert.SkipWhen(string.IsNullOrEmpty(SqlHost), "Set DARLING_TEST_SQL (and DARLING_TEST_SQL_USER / DARLING_TEST_SQL_PASSWORD) to run the plan force tool live tests.");
+        Assert.SkipWhen(!storeOnly && string.IsNullOrEmpty(SqlHost), "Set DARLING_TEST_SQL (and DARLING_TEST_SQL_USER / DARLING_TEST_SQL_PASSWORD) to run the plan force tool live tests.");
         var ct = TestContext.Current.CancellationToken;
         var sql = new SqlScratch();
         await using var scratch = await ScratchPostgres.CreateAsync(StoreConnectionString!, ct);
         var bodySucceeded = false;
         try
         {
-            await sql.CreateAsync(ct);
+            if (storeOnly)
+                Environment.SetEnvironmentVariable(sql.EnvName, sql.Password);
+            else
+                await sql.CreateAsync(ct);
             await using var connection = new NpgsqlConnection(scratch.ConnectionString);
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);
@@ -208,7 +212,7 @@ public sealed partial class PlanForceToolLiveTests
             var user = without == Without.CredentialSlot ? "NULL" : $"'{sql.Login}'";
             await PgExecAsync(connection,
                 "INSERT INTO config.config_monitored_servers (server_id, name, host, encrypt_mode, trust_server_certificate, remediation_username, remediation_encrypted_password) "
-                + $"VALUES (7, 'srv-7', '{SqlHost}', 'Optional', TRUE, {user}, {slot}), (8, 'srv-8', 'pg-host', 'Optional', TRUE, NULL, NULL)", ct);
+                + $"VALUES (7, 'srv-7', '{(storeOnly ? "127.0.0.1,1" : SqlHost)}', 'Optional', TRUE, {user}, {slot}), (8, 'srv-8', 'pg-host', 'Optional', TRUE, NULL, NULL)", ct);
             await PgExecAsync(connection, "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_major_version, engine_kind, created_date, modified_date) "
                 + "VALUES (7, 'srv-7', 'srv-7', TRUE, 16, 'sqlserver', now(), now()), (8, 'srv-8', 'srv-8', TRUE, NULL, 'postgres', now(), now())", ct);
             await PgExecAsync(connection, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
@@ -236,7 +240,10 @@ public sealed partial class PlanForceToolLiveTests
         }
         finally
         {
-            await sql.DropAsync();
+            if (storeOnly)
+                Environment.SetEnvironmentVariable(sql.EnvName, null);
+            else
+                await sql.DropAsync();
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
         }
     }

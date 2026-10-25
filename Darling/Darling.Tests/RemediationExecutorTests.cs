@@ -323,3 +323,38 @@ public sealed class RemediationOfflineTests
         Assert.DoesNotContain(typeof(ServerActionPermit).GetProperties(), p => p.SetMethod?.IsPublic == true);
     }
 }
+
+/// <summary>
+/// The check every database-scoped remediation makes right after it connects: the database the connection really landed in must be the one
+/// the caller's exclusion check was made on. The server resolves a sign-in database name under its own collation, which can ignore character
+/// width and accents, so a requested name with one fullwidth letter can land in the database it is not equal to.
+/// </summary>
+public sealed class RemediationLandedDatabaseTests
+{
+    private const string FullwidthT = "Ｔ"; /* a fullwidth capital T */
+
+    [Theory]
+    [InlineData("tempdb", "tempdb")]
+    [InlineData("tempdb", "TEMPDB")]
+    [InlineData(" tempdb ", "tempdb")]
+    public void SameName_IsNotRefused(string requested, string landed) =>
+        Assert.Null(SqlServerRemediationExecutor.LandedElsewhere("force_plan", false, requested, landed));
+
+    [Theory]
+    [InlineData(FullwidthT + "empdb", "tempdb")]
+    [InlineData("tempdb", FullwidthT + "empdb")]
+    [InlineData("cafédb", "cafedb")]
+    [InlineData("tempdb", null)]
+    public void NameThatDiffersBeyondCase_IsRefused_AndSaysNothingWasRun(string requested, string? landed)
+    {
+        var refused = SqlServerRemediationExecutor.LandedElsewhere("force_plan", true, requested, landed);
+
+        Assert.NotNull(refused);
+        Assert.Equal(RemediationResult.Reasons.WrongDatabase, refused!.Reason);
+        Assert.True(refused.DryRun);
+        Assert.Contains(requested.Trim(), refused.Message, StringComparison.Ordinal);
+        if (landed is not null)
+            Assert.Contains(landed, refused.Message, StringComparison.Ordinal);
+        Assert.EndsWith("Nothing was run.", refused.Message, StringComparison.Ordinal);
+    }
+}

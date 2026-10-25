@@ -276,6 +276,14 @@ public sealed partial class DarlingMcpPlanForceTools
             var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
             if (row is null)
                 return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
+
+            /* 3b: a database the server's entry excludes is one Darling does not act in (#5632), the same refusal recompile_module and the plan guide tools make. Refused before the dry run reads anything. */
+            if (IsExcludedDatabase(row.ExcludedDatabases, database_name.Trim()))
+            {
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, ct);
+                return DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database_name.Trim()));
+            }
+
             var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
 
             /* 4: the before state, read on the server. */
@@ -1013,6 +1021,14 @@ public sealed partial class DarlingMcpPlanForceTools
         var row = await ReadServerRowAsync(owner, facts.ServerId, ct);
         if (row is null)
             return PlanUndoAnswer.Refused("server_row_missing", $"{facts.ServerName} has no row in the monitored-server settings.");
+
+        /* A database the server's entry excludes is one Darling does not act in, so the force undo refuses too, as the plan guide undo does. */
+        if (IsExcludedDatabase(row.ExcludedDatabases, facts.Database))
+        {
+            await session.RecordRefusalAsync(AzureDatabaseExcluded, ct);
+            return PlanUndoAnswer.Refused(AzureDatabaseExcluded, ExcludedDatabaseRefusal(facts.Database, ForceUndoExcludedGuidance).Message);
+        }
+
         var executor = new SqlServerRemediationExecutor(facts.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
 
         var read = await executor.ReadPlanStateAsync(permit, facts.QueryId, facts.PlanId, ct);
@@ -1188,8 +1204,16 @@ SELECT EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND d
     }
 
     /// <summary>The refusal for a database the server's entry excludes, shared by the Azure kill, <c>recompile_module</c> and the plan guide tools.</summary>
-    internal static AgentActionRefusal ExcludedDatabaseRefusal(string database) =>
-        new(AzureDatabaseExcluded, $"Database {database} is excluded in this server's entry, so Darling does not act in it. Nothing was run.");
+    internal static AgentActionRefusal ExcludedDatabaseRefusal(string database) => ExcludedDatabaseRefusal(database, null);
+
+    /// <summary>The sentence the force undo adds after the shared refusal, because an undo is a person's way back and the refusal alone leaves them no next step.</summary>
+    internal const string ForceUndoExcludedGuidance =
+        "To reverse this change, unforce or force the plan by hand in that database, or remove the database from the server's exclusion list and undo it again.";
+
+    /// <summary>The shared refusal followed by <paramref name="guidance"/> when there is one.</summary>
+    internal static AgentActionRefusal ExcludedDatabaseRefusal(string database, string? guidance) =>
+        new(AzureDatabaseExcluded, $"Database {database} is excluded in this server's entry, so Darling does not act in it. Nothing was run."
+            + (string.IsNullOrEmpty(guidance) ? "" : " " + guidance));
 
     /// <summary>Whether the server entry's excluded list names <paramref name="database"/>: entries are compared trimmed, and without regard to case (#5632).</summary>
     internal static bool IsExcludedDatabase(string[]? excluded, string database) =>
