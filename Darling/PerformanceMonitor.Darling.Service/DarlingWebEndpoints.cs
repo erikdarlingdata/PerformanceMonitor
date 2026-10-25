@@ -176,6 +176,8 @@ public static class DarlingWebEndpoints
         "set_notification_route_fallback",
         "create_notification_route",
         "update_notification_route",
+        "generate_webhook_signing_key",
+        "remove_webhook_signing_key",
         "update_notification_channels",
         "dismiss_alert_history",
         "restore_alert_history",

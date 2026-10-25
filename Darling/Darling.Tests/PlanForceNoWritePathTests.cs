@@ -175,6 +175,8 @@ public sealed class PlanForceNoWritePathTests
 
         Assert.Equal(new[]
         {
+            /* #6394: a new webhook signing key is sealed for the destination's stored sealed generic URL, which the mcp role cannot read, so the tool reads that URL as the store owner. */
+            nameof(DarlingMcpAlertTools) + "." + nameof(DarlingMcpAlertTools.GenerateWebhookSigningKey),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.CreatePlanGuide),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.DropPlanGuide),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.EvictCachedPlan),
