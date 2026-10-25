@@ -68,7 +68,7 @@ internal static class DarlingAgentActionGate
         {
             /* #6542: a named agent token journals under its own name, never the agent_id the bad argument carried. */
             await store.RecordAgentActionRefusalAsync(LooseRequestId(agentAction), policy.AgentTokenName ?? LooseAgentId(agentAction), tool, problem.Reason,
-                cancellationToken);
+                policy.AgentTokenName, cancellationToken);
             return AgentActionGateOutcome.Refused(problem);
         }
 
@@ -76,7 +76,7 @@ internal static class DarlingAgentActionGate
         if (policy.AgentTokenName is { } tokenName && !string.Equals(action!.AgentId, tokenName, StringComparison.Ordinal))
         {
             await store.RecordAgentActionRefusalAsync(action.RequestId, tokenName, tool, DarlingMcpInvestigationTools.AgentIdNotToken,
-                cancellationToken);
+                tokenName, cancellationToken);
             return AgentActionGateOutcome.Refused(new AgentActionRefusal(DarlingMcpInvestigationTools.AgentIdNotToken,
                 DarlingMcpInvestigationTools.AgentIdNotTokenMessage(tokenName)));
         }
@@ -88,7 +88,7 @@ internal static class DarlingAgentActionGate
             ReadBefore = readBefore,
             Write = write,
         };
-        var result = await store.RunAgentActionAsync(new AgentActionCall(tool, kind, action!, target), hooks, cancellationToken);
+        var result = await store.RunAgentActionAsync(new AgentActionCall(tool, kind, action!, target, policy.AgentTokenName), hooks, cancellationToken);
         return result.Refusal is { } refusal
             ? AgentActionGateOutcome.Refused(refusal)
             : new AgentActionGateOutcome(false, null, result.CalledId, result.AfterJson);
@@ -112,10 +112,10 @@ internal static class DarlingAgentActionGate
     }
 
     /// <summary>The request id of a refused argument, when one parses, so its refusal is journaled with its request.</summary>
-    private static Guid? LooseRequestId(string? agentAction) =>
+    internal static Guid? LooseRequestId(string? agentAction) =>
         LooseText(agentAction, "request_id") is { } text && Guid.TryParse(text, out var id) ? id : null;
 
-    private static string? LooseAgentId(string? agentAction) => LooseText(agentAction, "agent_id");
+    internal static string? LooseAgentId(string? agentAction) => LooseText(agentAction, "agent_id");
 
     private static string? LooseText(string? json, string key)
     {
