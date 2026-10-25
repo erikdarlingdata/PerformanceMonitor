@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -59,7 +60,8 @@ internal static class ServerActionGate
         string? agentAction,
         AgentActionTarget target,
         CancellationToken cancellationToken,
-        string? agentTokenName = null)
+        string? agentTokenName = null,
+        IReadOnlySet<string>? namedAgentNames = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(ownerSource);
@@ -82,6 +84,16 @@ internal static class ServerActionGate
                 agentTokenName, cancellationToken);
             return new ServerActionDecision(null, new AgentActionRefusal(DarlingMcpInvestigationTools.AgentIdNotToken,
                 DarlingMcpInvestigationTools.AgentIdNotTokenMessage(agentTokenName)));
+        }
+
+        /* The legacy token's agent_id is free text. One that is a served named agent's name would put the action in that agent's journal, so
+           it is refused and journaled under no agent's name. */
+        if (agentTokenName is null && namedAgentNames is { Count: > 0 } && namedAgentNames.Contains(action!.AgentId))
+        {
+            await store.RecordAgentActionRefusalAsync(action.RequestId, InvestigationRules.InvalidAgentId, tool,
+                DarlingMcpInvestigationTools.AgentIdIsNamedToken, null, cancellationToken);
+            return new ServerActionDecision(null, new AgentActionRefusal(DarlingMcpInvestigationTools.AgentIdIsNamedToken,
+                DarlingMcpInvestigationTools.AgentIdIsNamedTokenMessage(action.AgentId)));
         }
 
         var hooks = new ServerActionHooks

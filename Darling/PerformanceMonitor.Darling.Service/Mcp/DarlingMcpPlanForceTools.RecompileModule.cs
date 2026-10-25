@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.Json;
 using System.Threading;
@@ -35,7 +36,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
     /// <summary>The recompile tool body (#6569), so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
     internal static async Task<string> RunRecompileAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, string? server_name,
-        string? database_name, string? module_name, string? agent_action, bool dry_run, CancellationToken ct, string? agentTokenName = null)
+        string? database_name, string? module_name, string? agent_action, bool dry_run, CancellationToken ct, string? agentTokenName = null, IReadOnlySet<string>? namedAgentNames = null)
     {
         const string tool = RecompileToolName;
         logger ??= NullLogger.Instance;
@@ -77,7 +78,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
             /* 3: the gate, for a dry run too. The permit's Id is the name in its one normal form and its Database is the database. */
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, module, database);
-            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.RecompileModule, agent_action, target, ct, agentTokenName);
+            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.RecompileModule, agent_action, target, ct, agentTokenName, namedAgentNames);
             if (decision.Refusal is { } gateRefusal)
                 return await GateRefusalAnswerAsync(gateRefusal, dry_run, owner, logger, resolved.ServerId, resolved.ServerName, ServerActionNames.RecompileModule, ct);
             var permit = decision.Permit!;
@@ -180,5 +181,5 @@ public sealed partial class DarlingMcpPlanForceTools
         ILogger? logger = null,
         DarlingMcpServedPolicy? served = null,
         CancellationToken cancellationToken = default) =>
-        RunRecompileAsync(postgres, ownerSource?.Read(), logger, server_name, database_name, module_name, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName);
+        RunRecompileAsync(postgres, ownerSource?.Read(), logger, server_name, database_name, module_name, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName, served?.NamedAgentNames);
 }
