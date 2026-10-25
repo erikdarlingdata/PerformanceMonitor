@@ -206,6 +206,18 @@ public static class ViewerTimeHelper
         _ => TimeZoneInfo.Utc,
     };
 
+    /// <summary>
+    /// The zone a fleet-wide time is drawn in and typed text is read in: the same zone <see cref="FormatFleetWide(DateTime, string, TimeDisplayMode)"/>
+    /// prints in. A fleet-wide view (Fleet Sweeps, a Custom View run over all servers) has no server clock, so Server
+    /// mode has nothing to apply and reads UTC; Local reads this machine's zone. Taking the active server's clock here
+    /// would show these times in whichever server tab refreshed last.
+    /// </summary>
+    public static TimeZoneInfo FleetWideZoneFor(TimeDisplayMode mode) =>
+        mode == TimeDisplayMode.LocalTime ? TimeZoneInfo.Local : TimeZoneInfo.Utc;
+
+    /// <summary><see cref="FleetWideZoneFor"/> for the current display mode.</summary>
+    public static TimeZoneInfo FleetWideZone() => FleetWideZoneFor(CurrentDisplayMode);
+
     /// <summary>The zone of the current display mode on the active server's clock. A tab that holds its own
     /// server's clock asks <see cref="DisplayZoneFor"/> with that clock instead, so it never reads another
     /// server's.</summary>

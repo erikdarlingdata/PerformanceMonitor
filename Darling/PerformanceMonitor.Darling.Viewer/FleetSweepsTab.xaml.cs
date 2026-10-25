@@ -39,7 +39,7 @@ public partial class FleetSweepsTab : UserControl
     public FleetSweepsTab()
     {
         InitializeComponent();
-        TimeRangePickerControl.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
+        TimeRangePickerControl.ZoneProvider = ViewerTimeHelper.FleetWideZone;
         /* The web page's default span: one hour, which at the shipped hourly cadence lands on the newest sweep. */
         TimeRangePickerControl.Value = TimeRangeSpec.Relative(TimeSpan.FromHours(1));
     }
@@ -67,7 +67,7 @@ public partial class FleetSweepsTab : UserControl
         try
         {
             var (startUtc, endUtc, _) = ViewerTimeRangeWindow.Window(
-                TimeRangePickerControl.Value, DateTime.UtcNow, ViewerTimeHelper.CurrentDisplayZone());
+                TimeRangePickerControl.Value, DateTime.UtcNow, ViewerTimeHelper.FleetWideZone());
             var node = await _dataService.GetFleetSweepTimelineAsync(startUtc, endUtc);
             if (_loads.Superseded(nameof(LoadTimelineAsync), gen)) return;
 
@@ -97,10 +97,13 @@ public partial class FleetSweepsTab : UserControl
 
             NoRunsMessage.Text = "No sweeps in this span. Widen the span, or check that fleet_sweep.enabled is on — a gap in this timeline is a missed sweep, with its cause on the service log.";
             NoRunsMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            LastRefreshedIndicator.Text = "Last refreshed " + DateTime.Now.ToString("HH:mm:ss", CultureInfo.CurrentCulture);
+            LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.FormatFleetWide(DateTime.UtcNow, "HH:mm:ss");
         }
         catch (Exception ex)
         {
+            /* A load the operator has moved past does not report its failure over the newer load's status. */
+            if (_loads.Superseded(nameof(LoadTimelineAsync), gen)) return;
+
             StatusChanged?.Invoke($"failed to load the fleet sweep timeline: {ex.Message}");
         }
         finally
@@ -141,6 +144,9 @@ public partial class FleetSweepsTab : UserControl
         }
         catch (Exception ex)
         {
+            /* A load the operator has moved past does not report its failure over the newer load's status. */
+            if (_loads.Superseded(nameof(LoadDetailAsync), gen)) return;
+
             StatusChanged?.Invoke($"failed to load the fleet sweep: {ex.Message}");
         }
     }
@@ -203,6 +209,9 @@ public partial class FleetSweepsTab : UserControl
         }
         catch (Exception ex)
         {
+            /* A load the operator has moved past does not report its failure over the newer load's status. */
+            if (_loads.Superseded(nameof(LoadWatchItemsAsync), gen)) return;
+
             StatusChanged?.Invoke($"failed to load the fleet sweep watch items: {ex.Message}");
         }
     }

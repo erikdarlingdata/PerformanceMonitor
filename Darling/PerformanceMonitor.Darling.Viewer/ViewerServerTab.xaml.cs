@@ -376,7 +376,7 @@ public partial class ViewerServerTab : UserControl
             var freshness = await _dataService.GetServerFreshnessAsync();
             ServerFreshnessText.Text = FreshnessLabel(
                 freshness.TryGetValue(_server.ServerId, out var lastUtc) ? lastUtc : null,
-                _server.RegisteredAt, DateTime.UtcNow);
+                _server.RegisteredAt, DateTime.UtcNow, TabDisplayZone);
         }
         catch
         {
@@ -388,8 +388,10 @@ public partial class ViewerServerTab : UserControl
     /// The toolbar's freshness text (#6135): when the newest collection landed, and for a server the Overview card
     /// calls Offline the same <see cref="FleetRollup.OfflineNote"/> sentence, so a red dot and an old time are not
     /// all the header says. The offline rule is the card's own, <see cref="ServerSummaryItem.ClassifyFreshness(DateTime?, DateTime?, DateTime)"/>.
+    /// The time is written in <paramref name="zone"/>, the tab's own server clock, because the process-wide clock may belong to
+    /// another server's tab by the time this awaited read returns.
     /// </summary>
-    internal static string FreshnessLabel(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc)
+    internal static string FreshnessLabel(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, TimeZoneInfo? zone = null)
     {
         var offline = ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, registeredAtUtc, nowUtc) == ServerFreshness.Offline;
         if (lastCollectionUtc is null)
@@ -397,7 +399,7 @@ public partial class ViewerServerTab : UserControl
             return offline ? "no collection retained" : "no data collected yet";
         }
 
-        var collected = $"collected {ViewerTimeHelper.FormatForDisplay(lastCollectionUtc.Value, "yyyy-MM-dd HH:mm")}";
+        var collected = $"collected {ViewerTimeHelper.FormatForDisplay(lastCollectionUtc.Value, zone ?? ViewerTimeHelper.CurrentDisplayZone(), "yyyy-MM-dd HH:mm")}";
         return offline ? $"{collected}. {FleetRollup.OfflineNote}" : collected;
     }
 

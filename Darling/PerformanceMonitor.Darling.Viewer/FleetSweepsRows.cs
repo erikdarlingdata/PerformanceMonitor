@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json.Nodes;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -84,16 +85,21 @@ internal static class FleetSweepsRows
 
     private static string Num(long n) => n.ToString("N0", CultureInfo.CurrentCulture);
 
-    /// <summary>An ISO instant (as the builders write them) as the viewer's display time; empty when it is not one.</summary>
     /// <summary>An ISO instant as a UTC DateTime, for a column's sort key; MinValue when it is not one.</summary>
     internal static DateTime Utc(string iso) =>
         DateTime.TryParse(iso, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var t)
             ? DateTime.SpecifyKind(t, DateTimeKind.Utc)
             : DateTime.MinValue;
 
-    internal static string Local(string iso) =>
+    /// <summary>An ISO instant (as the builders write them) as fleet-wide text, labelled with its zone; empty when it is not one.
+    /// A sweep belongs to the whole fleet and no server, so it never takes the active server tab's clock: Local mode reads this
+    /// machine's zone and every other mode reads UTC (<see cref="ViewerTimeHelper.FormatFleetWide(DateTime, string)"/>).</summary>
+    internal static string Local(string iso) => Local(iso, ViewerTimeHelper.CurrentDisplayMode);
+
+    /// <summary><see cref="Local(string)"/> for an explicit display mode.</summary>
+    internal static string Local(string iso, TimeDisplayMode mode) =>
         DateTime.TryParse(iso, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var t)
-            ? ViewerTimeHelper.FormatForDisplay(DateTime.SpecifyKind(t, DateTimeKind.Utc), "yyyy-MM-dd HH:mm:ss")
+            ? ViewerTimeHelper.FormatFleetWide(DateTime.SpecifyKind(t, DateTimeKind.Utc), "yyyy-MM-dd HH:mm:ss", mode)
             : "";
 
     private static string BandsText(JsonObject report)
