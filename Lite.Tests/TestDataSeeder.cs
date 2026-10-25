@@ -1093,7 +1093,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     /// One short, wide-open blocking chain: head 500 (in WAITFOR, so not sleeping) holds locks and blocks an UPDATE (501)
     /// and a SELECT (502), sampled once a minute by blocked-process reports for <paramref name="minutes"/> minutes, the
     /// last sample landing at <paramref name="lastSeen"/>. The longest wait grows a minute per sample, so the chain is
-    /// two sessions wide and <paramref name="minutes"/> minutes long. The head's transaction started when its first
+    /// two sessions wide and <paramref name="minutes"/> minutes long. The head's transaction started a minute before its first
     /// victim began waiting.
     /// </summary>
     internal async Task SeedLiveBlockingChainAsync(DateTime lastSeen, int minutes)

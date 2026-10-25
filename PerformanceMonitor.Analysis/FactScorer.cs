@@ -296,15 +296,6 @@ public class FactScorer
         };
     }
 
-    /// <summary>The longest-wait mark where a blocking chain starts to read concerning: a waiter stuck this long
-    /// is no longer a momentary lock queue. A session sitting in an open transaction for half a minute is
-    /// already past what an application's normal commit takes.</summary>
-    internal const double BlockingChainWaitConcerningSeconds = 30;
-
-    /// <summary>The longest-wait mark where a blocking chain reads critical on duration alone: five minutes of
-    /// one session waiting on another's lock, however few sessions are queued behind it.</summary>
-    internal const double BlockingChainWaitCriticalSeconds = 300;
-
     /// <summary>
     /// Scores a BLOCKING_CHAIN fact: the worst of its structural magnitude (chain depth and transitive victim
     /// count) and its duration (the longest any session in it waited). Max, not average, so one severe
@@ -319,13 +310,16 @@ public class FactScorer
             fact.Metadata.GetValueOrDefault("worst_chain_max_wait_ms"));
 
     /// <summary>The BLOCKING_CHAIN grade for one chain's depth, victim count and longest wait (milliseconds).
-    /// The collectors pick the worst chain by this too, so the fact describes the chain that earned the grade.</summary>
+    /// The wait bars (30 s concerning, 300 s critical) are the pair <see cref="PgTargetScorer.BlockingWaitWarningMs"/>
+    /// and <see cref="PgTargetScorer.BlockingWaitCriticalMs"/>: one definition of "a long blocked wait".
+    /// <see cref="ReconstructedChain.Grade"/> is this per chain; the collectors pick the worst chain by it and the
+    /// drill-downs list chains by it, so the fact and its drill-down name the same chain.</summary>
     internal static double ScoreBlockingChainShape(double depth, double victims, double maxWaitMs) =>
         Math.Max(
             Math.Max(
                 ApplyThresholdFormula(depth, 3, 8),
                 ApplyThresholdFormula(victims, 5, 25)),
-            ApplyThresholdFormula(maxWaitMs / 1000.0, BlockingChainWaitConcerningSeconds, BlockingChainWaitCriticalSeconds));
+            ApplyThresholdFormula(maxWaitMs, PgTargetScorer.BlockingWaitWarningMs, PgTargetScorer.BlockingWaitCriticalMs));
 
     /// <summary>
     /// Scores CPU utilization. Value is average SQL CPU %.

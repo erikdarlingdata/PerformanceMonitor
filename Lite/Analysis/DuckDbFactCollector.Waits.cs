@@ -450,7 +450,7 @@ LIMIT 5000";
                latest-value bounds), else the shipped default: it decides whether the chain's newest sample is
                recent enough to say it was still blocking when the window ended. */
             var collectionInterval = context.BlockingCollectionIntervalMinutes
-                ?? CollectorScheduleDefaults.All["dmv_blocking_snapshot"].FrequencyMinutes;
+                ?? CollectorScheduleDefaults.DefaultBlockingIntervalMinutes;
             facts.Add(BlockingChainFactBuilder.Build(context, reconstruction, rows, collectionInterval));
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))

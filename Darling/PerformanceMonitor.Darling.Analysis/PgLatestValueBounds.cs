@@ -129,9 +129,9 @@ AND   collection_time <= $2";
 
         /* The blocking chain fact's "still open at the window end" test is measured in the blocking collectors'
            own intervals: the slower of the two, so a report read that lags its snapshot is not called closed. */
-        context.BlockingCollectionIntervalMinutes = new[] { "dmv_blocking_snapshot", "blocked_process_report" }
-            .Max(name => CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(CollectorScheduleDefaults.ResolveFrequencyMinutes(
-                name, perServer.GetValueOrDefault(name), fleet.GetValueOrDefault(name))));
+        context.BlockingCollectionIntervalMinutes = CollectorScheduleDefaults.EffectiveBlockingIntervalMinutes(
+            name => CollectorScheduleDefaults.ResolveFrequencyMinutes(
+                name, perServer.GetValueOrDefault(name), fleet.GetValueOrDefault(name)));
 
         context.LatestValueStarts = starts;
     }

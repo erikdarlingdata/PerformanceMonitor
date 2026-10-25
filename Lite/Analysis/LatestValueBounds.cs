@@ -107,8 +107,7 @@ AND   collection_time <= $2";
 
         /* The blocking chain fact's "still open at the window end" test is measured in the blocking collectors'
            own intervals: the slower of the two, mirroring Darling's PgLatestValueBounds. */
-        var blockingIntervals = new List<int>();
-        foreach (var name in new[] { "dmv_blocking_snapshot", "blocked_process_report" })
+        context.BlockingCollectionIntervalMinutes = CollectorScheduleDefaults.EffectiveBlockingIntervalMinutes(name =>
         {
             int? configured = null;
             try
@@ -121,11 +120,8 @@ AND   collection_time <= $2";
                     $"Could not resolve the {name} schedule for {context.ServerName}; the blocking chain fact uses its default cadence this pass: {ex.Message}");
             }
 
-            blockingIntervals.Add(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
-                CollectorScheduleDefaults.ResolveFrequencyMinutes(name, configured, fleetOverride: null)));
-        }
-
-        context.BlockingCollectionIntervalMinutes = blockingIntervals.Max();
+            return CollectorScheduleDefaults.ResolveFrequencyMinutes(name, configured, fleetOverride: null);
+        });
 
         context.LatestValueStarts = starts;
     }

@@ -1110,6 +1110,8 @@ public static class FactAdvice
         var maxWait = FactMeta(facts, "BLOCKING_CHAIN", "worst_chain_max_wait_ms");
         var totalChains = FactMeta(facts, "BLOCKING_CHAIN", "total_reconstructed_chains");
         var open = FactMeta(facts, "BLOCKING_CHAIN", "worst_chain_open_at_end") is > 0;
+        // An anchored (as_of) window ends in the past: a chain open at ITS end says nothing about locks held now.
+        var anchored = FactMeta(facts, "BLOCKING_CHAIN", "worst_chain_window_anchored") is > 0;
         var headSpid = FactMeta(facts, "BLOCKING_CHAIN", "worst_apex_spid");
         var tranClock = FactMeta(facts, "BLOCKING_CHAIN", "worst_apex_tran_started_clock_s");
 
@@ -1138,7 +1140,9 @@ public static class FactAdvice
             inv.Append('.');
         }
 
-        var rem = new StringBuilder(open
+        var rem = new StringBuilder(open && anchored
+            ? "This chain was still blocking at the end of a window that has already passed, so the session may well have ended since — check the server's current blocking before acting on it, and aim at the recurrence. "
+            : open
             ? "This chain was still blocking at the end of the window, so it may be holding locks right now — look at the head session first, and if it is not doing work you can wait for, ending it (KILL) releases everyone queued behind it, at the cost of rolling back its open transaction. Then aim at the recurrence. "
             : "This reports a window that has already passed, so the chain cleared long ago — a KILL now buys nothing; aim at the recurrence. ");
         rem.Append(sleeping

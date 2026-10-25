@@ -27,12 +27,27 @@ internal static class BlockingChainFactBuilder
     internal const int OpenAtEndIntervals = 2;
 
     /// <summary>
+    /// The longest blocking-collector interval, in minutes, at which "still open at the window end" is judged.
+    /// Above it (an on-load or zero frequency resolves to a daily recapture, 1440) two intervals reach back days
+    /// and every chain in an ordinary window would read as still open, so the fact does not say.
+    /// </summary>
+    internal const int MaxOpenAtEndIntervalMinutes = 60;
+
+    /// <summary>
+    /// The chains a drill-down lists, worst first by <see cref="ReconstructedChain.Grade"/> (the order the fact's
+    /// pick uses), the reconstruction's own order breaking ties. Both products' drill-downs call this, so the
+    /// chain the fact describes is always among the ones listed.
+    /// </summary>
+    internal static List<ReconstructedChain> DrillDownChains(BlockingReconstruction reconstruction, int count) =>
+        reconstruction.Chains.OrderByDescending(c => c.Grade).Take(count).ToList();
+
+    /// <summary>
     /// The chain the fact describes: the one with the highest BLOCKING_CHAIN grade, ties going to the structurally
     /// larger chain (the reconstruction's own order). A long wait behind two sessions can outgrade a short
     /// pile-up of twenty, and the fact has to describe the chain the grade came from.
     /// </summary>
     internal static ReconstructedChain PickWorst(IReadOnlyList<ReconstructedChain> chains) =>
-        chains.MaxBy(c => FactScorer.ScoreBlockingChainShape(c.Depth, c.VictimCount, c.MaxWaitMs))!;
+        chains.MaxBy(c => c.Grade)!;
 
     /// <summary>
     /// The aggregate BLOCKING_CHAIN fact for a non-empty reconstruction. <paramref name="rows"/> are the pair rows
@@ -61,12 +76,20 @@ internal static class BlockingChainFactBuilder
             ["cycle_detected"] = reconstruction.CycleDetected ? 1 : 0
         };
 
+        // An anchored (as_of) window ends in the past; the advice must not tell the operator the chain may be
+        // holding locks right now.
+        if (context.AsOfUtc is not null)
+            metadata["worst_chain_window_anchored"] = 1;
+
         if (NewestObservation(worst, rows) is DateTime newest)
         {
             var age = context.TimeRangeEnd - newest;
-            var open = age <= TimeSpan.FromMinutes(OpenAtEndIntervals * Math.Max(1, collectionIntervalMinutes));
-            metadata["worst_chain_open_at_end"] = open ? 1 : 0;
             metadata["worst_chain_last_seen_age_ms"] = Math.Max(0, age.TotalMilliseconds);
+            if (collectionIntervalMinutes <= MaxOpenAtEndIntervalMinutes)
+            {
+                var open = age <= TimeSpan.FromMinutes(OpenAtEndIntervals * Math.Max(1, collectionIntervalMinutes));
+                metadata["worst_chain_open_at_end"] = open ? 1 : 0;
+            }
         }
 
         // The head's transaction start is the monitored server's own wall clock, whose offset from UTC the
@@ -87,17 +110,18 @@ internal static class BlockingChainFactBuilder
     /// <summary>The newest sample time among rows where one of the chain's sessions blocks another of them.</summary>
     private static DateTime? NewestObservation(ReconstructedChain chain, IEnumerable<BlockingPairRow> rows)
     {
-        var members = new HashSet<int> { chain.ApexSpid };
+        // The reconstruction's own session key, spid plus ecid: two parallel workers of one spid are two sessions.
+        var members = new HashSet<(int Spid, int Ecid)> { (chain.ApexSpid, chain.ApexEcid) };
         foreach (var level in chain.Levels)
         {
-            members.Add(level.BlockingSpid);
-            members.Add(level.BlockedSpid);
+            members.Add((level.BlockingSpid, level.BlockingEcid));
+            members.Add((level.BlockedSpid, level.BlockedEcid));
         }
 
         DateTime? newest = null;
         foreach (var row in rows)
         {
-            if (members.Contains(row.BlockingSpid) && members.Contains(row.BlockedSpid)
+            if (members.Contains((row.BlockingSpid, row.BlockingEcid)) && members.Contains((row.BlockedSpid, row.BlockedEcid))
                 && (newest is null || row.EventTime > newest))
                 newest = row.EventTime;
         }

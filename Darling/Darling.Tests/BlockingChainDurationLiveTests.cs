@@ -38,7 +38,13 @@ public sealed class BlockingChainDurationLiveTests
 
     /* Plants a head (500) blocking 501 and 502, sampled once a minute for 13 minutes, the last sample landing
        lastSeenMinutesBeforeEnd minutes before the window end, then collects the facts as the analysis pass would. */
-    private static async Task<Fact> CollectChainAsync(int lastSeenMinutesBeforeEnd, int? snapshotEveryMinutes)
+    private static async Task<Fact> CollectChainAsync(int lastSeenMinutesBeforeEnd, int? snapshotEveryMinutes) =>
+        (await CollectAsync(lastSeenMinutesBeforeEnd, snapshotEveryMinutes, withPileUps: false)).Chain;
+
+    /* withPileUps adds three short pile-ups (six to eight victims behind one head, over in seconds) that outrank the
+       13-minute chain on structure alone, and also reads the drill-down the pass attaches to the finding. */
+    private static async Task<(Fact Chain, List<int> DrillDownApexes)> CollectAsync(
+        int lastSeenMinutesBeforeEnd, int? snapshotEveryMinutes, bool withPileUps)
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
@@ -74,6 +80,12 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
                     await Exec(connection, "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name, blocking_last_tran_started) VALUES ($1,$2,$3,$4,$2,$5,500,$6,'suspended','LiveDb',$7)",
                         ct, CollectionIdGenerator.Next(), lastSeen.AddMinutes(i - 12), ServerId, ServerName, (long)(i + 1) * 60_000L, victim, tranStarted);
 
+            if (withPileUps)
+                foreach (var (head, victims) in new[] { (300, 6), (310, 7), (320, 8) })
+                    for (var v = 1; v <= victims; v++)
+                        await Exec(connection, "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name) VALUES ($1,$2,$3,$4,$2,4000,$5,$6,'suspended','LiveDb')",
+                            ct, CollectionIdGenerator.Next(), end.AddMinutes(-90), ServerId, ServerName, head, head + v);
+
             var context = new AnalysisContext
             {
                 ServerId = ServerId, ServerName = ServerName, TimeRangeStart = start, TimeRangeEnd = end,
@@ -82,8 +94,18 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             var facts = await new PgFactCollector(postgres).CollectFactsAsync(context);
             new FactScorer().ScoreAll(facts);
             var chain = Assert.Single(facts, f => f.Key == "BLOCKING_CHAIN");
+
+            var apexes = new List<int>();
+            if (withPileUps)
+            {
+                var finding = new AnalysisFinding { RootFactKey = "BLOCKING_CHAIN", StoryPath = "BLOCKING_CHAIN", PathKeys = ["BLOCKING_CHAIN"], Severity = 1.0 };
+                await new PgDrillDownCollector(postgres).EnrichFindingsAsync([finding], context);
+                var shown = System.Text.Json.JsonSerializer.SerializeToElement(finding.DrillDown!["reconstructed_blocking_chains"]);
+                apexes = shown.EnumerateArray().Select(c => c.GetProperty("apex_spid").GetInt32()).ToList();
+            }
+
             bodySucceeded = true;
-            return chain;
+            return (chain, apexes);
         }
         finally
         {
@@ -120,6 +142,28 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
         // Last sampled 6 minutes before the end: closed at the shipped one-minute cadence, open when the snapshot runs every five.
         Assert.Equal(0, (await CollectChainAsync(6, snapshotEveryMinutes: null)).Metadata["worst_chain_open_at_end"]);
         Assert.Equal(1, (await CollectChainAsync(6, snapshotEveryMinutes: 5)).Metadata["worst_chain_open_at_end"]);
+    }
+
+    [Fact]
+    public async Task ABlockingScheduleOfZero_IsTooCoarseToCallAnyChainOpen()
+    {
+        // frequency_minutes = 0 reads as the daily on-load recapture: two of those would call a chain last seen
+        // an hour before the window end "still blocking". The fact leaves open-at-end out instead.
+        var chain = await CollectChainAsync(lastSeenMinutesBeforeEnd: 60, snapshotEveryMinutes: 0);
+
+        Assert.DoesNotContain("worst_chain_open_at_end", chain.Metadata.Keys);
+        Assert.Equal(780_000, chain.Metadata["worst_chain_max_wait_ms"]);
+    }
+
+    [Fact]
+    public async Task DrillDown_ListsTheChainTheFactNames_WhenThreeWiderPileUpsOutrankItOnStructure()
+    {
+        var (chain, drillDownApexes) = await CollectAsync(lastSeenMinutesBeforeEnd: 1, snapshotEveryMinutes: null, withPileUps: true);
+
+        Assert.Equal(4, chain.Metadata["total_reconstructed_chains"]);
+        Assert.Equal(500, chain.Metadata["worst_apex_spid"]);
+        Assert.Equal(3, drillDownApexes.Count);
+        Assert.Contains(500, drillDownApexes);
     }
 
     private static async Task Exec(NpgsqlConnection c, string sql, CancellationToken ct, params object[] p)

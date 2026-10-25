@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -513,6 +514,22 @@ public static class CollectorScheduleDefaults
     /// </summary>
     public static int EffectiveRecurringIntervalMinutes(int frequencyMinutes) =>
         frequencyMinutes == 0 ? OnLoadRecaptureMinutes : Math.Min(frequencyMinutes, MaxFrequencyMinutes);
+
+    /// <summary>The two collectors that sample blocking: the blocked-process-report read and the DMV blocking snapshot.</summary>
+    public static readonly IReadOnlyList<string> BlockingCollectors = new[] { "dmv_blocking_snapshot", "blocked_process_report" };
+
+    /// <summary>
+    /// How often, in minutes, a server's blocking collectors sample: the slower of the two EFFECTIVE schedules.
+    /// <paramref name="resolvedFrequencyMinutes"/> answers a collector's resolved frequency (an operator's
+    /// override applied, or the shipped default). The BLOCKING_CHAIN fact's "still open at the window end" test is
+    /// measured in this; the stamped value and the unstamped fallback both come through here, so they cannot differ.
+    /// </summary>
+    public static int EffectiveBlockingIntervalMinutes(Func<string, int> resolvedFrequencyMinutes) =>
+        BlockingCollectors.Max(name => EffectiveRecurringIntervalMinutes(resolvedFrequencyMinutes(name)));
+
+    /// <summary>The blocking collectors' interval with no override on either: what the fact uses before a pass stamps one.</summary>
+    public static int DefaultBlockingIntervalMinutes =>
+        EffectiveBlockingIntervalMinutes(name => All[name].FrequencyMinutes);
 
     /// <summary>The longest frequency a collector's schedule accepts, in minutes: one year (#6227). A stored value above it (a row
     /// written another way, or before the cap) is read as this, because a longer one overflows the time arithmetic the analysis
