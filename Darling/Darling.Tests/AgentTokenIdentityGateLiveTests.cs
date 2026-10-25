@@ -201,6 +201,31 @@ public sealed class AgentTokenIdentityGateLiveTests
         });
     }
 
+    /// <summary>#6635 round 3: each recompile_module refusal made before the gate journals the token's name, not the agent_id passed. A case
+    /// fails when its call site drops agentTokenName: the row then names agent:someone-else.</summary>
+    [Theory]
+    [InlineData("bad_module_name")]
+    [InlineData("bad_database")]
+    [InlineData("postgres_target")]
+    public async Task EachRecompileModuleRefusalBeforeTheGate_IsJournaledUnderTheTokensName(string kind)
+    {
+        await RunAsync(async c =>
+        {
+            var (server, database, module, code) = kind switch
+            {
+                "bad_module_name" => ("srv-7", "AppDb", "dbo", PerformanceMonitor.Darling.Remediation.RemediationResult.Reasons.BadModuleName),
+                "bad_database" => ("srv-7", "", "dbo.p", PerformanceMonitor.Darling.Remediation.RemediationResult.Reasons.BadDatabase),
+                _ => ("srv-8", "AppDb", "dbo.p", DarlingMcpPlanForceTools.PostgresTarget),
+            };
+
+            var answer = await DarlingMcpPlanForceTools.RunRecompileAsync(
+                c.Source, c.Source, null, server, database, module, c.Arg(Other), true, c.Ct, Token);
+
+            Assert.Equal(code, ReasonOf(answer));
+            Assert.Equal("1|0", await RefusedActorsAsync(c, DarlingMcpPlanForceTools.RecompileToolName, code));
+        });
+    }
+
     /// <summary>L3 of the #6593 review: the kill_session wrapper passes the served policy's token name. A tools/call through the host with a
     /// named agent token, refused before the gate (session_id 0), journals the token's name. It fails when the wrapper drops
     /// served?.Policy.AgentTokenName.</summary>

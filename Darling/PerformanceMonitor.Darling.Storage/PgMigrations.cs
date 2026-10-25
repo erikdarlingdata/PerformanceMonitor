@@ -2371,6 +2371,25 @@ CREATE INDEX IF NOT EXISTS idx_query_store_hints_markers
     ON collect.query_store_hints (server_id, database_name, collection_time) WHERE query_hint_id IS NULL;";
 
     /// <summary>
+    /// V218 (#6569): <c>ck_config_server_actions_action</c> also allows <c>recompile_module</c> (the switch of the Level 3 action that
+    /// runs <c>sys.sp_recompile</c> on a procedure, function or trigger), <c>create_plan_guide</c> and <c>drop_plan_guide</c> (the plan guide actions). The CHECK is replaced in place under its own name, only when
+    /// the stored definition does not already name the newest action (V196's guard shape), so a second run replaces nothing. It inserts no row:
+    /// the action starts off on every server. An older build never writes the new word and never reads it as anything else.
+    /// </summary>
+    private const string V218Sql = @"
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint
+               WHERE conname = 'ck_config_server_actions_action'
+                 AND conrelid = 'config.config_server_actions'::regclass
+                 AND pg_get_constraintdef(oid) !~ 'drop_plan_guide') THEN
+        ALTER TABLE config.config_server_actions DROP CONSTRAINT ck_config_server_actions_action;
+        ALTER TABLE config.config_server_actions
+            ADD CONSTRAINT ck_config_server_actions_action CHECK (action IN ('force_plan', 'evict_plan', 'kill_session', 'recompile_module', 'create_plan_guide', 'drop_plan_guide'));
+    END IF;
+END $do$;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2762,6 +2781,7 @@ $rung$;";
         new Migration(215, "agent-table-indexes", V215Sql),
         new Migration(216, "client-timeouts-on-by-default", V216Sql),
         new Migration(217, "query-store-hints", V217Sql),
+        new Migration(218, "server-action-recompile-module", V218Sql),
     };
 
     /// <summary>

@@ -3061,9 +3061,11 @@ END $do$;
 -- 3i (continued). #6003 review: the journal is the request event log the service signs and delivers, and mcp and admin
 --     hold INSERT on it (the nine columns above: not journal_id, the identity, and not event_id, the webhook id, so a role
 --     cannot fill the next million values and make every service insert fail), so this trigger (managed provisioning's
---     BuildJournalEventRulesSql, text for text) refuses a row from any role but the owner that is an event or a delivery
---     or fallback mark (but for a practice request's one opened row, which the Viewer writes with the reason "practice of
---     <case id>"), or that carries a once key other than the prefixes the tools and the Viewer write. A practice opened
+--     BuildJournalEventRulesSql, text for text) refuses a row from any role but the owner that is an event, a delivery
+--     or fallback mark, a server action switch (#6269) or one of the three rows an agent action writes, action_called,
+--     action_done and action_failed (#6569: the service writes them itself, on the owner login, and a person's Undo
+--     acts on the action_called row) (but for a practice request's one opened row, which the Viewer writes with the
+--     reason "practice of <case id>"), or that carries a once key other than the prefixes the tools and the Viewer write. A practice opened
 --     row gets the once key practice_opened:<request id> from the trigger, so a second one fails on the unique index. A row
 --     dated ahead of the store's clock is clamped to it. The alert links get the twin rule (BuildRequestAlertLinkRulesSql):
 --     only a practice request takes a link from a role but the owner. Both read V191's practice_of, so on a store below
@@ -3092,7 +3094,7 @@ BEGIN
       RETURN NEW;
    END IF;
 
-   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched') THEN
+   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed') THEN
       IF NEW.event = 'opened'
          AND EXISTS (SELECT 1 FROM config.investigation_requests AS r
                      WHERE r.request_id = NEW.request_id AND r.practice_of IS NOT NULL

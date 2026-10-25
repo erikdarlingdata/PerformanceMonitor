@@ -310,12 +310,12 @@ public sealed class RemediationOfflineTests
     {
         var writes = typeof(SqlServerRemediationExecutor).GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly)
             .Where(m => m.ReturnType == typeof(Task<RemediationResult>)).ToList();
-        Assert.Equal(5, writes.Count); /* force, unforce, evict, kill, and the Azure SQL Database kill (#5632) */
+        Assert.Equal(8, writes.Count); /* force, unforce, evict, kill, the Azure SQL Database kill (#5632), recompile a module, and create and drop a plan guide (#6569) */
         Assert.All(writes, m => Assert.Equal(typeof(ServerActionPermit), m.GetParameters()[0].ParameterType));
-        /* No other public way to reach the server: the executor exposes nothing but those five methods, the one read-only state read the force
+        /* No other public way to reach the server: the executor exposes nothing but those eight methods, the one read-only state read the force
            tools journal their before and after image from (#5632, step 7, which takes the permit first too), and its constructor. */
         var publicMethods = typeof(SqlServerRemediationExecutor).GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.DeclaredOnly);
-        Assert.Equal(6, publicMethods.Length);
+        Assert.Equal(9, publicMethods.Length);
         var read = Assert.Single(publicMethods, m => m.ReturnType == typeof(Task<PlanStateRead>));
         Assert.Equal(typeof(ServerActionPermit), read.GetParameters()[0].ParameterType);
 

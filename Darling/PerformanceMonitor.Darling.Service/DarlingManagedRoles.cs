@@ -3971,7 +3971,9 @@ REVOKE ALL ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLegacy
     /// by <c>event_time</c>. <c>mcp</c> (the claim and submit tools) and <c>admin</c> (the desktop Viewer) hold INSERT on it
     /// (the columns of <see cref="JournalWriterColumns"/>) to journal their own actions, so this <c>BEFORE INSERT</c> trigger
     /// refuses a row from any role but the owner that
-    /// (a) is an event (<see cref="InvestigationEvents.Kinds"/>) or a delivery or fallback mark, but for the one
+    /// (a) is an event (<see cref="InvestigationEvents.Kinds"/>), a delivery or fallback mark, a server action switch (#6269) or one of
+    /// the three rows of an agent action (<see cref="AgentActionEvents.OwnerOnly"/>, #6569: the service journals them itself, on the
+    /// owner connection, and the Agent changes list offers Undo on the <c>action_called</c> row), but for the one
     /// <c>opened</c> row of a practice request (the Viewer opens those, #5918), whose reason is exactly
     /// <c>practice of &lt;the case's request id&gt;</c>; or
     /// (b) carries a once key other than the prefixes the tools and the Viewer write (<see cref="JournalWriterOnceKeyPrefixes"/>),
@@ -4030,7 +4032,7 @@ CREATE OR REPLACE TRIGGER trg_investigation_journal_owner_rows
 
     /// <summary>
     /// The columns of <c>config.investigation_journal</c> that <c>mcp</c> and <c>admin</c> may set on an insert: every column the
-    /// claim, submit and change tools and the Viewer's journal writers name. Not <c>journal_id</c> (the identity: a role that
+    /// claim and submit tools and the Viewer's journal writers name (the change tools' rows are the owner's, #6569). Not <c>journal_id</c> (the identity: a role that
     /// set it could fill the next million values and make every service insert fail) and not <c>event_id</c> (the unique
     /// webhook id): both take their defaults.
     /// </summary>
@@ -4077,9 +4079,12 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
    FOR EACH ROW EXECUTE FUNCTION {config}.investigation_request_alerts_owner_rows();";
 
     /// <summary>The journal events only the owner writes (<see cref="BuildJournalEventRulesSql"/>), as a SQL list. <c>server_action_switched</c>
-    /// is the owner's alone (#6269): only the switch writer, on the owner connection, journals it, so no other login can forge who changed a switch.</summary>
+    /// is the owner's alone (#6269): only the switch writer, on the owner connection, journals it, so no other login can write who changed a switch.
+    /// So are the three rows of an agent action (<see cref="AgentActionEvents.OwnerOnly"/>, #6569): the Agent changes list offers Undo on an
+    /// <c>action_called</c> row, so only the service, which runs the action and checks the request, journals it and its result.</summary>
     internal static string JournalOwnerEventList => string.Join(", ",
         InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent).Append(ServerActionSwitches.JournalEvent)
+            .Concat(AgentActionEvents.OwnerOnly)
             .Select(k => "'" + k + "'"));
 
     /// <summary>
@@ -4216,7 +4221,9 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
     /// the table. The check and the command run under the provisioning advisory lock (#5560,
     /// <see cref="ProvisioningLockKey"/>), so two services starting against one store do not both replace the function
     /// at once. The two <c>edit_monitored_server</c> overloads are part of the rules (#6170): a store that holds them from an
-    /// older script keeps a version that does not know the hypothetical-index pair, so they are replaced the same way. Returns whether the rules are in place.
+    /// older script keeps a version that does not know the hypothetical-index pair, so they are replaced the same way. The journal's owner-row
+    /// function (<see cref="BuildJournalEventRulesSql"/>, #6569) is checked and replaced in the same lock and the same transaction, so a store
+    /// upgraded by replacing the binaries refuses the owner-only journal events from the mcp and admin logins at the next start. Returns whether the rules are in place.
     /// </summary>
     public static async Task<bool> EnsureServerPasswordRulesAsync(
         NpgsqlDataSource dataSource, ILogger logger, CancellationToken cancellationToken = default)
@@ -4239,9 +4246,13 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
                 /* #6170: the edit function is part of the same rules (it answers the host change before the trigger is reached),
                    and a store whose script was not re-run keeps the version that knows only the remediation column. */
                 alreadyInPlace &= await EditMonitoredServerFunctionsAreCurrentAsync(connection, transaction, token);
+                /* #6569: the journal's owner-only event list is part of the same start check. A store upgraded by replacing the binaries
+                   keeps the older function, which still accepts action_called, action_done and action_failed from mcp and admin. */
+                var journal = await JournalEventRulesAreInPlaceAsync(connection, transaction, token);
+                alreadyInPlace &= journal is not false;
                 return alreadyInPlace
                     ? null
-                    : new NpgsqlCommand(BuildServerPasswordRulesSql("config") + BuildEditMonitoredServerFunctionsSql("config"), connection, transaction)
+                    : new NpgsqlCommand(BuildServerPasswordRulesSql("config") + BuildEditMonitoredServerFunctionsSql("config") + (journal is null ? "" : BuildJournalEventRulesSql("config")), connection, transaction)
                     {
                         CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
                     };
@@ -4249,14 +4260,14 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
 
             logger.LogInformation(
                 alreadyInPlace
-                    ? "The store's password rules are already in place on config.config_monitored_servers"
-                    : "The store's password rules are in place on config.config_monitored_servers");
+                    ? "The store's password and journal rules are already in place"
+                    : "The store's password and journal rules are in place");
             return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(
-                "Could not create the store's password rules on config.config_monitored_servers ({Message}). Run provision-roles.sql against the store as the role that owns its tables.",
+                "Could not create the store's password or journal rules ({Message}). Run provision-roles.sql against the store as the role that owns its tables.",
                 ex.Message);
             return false;
         }
@@ -4300,6 +4311,82 @@ WHERE t.tgrelid = 'config.config_monitored_servers'::regclass
             }
 
             var built = BuildServerPasswordRulesSql("config");
+            const string quote = "$rules$";
+            var open = built.IndexOf(quote, StringComparison.Ordinal);
+            var close = built.IndexOf(quote, open + quote.Length, StringComparison.Ordinal);
+            if (open < 0 || close < 0)
+            {
+                return false;
+            }
+
+            return string.Equals(
+                NormalizeRulesText(stored),
+                NormalizeRulesText(built.Substring(open + quote.Length, close - open - quote.Length)),
+                StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await RecoverFromReadAsync(transaction);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether the journal's owner-row trigger (<see cref="BuildJournalEventRulesSql"/>) is on <c>config.investigation_journal</c>, enabled,
+    /// a row-level BEFORE INSERT one, and its function has the text this build writes (full-line comments and spacing set aside) and the pinned
+    /// search path (#6569). A store below V191, which has no journal or no <c>practice_of</c> column yet, answers null: the function reads that
+    /// column, so there is nothing to replace until the service has migrated the store (the script skips it the same way). A read that fails
+    /// answers false, so the caller falls back to replacing the function.
+    /// </summary>
+    internal static async Task<bool?> JournalEventRulesAreInPlaceAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await TakeReadSavepointAsync(transaction, cancellationToken);
+            await using (var applicable = new NpgsqlCommand(@"
+SELECT pg_catalog.to_regclass('config.investigation_journal') IS NOT NULL
+   AND pg_catalog.to_regclass('config.investigation_request_alerts') IS NOT NULL
+   AND EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+               WHERE attrelid = pg_catalog.to_regclass('config.investigation_requests')
+                 AND attname = 'practice_of' AND NOT attisdropped)", connection, transaction)
+            {
+                CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
+            })
+            {
+                if (!(bool)(await applicable.ExecuteScalarAsync(cancellationToken) ?? false))
+                {
+                    return null;
+                }
+            }
+
+            await using var read = new NpgsqlCommand(@"
+SELECT p.prosrc, p.proconfig
+FROM pg_catalog.pg_trigger AS t
+JOIN pg_catalog.pg_proc AS p ON p.oid = t.tgfoid
+WHERE t.tgrelid = 'config.investigation_journal'::regclass
+  AND t.tgname = 'trg_investigation_journal_owner_rows'
+  AND t.tgenabled = 'O'
+  AND t.tgtype = 7
+  AND p.proname = 'investigation_journal_owner_rows'
+  AND p.pronamespace = 'config'::regnamespace", connection, transaction)
+            {
+                CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
+            };
+            await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return false;
+            }
+
+            var stored = reader.GetString(0);
+            var settings = reader.IsDBNull(1) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(1);
+            if (settings.Length != 1 || !string.Equals(settings[0], "search_path=pg_catalog, pg_temp", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var built = BuildJournalEventRulesSql("config");
             const string quote = "$rules$";
             var open = built.IndexOf(quote, StringComparison.Ordinal);
             var close = built.IndexOf(quote, open + quote.Length, StringComparison.Ordinal);

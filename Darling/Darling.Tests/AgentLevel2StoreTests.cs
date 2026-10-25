@@ -501,11 +501,11 @@ public sealed class AgentLevel2StoreGrantLiveTests
     }
 
     /// <summary>
-    /// #5912 review round 1: the gate's own statements as the real <c>mcp</c> login, whichever grant source made it. The store runs
-    /// <c>RunAgentActionAsync</c> as <c>mcp</c> (the role the MCP host connects as): the request read <c>FOR SHARE</c> takes its row
-    /// lock through <c>mcp</c>'s column-level UPDATE grant on <c>investigation_requests</c>, and <c>action_called</c> /
-    /// <c>action_done</c> are <c>INSERT ... RETURNING journal_id</c> through its journal grants. A pass journals both and a refusal
-    /// (the live route sends the metric at Level 1) journals one refused row.
+    /// #5912 review round 1, changed by #6569: the gate's own statements against the real roles, whichever grant source made them. The
+    /// MCP host connects as <c>mcp</c>, but the journal keeps <c>action_called</c> and <c>action_done</c> to the owner, so the tools hand the
+    /// store the owner's data source and the whole gate runs on it: a call on <c>mcp</c>'s own data source is refused at <c>action_called</c>
+    /// (42501) and changes nothing. A pass on the owner's journals both rows and a refusal (the live route sends the metric at Level 1)
+    /// journals one refused row.
     /// </summary>
     private static async Task RunTheGateAsMcpAsync(NpgsqlConnection owner, ScratchPostgres scratch, string mcpPassword, CancellationToken ct)
     {
@@ -518,6 +518,9 @@ public sealed class AgentLevel2StoreGrantLiveTests
         var mcpString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = "mcp", Password = mcpPassword }.ConnectionString;
         await using var mcpSource = NpgsqlDataSource.Create(mcpString);
         var mcpStore = new InvestigationRequestStore(mcpSource, 30);
+        /* #6569: the gate runs on the owner's data source, the way the MCP tools hand it one; claim stays mcp's own. */
+        await using var ownerSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var gateStore = new InvestigationRequestStore(mcpSource, 30, agentActionSource: ownerSource);
         var claim = (await mcpStore.ClaimAsync(request, "agent-a", ct)).ClaimId!.Value;
         var writes = 0;
         AgentActionCall Call() => new("create_mute_rule", "mute", new AgentAction(request, claim, "agent-a", "known batch",
@@ -529,13 +532,18 @@ public sealed class AgentLevel2StoreGrantLiveTests
             Write = (_, _, _) => { writes++; return Task.FromResult<string?>("{}"); },
         };
 
-        var done = await mcpStore.RunAgentActionAsync(Call(), Hooks(2), ct);
+        /* The same call on mcp's own data source stops at action_called, which the journal's trigger keeps to the owner: nothing is written. */
+        var alone = await Assert.ThrowsAsync<PostgresException>(() => mcpStore.RunAgentActionAsync(Call(), Hooks(2), ct));
+        Assert.Equal("42501", alone.SqlState);
+        Assert.Equal(0, writes);
+
+        var done = await gateStore.RunAgentActionAsync(Call(), Hooks(2), ct);
         Assert.True(done.Done, done.Refusal?.Message);
         Assert.Equal(1, writes);
         Assert.Equal("action_called|action_done", await ScalarAsync(owner,
             $"SELECT string_agg(event, '|' ORDER BY journal_id) FROM config.investigation_journal WHERE request_id = '{request}' AND event LIKE 'action_%'", ct));
 
-        var refused = await mcpStore.RunAgentActionAsync(Call(), Hooks(1), ct);
+        var refused = await gateStore.RunAgentActionAsync(Call(), Hooks(1), ct);
         Assert.Equal(AgentActionCodes.NotLevel2, refused.Refusal?.Reason);
         Assert.Equal(1, writes);
         Assert.Equal("1", await ScalarAsync(owner, $"SELECT count(*) FROM config.investigation_journal WHERE request_id = '{request}' AND event = 'refused'", ct));
@@ -575,6 +583,10 @@ public sealed class AgentLevel2StoreGrantLiveTests
             await AssertDeniedAsync(mcp, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (5909, 'force_plan', true, 'mcp')", ct);
             await AssertDeniedAsync(mcp, "UPDATE config.config_server_actions SET enabled = true", ct);
             await AssertDeniedAsync(mcp, "DELETE FROM config.config_server_actions", ct);
+
+            /* #6569: the rows of an agent action are the owner's alone, so mcp's own insert of any of them is refused. */
+            foreach (var journalEvent in AgentActionEvents.OwnerOnly)
+                await AssertDeniedAsync(mcp, AgentActionRowSql(journalEvent), ct);
         }
 
         await ExecAsync(owner, "DELETE FROM config.investigation_feedback", ct);
@@ -612,6 +624,15 @@ public sealed class AgentLevel2StoreGrantLiveTests
             await AssertDeniedAsync(admin, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (5909, 'force_plan', true, 'admin')", ct);
             await AssertDeniedAsync(admin, "UPDATE config.config_server_actions SET enabled = true", ct);
             await AssertDeniedAsync(admin, "DELETE FROM config.config_server_actions", ct);
+
+            /* #6569: nor does admin (the Viewer's login) write the rows of an agent action. */
+            foreach (var journalEvent in AgentActionEvents.OwnerOnly)
+                await AssertDeniedAsync(admin, AgentActionRowSql(journalEvent), ct);
         }
     }
+
+    /// <summary>One journal row of the given event on the request <see cref="ExerciseLoginsAsync"/> makes, by an agent actor.</summary>
+    private static string AgentActionRowSql(string journalEvent) =>
+        "INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor) "
+        + $"VALUES (now(), '66666666-6666-6666-6666-666666666666', 5909, '{journalEvent}', 'agent:other')";
 }

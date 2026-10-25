@@ -83,8 +83,9 @@ public sealed class DarlingMcpThresholdOverrideTools
         [Description("true removes the override.")] bool clear = false,
         [Description("Who made the change (writes arm). 1-64 of A-Za-z0-9._:-. Default mcp.")] string? set_by = null,
         [Description("Investigations arm only: the agent_action object (request_id, claim_id, agent_id, reason, evidence). Ignored under the writes arm.")] string? agent_action = null,
+        StoreOwnerSource? ownerSource = null,
         CancellationToken cancellationToken = default) =>
-        await SetAsync(postgres, served.Policy, new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds),
+        await SetAsync(postgres, served.Policy, new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: ownerSource?.Read()),
             logger, server_name, key, value, database_name, clear, set_by, agent_action, cancellationToken);
 
     /// <summary>The tool body over a given store, so a test drives either arm.</summary>
