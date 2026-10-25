@@ -71,6 +71,10 @@ public static class McpDataDetailKeys
             "victim_statement", "victim_sql_text", "victim_query",
             "blocked_sql_text", "blocking_sql_text", "blocked_query", "blocking_query", "bad_actor_query",
             "input_buffer", "inputbuf", "frame", "most_recent_sql_text", "last_sql_text", "current_query",
+            // A plan guide's definition (drop_plan_guide's before.guide and its journal row): the guide's batch text (or an
+            // OBJECT guide's module name) and its hint string, whose OPTIMIZE FOR (@p = ...) holds literals. Every other
+            // "hints" key in an answer holds an object, whose own keys are judged; only a string "hints" value is masked.
+            "module_or_batch", "hints",
             // get_query_repro_script: the statement plus one DECLARE per sniffed parameter value, so the values go with
             // the statement (replaced under maskLiterals, withheld under metadataOnly).
             "script", "repro_script",

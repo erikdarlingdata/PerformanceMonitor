@@ -117,7 +117,7 @@ public sealed partial class DarlingMcpPlanForceTools
             var before = new
             {
                 database,
-                guide = new { name = definition.Name, type = definition.Type, statement = definition.Statement, module_or_batch = definition.ModuleOrBatch, @params = definition.Params, hints = definition.Hints },
+                guide = GuideCreateImage(definition),
                 cached_matches = dry.CachedMatches,
             };
             if (dry.Outcome != RemediationOutcome.Done)
@@ -289,8 +289,20 @@ public sealed partial class DarlingMcpPlanForceTools
     }
 
     /// <summary>The definition a drop reads, in the shape the journal keeps and the Undo re-creates from (#6569, slice 2b): the create's own definition fields plus <c>is_disabled</c>.</summary>
-    private static object GuideImage(PlanGuideDefinition guide, bool disabled) =>
-        new { name = guide.Name, type = guide.Type, statement = guide.Statement, module_or_batch = guide.ModuleOrBatch, @params = guide.Params, hints = guide.Hints, is_disabled = disabled };
+    internal static object GuideImage(PlanGuideDefinition guide, bool disabled) =>
+        new { name = guide.Name, type = guide.Type, statement = guide.Statement, module = ObjectModule(guide), module_or_batch = guide.ModuleOrBatch, @params = guide.Params, hints = guide.Hints, is_disabled = disabled };
+
+    /// <summary>The create answer's guide image: the same fields as <see cref="GuideImage"/> without <c>is_disabled</c>, which a new guide does not have yet.</summary>
+    private static object GuideCreateImage(PlanGuideDefinition guide) =>
+        new { name = guide.Name, type = guide.Type, statement = guide.Statement, module = ObjectModule(guide), module_or_batch = guide.ModuleOrBatch, @params = guide.Params, hints = guide.Hints };
+
+    /// <summary>
+    /// An OBJECT guide's module name (<c>[schema].[name]</c>), under its own key. <c>module_or_batch</c> holds batch text for a SQL guide, so the data-detail
+    /// masker withholds it; an object's name is kept at every level, as it is everywhere else in an answer, so the module needs a key of its own that is kept.
+    /// Null for a SQL or TEMPLATE guide.
+    /// </summary>
+    private static string? ObjectModule(PlanGuideDefinition guide) =>
+        string.Equals(guide.Type, "OBJECT", StringComparison.OrdinalIgnoreCase) ? guide.ModuleOrBatch : null;
 
     /// <summary>The drop tool body (#6569, slice 2b), so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
     internal static async Task<string> RunDropPlanGuideAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, string? server_name, string? database_name,

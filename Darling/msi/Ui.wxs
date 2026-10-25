@@ -108,8 +108,8 @@
 
         <Control Id="AddInstaller" Type="CheckBox" X="20" Y="60" Width="330" Height="34" Property="ADDINSTALLER" CheckBoxValue="1"
                  Text="Add me to the PerformanceMonitor Darling Operators group, so I can read the collected data in the viewer (recommended)." />
-        <Control Id="WebDashboard" Type="CheckBox" X="20" Y="110" Width="330" Height="58" Property="WEBDASHBOARD" CheckBoxValue="1"
-                 Text="Turn on the web dashboard. It listens on this machine only. Anyone signed in to this machine can open it without a password. It is off by default, and only a new darling.json gets this setting: an existing one is left as it is." />
+        <Control Id="WebDashboard" Type="CheckBox" X="20" Y="110" Width="330" Height="72" Property="WEBDASHBOARD" CheckBoxValue="1"
+                 Text="Turn on the web dashboard. It listens on this machine only and asks for a web token that setup makes for you. To see the token, run &amp; &quot;[INSTALLFOLDER]PerformanceMonitor.Darling.Service.exe&quot; --print-web-token from an elevated PowerShell. It is off by default, and only a new darling.json gets this setting: an existing one is left as it is." />
       </Dialog>
 
       <Dialog Id="PurgeDlg" Width="370" Height="270" Title="!(loc.InstallDirDlg_Title)">
