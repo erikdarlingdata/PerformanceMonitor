@@ -1893,8 +1893,10 @@ REVOKE EXECUTE ON FUNCTION {config}.config_bump_version(), {config}.config_servi
 --     six, so REVOKE ALL ... CASCADE takes every privilege from PUBLIC and the three roles, and SELECT goes back to
 --     all three (the web dashboard and the MCP list read them). Then each writer gets only what it writes. The
 --     service opens, joins, sweeps and journals as the owner. mcp (the claim and submit tools) updates only the
---     claim and report columns of a request, inserts a report and a journal row, and proposes a note without its
---     state column, so an agent's note stays pending until a person decides it. admin (the WPF viewer) closes a
+--     claim and report columns of a request, inserts a report and a journal row, and proposes a note. The agent
+--     tools (claim, submit) leave the note's state column to its default, pending, but the database does not hold mcp to
+--     that: since #6400 mcp also holds INSERT on state, because the person-only investigation tools (write, approve and reject a
+--     note, close a request, save a profile) run as mcp. What keeps an agent from them is the tool policy (NeverAgentTools), not this role. admin (the WPF viewer) closes a
 --     request, writes the environment profiles, writes, decides or deletes a note, and journals what it did.
 --     Nothing but the owner writes the alert links (but for the Viewer's practice copy, section 10e). An identity column needs no sequence grant. One table per write
 --     grant, so provision-roles.sql's mirror (its step 3i) is compared grant for grant. It runs after every blanket
@@ -1941,7 +1943,24 @@ GRANT UPDATE (state, closed_at, closed_by, closed_reason) ON {config}.investigat
 GRANT INSERT ({JournalWriterColumns}) ON {config}.investigation_journal TO {admin};
 GRANT INSERT, DELETE ON {config}.investigation_notes TO {admin};
 GRANT UPDATE (state, decided_at, decided_by, expires_at) ON {config}.investigation_notes TO {admin};
+-- #6400: the four investigation admin tools (write_investigation_note, approve_investigation_note, reject_investigation_note,
+--     close_investigation_request) run the same store code the web routes and the Viewer run, as mcp. They need the columns admin's
+--     statements set and nothing more: close stamps the three close columns beside the state mcp already updates; a written note is
+--     inserted approved (state, the two clock columns, expires_at and the decider) beside the columns an agent's proposal sets; a
+--     decision updates the three columns that set the state and the decider (admin also updates expires_at, which no
+--     mcp statement does: a note's expiry is set when it is inserted). The journal INSERT is mcp's already. No DELETE on notes, no INSERT on a
+--     request, no profile write: the tools do none of them. Provisioning re-runs every start, so no migration rung carries this.
+GRANT UPDATE (closed_at, closed_by, closed_reason) ON {config}.investigation_requests TO {mcp};
+GRANT INSERT (state, created_at, expires_at, decided_at, decided_by) ON {config}.investigation_notes TO {mcp};
+GRANT UPDATE (state, decided_at, decided_by) ON {config}.investigation_notes TO {mcp};
 GRANT INSERT, UPDATE, DELETE ON {config}.agent_environment_profiles TO {admin};
+-- #6400: save_environment_profile (the web's PUT /api/environment-profiles) runs InvestigationRequestStore.SaveProfileAsync as mcp. The
+--     statements set the five profile columns on an insert (the profile_id identity takes its default), update three of them on a
+--     conflict and a blank save deletes the scope's profile; the scope lock (SELECT ... FOR UPDATE) rides on the UPDATE grant. The
+--     journal INSERT is mcp's already. Provisioning re-runs every start, so no migration rung carries this.
+GRANT INSERT (scope_server_id, scope_tag_id, profile_text, modified_at, modified_by) ON {config}.agent_environment_profiles TO {mcp};
+GRANT UPDATE (profile_text, modified_at, modified_by) ON {config}.agent_environment_profiles TO {mcp};
+GRANT DELETE ON {config}.agent_environment_profiles TO {mcp};
 -- #6003 review: the journal is the event log the service signs and delivers, and mcp and admin hold INSERT on it, so a
 --     trigger keeps the event rows, their delivery and fallback marks and the time order to the owner (see
 --     BuildJournalEventRulesSql). Created here, not in a migration, as the password rules are; a self-managed store gets
@@ -1981,6 +2000,18 @@ GRANT UPDATE (agent_actions_enabled, updated_by) ON {config}.config_service TO {
 GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
    window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON {config}.investigation_requests TO {admin};
 GRANT INSERT ON {config}.investigation_request_alerts TO {admin};
+-- #6400: start_practice_request and record_investigation_feedback run InvestigationPracticeStore.OpenAsync and
+--     InvestigationFeedbackStore.RecordAsync as mcp, so mcp holds what those two statements set and nothing more: the practice's request row
+--     and its copied alert rows (the journal INSERT is mcp's already, and trg_investigation_request_alerts_owner_rows still refuses a
+--     link to any request but a practice one), and a feedback row (the insert's six columns, and on a conflict the author's earlier
+--     row is replaced: the five text columns and created_at). No DELETE on feedback, no UPDATE of a request. Provisioning re-runs
+--     every start, so no migration rung carries this.
+GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
+   window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON {config}.investigation_requests TO {mcp};
+GRANT INSERT (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json)
+   ON {config}.investigation_request_alerts TO {mcp};
+GRANT INSERT (request_id, verdict, corrected_verdict, missed_step, comment, author) ON {config}.investigation_feedback TO {mcp};
+GRANT UPDATE (verdict, corrected_verdict, missed_step, comment, author, created_at) ON {config}.investigation_feedback TO {mcp};
 
 -- 10e2. The per-server action switches (V196, #5632 step 5). Every role reads them and NO role but the store owner (the service)
 --     writes them: the default privileges would give admin INSERT/UPDATE/DELETE on a table made after them, so REVOKE ALL ... CASCADE

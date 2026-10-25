@@ -73,6 +73,9 @@ public sealed class AgentSetupWebLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        /* #6400: the server a profile may name is one the operator defined (config_monitored_servers, what every picker lists), not one the worker
+           has observed (collect.servers, written on a first connection and never pruned), so the fixture's server is defined as well. */
+        await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ($1, $2, 'host-a')", ServerId, ServerName);
         return NpgsqlDataSource.Create(scratch.ConnectionString);
     }
 
@@ -524,6 +527,7 @@ public sealed class AgentSetupWebLiveTests
             var tooLong = await Send("PUT", "/api/environment-profiles", Json, $"{{\"profile_text\":\"{new string('p', 4001)}\"}}");
             Assert.Equal(400, tooLong.Status);
             Assert.Equal("A profile must be 4,000 characters or fewer.", (string)tooLong.Body!["error"]!);
+            await ExecAsync(owner, "INSERT INTO config.server_tags (id, name) OVERRIDING SYSTEM VALUE VALUES (3, 'dev')", ct);
             Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_tag_id\":3,\"profile_text\":\"{new string('p', 4000)}\"}}")).Status);
             Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, "{\"scope_server_id\":\"x\",\"profile_text\":\"x\"}")).Status);
             Assert.Equal(415, (await Send("PUT", "/api/environment-profiles", null, "{}")).Status);
@@ -892,6 +896,116 @@ public sealed class AgentSetupWebLiveTests
             /* A version of the wrong shape is a 400, and the default date is not a pass. */
             Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, "{\"expected_modified_at\":17,\"profile_text\":\"x\"}")).Status);
             Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, "{\"expected_modified_at\":\"not a date\",\"profile_text\":\"x\"}")).Status);
+        }, seat: new DarlingWebSeat("alice", true));
+    }
+
+    /* #6400: a profile for tag 0 (or below), or for a tag that does not exist, is a 400 with one sentence and writes nothing. The store
+       matches a scope on coalesce(scope_tag_id, 0), so a tag-0 row was never read by any brief, made every later fleet save a conflict, and a
+       blank tag-0 save carrying the fleet row's version deleted the fleet profile. The Viewer's save is the same store method. */
+    [Fact]
+    public async Task EnvironmentProfiles_ATagThatIs0OrBelowOrNamesNoTag_Is400_AndWritesNothing_ViaTheWebAndTheStore()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            const string Rows = "SELECT count(*) FROM config.agent_environment_profiles";
+            const string Journal = "SELECT count(*) FROM config.investigation_journal WHERE event IN ('profile_saved', 'profile_removed')";
+            var store = new InvestigationRequestStore(owner, 30);
+            var tag = await ScalarAsync(owner, "INSERT INTO config.server_tags (name) VALUES ('oltp-6400') RETURNING id", ct);
+            var unknown = (await ScalarAsync(owner, "SELECT coalesce(max(id), 0) + 1 FROM config.server_tags", ct))!;
+
+            /* No fleet profile yet: tag 0, a negative tag and an unknown tag are all refused, and the fleet can still be saved afterwards. */
+            foreach (var refused in new[] { "0", "-1", unknown })
+            {
+                var answer = await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_tag_id\":{refused},\"profile_text\":\"for no tag\"}}");
+                Assert.Equal(400, answer.Status);
+                Assert.Contains($"{refused}", (string)answer.Body!["error"]!, StringComparison.Ordinal);
+                await Assert.ThrowsAsync<ArgumentException>(() => store.SaveProfileAsync(null, int.Parse(refused, CultureInfo.InvariantCulture), "for no tag", "dave", null, ct));
+            }
+
+            Assert.Equal("0", await ScalarAsync(owner, Rows, ct));
+            Assert.Equal("0", await ScalarAsync(owner, Journal, ct));
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\"}")).Status);
+
+            /* A fleet profile is there: a blank tag-0 save that carries the fleet row's version (the page stamps it so) removes nothing. */
+            var fleetStamp = await ScalarAsync(owner, "SELECT modified_at::text FROM config.agent_environment_profiles", ct);
+            Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, "{\"scope_tag_id\":0,\"profile_text\":\"\"}")).Status);
+            Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, "{\"scope_tag_id\":0,\"profile_text\":\"for no tag\"}")).Status);
+            Assert.Equal("1|fleet: OLTP", await ScalarAsync(owner, "SELECT count(*) || '|' || max(profile_text) FROM config.agent_environment_profiles WHERE scope_server_id IS NULL AND scope_tag_id IS NULL", ct));
+            Assert.Equal(fleetStamp, await ScalarAsync(owner, "SELECT modified_at::text FROM config.agent_environment_profiles", ct));
+            Assert.Equal("1", await ScalarAsync(owner, Rows, ct));
+            Assert.Equal("1", await ScalarAsync(owner, Journal, ct));
+
+            /* An existing tag still saves; once its tag is deleted the orphan profile can still be removed by a blank save. */
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_tag_id\":{tag},\"profile_text\":\"tag: OLTP\"}}")).Status);
+            Assert.Equal("2", await ScalarAsync(owner, Rows, ct));
+            await ExecAsync(owner, $"DELETE FROM config.server_tags WHERE id = {tag}", ct);
+            Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_tag_id\":{tag},\"profile_text\":\"tag: OLTP, edited\"}}")).Status);
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_tag_id\":{tag},\"profile_text\":\"\"}}")).Status);
+            Assert.Equal("1", await ScalarAsync(owner, Rows, ct));
+        }, seat: new DarlingWebSeat("alice", true));
+    }
+
+    /* #6400: the server side of the tag test above. The profile table has no foreign key to a server either, so a profile for server 0 (or
+       below), or for a server id that is not registered (no row in config.config_monitored_servers), is a 400 with one sentence and writes
+       nothing; a registered server still saves, and a blank save still removes the profile of a server that has gone. */
+    [Fact]
+    public async Task EnvironmentProfiles_AServerThatIs0OrBelowOrIsNotRegistered_Is400_AndWritesNothing_ViaTheWebAndTheStore()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            const string Rows = "SELECT count(*) FROM config.agent_environment_profiles";
+            const string Journal = "SELECT count(*) FROM config.investigation_journal WHERE event IN ('profile_saved', 'profile_removed')";
+            var store = new InvestigationRequestStore(owner, 30);
+            var unregistered = ServerId + 1000;
+            var neverConnected = ServerId + 2000;
+
+            /* The registered/observed split (#6400): `unregistered` was observed (it has a collect.servers row, as a removed server keeps one) but
+               has no definition; `neverConnected` is defined and has never connected (no collect.servers row, as a server just added). */
+            await using (var observed = await owner.OpenConnectionAsync(ct))
+            {
+                await DarlingMcpTestData.RegisterServerAsync(observed, unregistered, "LcAgentSetupRemoved", ct);
+            }
+
+            await ExecAsync(owner, $"INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ({neverConnected}, 'LcAgentSetupNew', 'host-new')", ct);
+            Assert.Equal("0", await ScalarAsync(owner, $"SELECT count(*) FROM collect.servers WHERE server_id = {neverConnected}", ct));
+            Assert.Equal("0", await ScalarAsync(owner, $"SELECT count(*) FROM config.config_monitored_servers WHERE server_id = {unregistered}", ct));
+
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\"}")).Status);
+            var fleetStamp = await ScalarAsync(owner, "SELECT modified_at::text FROM config.agent_environment_profiles", ct);
+            Assert.Equal("1", await ScalarAsync(owner, Journal, ct));
+
+            /* Server 0, a negative server and an unregistered server are refused, with text and blank, and the fleet profile is not touched. */
+            foreach (var refused in new[] { 0, -1, unregistered })
+            {
+                var answer = await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{refused},\"profile_text\":\"for no server\"}}");
+                Assert.Equal(400, answer.Status);
+                var sentence = (string)answer.Body!["error"]!;
+                Assert.Contains($"{refused}", sentence, StringComparison.Ordinal);
+                Assert.DoesNotContain("Parameter", sentence, StringComparison.Ordinal);
+                await Assert.ThrowsAsync<ArgumentException>(() => store.SaveProfileAsync(refused, null, "for no server", "dave", null, ct));
+            }
+
+            Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, "{\"scope_server_id\":0,\"profile_text\":\"\"}")).Status);
+            Assert.Equal("1|fleet: OLTP", await ScalarAsync(owner, "SELECT count(*) || '|' || max(profile_text) FROM config.agent_environment_profiles WHERE scope_server_id IS NULL AND scope_tag_id IS NULL", ct));
+            Assert.Equal(fleetStamp, await ScalarAsync(owner, "SELECT modified_at::text FROM config.agent_environment_profiles", ct));
+            Assert.Equal("1", await ScalarAsync(owner, Rows, ct));
+            Assert.Equal("1", await ScalarAsync(owner, Journal, ct));
+
+            /* A registered server still saves; an orphan profile (its server gone) can still be removed by a blank save. */
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{ServerId},\"profile_text\":\"server: reporting\"}}")).Status);
+            Assert.Equal("2", await ScalarAsync(owner, Rows, ct));
+
+            /* A defined server that has never connected saves, through the web and through the store. */
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{neverConnected},\"profile_text\":\"server: just added\"}}")).Status);
+            Assert.Equal("3", await ScalarAsync(owner, Rows, ct));
+            await store.SaveProfileAsync(neverConnected, null, "server: just added, edited", "dave",
+                (await store.ListProfilesAsync(ct)).First(p => p.ScopeServerId == neverConnected).ModifiedAtUtc, ct);
+            Assert.Equal("server: just added, edited", await ScalarAsync(owner, $"SELECT profile_text FROM config.agent_environment_profiles WHERE scope_server_id = {neverConnected}", ct));
+
+            await ExecAsync(owner, $"INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text, modified_by) VALUES ({unregistered}, 'orphan', 'test')", ct);
+            Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{unregistered},\"profile_text\":\"orphan, edited\"}}")).Status);
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{unregistered},\"profile_text\":\"\"}}")).Status);
+            Assert.Equal("3", await ScalarAsync(owner, Rows, ct));
         }, seat: new DarlingWebSeat("alice", true));
     }
 

@@ -561,9 +561,13 @@ public sealed class AgentLevel2StoreGrantLiveTests
             Assert.True(long.Parse(await ScalarAsync(owner, "SELECT config_version FROM config.config_service", ct), CultureInfo.InvariantCulture) > version, "mcp's write reaches the beacon");
             await ExecAsync(mcp, "DELETE FROM config.config_threshold_overrides WHERE threshold_key = 'blocking.seconds'", ct);
 
+            /* #6400: record_investigation_feedback runs as mcp, so mcp holds INSERT on the six feedback columns and UPDATE on the six it replaces.
+               Nothing wider: not the request, and no DELETE. */
             Assert.Equal("0", await ScalarAsync(mcp, "SELECT count(*) FROM config.investigation_feedback", ct));
-            await AssertDeniedAsync(mcp, "INSERT INTO config.investigation_feedback (request_id, verdict, author) VALUES ('66666666-6666-6666-6666-666666666666', 'right', 'mcp-agent')", ct);
-            await AssertDeniedAsync(mcp, "UPDATE config.investigation_feedback SET verdict = 'wrong'", ct);
+            await ExecAsync(mcp, "INSERT INTO config.investigation_feedback (request_id, verdict, corrected_verdict, missed_step, comment, author) VALUES ('66666666-6666-6666-6666-666666666666', 'right', NULL, NULL, 'c', 'mcp-agent')", ct);
+            await ExecAsync(mcp, "UPDATE config.investigation_feedback SET verdict = 'wrong', corrected_verdict = NULL, missed_step = NULL, comment = 'edited', author = 'mcp-agent', created_at = now() WHERE author = 'mcp-agent'", ct);
+            Assert.Equal("wrong", await ScalarAsync(mcp, "SELECT verdict FROM config.investigation_feedback WHERE author = 'mcp-agent'", ct));
+            await AssertDeniedAsync(mcp, "UPDATE config.investigation_feedback SET request_id = gen_random_uuid()", ct);
             await AssertDeniedAsync(mcp, "DELETE FROM config.investigation_feedback", ct);
 
             /* V196 (#5632): the switch table is read by every role and written by none of them, so a role cannot turn an action on. */
@@ -573,6 +577,7 @@ public sealed class AgentLevel2StoreGrantLiveTests
             await AssertDeniedAsync(mcp, "DELETE FROM config.config_server_actions", ct);
         }
 
+        await ExecAsync(owner, "DELETE FROM config.investigation_feedback", ct);
         await ExecAsync(owner, "INSERT INTO config.config_threshold_overrides (server_id, threshold_key, value, set_by) VALUES (5909, 'cpu.percent', 80, 'owner')", ct);
         await ExecAsync(owner, "INSERT INTO config.investigation_feedback (request_id, verdict, author) VALUES ('66666666-6666-6666-6666-666666666666', 'right', 'erik')", ct);
         await using (var viewer = await LoginAsync(scratch, "viewer", viewerPassword, ct))

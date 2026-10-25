@@ -234,6 +234,34 @@ public sealed class ServerActionSwitchWriteLiveTests
     }
 
     [Fact]
+    public async Task TheMcpTool_JournalsTheLegacyTokenAsLegacyToken_AndANamedTokenByItsName_NeverTheFingerprintTheLogCarries()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            try
+            {
+                ReadCaller.SetAmbientMcpCaller("claude-desktop 1.2.3");
+                ReadCaller.SetAmbientMcpToken(ReadCaller.OfMcpToken("a-legacy-bearer-token"));
+                Assert.Matches("^token [0-9a-f]{8}, client says: ", ReadCaller.WriteIdentity());
+                Assert.Equal("set", (string)JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, owner, null, "alpha-sql-01", "evict_plan", true, DarlingMcpServerActionTools.ActorOf(), ct))!["status"]!);
+                var legacy = await ScalarAsync(owner, "SELECT actor FROM config.investigation_journal WHERE event = 'server_action_switched'", ct);
+                Assert.Equal("mcp:legacy token, client says: claude-desktop 1.2.3", legacy);
+                Assert.DoesNotMatch("[0-9a-f]{8}", legacy);
+
+                ReadCaller.SetAmbientMcpToken("named token ops");
+                Assert.Equal("set", (string)JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, owner, null, "alpha-sql-01", "evict_plan", false, DarlingMcpServerActionTools.ActorOf(), ct))!["status"]!);
+                Assert.Equal("mcp:named token ops, client says: claude-desktop 1.2.3",
+                    await ScalarAsync(owner, "SELECT actor FROM config.investigation_journal WHERE event = 'server_action_switched' ORDER BY journal_id DESC LIMIT 1", ct));
+            }
+            finally
+            {
+                ReadCaller.SetAmbientMcpToken(null);
+                ReadCaller.SetAmbientMcpCaller(null);
+            }
+        });
+    }
+
+    [Fact]
     public void TheMcpTool_IsServedOnlyUnderAllowServerAdmin_AndNeverToAnInvestigationAgentEvenWhenItsToolSetNamesIt()
     {
         const string tool = "set_server_action";
