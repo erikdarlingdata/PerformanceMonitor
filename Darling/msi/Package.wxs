@@ -22,7 +22,7 @@
   Public properties (msiexec /i X.msi /qn OPERATORACCOUNT=CONTOSO\jdoe WEBDASHBOARD=1):
     INSTALLFOLDER     default C:\Program Files\PerformanceMonitorDarling
     OPERATORACCOUNT   DOMAIN\user added to the 'PerformanceMonitor Darling Operators' group (install-darling.ps1 -AddOperator)
-    WEBDASHBOARD      1 seeds web.enabled in the darling.json the script writes (ignored when darling.json exists)
+    WEBDASHBOARD      1 seeds web.enabled and a DPAPI-encrypted web.network.encryptedToken in the darling.json the script writes (ignored when darling.json exists)
     PURGEDATA         1 deletes the store on uninstall (uninstall-darling.ps1 -PurgeData -ConfirmPurge)
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
