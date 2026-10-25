@@ -73,19 +73,20 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Operator token only: expiry minutes, 15 to 1440. Omit to keep.")] int? agent_expiry_minutes = null,
         DarlingMcpServedPolicy? served = null,
         ILogger? logger = null,
+        PostgresConfig? postgresConfig = null,
         CancellationToken cancellationToken = default) =>
         CreateNotificationRouteAsync(
             postgres, metric_match, enabled, scope_server_id, scope_tag_id, send_resolutions, fallback_route_id,
             new RouteDestinationRequest(teams_webhook_url, slack_webhook_url, generic_webhook_url, pagerduty_routing_key, email_recipients),
             DarlingPasswordKey.Current, logger, cancellationToken,
             new RouteAgentRequest(agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes),
-            served?.Policy.OperatorActor);
+            served?.Policy.OperatorActor, StoreRolesAreRunByOperator(postgresConfig));
 
     /// <summary>The create: the route and its destinations in one transaction (a sealed value is bound to the route's id, so the id comes first).</summary>
     internal static async Task<string> CreateNotificationRouteAsync(
         NpgsqlDataSource postgres, string metric_match, bool enabled, int? scope_server_id, int? scope_tag_id, string? send_resolutions,
         int? fallback_route_id, RouteDestinationRequest destinations, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
-        RouteAgentRequest? agent = null, string? operatorActor = null)
+        RouteAgentRequest? agent = null, string? operatorActor = null, bool selfManagedStore = true)
     {
         try
         {
@@ -148,7 +149,7 @@ public sealed partial class DarlingMcpAlertTools
 
                 await transaction.CommitAsync(cancellationToken);
             }
-            catch (PostgresException ex) when (RouteFunctionOutcome(ex) is { } refusal)
+            catch (PostgresException ex) when (RouteFunctionOutcome(ex, selfManagedStore) is { } refusal)
             {
                 return refusal;
             }
@@ -222,19 +223,21 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Operator token only: true puts agent_level back to Inherit (null), so the next level decides. The limits are kept. Not with agent_level.")] bool? clear_agent_level = null,
         DarlingMcpServedPolicy? served = null,
         ILogger? logger = null,
+        PostgresConfig? postgresConfig = null,
         CancellationToken cancellationToken = default) =>
         UpdateNotificationRouteAsync(
             postgres, route_id, metric_match, enabled, scope_server_id, scope_tag_id, fleet_wide, send_resolutions, fallback_route_id, clear_fallback,
             new RouteDestinationRequest(teams_webhook_url, slack_webhook_url, generic_webhook_url, pagerduty_routing_key, email_recipients),
             DarlingPasswordKey.Current, logger, cancellationToken,
             new RouteAgentRequest(agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, clear_agent_level == true),
-            served?.Policy.OperatorActor);
+            served?.Policy.OperatorActor, StoreRolesAreRunByOperator(postgresConfig));
 
     /// <summary>The edit: the match, scope and flag columns and the destinations in one transaction.</summary>
     internal static async Task<string> UpdateNotificationRouteAsync(
         NpgsqlDataSource postgres, int route_id, string? metric_match, bool? enabled, int? scope_server_id, int? scope_tag_id, bool? fleet_wide,
         string? send_resolutions, int? fallback_route_id, bool? clear_fallback, RouteDestinationRequest destinations, IPasswordKeyRing ring,
-        ILogger? logger, CancellationToken cancellationToken, RouteAgentRequest? agent = null, string? operatorActor = null)
+        ILogger? logger, CancellationToken cancellationToken, RouteAgentRequest? agent = null, string? operatorActor = null,
+        bool selfManagedStore = true)
     {
         try
         {
@@ -421,7 +424,7 @@ public sealed partial class DarlingMcpAlertTools
 
                 await transaction.CommitAsync(cancellationToken);
             }
-            catch (PostgresException ex) when (RouteFunctionOutcome(ex) is { } refusal)
+            catch (PostgresException ex) when (RouteFunctionOutcome(ex, selfManagedStore) is { } refusal)
             {
                 return refusal;
             }
@@ -566,17 +569,26 @@ public sealed partial class DarlingMcpAlertTools
 
     /// <summary>The fixed answer when the store has no route, signing-key or default-channel function the calling role may run: a
     /// self-managed store whose roles were provisioned by an older build (3.12 added and changed these functions, and only
-    /// provision-roles.sql creates them). Never PostgreSQL's own text. The web dashboard's route save says the same.</summary>
+    /// provision-roles.sql creates them). Never PostgreSQL's own text. The web dashboard's route save does not use it: it writes
+    /// the table on its own login and maps a 42501 itself (<c>DarlingWebAgentSetup</c>).</summary>
     internal const string RouteStoreNeedsRolesText =
         "This store's roles predate this route, signing key or notification channel write: re-run Darling/tools/provision-roles.sql on the store, then try again.";
 
+    /// <summary>Whether the operator runs provision-roles.sql on this store: false on the managed store and on a compose store whose roles
+    /// this service provisioned, where the script is never run by hand. A host with no config is treated as self-managed.</summary>
+    internal static bool StoreRolesAreRunByOperator(PostgresConfig? postgresConfig) =>
+        !DarlingWebStoreWrites.IsManaged(postgresConfig)
+        && !(Hosting.DarlingHostBinding.IsRunningInContainer && DarlingStoreLogins.ReadComposeStoreVerdict() is { Provisioned: true });
+
     /// <summary>The refusal a route function raised (its own DL400, DL403 or DL404 sentence), the re-run sentence when the store lacks
-    /// the function or the role may not run it (42883, 42501), or null for any other error.</summary>
-    private static string? RouteFunctionOutcome(PostgresException ex) => ex.SqlState switch
+    /// the function (42883) or, on a self-managed store, the role may not run it (42501), or null for any other error. A 42501 on a managed
+    /// or compose store gets no re-run advice (nobody runs the script there) and keeps the answer the tools gave before.</summary>
+    private static string? RouteFunctionOutcome(PostgresException ex, bool selfManagedStore = true) => ex.SqlState switch
     {
         "DL400" or "DL404" => Outcome("invalid", ex.MessageText),
         "DL403" => Outcome("refused", ex.MessageText),
-        "42883" or "42501" => Outcome("refused", RouteStoreNeedsRolesText),
+        "42883" => Outcome("refused", RouteStoreNeedsRolesText),
+        "42501" when selfManagedStore => Outcome("refused", RouteStoreNeedsRolesText),
         _ => null,
     };
 

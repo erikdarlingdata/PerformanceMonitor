@@ -93,6 +93,37 @@ public sealed class McpRouteRoleLiveTests
         });
     }
 
+    /* A role that may not run the update function gets a 42501. Only a self-managed store has an operator who runs provision-roles.sql, so
+       only there does the tool say to re-run it; a managed or compose store keeps the answer the tool gave before (no re-run advice). */
+    [Fact]
+    public async Task ARoleRefusedTheUpdateFunction_AnswersTheReRunSentenceOnASelfManagedStoreOnly()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var created = await DarlingMcpAlertTools.CreateNotificationRoute(asMcp, "Blocking", send_resolutions: "never", cancellationToken: ct);
+            var routeId = JsonDocument.Parse(created).RootElement.GetProperty("route").GetProperty("route_id").GetInt32();
+
+            string role;
+            await using (var whoAmI = asMcp.CreateCommand("SELECT current_user"))
+            {
+                role = (string)(await whoAmI.ExecuteScalarAsync(ct))!;
+            }
+
+            await ExecAsync(owner,
+                "DO $$ DECLARE f regprocedure; BEGIN FOR f IN SELECT p.oid::regprocedure FROM pg_proc p WHERE p.proname = 'update_notification_route' " +
+                "AND p.pronamespace = 'config'::regnamespace LOOP EXECUTE 'REVOKE EXECUTE ON FUNCTION ' || f || ' FROM ' || quote_ident('" + role + "'); END LOOP; END $$", ct);
+
+            var selfManaged = await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, metric_match: "Deadlocks", cancellationToken: ct);
+            Assert.Equal("refused", Status(selfManaged));
+            Assert.Equal(DarlingMcpAlertTools.RouteStoreNeedsRolesText, JsonDocument.Parse(selfManaged).RootElement.GetProperty("message").GetString());
+
+            var managed = await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, routeId, metric_match: "Deadlocks", cancellationToken: ct, postgresConfig: new PostgresConfig { Managed = true });
+            Assert.DoesNotContain("provision-roles.sql", managed, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"updated\"", managed, StringComparison.Ordinal);
+        });
+    }
+
     /* The signing-key and default-channel functions are new in 3.12 and only provision-roles.sql creates them: the harness store has none,
        as a self-managed store upgraded from 3.11 has none. */
     [Fact]

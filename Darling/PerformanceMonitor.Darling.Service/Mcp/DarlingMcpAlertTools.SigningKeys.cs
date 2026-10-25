@@ -60,8 +60,10 @@ public sealed partial class DarlingMcpAlertTools
         StoreOwnerSource? ownerSource = null,
         IHttpContextAccessor? httpContextAccessor = null,
         ILogger? logger = null,
+        PostgresConfig? postgresConfig = null,
         CancellationToken cancellationToken = default) =>
-        GenerateWebhookSigningKeyAsync(postgres, ownerSource?.Read(), route_id, replace_pending_rotation, httpContextAccessor?.HttpContext, DarlingPasswordKey.Current, logger, cancellationToken);
+        GenerateWebhookSigningKeyAsync(postgres, ownerSource?.Read(), route_id, replace_pending_rotation, httpContextAccessor?.HttpContext, DarlingPasswordKey.Current, logger, cancellationToken,
+            StoreRolesAreRunByOperator(postgresConfig));
 
     [McpServerTool(Name = "remove_webhook_signing_key"), Description(
         "Removes the signing key of a generic webhook destination, the default one or one route's, with its previous key. Needs mcp.allowWrites and a token. " +
@@ -74,8 +76,9 @@ public sealed partial class DarlingMcpAlertTools
         NpgsqlDataSource postgres,
         [Description(SigningKeyScopeHelp)] int? route_id = null,
         ILogger? logger = null,
+        PostgresConfig? postgresConfig = null,
         CancellationToken cancellationToken = default) =>
-        RemoveWebhookSigningKeyAsync(postgres, route_id, logger, cancellationToken);
+        RemoveWebhookSigningKeyAsync(postgres, route_id, logger, cancellationToken, StoreRolesAreRunByOperator(postgresConfig));
 
     /// <summary>The refusal of a generate that would send the key over plain HTTP to a non-local address, or null. A call with no HTTP
     /// context (an in-process caller) is served; so is a TLS request and a request from a loopback address (a TLS-ending proxy on the same
@@ -97,7 +100,7 @@ public sealed partial class DarlingMcpAlertTools
     /// seals the key for them, and stores it through the store's set function (which writes only when the URL and proxy are still those).</summary>
     internal static async Task<string> GenerateWebhookSigningKeyAsync(
         NpgsqlDataSource postgres, NpgsqlDataSource? owner, int? routeId, bool replacePendingRotation, HttpContext? httpContext,
-        IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken)
+        IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken, bool selfManagedStore = true)
     {
         try
         {
@@ -177,7 +180,7 @@ public sealed partial class DarlingMcpAlertTools
                     until = await write.ExecuteScalarAsync(cancellationToken) is DateTime window ? DateTime.SpecifyKind(window.ToUniversalTime(), DateTimeKind.Utc) : null;
                 }
             }
-            catch (PostgresException ex) when (SigningKeyFunctionOutcome(ex) is { } functionRefusal)
+            catch (PostgresException ex) when (SigningKeyFunctionOutcome(ex, selfManagedStore) is { } functionRefusal)
             {
                 return functionRefusal;
             }
@@ -210,7 +213,7 @@ public sealed partial class DarlingMcpAlertTools
     }
 
     /// <summary>Clears the key, the previous key and the window through the store's clear function.</summary>
-    internal static async Task<string> RemoveWebhookSigningKeyAsync(NpgsqlDataSource postgres, int? routeId, ILogger? logger, CancellationToken cancellationToken)
+    internal static async Task<string> RemoveWebhookSigningKeyAsync(NpgsqlDataSource postgres, int? routeId, ILogger? logger, CancellationToken cancellationToken, bool selfManagedStore = true)
     {
         try
         {
@@ -228,7 +231,7 @@ public sealed partial class DarlingMcpAlertTools
                 NotificationRouteWriter.AddNullableInt(command, routeId);
                 had = await command.ExecuteScalarAsync(cancellationToken) is true;
             }
-            catch (PostgresException ex) when (SigningKeyFunctionOutcome(ex) is { } functionRefusal)
+            catch (PostgresException ex) when (SigningKeyFunctionOutcome(ex, selfManagedStore) is { } functionRefusal)
             {
                 return functionRefusal;
             }
@@ -263,8 +266,8 @@ public sealed partial class DarlingMcpAlertTools
         "There is no saved generic webhook URL to tie a key to. Save the generic webhook URL first (update_notification_route for a route, Settings > Notifications for the default), then generate the key.";
 
     /// <summary>The refusal a signing key function raised: a route that does not exist is not_found, any other is the route functions' own mapping.</summary>
-    private static string? SigningKeyFunctionOutcome(PostgresException ex) =>
-        ex.SqlState == "DL404" ? Outcome("not_found", ex.MessageText) : RouteFunctionOutcome(ex);
+    private static string? SigningKeyFunctionOutcome(PostgresException ex, bool selfManagedStore = true) =>
+        ex.SqlState == "DL404" ? Outcome("not_found", ex.MessageText) : RouteFunctionOutcome(ex, selfManagedStore);
 
     private static string? SigningKeyRouteRefusal(int? routeId) =>
         routeId is { } id && id < 1 ? Outcome("invalid", "route_id is a positive number from get_notification_routes; omit it for the default destination's key.") : null;

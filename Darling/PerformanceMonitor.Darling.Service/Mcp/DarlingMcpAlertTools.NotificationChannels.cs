@@ -79,6 +79,7 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Proxy address for PagerDuty. Omit to keep; - removes it.")] string? pagerduty_proxy = null,
         [Description("Resolve the PagerDuty incident when the alert clears. Omit to keep.")] bool? pagerduty_auto_resolve = null,
         ILogger? logger = null,
+        PostgresConfig? postgresConfig = null,
         CancellationToken cancellationToken = default) =>
         UpdateNotificationChannelsAsync(
             postgres,
@@ -86,11 +87,12 @@ public sealed partial class DarlingMcpAlertTools
                 smtp_host, smtp_port, smtp_ssl, smtp_user, smtp_password, smtp_from, smtp_recipients, teams_webhook_url, teams_proxy,
                 slack_webhook_url, slack_proxy, generic_webhook_url, generic_headers, generic_body_template, generic_proxy,
                 pagerduty_routing_key, pagerduty_eu_region, pagerduty_proxy, pagerduty_auto_resolve),
-            DarlingPasswordKey.Current, logger, cancellationToken);
+            DarlingPasswordKey.Current, logger, cancellationToken, StoreRolesAreRunByOperator(postgresConfig));
 
     /// <summary>The settings write: read the stored settings, validate and seal, call the store function, read them again, in one transaction.</summary>
     internal static async Task<string> UpdateNotificationChannelsAsync(
-        NpgsqlDataSource postgres, NotificationChannelsRequest request, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, NotificationChannelsRequest request, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
+        bool selfManagedStore = true)
     {
         try
         {
@@ -121,7 +123,7 @@ public sealed partial class DarlingMcpAlertTools
                 after = await ReadChannelSettingsAsync(connection, transaction, cancellationToken) ?? before;
                 await transaction.CommitAsync(cancellationToken);
             }
-            catch (PostgresException ex) when (RouteFunctionOutcome(ex) is { } refusal)
+            catch (PostgresException ex) when (RouteFunctionOutcome(ex, selfManagedStore) is { } refusal)
             {
                 return refusal;
             }
