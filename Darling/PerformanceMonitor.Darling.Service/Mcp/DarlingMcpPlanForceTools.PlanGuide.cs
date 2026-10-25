@@ -37,9 +37,10 @@ public sealed partial class DarlingMcpPlanForceTools
     /// <summary>The refusal reason for a drop of a guide its Undo could not re-create (#6569): the definition read does not pass the checks a create makes.</summary>
     internal const string GuideNotUndoable = "guide_not_undoable";
 
-    /* SERVERPROPERTY('EngineEdition') as the registry stores it: 5 is an Azure SQL Database, 8 an Azure SQL Managed Instance. */
-    private const int AzureSqlDatabaseEdition = 5;
-    private const int AzureManagedInstanceEdition = 8;
+    /* SERVERPROPERTY('EngineEdition') as the registry stores it: 5 is an Azure SQL Database, 8 an Azure SQL Managed Instance. The numbers live in
+       ServerActionNames, which the switch rule reads too (#6727), so a switch cannot turn on for an edition these tools always refuse. */
+    private const int AzureSqlDatabaseEdition = ServerActionNames.AzureSqlDatabaseEdition;
+    private const int AzureManagedInstanceEdition = ServerActionNames.AzureManagedInstanceEdition;
 
     /// <summary>The create tool body (#6569), so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
     internal static async Task<string> RunCreatePlanGuideAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, string? server_name, string? database_name,

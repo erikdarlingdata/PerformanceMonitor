@@ -348,14 +348,41 @@ public static class ServerActionNames
     /// <summary>Every server action, the table's CHECK list.</summary>
     public static readonly IReadOnlyList<string> All = new[] { ForcePlan, EvictPlan, KillSession, RecompileModule, CreatePlanGuide, DropPlanGuide };
 
+    /// <summary>SERVERPROPERTY('EngineEdition') for an Azure SQL Database, as <c>collect.servers.sql_engine_edition</c> stores it (#6727). One spelling: it is <see cref="PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition"/>.</summary>
+    public const int AzureSqlDatabaseEdition = PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition;
+
+    /// <summary>SERVERPROPERTY('EngineEdition') for an Azure SQL Managed Instance (#6727).</summary>
+    public const int AzureManagedInstanceEdition = 8;
+
     /// <summary>
     /// Whether <paramref name="action"/> can ever run on a server of that engine (#6269): a Query Store plan force and a plan-cache
     /// eviction are SQL Server only, and a session kill runs on SQL Server and on PostgreSQL. A switch for an action the engine
     /// cannot run is refused, so no row says "on" for something the server can never do. False for a name not in <see cref="All"/>.
+    /// <para>#6727: <paramref name="sqlEngineEdition"/> is the probed edition of a SQL Server target. An Azure SQL Database has no plan handle
+    /// eviction and no plan guides, and an Azure SQL Managed Instance has no plan guides; the tools refuse those every time, so the switch does
+    /// not turn on for them. Null (not collected yet) answers as an ordinary SQL Server: the tool still refuses at run time.</para>
     /// </summary>
-    public static bool IsValidForEngine(string? action, bool postgres) =>
-        string.Equals(action, KillSession, StringComparison.Ordinal)
-        || (!postgres && (string.Equals(action, ForcePlan, StringComparison.Ordinal) || string.Equals(action, EvictPlan, StringComparison.Ordinal) || string.Equals(action, RecompileModule, StringComparison.Ordinal) || string.Equals(action, CreatePlanGuide, StringComparison.Ordinal) || string.Equals(action, DropPlanGuide, StringComparison.Ordinal)));
+    public static bool IsValidForEngine(string? action, bool postgres, int? sqlEngineEdition)
+    {
+        if (string.Equals(action, KillSession, StringComparison.Ordinal))
+            return true;
+        if (postgres)
+            return false;
+        if (sqlEngineEdition == AzureSqlDatabaseEdition && string.Equals(action, EvictPlan, StringComparison.Ordinal))
+            return false;
+        if (sqlEngineEdition is AzureSqlDatabaseEdition or AzureManagedInstanceEdition
+            && (string.Equals(action, CreatePlanGuide, StringComparison.Ordinal) || string.Equals(action, DropPlanGuide, StringComparison.Ordinal)))
+            return false;
+        return string.Equals(action, ForcePlan, StringComparison.Ordinal) || string.Equals(action, EvictPlan, StringComparison.Ordinal) || string.Equals(action, RecompileModule, StringComparison.Ordinal)
+            || string.Equals(action, CreatePlanGuide, StringComparison.Ordinal) || string.Equals(action, DropPlanGuide, StringComparison.Ordinal);
+    }
+
+    /// <summary>The plain reason <see cref="IsValidForEngine"/> answered false, for the sentence of a refused switch (#6727).</summary>
+    public static string EngineDescription(bool postgres, int? sqlEngineEdition) =>
+        postgres ? "a PostgreSQL target"
+        : sqlEngineEdition == AzureSqlDatabaseEdition ? "an Azure SQL Database"
+        : sqlEngineEdition == AzureManagedInstanceEdition ? "an Azure SQL Managed Instance"
+        : "a SQL Server target";
 }
 
 /// <summary>What a server's remediation slots hold, as the server-action gate classifies them (#5632, step 5). The gate never

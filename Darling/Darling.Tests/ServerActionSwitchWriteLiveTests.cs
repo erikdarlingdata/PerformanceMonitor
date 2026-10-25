@@ -595,6 +595,65 @@ public sealed class ServerActionSwitchWriteLiveTests
         });
     }
 
+    /* #6727: the registry says "sqlserver" for an Azure SQL target too; the probed edition in collect.servers is what the plan guide and eviction tools refuse on. */
+    [Fact]
+    public async Task AnAzureSqlTarget_RefusesTheSwitchesItsToolsAlwaysRefuse_OnAndListsThemInvalid_WhileOffAndTheOtherActionsStillWork()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            async Task<IReadOnlyDictionary<string, bool>> ValidAsync()
+            {
+                var rows = await ServerActionSwitches.ListAsync(owner, ct);
+                return rows.Single(r => r.ServerId == 1).Actions.ToDictionary(a => a.Action, a => a.Valid, StringComparer.Ordinal);
+            }
+
+            /* Edition 5, an Azure SQL Database: no eviction and no plan guides. */
+            await ExecAsync(owner, "UPDATE collect.servers SET sql_engine_edition = 5 WHERE server_id = 1", ct);
+            var evict = await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.EvictPlan, true, "person:alice", ServerActionSurfaces.Mcp, ct);
+            Assert.False(evict.Succeeded);
+            Assert.Equal("not_for_engine", evict.Code);
+            Assert.Contains("Azure SQL Database", evict.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("a SQL Server target", evict.Message, StringComparison.Ordinal);
+            Assert.Equal("not_for_engine", (await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.CreatePlanGuide, true, "person:alice", ServerActionSurfaces.Mcp, ct)).Code);
+            Assert.Equal("not_for_engine", (await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.DropPlanGuide, true, "person:alice", ServerActionSurfaces.Mcp, ct)).Code);
+            var valid = await ValidAsync();
+            Assert.False(valid[ServerActionNames.EvictPlan]);
+            Assert.False(valid[ServerActionNames.CreatePlanGuide]);
+            Assert.False(valid[ServerActionNames.DropPlanGuide]);
+            Assert.True(valid[ServerActionNames.ForcePlan]);
+            Assert.True(valid[ServerActionNames.KillSession]);
+            Assert.True(valid[ServerActionNames.RecompileModule]);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions WHERE server_id = 1", ct));
+            Assert.True((await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.KillSession, true, "person:alice", ServerActionSurfaces.Mcp, ct)).Succeeded);
+
+            /* Edition 8, a Managed Instance: no plan guides, but eviction runs. */
+            await ExecAsync(owner, "UPDATE collect.servers SET sql_engine_edition = 8 WHERE server_id = 1", ct);
+            var guide = await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.CreatePlanGuide, true, "person:alice", ServerActionSurfaces.Mcp, ct);
+            Assert.Equal("not_for_engine", guide.Code);
+            Assert.Contains("Azure SQL Managed Instance", guide.Message, StringComparison.Ordinal);
+            Assert.Equal("not_for_engine", (await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.DropPlanGuide, true, "person:alice", ServerActionSurfaces.Mcp, ct)).Code);
+            Assert.True((await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.EvictPlan, true, "person:alice", ServerActionSurfaces.Mcp, ct)).Succeeded);
+            valid = await ValidAsync();
+            Assert.True(valid[ServerActionNames.EvictPlan]);
+            Assert.False(valid[ServerActionNames.CreatePlanGuide]);
+            Assert.False(valid[ServerActionNames.DropPlanGuide]);
+
+            /* A switch left on before the edition was probed as Azure SQL Database can still be turned off. */
+            await ExecAsync(owner, "UPDATE collect.servers SET sql_engine_edition = 5 WHERE server_id = 1", ct);
+            var off = await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.EvictPlan, false, "person:alice", ServerActionSurfaces.Mcp, ct);
+            Assert.True(off.Succeeded);
+            Assert.Equal("set", off.Status);
+
+            /* No edition probed yet, and no collect.servers row at all: answers as an ordinary SQL Server, as before. */
+            await ExecAsync(owner, "UPDATE collect.servers SET sql_engine_edition = NULL WHERE server_id = 1", ct);
+            Assert.True((await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.CreatePlanGuide, true, "person:alice", ServerActionSurfaces.Mcp, ct)).Succeeded);
+            await ExecAsync(owner, "DELETE FROM collect.servers WHERE server_id = 1", ct);
+            Assert.True((await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.EvictPlan, true, "person:alice", ServerActionSurfaces.Mcp, ct)).Succeeded);
+            valid = await ValidAsync();
+            Assert.All(ServerActionNames.All, a => Assert.True(valid[a], a));
+        });
+    }
+
     [Theory]
     [InlineData("admin")]
     [InlineData("mcp")]
