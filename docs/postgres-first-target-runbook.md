@@ -1,7 +1,9 @@
 # Runbook: point Darling at a PostgreSQL target
 
+Audience: operators.
+
 End to end, with a **proof point at every step** — what to look at, and what it should say. The
-[README's PostgreSQL Targets section](../Darling/README.md#postgresql-targets) is the reference for *what*
+[PostgreSQL Targets page](darling/postgresql-targets.md) is the reference for *what*
 each collector does; this is the ordered procedure for getting one collecting and knowing that it is.
 
 > **Status.** This started as the procedure derived from the code, written before the service had ever
@@ -24,10 +26,10 @@ each collector does; this is the ordered procedure for getting one collecting an
 
 | | | Check |
 |---|---|---|
-| A target | Aurora PostgreSQL, or self-managed PostgreSQL 10 or later. An older version stores NULL for a column it lacks, and `pg_io_stats` needs 16 (see [Oldest PostgreSQL version per collector](../Darling/README.md#oldest-postgresql-version-per-collector)) | `SELECT version();` |
+| A target | Aurora PostgreSQL, or self-managed PostgreSQL 10 or later. An older version stores NULL for a column it lacks, and `pg_io_stats` needs 16 (see [Oldest PostgreSQL version per collector](darling/postgresql-targets.md#oldest-postgresql-version-per-collector)) | `SELECT version();` |
 | A login on it | `pg_monitor`, password auth | step 1 |
 | A store | Managed (bundled) or your own PostgreSQL | README [The Store](../Darling/README.md#the-store) |
-| The service | A current release, installed as the README describes ([Install as a Windows Service](../Darling/README.md#install-as-a-windows-service)) | `PerformanceMonitor.Darling.Service.exe --version` |
+| The service | A current release, installed as [Install as a Windows Service](darling/install.md#install-as-a-windows-service) describes | `PerformanceMonitor.Darling.Service.exe --version` |
 | Network | The service host must reach the target's port 5432 | `nc -z <host> 5432` |
 
 On Aurora, "the target" is one **instance**, not the cluster. A writer and a reader are two entries with
@@ -75,7 +77,7 @@ sits on top of `pg_stat_statements`), `pg_predicate_stats` (`pg_qualstats` — p
 `CREATE EXTENSION` per database), and `pg_wait_sampling` (the `pg_wait_sampling` module — preload-only,
 so check it with `SHOW shared_preload_libraries;`, not `pg_extension`). Skipping any of them is fine:
 the collector records a non-fatal skip naming exactly which install is missing (step 10), and the other
-24 collectors are unaffected.
+collectors are unaffected.
 
 `pg_wait_sampling` is the one whose absence is no longer a skip (#3604). Without the extension the same
 collector takes its **service-sampler arm**: it polls `pg_stat_activity` once a second for a 30-second
@@ -412,11 +414,11 @@ carries any older store to the newest version. `StorageVersion.SchemaVersion` is
 3.11.0), and step 5's proof line quotes whatever it says at your build.
 
 **Before starting, if your store is unmanaged and has TimescaleDB**, re-derive the background-worker
-settings. Every collector table becomes a hypertable — all 71 of them, 29 PostgreSQL — so the required
+settings. Nearly every collector table becomes a hypertable. The required
 numbers move whenever collectors are added, and undersizing does not error — it silently stops
 compression and retention from running. See
 [Background workers](../Darling/README.md#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont);
-for an 8 GB host the numbers are 128 and 139 for 72 hypertables (74 and 85 at 4 GB or less, 177 and 188 at 12 GB or more), and both need a server restart. Managed mode does this itself.
+this build's first start migrates the store and can add hypertables. After that start, count your hypertables and continuous aggregates with the two queries there and work its formula. For example, a store with 72 hypertables and 29 continuous aggregates gets 128 and 139 on an 8 GB host. It gets 74 and 85 at 4 GB or less, and 177 and 188 at 12 GB or more. Both settings need a server restart. Managed mode does this itself.
 
 ## 5. First start, in console mode
 
@@ -577,7 +579,7 @@ sentence the data can support if both are sampled on the same grain.
 ## 8. Read it
 
 Through MCP — a read per collector, plus the trend, detail and config-diff readers that sit on top of
-them; 35 `get_pg_*` tools in all, registered by the same service:
+them; more than 30 `get_pg_*` tools in all, registered by the same service:
 
 | Tool | Answers |
 |---|---|

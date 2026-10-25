@@ -2812,7 +2812,7 @@ LIMIT 1";
         await using var postgres = NpgsqlDataSource.Create(
             DarlingStoreConnection.PinSessionTimeZoneUtc(
                 DarlingStoreConnection.WithApplicationName(
-                    EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName)));
+                    DarlingStoreConnection.EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName)));
         _postgres = postgres;
         _ownerSource?.Publish(postgres);
         /* #2936: a failure here is triaged rather than uniformly terminal. A store that is unreachable for
@@ -3326,6 +3326,10 @@ LIMIT 1";
            Never throws; a key that cannot be used is a refusing ring with the reason logged and recorded in the store. */
         _passwordKeyRuntime = await DarlingPasswordKeyRuntime.StartForServiceAsync(
             config, DarlingConfig.ResolveConfigPath(), postgres, _logger, stoppingToken);
+        /* #6715: the seed above copies the webhook values from darling.json as plain text, because the ring it would seal them with
+           needs the seeded store and loads only now. Seal those (and any an older build left) here, before the first view reads the
+           row, so this host's reload baseline already includes the write's config_version bump. Never stops the start. */
+        await configProvider.SealPlainWebhookSettingsAsync(_passwordKeyRuntime.Ring, stoppingToken);
         /* #5456: a pin step that could not run is tried again on every sweep, and until it does the re-enter line says to wait.
            Set before the first view so that view's line already knows; the pins it takes bump config_version, which every
            host's reload beacon picks up. */
@@ -3457,7 +3461,7 @@ LIMIT 1";
            service is hoisted too so a reload can re-LoadAsync() it (closes F16 — the engine holds
            its IsAlertMuted delegate, so refreshing the same instance's cache mutes the next sweep). */
         var alertSettings = new DarlingAlertSettings(config, _logger);
-        var historyStore = new PgAlertHistoryStore(postgres, _logger);
+        var historyStore = new PgAlertHistoryStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, _logger);
         var webhookAlertService = new WebhookAlertService(
             alertSettings, DarlingAlertDeliverer.Branding,
             _loggerFactory.CreateLogger<WebhookAlertService>(), historyStore);
@@ -3474,7 +3478,7 @@ LIMIT 1";
             InvestigationDispatcher.WithLockTimeout(
                 DarlingStoreConnection.PinSessionTimeZoneUtc(
                     DarlingStoreConnection.WithApplicationName(
-                        EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName))));
+                        DarlingStoreConnection.EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName))));
         var investigationStore = new InvestigationRequestStore(
             investigationPostgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
         /* #5821: the generic webhook's {{investigation_json}} masks the stored brief at the level the MCP tools serve; an
@@ -3560,8 +3564,8 @@ LIMIT 1";
         if (customAlertViewerSource is not null)
         {
             _customAlertEvaluator = new CustomAlertEvaluator(
-                new CustomAlertRuleStore(postgres),
-                new CustomAlertStateStore(postgres),
+                new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds),
+                new CustomAlertStateStore(postgres, McpCommandDeadlines.ReadSeconds),
                 customAlertViewerSource,
                 deliverer,
                 muteRuleService.IsAlertMuted,
@@ -7839,47 +7843,16 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// Ensures the store connection string carries the collect/config search path (the V8 schema
-    /// split) so every pooled physical connection resolves the shared SQL's bare table names to the
-    /// <c>collect</c>/<c>config</c> schemas from its FIRST use. Managed mode already sets it
-    /// (<see cref="DarlingManagedPostgres.SearchPath"/>) — that string is returned unchanged, no
-    /// double-set. A bring-your-own connection string usually omits it and would otherwise rely on
-    /// the database-default <c>search_path</c> that
-    /// <see cref="PgMigrations.MigrateAsync(NpgsqlConnection, ILogger, CancellationToken)"/>
-    /// best-effort sets via <c>ALTER DATABASE ... SET search_path</c>.
-    ///
-    /// <para>That database default only governs the startup search_path of connections established
-    /// AFTER the ALTER commits, but the Npgsql pool's physical connections opened around it (for the
-    /// migration itself, the hypertable conversion, and the first collection sweep) keep their
-    /// pre-ALTER session search_path for their entire lifetime. On a FRESH BYO store that means the
-    /// whole first run fails — hypertable conversion, delta seeding, and every collector write hit
-    /// <c>42P01: relation "wait_stats" does not exist</c> — and collection only starts working after
-    /// a service restart hands out a fresh pool. Carrying the search path on the connection string
-    /// itself is deterministic and pool-timing-independent; any login may <c>SET</c> its own
-    /// search_path, so this is safe for least-privilege BYO logins too.</para>
+    /// The store data source the MCP and web hosts open (#6630): the operator's string (a configured
+    /// <c>postgres.mcpConnectionString</c>/<c>webConnectionString</c> or the owner fallback never runs through the managed
+    /// builder) with the collect/config search path set-if-absent, then the application name, then the UTC session pin,
+    /// in the order the worker builds its own. Without the path a login that does not own the database, on a database
+    /// with no default path, fails every unqualified read with 42P01.
     /// </summary>
-    internal static string EnsureStoreSearchPath(string connectionString)
-    {
-        var builder = new NpgsqlConnectionStringBuilder(connectionString);
-        if (string.IsNullOrWhiteSpace(builder.SearchPath))
-        {
-            /* Append, don't rewrite through the builder: round-1 review on #4285's PR found the builder's
-               writer erases a caller keyword set to an explicit empty value (Password='', ...), because it
-               emits that as a bare Key=, which its own reader treats as "not set". Appending keeps every
-               other keyword byte for byte. The constant below holds no ';', '=' or quote character, so it
-               never needs quoting — a plain "Search Path=<value>" is unambiguous.
-               DarlingManagedPostgres is annotated [SupportedOSPlatform("windows")] for its DPAPI /
-               bundled-cluster surface, but SearchPath is a platform-neutral compile-time constant
-               with no runtime dependency, and BYO mode runs on any OS — so the CA1416 cross-platform
-               reachability flag is spurious for this const reference. Suppressed narrowly rather than
-               forking the constant, keeping managed and BYO byte-identical (a test pins them equal). */
-#pragma warning disable CA1416
-            return connectionString + ";Search Path=" + DarlingManagedPostgres.SearchPath;
-#pragma warning restore CA1416
-        }
-
-        return connectionString;
-    }
+    internal static NpgsqlDataSource CreateHostStoreDataSource(string storeConnectionString, string applicationName) =>
+        NpgsqlDataSource.Create(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(DarlingStoreConnection.EnsureStoreSearchPath(storeConnectionString), applicationName)));
 
     /// <summary>
     /// Assembles the Phase-5 shared alert engine over Darling's third-party implementations:
@@ -8894,7 +8867,7 @@ LIMIT 1";
                         NumericThresholdValue: threshold,
                         Muted: muted,
                         Severity: AlertEngine.GradeDeadlockFire(count, rateTiers),
-                        ShortMessage: $"{count} deadlock(s) in the last hour"),
+                        ShortMessage: $"{count} {(count == 1 ? "deadlock" : "deadlocks")} in the last hour"),
                     cancellationToken);
                 readClock.Restart();
 
@@ -9073,7 +9046,7 @@ LIMIT 1";
                         NumericThresholdValue: threshold,
                         Muted: muted,
                         Severity: PgBlockingFireSeverity,
-                        ShortMessage: $"{count} blocking session(s)"),
+                        ShortMessage: $"{count} blocking {(count == 1 ? "session" : "sessions")}"),
                     cancellationToken);
                 readClock.Restart();
 
@@ -9286,7 +9259,7 @@ LIMIT 1";
                         key,
                         snapshot.ServerName,
                         metricName,
-                        $"{rows.Count} query(s), longest {elapsedMinutes}m",
+                        $"{rows.Count} {(rows.Count == 1 ? "query" : "queries")}, longest {elapsedMinutes}m",
                         $"{thresholdMinutes}m",
                         Context: AlertSampleAge.Stamp(
                             new AlertContext
@@ -9705,7 +9678,7 @@ LIMIT 1";
                    without this, a multi-line statement breaks the one-line-per-incident rendering and an
                    unbounded one can bloat the stored context past what Slack/Teams will accept. */
                 string.IsNullOrWhiteSpace(row.VictimStatement)
-                    ? $"victim pid {row.VictimPid}, {row.ParticipantCount} participant(s)"
+                    ? $"victim pid {row.VictimPid}, {row.ParticipantCount} {(row.ParticipantCount == 1 ? "participant" : "participants")}"
                     : AlertContextBuilders.TruncateText(row.VictimStatement!),
             });
 
@@ -9798,7 +9771,7 @@ LIMIT 1";
                 : row.RootBackendId.ToString(CultureInfo.InvariantCulture),
             new[]
             {
-                $"root pid {row.RootPid} blocking {row.TotalVictims} session(s)"
+                $"root pid {row.RootPid} blocking {row.TotalVictims} {(row.TotalVictims == 1 ? "session" : "sessions")}"
                     + (row.Databases.Length > 0 ? $" in [{string.Join(", ", row.Databases)}]" : string.Empty)
                     /* AlertContextBuilders.TruncateText — same reasoning as BuildPgDeadlockIncident's
                        VictimStatement: root queries are commonly multi-line and otherwise unbounded. */
@@ -17442,6 +17415,7 @@ LIMIT 1";
         ["ag_database_replica_states"] = (r, s, ct) => r.RunAsync(AgDatabaseReplicaStatesCollector.Instance, s, ct),
         ["plan_correction"] = (r, s, ct) => r.RunAsync(PlanCorrectionCollector.Instance, s, ct),
         ["query_store_forced_plans"] = (r, s, ct) => r.RunAsync(QueryStoreForcedPlansCollector.Instance, s, ct),
+        ["query_store_hints"] = (r, s, ct) => r.RunAsync(QueryStoreHintsCollector.Instance, s, ct),
         ["pvs_stats"] = (r, s, ct) => r.RunAsync(PvsStatsCollector.Instance, s, ct),
         /* PostgreSQL. Dispatch is by name and engine-agnostic; the engine gate upstream in
            RunDueCollectorsAsync means this lambda is only ever reached for a Postgres target. */

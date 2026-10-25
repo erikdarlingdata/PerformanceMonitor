@@ -61,7 +61,7 @@ public partial class AlertsHistoryTab : UserControl
 
     /// <summary>#5847: builds the Alert Details window's "open the full chain" action for a row, or null when the row has
     /// no Blocking or Deadlocks view to open (set by the shell, which owns the server tabs).</summary>
-    public Func<ViewerAlertRow, Action?>? FullChainOpener { get; set; }
+    public Func<ViewerAlertRow, AlertChainOpener?>? FullChainOpener { get; set; }
 
     /// <summary>#5847: where the Alert Details window keeps its last size (set by the shell).</summary>
     public AlertDetailWindow.ISizeStore? DetailWindowSizeStore { get; set; }
@@ -586,6 +586,17 @@ public partial class AlertsHistoryTab : UserControl
         window.ShowDialog();
     }
 
+    private void AlertRules_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService == null)
+        {
+            return;
+        }
+
+        var window = new AlertRulesWindow(_dataService) { Owner = Window.GetWindow(this) };
+        window.ShowDialog();
+    }
+
     private void KnownPatterns_Click(object sender, RoutedEventArgs e)
     {
         if (_dataService == null)
@@ -594,6 +605,17 @@ public partial class AlertsHistoryTab : UserControl
         }
 
         var window = new KnownPatternsWindow(_dataService) { Owner = Window.GetWindow(this) };
+        window.ShowDialog();
+    }
+
+    private void CustomViews_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService == null)
+        {
+            return;
+        }
+
+        var window = new CustomViewsWindow(_dataService) { Owner = Window.GetWindow(this) };
         window.ShowDialog();
     }
 

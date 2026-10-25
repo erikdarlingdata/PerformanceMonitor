@@ -408,7 +408,7 @@ public sealed class DarlingMcpCollectionStateTools
         var servers = await ReadServersAsync(postgres, cancellationToken);
         var typed = serverName.Trim();
         var target = DarlingMcpServerAdminTools.ResolveForRemoval(
-            servers.Select(s => new DarlingServerResolver.RegisteredServer(s.ServerId, s.StorageName, s.Name)).ToList(), typed,
+            servers.Select(s => new RegisteredServer(s.ServerId, s.StorageName, s.Name)).ToList(), typed,
             nameClash: NameClash.Refuse);
         if (target.Candidates.Count == 1)
         {

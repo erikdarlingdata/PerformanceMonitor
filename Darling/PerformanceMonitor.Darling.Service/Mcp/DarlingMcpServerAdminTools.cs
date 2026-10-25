@@ -681,19 +681,13 @@ public sealed partial class DarlingMcpServerAdminTools
     };
 
     /// <summary>
-    /// The outcome of matching a <c>remove_server</c> name against the definitions: the rows it matched and HOW.
-    /// Zero candidates is a miss, one is the row to delete, more than one is a refusal.
-    /// </summary>
-    internal sealed record RemovalTarget(IReadOnlyList<DarlingServerResolver.RegisteredServer> Candidates, string MatchedBy);
-
-    /// <summary>
     /// One <c>config_monitored_servers</c> row as <c>remove_server</c> resolves it (#3653 A15/A16): projected onto
-    /// the read tools' <see cref="DarlingServerResolver.RegisteredServer"/> identity — the storage name rebuilt
+    /// the read tools' <see cref="RegisteredServer"/> identity — the storage name rebuilt
     /// from the definition's identity columns through the SAME <see cref="ServerIdHelper.BuildStorageName"/> the
     /// worker uses when it registers the server on first connect, so a definition and its registry row carry one
     /// name and one id — plus whether that registry row exists at all.
     /// </summary>
-    internal sealed record ServerDefinition(DarlingServerResolver.RegisteredServer Server, bool EverConnected, string Kind);
+    internal sealed record ServerDefinition(RegisteredServer Server, bool EverConnected, string Kind);
 
     /// <summary>
     /// One definition row projected onto <see cref="ServerDefinition"/> (#4734): the storage name is rebuilt from the
@@ -706,7 +700,7 @@ public sealed partial class DarlingMcpServerAdminTools
     {
         var storageName = ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port);
         return new ServerDefinition(
-            new DarlingServerResolver.RegisteredServer(serverId, storageName, displayName),
+            new RegisteredServer(serverId, storageName, displayName),
             everConnected,
             ServerIdHelper.DescribeKind(database, readOnlyIntent));
     }
@@ -833,116 +827,14 @@ ORDER BY d.host, d.database";
     }
 
     /// <summary>
-    /// The matching rule for a name over the registry rows: the one registration whose
-    /// storage name equals the name exactly (case-sensitive, trimmed), if there is one (#4734); otherwise every exact
-    /// match on the storage name OR display name (case-insensitive), if there are any; otherwise every partial
-    /// (<c>Contains</c>) match. The CALLER decides what a count other than one means — this only refuses to
-    /// choose among equals. Every read tool (through <see cref="DarlingServerResolver"/>), <c>remove_server</c>
-    /// and <c>mute_analysis_finding</c> match with it, and each refuses a count other than one. Only the read tools
-    /// pass <paramref name="storageNameIgnoresCase"/>: they also take the storage name in another letter case.
-    ///
-    /// <para><b>Why one rule for reads and writes.</b> The read resolver used to take the FIRST partial match,
-    /// ordered by storage name. Several databases on one Azure SQL Database server are separate servers whose
-    /// storage names (<c>host:database</c>) all contain the host name, so the bare host name answered for whichever
-    /// database sorted first, and a delete removed <c>-01</c> when the caller typed a fragment that <c>-01</c> and
-    /// <c>-02</c> both contain — a coin the caller did not know was being flipped. A read that picks the wrong
-    /// sibling is only a wrong answer, but it is still a wrong answer the caller may not notice.</para>
-    ///
-    /// <para><b>Why partial matching survives at all.</b> The description has promised it since the tool shipped
-    /// ("resolved the same way the read tools resolve server_name"), display names are what an operator knows a
-    /// server by, and a unique partial is unambiguous — refusing it would be refusing something the tool CAN
-    /// honor. The rule the contract asks for is "refuse what you cannot honor", and what cannot be honored here is
-    /// a choice, not a fragment.</para>
-    ///
-    /// <para><b>Exact matches are collected, not first-taken.</b> <c>display_name</c> is not unique in the registry,
-    /// so two registrations can share one display name exactly; picking the first would be the same coin under a
-    /// better-looking name. Two rows matching exactly is reported as ambiguous with <c>matched_by: "exact"</c>, and
-    /// the caller disambiguates on the storage name, which IS unique.</para>
-    ///
-    /// <para><b>An exact storage name breaks the tie, and only that (#4734).</b> The plain registration's storage
-    /// name is the machine name, and the display name defaults to the machine name, so its read-only and per-database
-    /// siblings show that same text as THEIR display name. Without a tier for the storage name, the plain
-    /// registration's own <c>server</c> value — the one an <c>ambiguous</c> answer lists for it, and tells the caller
-    /// to pass back — tied with its siblings, so no name could pick it. A storage name is unique (it is what
-    /// <c>server_id</c> is derived from), so an exact match on it names one registration by construction. The tier is
-    /// deliberately narrow, because this rule also chooses what a delete removes: the match is case-SENSITIVE, so the
-    /// same name in another case, a display-name match and a partial all keep the old behavior and still answer
-    /// ambiguous when they name several registrations. And a tier that finds anything other than exactly one
-    /// registration falls through to the matching above unchanged.</para>
-    ///
-    /// <para><b>A storage name that is also another server's display name (#6230) is the caller's choice,
-    /// <paramref name="nameClash"/>.</b> <see cref="NameClash.Refuse"/> (the default, and the mode every caller that changes
-    /// state passes) answers ambiguous with both registrations listed when that single storage-name match is also the display
-    /// name of a different registration that is not of the same host (a colon-suffixed sibling, or the same name in another
-    /// case), so a write never silently picks one of two servers its name matches. <see cref="NameClash.StoredNameWins"/> is
-    /// for a read: the exact stored name keeps winning over another server's display name (#5633), so a saved Custom View
-    /// scope and a read tool that named the stored name keep working.</para>
+    /// The matching rule for a name over the registry rows, which moved to Storage so the Viewer applies the same one
+    /// (#6390): see <see cref="ServerNameMatcher.Match"/>. Kept here as the call every state-changing tool and the read
+    /// resolver's callers name; the default <see cref="NameClash.Refuse"/> is the write mode.
     /// </summary>
-    internal static RemovalTarget ResolveForRemoval(
-        IReadOnlyList<DarlingServerResolver.RegisteredServer> servers, string serverName, bool storageNameIgnoresCase = false,
-        NameClash nameClash = NameClash.Refuse)
-    {
-        var name = (serverName ?? string.Empty).Trim();
-        if (name.Length == 0)
-        {
-            return new RemovalTarget(Array.Empty<DarlingServerResolver.RegisteredServer>(), "none");
-        }
-
-        /* The storage name is the one key that is unique, so a single match on it picks that registration: exact case
-           first (a candidate's own `server` value picks it even beside a registration whose name differs only in
-           case), then, for a read only, ignoring case. Anything other than one match falls through to the tiers
-           below. */
-        var comparisons = storageNameIgnoresCase
-            ? new[] { StringComparison.Ordinal, StringComparison.OrdinalIgnoreCase }
-            : new[] { StringComparison.Ordinal };
-        foreach (var comparison in comparisons)
-        {
-            var byStorageName = servers
-                .Where(s => string.Equals(s.ServerName, name, comparison))
-                .ToList();
-            if (byStorageName.Count == 1)
-            {
-                /* A name that is this registration's storage name AND a different, unrelated registration's display
-                   name names two servers, so it answers with both and the caller picks one by storage name. A registration
-                   of the same host does not count: its storage name continues with a colon (the read-only and per-database
-                   registrations that share the machine name as their display name, #4734) or differs only in case (its
-                   display name is its own storage name). */
-                var only = byStorageName[0];
-                var sharedDisplayName = nameClash == NameClash.StoredNameWins
-                    ? new List<DarlingServerResolver.RegisteredServer>()
-                    : servers
-                    .Where(s => !ReferenceEquals(s, only)
-                             && s.ServerId != only.ServerId
-                             && string.Equals(s.DisplayName, name, StringComparison.OrdinalIgnoreCase)
-                             && !string.Equals(s.ServerName, only.ServerName, StringComparison.OrdinalIgnoreCase)
-                             && !s.ServerName.StartsWith(only.ServerName + ":", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-                if (sharedDisplayName.Count > 0)
-                {
-                    sharedDisplayName.Insert(0, only);
-                    return new RemovalTarget(sharedDisplayName, "exact");
-                }
-
-                return new RemovalTarget(byStorageName, "exact");
-            }
-        }
-
-        var exact = servers
-            .Where(s => string.Equals(s.ServerName, name, StringComparison.OrdinalIgnoreCase)
-                     || string.Equals(s.DisplayName, name, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        if (exact.Count > 0)
-        {
-            return new RemovalTarget(exact, "exact");
-        }
-
-        var partial = servers
-            .Where(s => s.ServerName.Contains(name, StringComparison.OrdinalIgnoreCase)
-                     || (s.DisplayName?.Contains(name, StringComparison.OrdinalIgnoreCase) ?? false))
-            .ToList();
-
-        return new RemovalTarget(partial, partial.Count == 0 ? "none" : "partial");
-    }
+    internal static ServerNameMatch ResolveForRemoval(
+        IReadOnlyList<RegisteredServer> servers, string serverName, bool storageNameIgnoresCase = false,
+        NameClash nameClash = NameClash.Refuse) =>
+        ServerNameMatcher.Match(servers, serverName, storageNameIgnoresCase, nameClash);
 
     /// <summary>
     /// PURE structural validation of the <c>servers_json</c> request — no store, no probe, no crypto — so the

@@ -47,9 +47,9 @@ public sealed class DarlingMcpChangeWatchTools
         "Lists a server's change watches, open and closed, newest first: a recorded change (a configuration, trace flag, plan or " +
         "extension change) opens a 60 minute watch, and at its end Darling compares wait time per second, average CPU and query " +
         "duration with the hour before and the same hour a week earlier. Each watch carries its changes, its measures and its result " +
-        "(flat, request_opened, moved_no_request, moved_agent_change, moved_auto_plan_correction, no_data), or its failed state. Stored read. <<GUIDE>> " +
+        "(flat, request_opened, moved_no_request, moved_agent_change, moved_auto_plan_correction, no_data), or its failed state. One watch: pass watch_id. From a request_id: state=request_opened, then match it. Stored read. <<GUIDE>> " +
         "Reads the change watch windows (config.change_watches) for SQL Server and PostgreSQL targets. A SQL Server change is a server, database or " +
-        "database-scoped setting, a trace flag, or a forced or unforced Query Store plan; a PostgreSQL change is a server setting, a per-database " +
+        "database-scoped setting, a trace flag, a forced or unforced Query Store plan, or a Query Store hint set, changed or cleared (kind query_store_hint, SQL Server 2022 and later); a PostgreSQL change is a server setting, a per-database " +
         "or per-role setting, or an extension install, drop or version change. Every change Darling records opens a watch of 60 " +
         "minutes for its server, or extends the open one; when the window ends, the watch is evaluated and closes. Darling looks for " +
         "changes once an hour per server, so a change may be recorded up to an hour after it happened. The window still runs from the " +
@@ -81,7 +81,7 @@ public sealed class DarlingMcpChangeWatchTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Only watches in this state (open, evaluating, closed, failed) or with this result (flat, request_opened, moved_no_request, moved_agent_change, moved_auto_plan_correction, no_data). Omit it, or pass all, for every state.")] string? state = null,
-        [Description("Most watches to return, newest first. Default 20 (1-1000).")] int limit = 20,
+        [Description("Most watches to return, newest first. Default 20 (1-1000). A small limit gives the newest, not a chosen watch: use watch_id.")] int limit = 20,
         [Description("Read one watch by its watch_id, in any state; state still applies if you give it. A watch_id that is not on this server answers not_found.")] string? watch_id = null,
         CancellationToken cancellationToken = default)
     {
@@ -129,7 +129,7 @@ public sealed class DarlingMcpChangeWatchTools
                 var (_, engineKind) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, resolved.ServerId, cancellationToken);
                 var kinds = MonitoredEngineKind.IsPostgres(engineKind)
                     ? "a server setting, a per-database or per-role setting, or an extension install, drop or version change"
-                    : "a server, database or database-scoped configuration change, a trace flag change or a Query Store plan force or unforce";
+                    : "a server, database or database-scoped configuration change, a trace flag change, a Query Store plan force or unforce or a Query Store hint change";
                 return McpHelpers.Status(
                     "empty",
                     $"No change watch{(state is null ? "" : $" matching {state}")} is recorded for {resolved.DisplayName}. A watch opens when {kinds} " +

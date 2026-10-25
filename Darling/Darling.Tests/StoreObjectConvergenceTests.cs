@@ -340,7 +340,7 @@ public sealed class StoreObjectConvergenceTests
     [Fact]
     public void TheReadme_NamesTheHourlyConvergence()
     {
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "admin.md"); // #6416: the cadence table moved from Darling/README.md
         Assert.Contains("store-object convergence", readme, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("#3817", readme, StringComparison.Ordinal);
         Assert.Contains("Store object convergence:", readme, StringComparison.Ordinal);

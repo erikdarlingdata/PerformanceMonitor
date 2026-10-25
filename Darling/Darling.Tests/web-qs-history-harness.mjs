@@ -111,6 +111,15 @@ const scenarios = {
     out.closed = tables(cell).length === 0;
     out.observersClosed = liveObservers();
   },
+  /* The Forced column's label for a force the store removed and for a state name with underscores. */
+  async forcedLabels() {
+    const plan = (id, extra) => ({ plan_id: id, execution_count: 1, avg_duration_ms: 1, total_duration_ms: 1, avg_cpu_ms: 1, total_cpu_ms: 1, first_execution_time: null, last_execution_time: null, ...extra });
+    respond(history({ plans: [plan(7, { is_forced_plan: false, forced_state: "REMOVED" }), plan(9, { is_forced_plan: false, forced_state: "UNKNOWN_PLAN_NOT_COLLECTED" })], points: [] }));
+    const cell = col().render(row);
+    cell.byText("History").click();
+    await flush();
+    out.rowTexts = tables(cell)[0].all((n) => n.tag === "tr").slice(1).map((r) => r.textContent);
+  },
   async rebuild() {
     respond(history());
     const first = col().render(row);

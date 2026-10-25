@@ -842,10 +842,11 @@ public sealed class AlertsConfig
     public int RunnableQueueCriticalPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultCriticalPerScheduler;
 
     /// <summary>The Client Timeouts alert (#5640) switch: client attentions (a client cancelled or timed out a query) per
-    /// minute, from the attention collector. OFF by default: the bars are a guess until checked against captured data.
-    /// Persisted as the store column <c>client_timeouts_enabled</c> (V179).</summary>
+    /// minute, from the attention collector. ON by default since #5736 (V216): the bars are relative to each server's own normal rate, and a
+    /// 7-day replay of them over a 42-server production store would have paged twice, both at Warning. Persisted as the store column
+    /// <c>client_timeouts_enabled</c> (V179, default moved to TRUE by V216).</summary>
     [JsonPropertyName("clientTimeoutsEnabled")]
-    public bool ClientTimeoutsEnabled { get; set; }
+    public bool ClientTimeoutsEnabled { get; set; } = true;
 
     /// <summary>Client Timeouts Warning FLOOR (#5640, #5736), attentions per minute over the covered span. Shipped 10. The bar is the higher of this and
     /// the Warning multiple times the server's own baseline. Read through
@@ -1901,6 +1902,15 @@ public sealed class WebConfig
     public bool AllowTokenlessLoopback { get; set; }
 
     /// <summary>
+    /// Default ON (#6600). On the managed store the dashboard signs in as the read-only <c>viewer</c> role, so its Admin writes were list-only.
+    /// On, the dashboard opens a second, small connection pool that signs in as the managed <c>admin</c> role (the Viewer's login) and uses it
+    /// only for those writes and their access checks, and only for a person signed in as an admin; every read stays on <c>viewer</c>. Off keeps
+    /// the dashboard list-only on the managed store. A store you bring yourself is unchanged either way. File-only and restart-only.
+    /// </summary>
+    [JsonPropertyName("allowAdminWrites")]
+    public bool AllowAdminWrites { get; set; } = true;
+
+    /// <summary>
     /// Opt-in network exposure for the web dashboard (darling-network-endpoints). Omit <c>listen</c> for the
     /// default = loopback-only HTTP; the block's token gates that listener too. Managed-mode only; ignored in BYO with a caller warning. Any missing
     /// precondition (token / valid allowFrom / managed) keeps the dashboard loopback-only + LogCritical —
@@ -2457,7 +2467,8 @@ public sealed class WebhooksConfig
     public string GenericHeaders { get; set; } = "";
 
     /// <summary>The JSON body, with <c>{{metric}}</c>/<c>{{server}}</c>/… placeholders; empty uses the shared default.
-    /// <c>{{investigation_json}}</c> (#5821) is the investigation request the alert opened or joined, empty when it opened none.</summary>
+    /// <c>{{investigation_json}}</c> (#5821) is the investigation request the alert opened or joined, empty when it opened none.
+    /// <c>{{status}}</c> (#6718) is <c>firing</c> on a fire and <c>resolved</c> on a resolution send.</summary>
     [JsonPropertyName("genericBodyTemplate")]
     public string GenericBodyTemplate { get; set; } = "";
 

@@ -3003,6 +3003,37 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Fail "Run this from an ELEVATED PowerShell. Stopping the service, writing to the install directory, and starting it again all need it."
 }
 
+# The MSI package (#6480) writes HKLM\SOFTWARE\PerformanceMonitor Darling, value InstalledBy = msi, and removes it at uninstall. A
+# machine that holds it belongs to Windows Installer: a script install over it would leave two owners for one service. Returns the
+# refusal text, or $null when the marker is absent. The registry read is a parameter so a test can stand in for the machine; the
+# default reads the 64-bit view, so a 32-bit PowerShell is not sent to WOW6432Node and does not miss the marker. Kept byte-identical
+# in install-darling.ps1, upgrade-darling.ps1 and uninstall-darling.ps1.
+function Get-DarlingMsiInstallRefusal([string]$ScriptName, [scriptblock]$ReadMarker = $null) {
+    if (-not $ReadMarker) {
+        $ReadMarker = {
+            $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+            try {
+                $key = $base.OpenSubKey('SOFTWARE\PerformanceMonitor Darling')
+                if ($key) { try { $key.GetValue('InstalledBy') } finally { $key.Dispose() } }
+            }
+            finally { $base.Dispose() }
+        }
+    }
+    if ("$(& $ReadMarker)" -ne 'msi') { return $null }
+    return @"
+PerformanceMonitor Darling on this machine was installed by the MSI package, so $ScriptName will not change it: two installers
+would then own one service.
+  To update it: run the newer MSI. Windows Installer replaces the files in place and keeps darling.json and the store.
+  To remove it: Settings > Apps > Installed apps > PerformanceMonitor Darling > Uninstall. That keeps the store unless you tick
+  the box to remove it.
+  To go back to script installs: uninstall the MSI as above, extract the zip into a fresh folder, and run install-darling.ps1 there.
+Nothing was installed or changed.
+"@
+}
+
+$msiRefusal = Get-DarlingMsiInstallRefusal 'upgrade-darling.ps1'
+if ($msiRefusal) { Fail $msiRefusal }
+
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
     $InstallRoot = Get-DarlingInstallRootFromService $serviceName
     if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
@@ -3838,12 +3869,11 @@ catch { Fail "'$serviceName' did not reach Running within two minutes. The new b
 Good "Service is Running."
 Note ""
 Note "The install is NOT verified yet. 'Running' means the process started, not that it collects."
-Note "In 10-15 minutes, against the store, confirm all of:"
-Note "  1. MAX(version) FROM darling_schema_version equals this build's expected schema rung."
-Note "  2. COUNT(DISTINCT server_id) FROM collect.collection_log over the last 15 minutes equals the fleet size plus the '(fleet)' maintenance row - the fleet-wide passes (the retention purge and the oversized-plan backlog sweep) both log under server_id = 0, and both run their first pass at startup, so the row is there within this window."
-Note "  3. COUNT(DISTINCT collector_name) over the same window is in the mid-30s, not single digits."
-Note "  4. Any non-SUCCESS rows since the restart are READ, not just counted - YIELDED is the lock-timeout guard working; anything else is a finding."
-Note "  5. If this build added a collector or a migration, one targeted probe that ITS table moved."
+Note "About 10-15 minutes after the start, check these:"
+Note "  1. Open the Viewer. Every monitored server shows Online, and the status bar shows 'Collection: Active'."
+Note "  2. On each server card, Collectors shows OK and 'Failing: 0'. The status bar shows 'Collectors: N OK'. The web page has a Collection Health tab for each server."
+Note "  3. The service log (%ProgramData%\PerformanceMonitorDarling\logs) has a line 'Postgres store ready (schema v<N>, ...)' from this start. N is the store version this build expects. If the line is missing, the store did not finish its update: read the log lines near the start."
+Note "  If you connect to the store, you can also run SELECT MAX(version) FROM darling_schema_version. It returns the same N."
 
 }
 finally {

@@ -130,7 +130,7 @@ internal static class McpCommandDeadlines
     /// relation on purpose rather than by omission, and <c>McpReadCommandTimeoutTests</c> pins the new
     /// direction so a future edit has to notice which one it is restoring.</para>
     /// </summary>
-    internal const int ReadSeconds = 75;
+    internal const int ReadSeconds = StorageCommandDeadlines.ComposedReadSeconds;
 
     /// <summary>
     /// The composed-query deadline when the operator's configured value cannot be read — 60 s (#4442, raised

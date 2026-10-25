@@ -95,7 +95,7 @@ public sealed class RunnableQueueAlertDetailTests
         Assert.Equal("SOS_SCHEDULER_YIELD", Field(requests[0], "Wait Type"));
 
         var more = Item(fired, "More requests");
-        Assert.Contains("1 more request(s)", Field(more, "Not shown"), StringComparison.Ordinal);
+        Assert.Contains("1 more request", Field(more, "Not shown"), StringComparison.Ordinal);
         Assert.False(Assert.Single(h.Deliverer.Outcomes).Muted);
     }
 

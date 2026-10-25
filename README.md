@@ -40,16 +40,18 @@ Not sure which one? Start with Lite. It is one download, nothing is installed on
 
 Data starts to flow within 1 to 5 minutes. The monitoring login needs `VIEW SERVER STATE` ([Permissions](docs/permissions.md)).
 
-Before you upgrade an older install with `Setup.exe`, read the warning in the [Lite guide](docs/lite-guide.md). On versions older than 3.4.0, `Setup.exe` deletes the data in the install directory (see [Upgrading an install older than 3.4.0](Lite/README.md#upgrading-an-install-older-than-340)). The Lite guide also covers the portable ZIP, collectors, storage, and configuration.
+Before you upgrade an older install with `Setup.exe`, read the warning in the [Lite guide](docs/lite-guide.md). On versions older than 3.4.0, `Setup.exe` deletes the data in the install directory (see [Upgrading an install older than 3.4.0](docs/lite-guide.md#upgrading-an-install-older-than-340)). The Lite guide also covers the portable ZIP, collectors, storage, and configuration.
 
 ## Quick start: Darling
 
-1. Download `PerformanceMonitorDarling-<version>.zip` from the [latest release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest). It carries its own .NET runtime, so there is nothing to install first.
-2. Copy `darling.sample.json` to `darling.json` and add your servers.
-3. Run the service, in a console for a trial or as a Windows service.
-4. Start the **Darling Viewer** from the `viewer\` folder in the same zip.
+1. Download `PerformanceMonitorDarling-<version>.zip` and `SHA256SUMS.txt` from the [latest release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest). Check the zip hash against `SHA256SUMS.txt`. The zip carries its own .NET runtime, so there is nothing to install first.
+2. Extract the zip to `C:\Program Files\PerformanceMonitorDarling`. Do not use your Desktop, Downloads, or any folder under `C:\Users\`. The service runs as a virtual account that cannot read a user profile ([why](docs/darling/install.md#step-3-extract-to-a-machine-scoped-path)).
+3. Copy `darling.sample.json` to `darling.json` and add one server. `darling.json` is only a seed. The service reads it on the first start, and after that the store is the authority. If you edit the file later to add a server, nothing changes. Add servers in the viewer instead ([why](docs/darling/install.md#darlingjson-is-only-a-seed)).
+4. From an elevated PowerShell in the install folder, run `.\install-darling.ps1`. It installs the Windows service and creates a **Darling Viewer** shortcut.
+5. Wait about two minutes for the first start, then open **Darling Viewer**. It opens on the fleet.
+6. The service log is in `%ProgramData%\PerformanceMonitorDarling\logs`.
 
-These steps are for Windows. For Linux, the full steps, and the web dashboard, read the [Darling quick start](docs/darling-quick-start.md). If you have not done this before, [docs/uat-onboarding.md](docs/uat-onboarding.md) is the ordered path from the zip to a working install. The [Darling operator guide](Darling/README.md) is the configuration reference.
+[Install Darling](docs/darling/install.md) gives each step with the log line or screen that proves it worked. To upgrade, run `upgrade-darling.ps1`. To remove the service, run `uninstall-darling.ps1`. Both are in the install folder. For Linux and the web dashboard, read the [Darling quick start](docs/darling-quick-start.md). The [Darling operator guide](Darling/README.md) is the configuration reference.
 
 ## Documentation
 
@@ -57,10 +59,17 @@ These steps are for Windows. For Linux, the full steps, and the web dashboard, r
 |---|---|
 | [Choosing an edition](docs/editions.md) | Lite, Darling, and Dashboard side by side |
 | [Features and screenshots](docs/features.md) | What you get, with screenshots |
-| [Lite guide](docs/lite-guide.md) | Install, upgrade, collectors, Extended Events sessions, storage, configuration |
+| [Lite guide](docs/lite-guide.md) | Install, upgrade, where Lite keeps its files, configuration, appearance, collectors |
+| [Lite Extended Events sessions](docs/lite-extended-events.md) | The sessions Lite creates on a monitored server, and how to remove them |
 | [Darling quick start](docs/darling-quick-start.md) | Install on Windows, Linux notes, web dashboard |
 | [Darling operator guide](Darling/README.md) | Darling configuration, permissions, operations |
 | [Darling store sizing](docs/darling-store-sizing.md) | Disk, RAM and vCPU for a store host, by number of servers |
+| [Back up, restore and move the store](docs/darling-store-backup.md) | Back up a Darling store, restore it, or move it to another machine |
+| [Darling guides](docs/darling/README.md) | Install, viewer, web dashboard, MCP, day-to-day admin and command line reference |
+| [PostgreSQL target runbook](docs/postgres-first-target-runbook.md) | Point Darling at a PostgreSQL target, with a proof point at each step |
+| [Retention Held runbook](docs/retention-hold-runbook.md) | Clear a Retention Held alert |
+| [How collection works](docs/how-collection-works.md) | A tour of the collection pipeline, for people who read the code |
+| [Documentation index](docs/README.md) | Every page in `docs/`, grouped by audience |
 | [Tabs](docs/tabs.md) | What each tab shows |
 | [Alerts and notifications](docs/alerts.md) | Alert types, channels, routes, email |
 | [Agent dispatch](docs/darling-agent-dispatch.md) | Hand an alert to your own AI agent: levels, the brief and report, undo, the remediation login |

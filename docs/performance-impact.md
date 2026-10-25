@@ -1,5 +1,7 @@
 # Performance Impact
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 ### On Monitored Servers
@@ -39,8 +41,8 @@ That is about 1,360 queries an hour per server, or roughly 114 in every 5 minute
 
 Collectors read from Extended Events sessions. `system_health` is the one that SQL Server ships. The other sessions are created on the monitored server. The session lists, and what each one captures, are in these sections:
 
-- Lite: [The Extended Events Sessions Lite Creates](lite-guide.md#the-extended-events-sessions-lite-creates)
-- Darling: [The Extended Events Sessions the Service Creates](../Darling/README.md#the-extended-events-sessions-the-service-creates)
+- Lite: [The Extended Events Sessions Lite Creates](lite-extended-events.md)
+- Darling: [The Extended Events Sessions the Service Creates](darling/monitored-servers.md#the-extended-events-sessions-the-service-creates)
 
 The long-query session is created only when the opt-in `long_query_completions` collector is on.
 

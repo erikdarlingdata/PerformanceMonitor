@@ -47,6 +47,28 @@ public static class InvestigationEvents
     /// <summary>The journal row that marks an expired request's fallback as sent (once key <see cref="FallbackOnceKey"/>).</summary>
     public const string FallbackSent = "fallback_sent";
 
+    /// <summary>
+    /// #6596: an alert on an agent route whose story the analysis pass labelled "recurring at this hour", so no request was
+    /// opened or joined for it. Journaled with no request id, for a person to read; not an event (an agent is not woken for it).
+    /// </summary>
+    public const string RecurringSkipped = "recurring_skipped";
+
+    /// <summary>
+    /// #6596: the once key of a <see cref="RecurringSkipped"/> row: one per route, server, metric and alert hour, so a page
+    /// repeated inside the hour writes one row.
+    /// </summary>
+    public static string RecurringSkippedOnceKey(int routeId, int serverId, string metricName, DateTime alertTimeUtc) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"recurring_skipped:{routeId}:{serverId}:{metricName}:{alertTimeUtc:yyyy-MM-ddTHH}");
+
+    /// <summary>#6596: the detail of a <see cref="RecurringSkipped"/> row: the story path hash and the alert's time.</summary>
+    public static string RecurringSkippedDetail(string? storyPathHash, DateTime alertTimeUtc) =>
+        new JsonObject
+        {
+            ["story_path_hash"] = storyPathHash,
+            ["alert_time"] = DateTime.SpecifyKind(alertTimeUtc, DateTimeKind.Utc).ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+        }.ToJsonString();
+
     /// <summary>Every event kind, in the order D6 lists them.</summary>
     public static IReadOnlyList<string> Kinds { get; } =
         [Opened, Joined, Resolved, Expired, ClaimsExhausted, EvidenceReady, FollowUp, DeadlockDigest];

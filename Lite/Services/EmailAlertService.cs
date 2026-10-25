@@ -119,6 +119,10 @@ public class EmailAlertService : IFindingAlertSender
     /// #5820: an analysis finding's full story path hash, for the investigation request it opens (the metric name holds only
     /// eight characters of it). Null for an engine alert.
     /// </param>
+    /// <param name="recurringAtThisHour">
+    /// #6596: the finding's story is labelled "recurring at this hour", so no investigation request is opened for it. The row and
+    /// the send are unchanged.
+    /// </param>
     public async Task<AlertDelivery?> TrySendAlertEmailAsync(
         string metricName,
         string serverName,
@@ -134,6 +138,7 @@ public class EmailAlertService : IFindingAlertSender
         AlertNotificationMode? deliveryMode = null,
         bool trayShown = true,
         string? storyPathHash = null,
+        bool recurringAtThisHour = false,
         CancellationToken cancellationToken = default)
     {
         try
@@ -158,7 +163,7 @@ public class EmailAlertService : IFindingAlertSender
                     InvestigationDispatchCore.Facts(
                         currentValue, numericCurrentValue, thresholdValue, numericThresholdValue, muted, detailText,
                         context is not null ? AlertContextSerializer.Serialize(context) : null),
-                    _readInvestigation, _investigationDataDetail(), cancellationToken);
+                    _readInvestigation, _investigationDataDetail(), recurringAtThisHour, cancellationToken);
 
             var result = await _core.TrySendAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId.ToString(), context, attemptChannels: !muted,
@@ -184,7 +189,7 @@ public class EmailAlertService : IFindingAlertSender
             if (result.Route is { } route)
             {
                 context ??= new AlertContext();
-                context.Route = route.ToDto(result.ChannelOutcomes);
+                context.Route = route.ToDto(result.ChannelOutcomes, result.GenericDedupKey, result.PagerDutyDedupKey);
             }
 
             /* Always log the alert, regardless of email status. The numeric current/threshold
@@ -278,7 +283,9 @@ public class EmailAlertService : IFindingAlertSender
                "tray" row that reads Shown. */
             trayShown: false,
             /* #5820: the request records the finding's full story path hash, not the metric name's eight characters. */
-            storyPathHash: alert.StoryPathHash);
+            storyPathHash: alert.StoryPathHash,
+            /* #6596: a story recurring at this hour opens no request; the page goes as it would. */
+            recurringAtThisHour: alert.RecurringAtThisHour);
     }
 
     /// <summary>
@@ -314,7 +321,7 @@ public class EmailAlertService : IFindingAlertSender
                         InvestigationDispatchCore.Facts(
                             page.CurrentValue, page.Severity, page.ThresholdValue, page.NotifyThreshold, muted: false,
                             page.DetailText, page.Context is not null ? AlertContextSerializer.Serialize(page.Context) : null),
-                        readRequest: null, _investigationDataDetail(), CancellationToken.None);
+                        readRequest: null, _investigationDataDetail(), page.RecurringAtThisHour, CancellationToken.None);
                 }
             }
 
