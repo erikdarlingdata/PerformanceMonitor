@@ -234,7 +234,7 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
         var action = permit?.ServerAction == ServerActionNames.DropPlanGuide ? ServerActionNames.DropPlanGuide : ServerActionNames.CreatePlanGuide;
         if (PermitRefusal(permit, action, guide.Name, name, dryRun) is { } mismatch)
             return mismatch;
-        var database = permit.Database;
+        var database = permit!.Database;
         if (string.IsNullOrWhiteSpace(database) || database.Length > 128 || ContainsControl(database))
             return Log(RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.BadDatabase,
                 "A plan guide is created in one named database. The permit names none, or names one that is not a database name."));
