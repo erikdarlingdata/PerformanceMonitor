@@ -482,6 +482,16 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         var reference = await AllLiveAsync(f, ct);
         Assert.NotEmpty(reference);
 
+        /* A measured 60-minute interval, so the reads take the three-hour margin and the latest form raises its high range
+           start to the last run day's next midnight minus three hours: the trailing seam interval (first 23:40, last 00:10)
+           must still be counted. */
+        await ExecAsync(f.Connection, $"""
+            INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, interval_length_minutes)
+            SELECT row_number() OVER (), c.c, {ServerId}, 'qsdaily', '{Db}', 60
+            FROM generate_series(TIMESTAMP '{f.BaselineStart.AddDays(-5):yyyy-MM-dd HH:mm:ss}', TIMESTAMP '{f.End:yyyy-MM-dd HH:mm:ss}', interval '6 hours') AS c(c)
+            """, ct);
+        Assert.Equal(TimeSpan.FromHours(3), await QueryStoreIntervalWide.ResolveEdgeMarginAsync(f.Connection, ServerId, f.BaselineStart, f.End, 60, ct));
+
         async Task<List<string>> ViewerRowsAsync()
         {
             await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(f.Scratch.ConnectionString);
