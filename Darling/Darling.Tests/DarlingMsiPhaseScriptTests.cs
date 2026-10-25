@@ -8,7 +8,9 @@
 
 using System;
 using System.IO;
+using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using static Darling.Tests.DarlingInstallerConfigStepTests;
 using static Darling.Tests.RepoFile;
@@ -110,11 +112,13 @@ public sealed class DarlingMsiPhaseScriptTests
     }
 
     /// <summary>
-    /// -WebDashboard (the MSI's WEBDASHBOARD=1) seeds web.enabled in the minimal darling.json the installer writes, and the service's own
-    /// loader reads it; without the switch the file is the one it always was (no web block).
+    /// -WebDashboard (the MSI's WEBDASHBOARD=1) seeds web.enabled and an encrypted web token in the minimal darling.json the installer
+    /// writes: the web host refuses to start without a token, so web.enabled alone gave a dashboard that never started. The service's own
+    /// loader and token check accept the file, tokenless loopback stays off, and a second run leaves the first token alone. Without the
+    /// switch the file is the one it always was (no web block).
     /// </summary>
     [Fact]
-    public void WebDashboard_SeedsWebEnabled_InTheMinimalConfig_AndOtherwiseNothingChanges()
+    public void WebDashboard_SeedsAnEncryptedWebToken_ThatTheWebHostAccepts_AndOtherwiseNothingChanges()
     {
         var folder = Directory.CreateTempSubdirectory("darling-msi-config-").FullName;
         try
@@ -122,18 +126,34 @@ public sealed class DarlingMsiPhaseScriptTests
             var withWeb = Path.Combine(folder, "with-web.json");
             var without = Path.Combine(folder, "without.json");
             var lines = RunWindowsPowerShell(
-                ExtractFunction(Install, "New-DarlingMinimalConfigText") + "\n"
+                ExtractFunction(Install, "New-DarlingWebEncryptedToken") + "\n"
+                + ExtractFunction(Install, "New-DarlingMinimalConfigText") + "\n"
                 + ExtractFunction(Install, "Write-DarlingMinimalConfig") + "\n"
-                + $"Write-DarlingMinimalConfig '{withWeb}' $true\n"
-                + $"Write-DarlingMinimalConfig '{without}'\n"
-                + "'written'\n");
-            Assert.Equal(["written"], lines);
+                + ExtractFunction(Install, "Initialize-DarlingMinimalConfig") + "\n"
+                + $"'first-wrote=' + (Initialize-DarlingMinimalConfig '{withWeb}' $true)\n"
+                + $"$firstText = [System.IO.File]::ReadAllText('{withWeb}')\n"
+                + $"'second-wrote=' + (Initialize-DarlingMinimalConfig '{withWeb}' $true)\n"
+                + $"'second-keeps-file=' + ($firstText -ceq [System.IO.File]::ReadAllText('{withWeb}'))\n"
+                + $"'plain-wrote=' + (Initialize-DarlingMinimalConfig '{without}' $false)\n");
+            Assert.Equal(["first-wrote=True", "second-wrote=False", "second-keeps-file=True", "plain-wrote=True"], lines);
 
             var seeded = DarlingConfig.Parse(File.ReadAllText(withWeb));
             Assert.True(seeded.Web.Enabled);
+            Assert.False(seeded.Web.AllowTokenlessLoopback);
             Assert.Empty(seeded.Servers);
             Assert.True(seeded.Postgres.Managed);
             Assert.Empty(seeded.Validate());
+            Assert.False(string.IsNullOrWhiteSpace(seeded.Web.Network?.EncryptedToken));
+            Assert.True(string.IsNullOrWhiteSpace(seeded.Web.Network?.Token));
+
+            // The service decrypts it with its own DPAPI entropy and the web host starts on it: no refusal, no missing-token line.
+            var resolved = DarlingWebHostService.ResolveLoopbackOnlyToken(
+                seeded.Web.Network, seeded.Web.AllowTokenlessLoopback, NullLogger.Instance);
+            Assert.False(resolved.Refuse);
+            Assert.False(resolved.MissingToken);
+            Assert.Null(resolved.TokenProblem);
+            Assert.Equal(32, resolved.Token.Length);
+            Assert.Equal(resolved.Token, DarlingSecrets.Unprotect(seeded.Web.Network!.EncryptedToken!));
 
             var plain = DarlingConfig.Parse(File.ReadAllText(without));
             Assert.False(plain.Web.Enabled);

@@ -2018,7 +2018,35 @@ Invoke-InstallTreeLock $lockAccount -StopOnOpen
 # A first install needs no hand-edited darling.json (#6468). The service starts with no monitored servers, so a
 # missing darling.json is answered with a minimal one (the bundled store only) and the install carries on. The
 # first server is added afterwards in the Viewer. The full sample is left beside it as the reference.
-function New-DarlingMinimalConfigText([bool]$EnableWebDashboard = $false) {
+
+# The web dashboard's access token for a new darling.json (#6480). The web host refuses to start without a token, so turning the
+# dashboard on with no token gives a dashboard that never starts. This makes 32 random letters and digits and returns them
+# DPAPI-protected at LocalMachine scope with the service's own entropy string, base64: the same blob DarlingSecrets.Protect makes
+# for --encrypt-password, so web.network.encryptedToken reads it back on this machine. The plain token is never written or shown
+# here: --print-web-token reprints it.
+function New-DarlingWebEncryptedToken {
+    Add-Type -AssemblyName System.Security
+    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $chars = New-Object System.Text.StringBuilder
+        $buffer = New-Object byte[] 1
+        while ($chars.Length -lt 32) {
+            $rng.GetBytes($buffer)
+            # 248 = 4 * 62: a byte at or above it is skipped so every letter and digit is equally likely.
+            if ($buffer[0] -lt 248) { [void]$chars.Append($alphabet[$buffer[0] % 62]) }
+        }
+        $entropy = [System.Text.Encoding]::UTF8.GetBytes('PerformanceMonitor.Darling.v1')
+        $blob = [System.Security.Cryptography.ProtectedData]::Protect(
+            [System.Text.Encoding]::UTF8.GetBytes($chars.ToString()), $entropy, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+        return [Convert]::ToBase64String($blob)
+    }
+    finally {
+        $rng.Dispose()
+    }
+}
+
+function New-DarlingMinimalConfigText([bool]$EnableWebDashboard = $false, [string]$WebEncryptedToken = '') {
     $text = @'
 {
   // Written by install-darling.ps1. The service keeps everything else in its own PostgreSQL store.
@@ -2034,9 +2062,15 @@ function New-DarlingMinimalConfigText([bool]$EnableWebDashboard = $false) {
   "servers": []
 }
 '@
-    # -WebDashboard (the MSI's WEBDASHBOARD=1, #6480): the dashboard starts on its loopback address. The block goes ahead of "servers".
+    # -WebDashboard (the MSI's WEBDASHBOARD=1, #6480): the dashboard starts on its loopback address and asks for the token below.
+    # The block goes ahead of "servers". Tokenless loopback stays off: it would let every local user read the collected data.
     if ($EnableWebDashboard) {
-        $text = $text -replace '(?m)^  "servers": \[\]', ('  "web": {' + "`r`n" + '    "enabled": true' + "`r`n" + '  },' + "`r`n" + '  "servers": []')
+        $webBlock = '  "web": {' + "`r`n" + '    "enabled": true'
+        if ($WebEncryptedToken) {
+            $webBlock += ',' + "`r`n" + '    "network": {' + "`r`n" + '      "encryptedToken": "' + $WebEncryptedToken + '"' + "`r`n" + '    }'
+        }
+        $webBlock += "`r`n" + '  },' + "`r`n"
+        $text = $text -replace '(?m)^  "servers": \[\]', ($webBlock.Replace('$', '$$') + '  "servers": []')
     }
     return $text
 }
@@ -2044,11 +2078,20 @@ function New-DarlingMinimalConfigText([bool]$EnableWebDashboard = $false) {
 # Writes the minimal file as UTF-8 without a byte-order mark, so every reader (the service's, this script's
 # regexes, Windows PowerShell 5.1) sees the same bytes.
 function Write-DarlingMinimalConfig([string]$path, [bool]$EnableWebDashboard = $false) {
-    [System.IO.File]::WriteAllText($path, (New-DarlingMinimalConfigText $EnableWebDashboard), (New-Object System.Text.UTF8Encoding($false)))
+    $token = ''
+    if ($EnableWebDashboard) { $token = New-DarlingWebEncryptedToken }
+    [System.IO.File]::WriteAllText($path, (New-DarlingMinimalConfigText $EnableWebDashboard $token), (New-Object System.Text.UTF8Encoding($false)))
 }
 
-if (-not (Test-Path -LiteralPath $configPath)) {
-    Write-DarlingMinimalConfig $configPath ([bool]$WebDashboard)
+# Only a missing darling.json is written. An existing one (an upgrade or a re-run) is left exactly as it is, web token included.
+# Returns $true when it wrote the file.
+function Initialize-DarlingMinimalConfig([string]$path, [bool]$EnableWebDashboard = $false) {
+    if (Test-Path -LiteralPath $path) { return $false }
+    Write-DarlingMinimalConfig $path $EnableWebDashboard
+    return $true
+}
+
+if (Initialize-DarlingMinimalConfig $configPath ([bool]$WebDashboard)) {
     Write-Host ''
     Write-Host 'darling.json did not exist, so a minimal one was written: the bundled PostgreSQL store and no servers.' -ForegroundColor Yellow
     Write-Host 'Nothing needs editing before the install. Add your first server afterwards, in the Viewer (Add Server).' -ForegroundColor Yellow
@@ -3473,9 +3516,11 @@ if ($operatorSid) {
 # after the store is ready, so when darling.json turns the dashboard on, wait for that line briefly.
 $entriesNow = @(Get-DarlingServiceLogEntries $serviceLogDirectory $startedAt)
 $webAddress = Get-DarlingWebAddress $entriesNow
+$webEnabledInConfig = $false
 if (-not $startupProblem -and -not $webAddress -and (Test-Path -LiteralPath $configPath -PathType Leaf)) {
     $configText = Get-Content -LiteralPath $configPath -Raw -ErrorAction SilentlyContinue
     if ($configText -match '(?s)"web"\s*:\s*\{.*?"enabled"\s*:\s*true') {
+        $webEnabledInConfig = $true
         for ($waited = 0; $waited -lt 15 -and -not $webAddress; $waited += 3) {
             Start-Sleep -Seconds 3
             $webAddress = Get-DarlingWebAddress @(Get-DarlingServiceLogEntries $serviceLogDirectory $startedAt)
@@ -3498,4 +3543,8 @@ else {
 }
 if ($webAddress) {
     Write-Host "  3. The web dashboard is on: $webAddress   (sign in with the token from:  & `"$serviceExe`" --print-web-token )"
+}
+elseif ($webEnabledInConfig) {
+    # Turned on in darling.json but no address was logged during the wait above: say so, and where to look, instead of leaving the line out.
+    Write-Host "  3. The web dashboard is turned on in darling.json, but the service did not report its address within 15 seconds. It may still be starting, or it did not start: its log is in $serviceLogDirectory (look for 'web dashboard')."
 }
