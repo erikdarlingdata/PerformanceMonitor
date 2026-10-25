@@ -362,6 +362,9 @@ public sealed partial class DarlingMcpInvestigationTools
         "Claims an investigation request and returns its brief, claim_id and lease_until. Writes only investigation state. " +
         "Pass your claim_id again to renew. status claimed, renewed, already_claimed, not_open, not_found or " +
         "unsupported_format. <<GUIDE>> " +
+        "Two more statuses can answer where the host serves named agent tokens: claim_not_token (a named token passed a claim_id another " +
+        "token made) and agent_id_is_named_token (the legacy token passed an agent_id that is a named token's name, or a claim_id that " +
+        "named token holds). " +
         "The brief says what fired, what changed, earlier reports and the next calls to make. " +
         "A claim is one conditional update, so two agents with different agent_ids claiming at once cannot both win (agents that share one agent_id on a named token are one agent); a request takes at most three " +
         "claims. The lease is the route's agent_lease_minutes; a renewal moves it on by that much, never past the request's " +
@@ -413,7 +416,7 @@ public sealed partial class DarlingMcpInvestigationTools
                 /* The legacy token's agent_id is free text. One that is a named agent's name would put the claim, and the plan changes after it,
                    in that agent's journal, so it is refused and journaled under no agent's name. */
                 await store.RecordRefusalAsync(requestId, InvestigationRules.InvalidAgentId, "claim", AgentIdIsNamedToken, null, cancellationToken);
-                return McpHelpers.Refusal("agent_id", AgentIdIsNamedTokenMessage(agent_id));
+                return InvestigationToolCore.Status(AgentIdIsNamedToken, AgentIdIsNamedTokenMessage(agent_id));
             }
 
             /* #5632 review round 2, L4: an agent id is a name, not text, so it cannot pose as another journal line. */
@@ -433,11 +436,10 @@ public sealed partial class DarlingMcpInvestigationTools
 
             if (!string.IsNullOrWhiteSpace(claim_id) && Guid.TryParse(claim_id, out var held))
             {
-                if (tokenName is not null && await store.ClaimHolderAsync(requestId, held, cancellationToken) is { } holder
-                    && !string.Equals(holder, tokenName, StringComparison.Ordinal))
+                if (ClaimTokenRefusal(tokenName, namedAgentNames, await store.ClaimHolderAsync(requestId, held, cancellationToken)) is { } notYours)
                 {
-                    await store.RecordRefusalAsync(requestId, tokenName, "claim", ClaimNotToken, null, cancellationToken);
-                    return McpHelpers.Refusal("claim_id", ClaimNotTokenMessage(tokenName));
+                    await store.RecordRefusalAsync(requestId, tokenName ?? InvestigationRules.InvalidAgentId, "claim", notYours.Status, null, cancellationToken);
+                    return InvestigationToolCore.Status(notYours.Status, notYours.Message);
                 }
 
                 var renewed = await store.RenewAsync(requestId, held, cancellationToken);
@@ -514,13 +516,15 @@ public sealed partial class DarlingMcpInvestigationTools
     [McpServerTool(Name = "get_investigation_evidence"), Description(
         "Reads the frozen evidence sections of one investigation request, reported ones too. Writes nothing. status ok, empty, not_found or " +
         "already_claimed. <<GUIDE>> " +
+        "Where the host serves named agent tokens, claim_not_token (a named token passed another token's claim_id) and " +
+        "agent_id_is_named_token (the legacy token passed a claim_id a named token holds) can also answer. " +
         "The brief is composed once, at claim time; evidence that freezes later reaches you only as an evidence_ready event " +
         "from wait_for_investigation_requests. Call this with that event's request_id to read it. Each section carries its " +
         "status (ready, pending, empty, unavailable or not_collected) and its content as stored, masked at mcp.dataDetail the " +
         "way the brief masks it. A pending section comes back as pending with no content: it never waits, so read it again " +
         "after a later evidence_ready. sections (optional) names the sections to return; omit it for all. A request that " +
         "another agent holds a live claim on is refused (already_claimed) unless you pass its claim_id; an unclaimed or " +
-        "finished request is served to any caller. A named agent token that passes another token's claim_id is refused (claim_not_token).")]
+        "finished request is served to any caller.")]
     public static async Task<string> GetInvestigationEvidence(
         NpgsqlDataSource postgres,
         InvestigationBriefComposer composer,
@@ -530,11 +534,12 @@ public sealed partial class DarlingMcpInvestigationTools
         DarlingMcpServedPolicy? served = null,
         CancellationToken cancellationToken = default) =>
         await EvidenceAsync(Store(postgres), composer.Mode, request_id, sections, claim_id, cancellationToken, await composer.KeyAsync(cancellationToken),
-            served?.Policy.AgentTokenName);
+            served?.Policy.AgentTokenName, served?.NamedAgentNames);
 
     /// <summary>The evidence read over a given store at <paramref name="mode"/> (#6033).</summary>
     internal static async Task<string> EvidenceAsync(InvestigationRequestStore store, McpDataDetail mode, string request_id,
-        string[]? sections, string? claim_id, CancellationToken cancellationToken, PseudonymKey? key = null, string? tokenName = null)
+        string[]? sections, string? claim_id, CancellationToken cancellationToken, PseudonymKey? key = null, string? tokenName = null,
+        IReadOnlySet<string>? namedAgentNames = null)
     {
         if (!Guid.TryParse(request_id, out var requestId))
             return InvestigationToolCore.Status("not_found", $"request_id '{request_id}' is not a request id.");
@@ -549,10 +554,10 @@ public sealed partial class DarlingMcpInvestigationTools
             {
                 var holder = Guid.TryParse(claim_id, out var claim) ? await store.ClaimHolderAsync(requestId, claim, cancellationToken) : null;
                 /* A claim_id is the claiming token's: a named token that presents another token's claim_id is refused, and journaled as itself. */
-                if (holder is not null && tokenName is not null && !string.Equals(holder, tokenName, StringComparison.Ordinal))
+                if (ClaimTokenRefusal(tokenName, namedAgentNames, holder) is { } notYours)
                 {
-                    await store.RecordRefusalAsync(requestId, tokenName, "evidence", ClaimNotToken, null, cancellationToken);
-                    return InvestigationToolCore.Status(ClaimNotToken, ClaimNotTokenMessage(tokenName));
+                    await store.RecordRefusalAsync(requestId, tokenName ?? InvestigationRules.InvalidAgentId, "evidence", notYours.Status, null, cancellationToken);
+                    return InvestigationToolCore.Status(notYours.Status, notYours.Message);
                 }
 
                 if (holder is null)
@@ -582,8 +587,9 @@ public sealed partial class DarlingMcpInvestigationTools
 
     [McpServerTool(Name = "submit_investigation_report"), Description(
         "Returns your report on a request you claimed. Writes only investigation state. status reported, invalid, " +
-        "unsupported_format, lease_lost, already_reported, claim_not_token or not_found. <<GUIDE>> " +
-        "A named agent token reports only under its own claim_id: another token's claim_id is refused as claim_not_token. " +
+        "unsupported_format, lease_lost, already_reported or not_found. <<GUIDE>> " +
+        "Where the host serves named agent tokens, a named token reports only under its own claim_id: another token's claim_id answers " +
+        "claim_not_token, and the legacy token passing a claim_id a named token holds answers agent_id_is_named_token. " +
         "A report is verdict (real, false_positive, needs_person), root_cause, evidence (the calls you made and the numbers " +
         "they showed) and summary, with an optional proposed_note for a person to approve. " +
         "evidence is a JSON array of at least one {\"tool\":\"...\",\"arguments\":{...},\"key_numbers\":\"...\",\"basis\":\"" + InvestigationReportFields.BasesAlternation + "\"}: " +
@@ -624,7 +630,7 @@ public sealed partial class DarlingMcpInvestigationTools
         CancellationToken cancellationToken = default) =>
         SubmitAsync(Store(postgres), request_id, claim_id, report_format, verdict, root_cause, evidence, summary,
             proposed_note, action_proposals, cancellationToken, links, family_of, queries_run, follow_up_at, follow_up_condition,
-            served?.Policy.AgentTokenName);
+            served?.Policy.AgentTokenName, served?.NamedAgentNames);
 
     /// <summary>The <c>reported</c> answer: <c>links_recorded</c> (the distinct URLs stored, #5914) only when the report
     /// carried a link, so a report without one answers exactly as before.</summary>
@@ -645,7 +651,8 @@ public sealed partial class DarlingMcpInvestigationTools
     internal static async Task<string> SubmitAsync(InvestigationRequestStore store, string request_id, string claim_id,
         int report_format, string verdict, string root_cause, string evidence, string summary, string? proposed_note,
         string? action_proposals, CancellationToken cancellationToken, string? links = null, string? family_of = null,
-        string? queries_run = null, string? follow_up_at = null, string? follow_up_condition = null, string? tokenName = null)
+        string? queries_run = null, string? follow_up_at = null, string? follow_up_condition = null, string? tokenName = null,
+        IReadOnlySet<string>? namedAgentNames = null)
     {
         var problems = InvestigationToolCore.ValidateReport(request_id, claim_id, verdict, root_cause, evidence, summary, proposed_note,
             action_proposals, out var requestId, out var claimId, out var evidenceJson, requireBasis: true);
@@ -674,11 +681,11 @@ public sealed partial class DarlingMcpInvestigationTools
             /* A report under a claim_id comes from the token that claimed it. A named token that presents another token's claim_id is
                refused, and every refusal here is journaled as the caller, not as the claim's holder. */
             var journalAs = tokenName ?? agent;
-            if (tokenName is not null && holder is not null && !string.Equals(holder, tokenName, StringComparison.Ordinal))
+            if (ClaimTokenRefusal(tokenName, namedAgentNames, holder) is { } notYours)
             {
                 if (requestId != Guid.Empty)
-                    await store.RecordRefusalAsync(requestId, tokenName, "submit", ClaimNotToken, null, cancellationToken);
-                return InvestigationToolCore.Status(ClaimNotToken, ClaimNotTokenMessage(tokenName));
+                    await store.RecordRefusalAsync(requestId, tokenName ?? InvestigationRules.InvalidAgentId, "submit", notYours.Status, null, cancellationToken);
+                return InvestigationToolCore.Status(notYours.Status, notYours.Message);
             }
 
             if (report_format < short.MinValue || report_format > short.MaxValue
@@ -723,7 +730,7 @@ public sealed partial class DarlingMcpInvestigationTools
             }
 
             var outcome = await store.SubmitAsync(new InvestigationReportSubmission(
-                requestId, claimId, agent, (short)report_format, verdict, root_cause.Trim(),
+                requestId, claimId, journalAs, (short)report_format, verdict, root_cause.Trim(),
                 RootCauseFound: verdict != "needs_person", summary.Trim(), evidenceJson!,
                 string.IsNullOrWhiteSpace(proposed_note) ? null : proposed_note.Trim(), reportLinks.Count > 0 ? reportLinks : null,
                 familyOf, queriesRunJson, followUpAtUtc, followUpCondition), cancellationToken);
@@ -884,6 +891,21 @@ public sealed partial class DarlingMcpInvestigationTools
 
     /// <summary>A legacy-token claim named an agent_id that is a named agent token's name (#6542).</summary>
     internal const string AgentIdIsNamedToken = "agent_id_is_named_token";
+
+    /// <summary>Whether a call under a claim_id may go on, given who made the claim (<paramref name="holder"/>, null when no claim holds it).
+    /// A named token acts only under a claim it made; the legacy token acts only under a claim no served named token made, since the
+    /// journal would credit that named agent with what the legacy token did. Null means it may.</summary>
+    internal static (string Status, string Message)? ClaimTokenRefusal(string? tokenName, IReadOnlySet<string>? namedAgentNames, string? holder)
+    {
+        if (holder is null)
+            return null;
+        if (tokenName is not null)
+            return string.Equals(holder, tokenName, StringComparison.Ordinal) ? null : (ClaimNotToken, ClaimNotTokenMessage(tokenName));
+        return namedAgentNames is { Count: > 0 } && namedAgentNames.Contains(holder) ? (AgentIdIsNamedToken, ClaimHeldByNamedTokenMessage(holder)) : null;
+    }
+
+    internal static string ClaimHeldByNamedTokenMessage(string holder) =>
+        $"That claim_id belongs to the named agent token {holder}, which this host serves. Only that token can act under it; claim the request again with a different agent_id.";
 
     internal static string AgentIdIsNamedTokenMessage(string agentId) =>
         $"agent_id {agentId} is the name of a named agent token this host serves. Use a different agent_id on this token.";

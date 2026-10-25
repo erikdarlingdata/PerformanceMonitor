@@ -30,11 +30,17 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 public sealed class DarlingAgentActionSeat
 {
-    internal DarlingAgentActionSeat(DarlingMcpWritePolicy.Effective policy, StoreOwnerSource? owner = null)
+    internal DarlingAgentActionSeat(DarlingMcpWritePolicy.Effective policy, StoreOwnerSource? owner = null,
+        IReadOnlySet<string>? namedAgentNames = null)
     {
         Policy = policy;
         Owner = owner;
+        NamedAgentNames = namedAgentNames ?? new HashSet<string>();
     }
+
+    /// <summary>The names of the named agent tokens this host serves (#6542), empty when it serves none: the legacy token's agent_action
+    /// may not act as one of them.</summary>
+    internal IReadOnlySet<string> NamedAgentNames { get; }
 
     internal DarlingMcpWritePolicy.Effective Policy { get; }
 
@@ -150,7 +156,7 @@ internal static class DarlingMcpAgentActions
         {
             var outcome = await DarlingAgentActionGate.RunAsync(seat.Policy, postgres, store,
                 logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, tool, kind, agentAction, target,
-                kindRule, readBefore, write, ct);
+                kindRule, readBefore, write, ct, seat.NamedAgentNames);
             if (outcome.Refusal is { } refusal)
                 return DarlingAgentActionGate.RefusalAnswer(refusal);
             return outcome.AfterJson ?? Json("done", tool + " done.");

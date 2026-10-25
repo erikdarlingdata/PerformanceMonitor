@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -1278,7 +1278,7 @@ public sealed class DarlingMcpHostService : BackgroundService
            arm they go through the agent_action gate and under the writes arm they write as before. A service parameter, so a
            client cannot supply it. */
         if (perRequest)
-            services.AddTransient<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(PolicyOf(sp), sp.GetService<StoreOwnerSource>()));
+            services.AddTransient<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(PolicyOf(sp), sp.GetService<StoreOwnerSource>(), tokens!.AgentNames));
         else
             services.AddSingleton<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(writes, sp.GetService<StoreOwnerSource>()));
 

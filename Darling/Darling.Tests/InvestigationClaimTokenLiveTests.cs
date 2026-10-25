@@ -153,8 +153,7 @@ public sealed class InvestigationClaimTokenLiveTests
             /* The composer is never reached: a refusal and a renewal both answer before a brief is composed. */
             var refused = await DarlingMcpInvestigationTools.ClaimAsync(c.Store, null!, c.RequestId.ToString(), Second, c.ClaimId.ToString(),
                 null, c.Ct, Second);
-            Assert.Equal("invalid", StatusOf(refused));
-            Assert.Contains("claim_id", refused, StringComparison.Ordinal);
+            Assert.Equal(DarlingMcpInvestigationTools.ClaimNotToken, StatusOf(refused));
             Assert.Equal("0|1|0", await RefusedAsync(c, "claim:" + DarlingMcpInvestigationTools.ClaimNotToken));
 
             var renewed = await DarlingMcpInvestigationTools.ClaimAsync(c.Store, null!, c.RequestId.ToString(), Holder, c.ClaimId.ToString(),
@@ -208,7 +207,7 @@ public sealed class InvestigationClaimTokenLiveTests
 
             var refused = await DarlingMcpInvestigationTools.ClaimAsync(c.Store, composer, other.ToString(), Second, null, null, c.Ct,
                 tokenName: null, namedAgentNames: named);
-            Assert.Equal("invalid", StatusOf(refused));
+            Assert.Equal(DarlingMcpInvestigationTools.AgentIdIsNamedToken, StatusOf(refused));
             Assert.Contains("different agent_id", refused, StringComparison.Ordinal);
             Assert.Equal("", await ScalarAsync(c.Connection, $"SELECT coalesce(claimed_by, '') FROM config.investigation_requests WHERE request_id = '{other}'", c.Ct));
             Assert.Equal("0|0|1", await RefusedAsync(c, "claim:" + DarlingMcpInvestigationTools.AgentIdIsNamedToken));
@@ -216,6 +215,63 @@ public sealed class InvestigationClaimTokenLiveTests
             var claimed = await DarlingMcpInvestigationTools.ClaimAsync(c.Store, composer, other.ToString(), "legacy-agent", null, null, c.Ct,
                 tokenName: null, namedAgentNames: named);
             Assert.Equal("claimed", StatusOf(claimed));
+        });
+    }
+
+    private static readonly HashSet<string> BothNames = new(StringComparer.Ordinal) { Holder, Second };
+
+    [Fact]
+    public async Task TheLegacyToken_CannotRenewSubmitOrReadEvidence_OnAServedNamedTokensClaim_AndTheRowsAreNotTheNamedAgents()
+    {
+        await RunAsync(async c =>
+        {
+            /* The claim was made by the named token (or before the upgrade); the legacy token holds its claim_id. */
+            var renew = await DarlingMcpInvestigationTools.ClaimAsync(c.Store, null!, c.RequestId.ToString(), "legacy-agent", c.ClaimId.ToString(),
+                null, c.Ct, tokenName: null, namedAgentNames: BothNames);
+            Assert.Equal(DarlingMcpInvestigationTools.AgentIdIsNamedToken, StatusOf(renew));
+
+            var submit = await DarlingMcpInvestigationTools.SubmitAsync(c.Store, c.RequestId.ToString(), c.ClaimId.ToString(), 1, "real", "a cause",
+                Evidence, "a summary", null, null, c.Ct, tokenName: null, namedAgentNames: BothNames);
+            Assert.Equal(DarlingMcpInvestigationTools.AgentIdIsNamedToken, StatusOf(submit));
+            Assert.Equal("0", await ScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_reports", c.Ct));
+
+            var evidence = await DarlingMcpInvestigationTools.EvidenceAsync(c.Store, McpDataDetail.Full, c.RequestId.ToString(), null,
+                c.ClaimId.ToString(), c.Ct, tokenName: null, namedAgentNames: BothNames);
+            Assert.Equal(DarlingMcpInvestigationTools.AgentIdIsNamedToken, StatusOf(evidence));
+
+            /* Each refusal is journaled as the placeholder, never as the named agent whose claim it was. */
+            Assert.Equal("0|0|1", await RefusedAsync(c, "claim:" + DarlingMcpInvestigationTools.AgentIdIsNamedToken));
+            Assert.Equal("0|0|1", await RefusedAsync(c, "submit:" + DarlingMcpInvestigationTools.AgentIdIsNamedToken));
+            Assert.Equal("0|0|1", await RefusedAsync(c, "evidence:" + DarlingMcpInvestigationTools.AgentIdIsNamedToken));
+        });
+    }
+
+    [Fact]
+    public async Task TheNamedToken_CanTakeTheClaimOver_ByReclaimingUnderItsOwnName()
+    {
+        await RunAsync(async c =>
+        {
+            var reclaimed = await DarlingMcpInvestigationTools.ClaimAsync(c.Store, null!, c.RequestId.ToString(), Holder, null, null, c.Ct,
+                tokenName: Holder, namedAgentNames: BothNames);
+            Assert.Equal("renewed", StatusOf(reclaimed));
+            Assert.Contains(c.ClaimId.ToString(), reclaimed, StringComparison.Ordinal);
+
+            Assert.Equal("reported", StatusOf(await DarlingMcpInvestigationTools.SubmitAsync(c.Store, c.RequestId.ToString(), c.ClaimId.ToString(), 1,
+                "real", "a cause", Evidence, "a summary", null, null, c.Ct, tokenName: Holder, namedAgentNames: BothNames)));
+        });
+    }
+
+    [Fact]
+    public async Task AStoreLevelSubmitRefusal_IsJournaledAsTheCaller_NotAsUnclaimed()
+    {
+        await RunAsync(async c =>
+        {
+            /* A claim_id nothing holds: the store answers lease_lost, and the row names the token that asked. */
+            var lost = await DarlingMcpInvestigationTools.SubmitAsync(c.Store, c.RequestId.ToString(), Guid.NewGuid().ToString(), 1, "real",
+                "a cause", Evidence, "a summary", null, null, c.Ct, tokenName: Second);
+            Assert.Equal("lease_lost", StatusOf(lost));
+            Assert.Equal("0|1|0", await RefusedAsync(c, "submit:lease_lost"));
+            Assert.Equal("0", await ScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE actor = 'agent:unclaimed'", c.Ct));
         });
     }
 
