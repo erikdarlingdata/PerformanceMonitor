@@ -512,7 +512,7 @@ public sealed class DarlingMcpWritePolicyTests
     /// so no value here is computed a second way.</summary>
     internal static async Task<TestServer> BuildServer(
         McpConfig mcp, string bearerToken, string postgresConnection = "Host=localhost;Database=postgres;Username=darling",
-        DarlingMcpTokenSet? tokens = null, bool? requireToken = null)
+        DarlingMcpTokenSet? tokens = null, bool? requireToken = null, StoreOwnerSource? owner = null)
     {
         var builder = DarlingMcpHostService.CreateHostBuilder();
         builder.WebHost.UseTestServer();
@@ -521,6 +521,8 @@ public sealed class DarlingMcpWritePolicyTests
         // A pool no test here opens: every case stops at the gate, at tools/list or at the refusal, before any tool body runs.
         var postgres = NpgsqlDataSource.Create(postgresConnection);
         builder.Services.AddSingleton(postgres);
+        if (owner is not null)
+            builder.Services.AddSingleton(owner);
         builder.Services.AddSingleton(new PerformanceMonitor.Darling.Analysis.DarlingAnalysisService(
             postgres, planFetcher: null, logger: Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance,
             baselineCache: new PerformanceMonitor.Darling.Analysis.BaselineCache()));
