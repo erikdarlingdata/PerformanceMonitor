@@ -27,7 +27,7 @@ Exit codes are numbers. The [exit code table](#exit-codes) below says what each 
 | `--version`, `-v` | Prints the product version. | no | either | `0` | This page |
 | `--test-connection`, `--validate-config` | Checks `darling.json` and probes every configured server. | no | either | `0`, `1` | [Validate the config](install.md#validate-the-config-pre-flight) |
 | `--check-settings` | Prints the store host profile and a verdict for each sizing setting. | no | either (1) | `0`, `1`, `2`, `3` | [Check settings](install.md#check-hoststore-sizing-settings) |
-| `--diagnostics-bundle`, `--diag-bundle` | Writes one aliased file to attach to a bug report. | yes on the store host | either | `0` to `5` | [Diagnostics bundle](install.md#diagnostics-bundle) |
+| `--diagnostics-bundle`, `--diag-bundle` | Writes one aliased file to attach to a bug report. | yes on the store host | either | `0` to `5` | [Diagnostics bundle](#diagnostics-bundle) |
 | `--encrypt-password` | Encrypts a SQL login password for `darling.json`. Windows only. | no | no | `0`, `1` | [Configure darling.json](install.md#configure-darlingjson) |
 | `--add-server`, `--add-servers` | Registers one or more monitored servers. | no | either (1) | `0`, `1` | [Add-server](#--add-server) |
 | `--grant-script` | Prints the T-SQL that grants Darling its access on a monitored server. | no | either (1) | `0`, `1` | [Permissions](../permissions.md) |
@@ -169,6 +169,22 @@ PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql
 ```
 
 The first form finds the server the way `--validate-config` does and drops the Extended Events sessions on it. `--dry-run` lists them and drops nothing. The second form prints guarded `DROP` statements and connects to nothing. Use it for a server that is no longer configured. `--print-sql` takes no server name, no `--dry-run` and no `--config`.
+
+### Diagnostics Bundle
+
+To report a problem, write one file with the store's state, the recent service log and the collection health, and attach it to the issue:
+
+```
+PerformanceMonitor.Darling.Service.exe --diagnostics-bundle darling-bundle.json [--hours N] [--server <name>] [--log-dir <dir>] [--config <path>] [--alias-map <path>] [--include-log-text] [--force]
+```
+
+Run it elevated on the store host (a managed store's credential is protected by Windows). On Linux run `./PerformanceMonitor.Darling.Service --diagnostics-bundle darling-bundle.json`; with compose, run it with `docker compose exec` and copy the file out with `docker compose cp`. `--diag-bundle` is the short form. The file is one JSON document of at most 4 MiB. `--hours` (1 to 168, default 24) sets the window; `--server` limits the server-scoped sections to one server.
+
+Server, host, database, login and domain names and IP addresses are replaced with ordinal aliases (`server-1`, `db-2`, `ip-1`), and credentials are removed. Before anything is written the verb scans the finished file for every name and secret it knows and writes nothing if one is still there. That proves only that the names it knows are gone, so open the file and check it before you attach it. `--alias-map <path>` writes a separate file that maps the aliases back to names; it starts with a `DO NOT ATTACH` line, and the bundle never contains it.
+
+When the store cannot be reached, the registry cannot be read, so a server known only to it cannot be aliased: the service log is then written as counts only. `--include-log-text` adds the message text anyway (open the file before you attach it). `--alias-map` refuses to overwrite the bundle or an existing file without `--force`. The `store_unreachable` section holds no sentence, only an error class and a fixed reason code. For a managed store the bundle reads the store's own `postmaster.pid` when the first connect is refused: a store listening on another port than `postgres.port` is used there (a warning says so; the service reads the port only at start-up), and a store still starting is waited for (about 20 seconds). If it still cannot connect, the reason is `store_not_running` (no live store on the data directory, so start the service and read its log), `store_starting`, or `data_directory_missing` (the bundle is reading a `darling.json` whose data directory is not the service's: pass `--config` with the install folder's file); a bare `connect_failed` means the store is listening on the configured port and still refused.
+
+Exit codes: see [Exit codes](#exit-codes). If the service log is not where the verb looks, the `service_log` section says so. Pass `--log-dir`.
 
 ### `--grant-script`
 

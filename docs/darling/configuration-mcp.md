@@ -2,7 +2,7 @@
 
 Audience: operators.
 
-This page covers the `mcp` block of `darling.json`. It moved here from the Darling operator guide. To turn MCP on and connect a client, see [Darling MCP setup](mcp.md).
+This page covers the `mcp` block of `darling.json`. It moved here from the Darling operator guide. To turn MCP on and connect a client, see [MCP server](../mcp-server.md#darling).
 
 ## mcp
 

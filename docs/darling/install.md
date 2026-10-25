@@ -10,7 +10,7 @@ The service fills one store. Three surfaces read that store, and each has its ow
 |---|---|---|
 | WPF viewer | The desktop app. It shows plans, blocking chains, deadlock graphs and live active queries | [The WPF viewer](viewer.md) |
 | Web dashboard | A browser view of the fleet, served by the service itself. It is off by default | [The web dashboard](web-dashboard.md) |
-| MCP | The endpoint that an LLM client talks to. It is off by default | [Darling MCP setup](mcp.md) |
+| MCP | The endpoint that an LLM client talks to. It is off by default | [MCP server](../mcp-server.md#darling) |
 
 Everyone does the steps on this page. The three surface pages are independent of each other, so read only the one that you need.
 
@@ -137,7 +137,7 @@ A failure still writes its error line to stderr and exits with code 1. The guida
 
 Older builds wrote the prompt and the hint to stderr unconditionally. That stopped a `'Stop'` script and echoed the piped-in password in the error text. On one of those builds, wrap the call with `$ErrorActionPreference = 'Continue'` and add `2>$null`.
 
-The blob is DPAPI at LocalMachine scope with a fixed entropy string. It decrypts only on the machine that produced it. Run `--encrypt-password` on the service host. If you ever move `darling.json` to a different box, run it again there. The same rule applies to the MCP and web tokens (see [the web dashboard](web-dashboard.md) and [MCP](mcp.md)). Do not copy a `darling.json` between machines and expect its secrets to survive.
+The blob is DPAPI at LocalMachine scope with a fixed entropy string. It decrypts only on the machine that produced it. Run `--encrypt-password` on the service host. If you ever move `darling.json` to a different box, run it again there. The same rule applies to the MCP and web tokens (see [the web dashboard](web-dashboard.md) and [MCP](../mcp-server.md#darling)). Do not copy a `darling.json` between machines and expect its secrets to survive.
 
 ## Step 5: Pre-flight
 
@@ -183,7 +183,7 @@ The script does these things:
 
 `.\uninstall-darling.ps1` reverses the install. It leaves your store and config alone unless you pass `-PurgeData`.
 
-To set up the LAN endpoints in the same pass, use `.\install-darling.ps1 -Network`. It runs the guided wizard at the end. You can also do this later (see [the web dashboard](web-dashboard.md) and [MCP](mcp.md)).
+To set up the LAN endpoints in the same pass, use `.\install-darling.ps1 -Network`. It runs the guided wizard at the end. You can also do this later (see [the web dashboard](web-dashboard.md) and [MCP](../mcp-server.md#darling)).
 
 ## Step 7: Wait about two minutes
 
@@ -222,7 +222,7 @@ Two things look wrong on a first start and are not:
 
 If the service idles instead, the message is literal and named: `Cannot load configuration`, `Configuration problem: <field>`, or `Cannot reach or migrate the Postgres store`. See [Troubleshooting](troubleshooting.md).
 
-When the service collects, go to the page for the surface that you need: [the WPF viewer](viewer.md), [the web dashboard](web-dashboard.md) or [MCP](mcp.md).
+When the service collects, go to the page for the surface that you need: [the WPF viewer](viewer.md), [the web dashboard](web-dashboard.md) or [MCP](../mcp-server.md#darling).
 
 ## Things that will bite you
 
@@ -240,7 +240,7 @@ Each of these has cost somebody real time.
 
    If the store still cannot answer within the ten-second budget of the command, the start-up check of the running service logs the exact command to fix it. Fresh installs are not affected, because there the file is the future answer of the control plane.
 8. `--configure-firewall`, `--enable-*` and `--disable-*` need an elevated shell. The service account cannot create firewall rules, by design. If you run unelevated, the store toggle still succeeds and the rule does not change. The command prints the exact elevated command for you to run by hand.
-9. An off-box MCP client that points at `localhost` fails quietly. Use the LAN IP of the box. (See [When it says enabled and still will not connect](mcp.md#when-it-says-enabled-and-still-will-not-connect).)
+9. An off-box MCP client that points at `localhost` fails quietly. Use the LAN IP of the box. (See [When it says enabled and still will not connect](../mcp-server.md#when-it-says-enabled-and-still-will-not-connect).)
 10. The web dashboard asks for its token on loopback too. A loopback-only dashboard needs the token like an exposed one. The browser on the service host signs in with it. Only `web.allowTokenlessLoopback` serves it with no token, and then for reads only. (See [Reach it from a browser on another machine](web-dashboard.md#reach-it-from-a-browser-on-another-machine).)
 11. `Warning` means three different things, and you must look at the card to tell which. `ClassifyBand` returns `Warning` for any of these:
     - A metric at warning severity (CPU, blocking, deadlocks, memory, threads). This is a real condition on the server.
@@ -390,19 +390,7 @@ Every other verb, with its exit codes, platform rules and whether it needs the s
 
 ### Diagnostics Bundle
 
-To report a problem, write one file with the store's state, the recent service log and the collection health, and attach it to the issue:
-
-```
-PerformanceMonitor.Darling.Service.exe --diagnostics-bundle darling-bundle.json [--hours N] [--server <name>] [--log-dir <dir>] [--config <path>] [--alias-map <path>] [--include-log-text] [--force]
-```
-
-Run it elevated on the store host (a managed store's credential is protected by Windows). On Linux run `./PerformanceMonitor.Darling.Service --diagnostics-bundle darling-bundle.json`; with compose, run it with `docker compose exec` and copy the file out with `docker compose cp`. `--diag-bundle` is the short form. The file is one JSON document of at most 4 MiB. `--hours` (1 to 168, default 24) sets the window; `--server` limits the server-scoped sections to one server.
-
-Server, host, database, login and domain names and IP addresses are replaced with ordinal aliases (`server-1`, `db-2`, `ip-1`), and credentials are removed. Before anything is written the verb scans the finished file for every name and secret it knows and writes nothing if one is still there. That proves only that the names it knows are gone, so open the file and check it before you attach it. `--alias-map <path>` writes a separate file that maps the aliases back to names; it starts with a `DO NOT ATTACH` line, and the bundle never contains it.
-
-When the store cannot be reached, the registry cannot be read, so a server known only to it cannot be aliased: the service log is then written as counts only. `--include-log-text` adds the message text anyway (open the file before you attach it). `--alias-map` refuses to overwrite the bundle or an existing file without `--force`. The `store_unreachable` section holds no sentence, only an error class and a fixed reason code. For a managed store the bundle reads the store's own `postmaster.pid` when the first connect is refused: a store listening on another port than `postgres.port` is used there (a warning says so; the service reads the port only at start-up), and a store still starting is waited for (about 20 seconds). If it still cannot connect, the reason is `store_not_running` (no live store on the data directory, so start the service and read its log), `store_starting`, or `data_directory_missing` (the bundle is reading a `darling.json` whose data directory is not the service's: pass `--config` with the install folder's file); a bare `connect_failed` means the store is listening on the configured port and still refused.
-
-Exit codes: see [`--diagnostics-bundle` in the command line reference](cli.md#exit-codes). If the service log is not where the verb looks, the `service_log` section says so. Pass `--log-dir`.
+This section moved to [The command line reference](cli.md#diagnostics-bundle).
 
 ### Run It — Console Mode
 
@@ -572,7 +560,7 @@ On Windows Server 2022 build 20348.5622, `Set-ProcessMitigation -Remove -Disable
 |---|---|
 | The desktop app | [The WPF viewer](viewer.md) |
 | The browser view | [The web dashboard](web-dashboard.md) |
-| An LLM client | [Darling MCP setup](mcp.md) |
+| An LLM client | [MCP server](../mcp-server.md#darling) |
 | Every config field, in detail | [Darling operator guide](../../Darling/README.md) |
 | Permissions on monitored servers | [Permissions](monitored-servers.md#permissions-on-monitored-servers) |
 | The LAN endpoints in full | [Opt-in Network Endpoints](network-endpoints.md) |

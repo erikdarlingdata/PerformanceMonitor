@@ -7,7 +7,7 @@ Read these pages in this order. After the install, each page is complete on its 
 1. [Install Darling](install.md): from a downloaded zip to a service that collects data.
 2. [The WPF viewer](viewer.md): the desktop app, on the service host or on another machine.
 3. [The web dashboard](web-dashboard.md): the browser view that the service serves.
-4. [Darling MCP setup](mcp.md): the endpoint for an LLM client.
+4. [MCP server](../mcp-server.md#darling): the endpoint for an LLM client.
 5. [Running Darling day to day](admin.md): add or remove a server, change a password, rotate a token, pause, upgrade, uninstall, and where everything is.
 6. [Command line reference](cli.md): every verb of the service exe, with exit codes.
 7. [Darling and your monitored servers](monitored-servers.md): what the service does on each SQL Server, its Extended Events sessions, and the permissions it needs.
