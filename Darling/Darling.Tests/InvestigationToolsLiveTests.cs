@@ -431,7 +431,8 @@ public sealed class InvestigationToolsLiveTests
         });
     }
 
-    /// <summary>#6004: a family_of that names no request is refused as invalid, naming the id, and nothing is stored; one that
+    /// <summary>#6004: a family_of that is not a full id (the 8-character short form) or names no request is refused as invalid,
+    /// and nothing is stored. The second refusal names the id. One that
     /// names a request is stored and served back, with the queries run.</summary>
     [Fact]
     public async Task Submit_FamilyOf_MustNameARequest_AndIsServedBack()
@@ -443,6 +444,11 @@ public sealed class InvestigationToolsLiveTests
             var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
             var claimId = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, second, "agent-a", null, null, ct))
                 .GetProperty("claim_id").GetString()!;
+
+            var shortForm = Root(await DarlingMcpInvestigationTools.SubmitAsync(store, second, claimId, 1, "real", "a blocking chain", Evidence,
+                "summary", null, null, ct, family_of: first.ToString()[..8]));
+            Assert.Equal("invalid", shortForm.GetProperty("status").GetString());
+            Assert.Equal("0", await ScalarAsync(connection, $"SELECT count(*)::text FROM config.investigation_reports WHERE request_id = '{second}'", ct));
 
             var missing = Guid.NewGuid();
             var refused = Root(await DarlingMcpInvestigationTools.SubmitAsync(store, second, claimId, 1, "real", "a blocking chain", Evidence,

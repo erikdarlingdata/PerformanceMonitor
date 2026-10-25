@@ -233,6 +233,12 @@ public sealed class LiteInvestigationL2Tests : IDisposable
         var (first, firstClaim) = await ClaimedAsync(101, "srv-101");
         var (second, secondClaim) = await ClaimedAsync(102, "srv-102");
 
+        /* The 8-character short form of a real request id is not an id: refused, and nothing is stored. */
+        var shortForm = Root(await McpInvestigationTools.SubmitAsync(_store, second.ToString(), secondClaim.ToString(), 1, "real", "cause",
+            Evidence, "s", null, null, Ct, family_of: first.ToString()[..8]));
+        Assert.Equal("invalid", shortForm.GetProperty("status").GetString());
+        Assert.Equal("0", Scalar("SELECT count(*) FROM investigation_reports"));
+
         var refused = Root(await McpInvestigationTools.SubmitAsync(_store, second.ToString(), secondClaim.ToString(), 1, "real", "cause",
             Evidence, "s", null, null, Ct, family_of: Guid.NewGuid().ToString()));
         Assert.Equal("invalid", refused.GetProperty("status").GetString());
