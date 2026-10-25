@@ -129,8 +129,8 @@ public sealed class RecompileModuleTests
     public void TheAction_IsInEverySwitchList_ForSqlServerOnly_AndIsAnAgentTool_WithAJournalKindAndNoUndo()
     {
         Assert.Contains(ServerActionNames.RecompileModule, ServerActionNames.All);
-        Assert.True(ServerActionNames.IsValidForEngine(ServerActionNames.RecompileModule, postgres: false));
-        Assert.False(ServerActionNames.IsValidForEngine(ServerActionNames.RecompileModule, postgres: true));
+        Assert.True(ServerActionNames.IsValidForEngine(ServerActionNames.RecompileModule, postgres: false, sqlEngineEdition: null));
+        Assert.False(ServerActionNames.IsValidForEngine(ServerActionNames.RecompileModule, postgres: true, sqlEngineEdition: null));
         Assert.Equal("Recompile procedures, functions and triggers", ServerActionNames.Label(ServerActionNames.RecompileModule));
         Assert.Contains("recompile_module", InvestigationRules.AgentActionToolNames);
         Assert.Contains("recompile_module", DarlingMcpWritePolicy.AgentActionTools);

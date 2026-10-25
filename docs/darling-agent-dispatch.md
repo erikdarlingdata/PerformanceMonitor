@@ -276,7 +276,7 @@ A person turns a switch on or off from any of three places. Each change is journ
 - **The web dashboard.** Open the Admin page and use the **Server actions** tab. You must be signed in to the dashboard as an admin. A dashboard with no sign-in configured, or a viewer account, lists the switches and answers 403 to a change.
 - **MCP.** The `set_server_action` tool, served only with `mcp.allowServerAdmin`. Name one server by its exact name. A disabled server works too. A part of a name is refused and the near matches are listed.
 
-A switch cannot be turned on for an action the server's engine cannot run, but it can always be turned off. No `darling.json` key sets a switch.
+A switch cannot be turned on for an action the server's engine cannot run, but it can always be turned off. An Azure SQL Database target cannot take `evict_plan`, `create_plan_guide` or `drop_plan_guide`, and an Azure SQL Managed Instance target cannot take `create_plan_guide` or `drop_plan_guide`. The edition is the one Darling collected for the server. Until Darling collects it, the switch can be turned on and the tool still refuses the call. No `darling.json` key sets a switch.
 
 As a fallback, the store owner can write the table directly.
 

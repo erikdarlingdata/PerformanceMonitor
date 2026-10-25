@@ -242,8 +242,8 @@ public sealed class PlanGuideTests
         foreach (var action in new[] { ServerActionNames.CreatePlanGuide, ServerActionNames.DropPlanGuide })
         {
             Assert.Contains(action, ServerActionNames.All);
-            Assert.True(ServerActionNames.IsValidForEngine(action, postgres: false));
-            Assert.False(ServerActionNames.IsValidForEngine(action, postgres: true));
+            Assert.True(ServerActionNames.IsValidForEngine(action, postgres: false, sqlEngineEdition: null));
+            Assert.False(ServerActionNames.IsValidForEngine(action, postgres: true, sqlEngineEdition: null));
         }
 
         Assert.Equal("Create plan guides", ServerActionNames.Label(ServerActionNames.CreatePlanGuide));
