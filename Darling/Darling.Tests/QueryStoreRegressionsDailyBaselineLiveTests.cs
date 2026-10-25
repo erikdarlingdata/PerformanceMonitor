@@ -466,4 +466,63 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.Equal(25L, long.Parse(q41[7], CultureInfo.InvariantCulture));
         Assert.Equal(10L, long.Parse(q41[8], CultureInfo.InvariantCulture));
     }
+
+    /// <summary>
+    /// #5506: where latest's coverage holds the whole read and no batch is pending, the table read takes its three Regular arms
+    /// from <c>query_store_interval_latest</c>, and the rows equal the wide read's. A poisoned latest row proves which table
+    /// was read: the served rows move, in the MCP read and in the viewer's grid. A pending latest batch, or latest's coverage
+    /// starting after the baseline start, sends the arms back to the wide table, and the poisoned row is not read.
+    /// </summary>
+    [Fact]
+    public async Task TheRegularArms_ReadLatestWhereItsCoverageHolds_AndFallBackToWideOnAPendingBatchOrLateCoverage()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5506 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var f = await BuildFixtureAsync(extra: true, timescale: false, ct);
+        var reference = await AllLiveAsync(f, ct);
+        Assert.NotEmpty(reference);
+
+        async Task<List<string>> ViewerRowsAsync()
+        {
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(f.Scratch.ConnectionString);
+            var rows = await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, f.Start, f.End, null, [Db], f.BaselineStart, null, ct);
+            Assert.NotNull(rows);
+            return rows.Select(r => string.Join("|",
+                r.DatabaseName, r.QueryId, Math.Round(r.BaselineDurationMs, 6), Math.Round(r.RecentDurationMs, 6), Math.Round(r.BaselineCpuMs, 6),
+                Math.Round(r.RecentCpuMs, 6), Math.Round(r.AdditionalDurationMs, 6), r.BaselineExecCount, r.RecentExecCount,
+                r.BaselinePlanCount, r.RecentPlanCount, r.Severity, r.QueryTextSample, r.LastExecutionTime)).ToList();
+        }
+
+        /* The gate allows latest, and both forms of the statement give the same rows, with the run days and all live. */
+        var plan = await ResolveAsync(f.Postgres, f.BaselineStart, f.Start, ct);
+        Assert.True(plan.RegularFromLatest);
+        Assert.NotEmpty(plan.RunDays);
+        Assert.Equal(reference, await RunAsync(f.Connection, DarlingQueryStoreRegressionReader.BuildSql(wide: true, useDailyTotals: true, regularFromLatest: true), f.Start, f.End, f.BaselineStart, plan, ct));
+        Assert.Equal(reference, await RunAsync(f.Connection, DarlingQueryStoreRegressionReader.BuildSql(wide: true, useDailyTotals: false, regularFromLatest: true), f.Start, f.End, f.BaselineStart, QueryStoreRegressionBaseline.AllLive(f.Start), ct));
+        Assert.Equal(reference, await ServedRowsAsync(f, ct));
+        var viewerReference = await ViewerRowsAsync();
+        Assert.Equal(reference, viewerReference);
+
+        /* Poison the recent intervals in latest only: the served rows move, so latest is what the Regular arms read. */
+        await ExecAsync(f.Connection, $"UPDATE collect.query_store_interval_latest SET avg_cpu_time_us = avg_cpu_time_us * 5 WHERE server_id = {ServerId} AND last_execution_time >= TIMESTAMP '{f.Start:yyyy-MM-dd HH:mm:ss}'", ct);
+        Assert.Equal(reference, await AllLiveAsync(f, ct));
+        Assert.NotEqual(reference, await ServedRowsAsync(f, ct));
+        Assert.NotEqual(viewerReference, await ViewerRowsAsync());
+
+        /* Latest's coverage starts after the baseline start: the arms read wide, and the rows are the wide rows again. */
+        var filledSince = (DateTime)(await ScalarAsync(f.Connection, $"SELECT filled_since FROM collect.query_store_interval_latest_coverage WHERE server_id = {ServerId}", ct))!;
+        await ExecAsync(f.Connection, $"UPDATE collect.query_store_interval_latest_coverage SET filled_since = TIMESTAMP '{f.BaselineStart.AddHours(1):yyyy-MM-dd HH:mm:ss}' WHERE server_id = {ServerId}", ct);
+        Assert.False((await ResolveAsync(f.Postgres, f.BaselineStart, f.Start, ct)).RegularFromLatest);
+        Assert.Equal(reference, await ServedRowsAsync(f, ct));
+        Assert.Equal(viewerReference, await ViewerRowsAsync());
+
+        /* Coverage restored, then a pending latest batch: the arms read wide again. */
+        await ExecAsync(f.Connection, $"UPDATE collect.query_store_interval_latest_coverage SET filled_since = TIMESTAMP '{filledSince:yyyy-MM-dd HH:mm:ss.ffffff}' WHERE server_id = {ServerId}", ct);
+        Assert.True((await ResolveAsync(f.Postgres, f.BaselineStart, f.Start, ct)).RegularFromLatest);
+        Assert.NotEqual(reference, await ServedRowsAsync(f, ct));
+        await ExecAsync(f.Connection, $"INSERT INTO collect.query_store_interval_latest_pending (server_id, collection_time, database_name, recorded_at, failure) VALUES ({ServerId}, TIMESTAMP '{f.Start:yyyy-MM-dd HH:mm:ss}', '{Db}', TIMESTAMP '{f.Start:yyyy-MM-dd HH:mm:ss}', 'x')", ct);
+        Assert.False((await ResolveAsync(f.Postgres, f.BaselineStart, f.Start, ct)).RegularFromLatest);
+        Assert.Equal(reference, await ServedRowsAsync(f, ct));
+        Assert.Equal(viewerReference, await ViewerRowsAsync());
+    }
 }
