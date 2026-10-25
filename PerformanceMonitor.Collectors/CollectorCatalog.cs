@@ -64,6 +64,7 @@ public static class CollectorCatalog
         AgDatabaseReplicaStatesCollector.Instance,
         PlanCorrectionCollector.Instance,
         QueryStoreForcedPlansCollector.Instance,
+        QueryStoreHintsCollector.Instance,
         PvsStatsCollector.Instance,
         /* PostgreSQL definitions. They live in the same catalog as the T-SQL ones on purpose: the
            schema generator walks this list to create tables, and one store can hold data from both

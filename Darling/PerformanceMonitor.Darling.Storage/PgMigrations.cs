@@ -2341,6 +2341,36 @@ ALTER TABLE config.config_alert_settings ALTER COLUMN client_timeouts_enabled SE
 UPDATE config.config_alert_settings SET client_timeouts_enabled = TRUE WHERE client_timeouts_enabled = FALSE;";
 
     /// <summary>
+    /// V217 (#6581) - <c>collect.query_store_hints</c>: the Query Store hints in place, read from <c>sys.query_store_query_hints</c> by
+    /// <c>QueryStoreHintsCollector</c> (SQL Server 2022 and later) every five minutes, one row per hint plus ONE all-NULL marker row
+    /// (<c>query_hint_id</c> NULL) per captured database per pass, so a hint that left a captured database reads as CLEARED, not as not
+    /// captured. The forced-plans table's model: a PLAIN table on every store (<c>StaysPlainTable</c>), 30-day time-sliced DELETE. Columns
+    /// and the (server_id, collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a fresh store (V1's catalog walk) and an
+    /// upgraded one agree. The marker index is the forced-plans one (<c>idx_query_store_forced_plans_markers</c>): it finds a database's
+    /// previous complete capture by one seek. New table, no data moves, no grant (the <c>collect</c> schema carries blanket SELECT).
+    /// Every statement is idempotent.
+    /// </summary>
+    private const string V217Sql = @"
+CREATE TABLE IF NOT EXISTS collect.query_store_hints (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    query_hint_id bigint,
+    query_id bigint,
+    query_hint_text text,
+    last_query_hint_failure_reason text,
+    query_hint_failure_count bigint,
+    source_desc text
+);
+
+CREATE INDEX IF NOT EXISTS idx_query_store_hints_time ON collect.query_store_hints(server_id, collection_time);
+
+CREATE INDEX IF NOT EXISTS idx_query_store_hints_markers
+    ON collect.query_store_hints (server_id, database_name, collection_time) WHERE query_hint_id IS NULL;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2731,6 +2761,7 @@ $rung$;";
         new Migration(214, "known-patterns", V214Sql),
         new Migration(215, "agent-table-indexes", V215Sql),
         new Migration(216, "client-timeouts-on-by-default", V216Sql),
+        new Migration(217, "query-store-hints", V217Sql),
     };
 
     /// <summary>

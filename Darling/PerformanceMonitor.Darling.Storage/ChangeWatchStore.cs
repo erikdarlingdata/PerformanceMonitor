@@ -19,11 +19,11 @@ namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>One recorded change a watch names: what it was, when it happened and a key that never repeats for the same change.</summary>
 /// <param name="Key">Stable per change (kind, subject, capture time), so detecting the same change on a later pass records it once.</param>
-/// <param name="Kind"><c>server_config</c>, <c>database_config</c>, <c>database_scoped_config</c>, <c>trace_flag</c> or <c>plan_force</c>.</param>
+/// <param name="Kind"><c>server_config</c>, <c>database_config</c>, <c>database_scoped_config</c>, <c>trace_flag</c>, <c>plan_force</c> or <c>query_store_hint</c> (#6581).</param>
 /// <param name="ChangeTimeUtc">The capture time the change was seen at.</param>
 /// <param name="Description">One line in words, for the investigation brief.</param>
 /// <param name="DatabaseName">The database a plan change belongs to, or null.</param>
-/// <param name="QueryId">The Query Store query a plan change belongs to, or null; a watch of plan changes alone measures these queries.</param>
+/// <param name="QueryId">The Query Store query a plan change belongs to, or null; a watch of plan or Query Store hint changes alone measures these queries.</param>
 /// <param name="PlanId">The Query Store plan a plan change forced or unforced, or null: the agent-only test (#6239 round 3, M1) matches an agent's action to a change by server, database and this plan id.</param>
 public sealed record ChangeWatchChange(string Key, string Kind, DateTime ChangeTimeUtc, string Description, string? DatabaseName = null, long? QueryId = null, long? PlanId = null)
 {
@@ -390,7 +390,7 @@ ON CONFLICT (server_id, change_key) DO NOTHING",
 
     /// <summary>The detection sources a server has a high-water mark for.</summary>
     public static readonly IReadOnlyList<string> MarkSources =
-        ["server_config", "database_config", "database_scoped_config", "trace_flags", "plan_actions", "plan_snapshots"];
+        ["server_config", "database_config", "database_scoped_config", "trace_flags", "plan_actions", "plan_snapshots", "hint_snapshots"];
 
     /// <summary>The sources a PostgreSQL target has a mark for (#6234): server-wide settings, per-database and per-role overrides, and
     /// extension install state (the daily extension snapshot). The marks table keys on (server, source), so no migration is needed.</summary>

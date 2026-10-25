@@ -89,7 +89,7 @@ WHERE server_id = $1";
 
     /// <summary>The collectors that skip a readable secondary's databases (bit 8 of readonly_reason), so a read of what they store can be empty by design there (#6554).</summary>
     internal static bool IsReadableSecondaryGated(string collectorName) =>
-        collectorName is "query_store" or "query_store_forced_plans" or "plan_correction";
+        collectorName is "query_store" or "query_store_forced_plans" or "query_store_hints" or "plan_correction";
 
     /// <summary>
     /// #6439: the <c>not_collected</c> envelope for the tempdb file I/O read on an Azure SQL Database, or <c>null</c> on any other
