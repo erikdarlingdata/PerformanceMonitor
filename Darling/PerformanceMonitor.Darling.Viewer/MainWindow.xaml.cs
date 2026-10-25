@@ -1041,6 +1041,13 @@ public partial class MainWindow : Window
             return;
         }
 
+        /* The tab now on screen puts its own server's clock on the process-wide helper before anything renders, so a
+           PostgreSQL tab does not format with the clock of the SQL Server tab that was open before it. */
+        if (MainTabs.SelectedItem is TabItem { Content: ViewerServerTab activated })
+        {
+            activated.ApplyServerClockToHelper();
+        }
+
         await RefreshVisibleAsync();
         /* The status bar's collector-health scope flips with the active tab (a per-server tab shows that
            server; an aggregate tab shows the fleet-cumulative total), so refresh it now rather than waiting
