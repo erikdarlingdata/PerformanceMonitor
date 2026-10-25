@@ -265,7 +265,9 @@ public sealed class McpInvestigationTools
             if (Guid.TryParse(family_of, out var parsedFamily))
                 familyOf = parsedFamily;
             else
-                problems.Add("family_of: not a request id.");
+                /* An agent that passes the short form of a request id (its first 8 hex digits) gets told the full one is
+                   needed, rather than only that the value is not an id. */
+                problems.Add("family_of: not a request id. Give the full request_id, a UUID, not a short form such as its first 8 characters.");
         }
 
         if (InvestigationReportFields.Validate(queries_run, out var queriesRunJson) is { } queriesProblem)
