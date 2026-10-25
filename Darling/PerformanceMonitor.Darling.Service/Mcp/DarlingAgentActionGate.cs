@@ -50,7 +50,8 @@ internal static class DarlingAgentActionGate
         Func<NpgsqlConnection, NpgsqlTransaction, AgentActionContext, CancellationToken, Task<AgentActionRefusal?>>? kindRule,
         Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<string?>> readBefore,
         Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<string?>> write,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlySet<string>? namedAgentNames = null)
     {
         ArgumentNullException.ThrowIfNull(postgres);
         ArgumentNullException.ThrowIfNull(store);
@@ -79,6 +80,16 @@ internal static class DarlingAgentActionGate
                 tokenName, cancellationToken);
             return AgentActionGateOutcome.Refused(new AgentActionRefusal(DarlingMcpInvestigationTools.AgentIdNotToken,
                 DarlingMcpInvestigationTools.AgentIdNotTokenMessage(tokenName)));
+        }
+
+        /* The legacy token's agent_id is free text. One that is a served named agent's name would put the change in that agent's journal, so
+           it is refused and journaled under no agent's name. */
+        if (policy.AgentTokenName is null && namedAgentNames is { Count: > 0 } && namedAgentNames.Contains(action!.AgentId))
+        {
+            await store.RecordAgentActionRefusalAsync(action.RequestId, InvestigationRules.InvalidAgentId, tool,
+                DarlingMcpInvestigationTools.AgentIdIsNamedToken, null, cancellationToken);
+            return AgentActionGateOutcome.Refused(new AgentActionRefusal(DarlingMcpInvestigationTools.AgentIdIsNamedToken,
+                DarlingMcpInvestigationTools.AgentIdIsNamedTokenMessage(action.AgentId)));
         }
 
         var hooks = new AgentActionHooks

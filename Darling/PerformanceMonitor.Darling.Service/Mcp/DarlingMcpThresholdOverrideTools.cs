@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
@@ -29,9 +30,17 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 public sealed class DarlingMcpServedPolicy
 {
-    internal DarlingMcpServedPolicy(DarlingMcpWritePolicy.Effective policy) => Policy = policy;
+    internal DarlingMcpServedPolicy(DarlingMcpWritePolicy.Effective policy, IReadOnlySet<string>? namedAgentNames = null)
+    {
+        Policy = policy;
+        NamedAgentNames = namedAgentNames ?? new HashSet<string>();
+    }
 
     internal DarlingMcpWritePolicy.Effective Policy { get; }
+
+    /// <summary>The names of the named agent tokens this host serves (#6542), empty when it serves none. A legacy-token call may not
+    /// claim as one of them: the journal would credit that named agent with a claim it never made.</summary>
+    internal IReadOnlySet<string> NamedAgentNames { get; }
 }
 
 /// <summary>
@@ -86,13 +95,13 @@ public sealed class DarlingMcpThresholdOverrideTools
         StoreOwnerSource? ownerSource = null,
         CancellationToken cancellationToken = default) =>
         await SetAsync(postgres, served.Policy, new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: ownerSource?.Read()),
-            logger, server_name, key, value, database_name, clear, set_by, agent_action, cancellationToken);
+            logger, server_name, key, value, database_name, clear, set_by, agent_action, cancellationToken, served.NamedAgentNames);
 
     /// <summary>The tool body over a given store, so a test drives either arm.</summary>
     internal static async Task<string> SetAsync(
         NpgsqlDataSource postgres, DarlingMcpWritePolicy.Effective policy, InvestigationRequestStore store, ILogger logger,
         string server_name, string key, int? value, string? database_name, bool clear, string? set_by, string? agent_action,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, IReadOnlySet<string>? namedAgentNames = null)
     {
         try
         {
@@ -168,7 +177,7 @@ public sealed class DarlingMcpThresholdOverrideTools
                     new AgentActionTarget(resolved.ServerId, resolved.ServerName, wire, database),
                     (_, _, context, _) => Task.FromResult(
                         action is not null && !clear ? AgentKindRule(entry, value!.Value) : null),
-                    ReadBefore, Write, cancellationToken);
+                    ReadBefore, Write, cancellationToken, namedAgentNames);
                 if (outcome.Refusal is { } refusal)
                     return DarlingAgentActionGate.RefusalAnswer(refusal);
             }
