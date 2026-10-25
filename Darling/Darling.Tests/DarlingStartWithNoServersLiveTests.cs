@@ -177,11 +177,15 @@ public sealed class DarlingStartWithNoServersLiveTests
     }
 
     /// <summary>
-    /// A stop that lands while a pass is waiting on the store ends the collection loop cleanly. The config beacon read and the
-    /// external alert pass are both held on a table lock, then the service is stopped: the loop must return without raising, only
-    /// after the background loops have drained, so no pass in flight meets a store source that was already disposed, and nothing
-    /// at Warning or above reaches the log. Before the loop's pass body was inside the stop handler, the cancelled beacon read left
-    /// the method by exception, skipping the drain and disposing the store sources under the alert loop.
+    /// A stop that lands while a pass is waiting on the store ends the collection loop cleanly. The config beacon read is held on a
+    /// table lock (and the external alert pass on another), then the service is stopped the moment the beacon read is seen waiting:
+    /// the loop must return without raising, which means it reached the drain of the background loops before the store sources
+    /// were disposed, and nothing at Warning or above may be logged after the stop. Before the loop's pass body was inside the stop
+    /// handler, the cancelled beacon read left the method by exception, skipping the drain and disposing the store sources under
+    /// the alert loop. The beacon read (3 s) and the alert pass (10 s) have command deadlines that log a Warning when they expire
+    /// while the lock is held, so only what is logged after the stop is judged: those expiries happen with or without a stop and
+    /// say nothing about it. Whether the alert pass is also waiting at that moment depends on how the two 15 second loops line up;
+    /// the assertion holds either way, and the cancelled beacon read alone fails the old code on the loop's return.
     /// </summary>
     [Fact]
     public async Task AStopWhilePassesWaitOnTheStore_EndsTheLoopCleanly_AfterTheBackgroundLoopsDrain()
@@ -221,6 +225,7 @@ public sealed class DarlingStartWithNoServersLiveTests
                 await Task.Delay(100, ct);
             }
 
+            Assert.False(task.IsFaulted, "the loop failed before the test could hold it: " + task.Exception?.GetBaseException().Message);
             Assert.False(task.IsCompleted, "the loop ended before the test could hold it");
 
             /* From here every read of the config beacon and every external alert statement waits on a lock this connection holds. */
@@ -233,7 +238,8 @@ public sealed class DarlingStartWithNoServersLiveTests
                 await begin.ExecuteNonQueryAsync(ct);
             }
 
-            /* Both loops tick every 15 seconds, so each is waiting on a lock within that time. */
+            /* The beacon is read once a pass and a pass starts every 15 seconds (a read held on the lock gives up after 3 seconds), so a
+               read is waiting on the lock within about 18 seconds. The stop goes as soon as one is seen. */
             await using var probe = new NpgsqlConnection(scratch.ConnectionString);
             await probe.OpenAsync(ct);
             var deadline = DateTime.UtcNow.AddSeconds(45);
@@ -241,27 +247,31 @@ public sealed class DarlingStartWithNoServersLiveTests
             while (!held && DateTime.UtcNow < deadline)
             {
                 await using var look = new NpgsqlCommand(
-                    "SELECT (SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%config_version%')"
-                    + ", (SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%external_alert%')", probe);
+                    "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%config_version%'", probe);
                 await using var reader = await look.ExecuteReaderAsync(ct);
                 await reader.ReadAsync(ct);
-                held = reader.GetInt64(0) > 0 && reader.GetInt64(1) > 0;
+                held = reader.GetInt64(0) > 0;
                 if (!held)
                 {
                     await Task.Delay(50, ct);
                 }
             }
 
-            Assert.True(held, "the beacon read and the external alert pass were not both waiting on the lock within 45 seconds");
+            Assert.True(held, "the beacon read was not seen waiting on the lock within 45 seconds");
 
+            /* Anything logged up to here (a deadline that expired on the held lock) is not about the stop. */
+            var loggedBeforeStop = logger.Entries.Count;
             stop.Cancel();
             var finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(60), ct));
             Assert.True(ReferenceEquals(finished, task), "the loop did not finish within 60 seconds of the stop");
             await task;
 
+            var afterStop = logger.Entries.Skip(loggedBeforeStop)
+                .Where(e => e.Level >= LogLevel.Warning && !e.Message.StartsWith("Statement statistics:", StringComparison.Ordinal))
+                .ToList();
             Assert.True(
-                !Faults(logger).Any(),
-                "nothing at Warning or above may be logged: " + string.Join(" || ", Faults(logger).Select(e => e.Level + " " + e.Message)));
+                afterStop.Count == 0,
+                "nothing at Warning or above may be logged after the stop: " + string.Join(" || ", afterStop.Select(e => e.Level + " " + e.Message)));
             bodySucceeded = true;
         }
         finally
