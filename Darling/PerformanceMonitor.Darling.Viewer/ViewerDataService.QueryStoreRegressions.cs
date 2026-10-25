@@ -310,6 +310,9 @@ public sealed partial class ViewerDataService
                 wideSql = QueryStoreIntervalWide.WithEdgeMargin(wideSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
             }
 
+            /* #5506: the latest form's high live range starts at the next midnight minus the margin, as in the MCP read. */
+            baselinePlan = QueryStoreRegressionBaseline.WithMeasuredHighStart(baselinePlan, edgeMargin);
+
             await using var command = new NpgsqlCommand(wideSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
             AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, plan.ClampedStart, baselinePlan, excludedDatabases);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);

@@ -299,6 +299,10 @@ internal static class DarlingQueryStoreRegressionReader
                 wideSql = QueryStoreIntervalWide.WithEdgeMargin(wideSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
             }
 
+            /* #5506: on the latest form the high live range starts at the next midnight minus the same margin, not at the last
+               run day's midnight, so that day's rows are not read only to be dropped. */
+            plan = QueryStoreRegressionBaseline.WithMeasuredHighStart(plan, edgeMargin);
+
             await using var command = new NpgsqlCommand(wideSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
             AddParameters(command, serverId, startUtc, endUtc, databases, limit, wide.ClampedStart, plan);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);

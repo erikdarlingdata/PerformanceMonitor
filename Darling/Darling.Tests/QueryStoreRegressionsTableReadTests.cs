@@ -119,4 +119,20 @@ public sealed class QueryStoreRegressionsTableReadTests
 
         Assert.False(live.RegularFromLatest);
     }
+
+    /// <summary>#5506: the latest form's high range starts at the next midnight minus the measured margin, never below the
+    /// last run day's midnight, and the wide form and the all-live plan keep their bounds.</summary>
+    [Fact]
+    public void TheHighStart_IsRaisedByTheMeasuredMargin_OnTheLatestFormWithRunDaysOnly()
+    {
+        var lastRunDay = new DateTime(2026, 10, 23);
+        var days = new QueryStoreRegressionBaseline.Plan([new DateOnly(2026, 10, 22), new DateOnly(2026, 10, 23)], new DateTime(2026, 10, 22), lastRunDay);
+        var latest = days with { RegularFromLatest = true };
+
+        Assert.Equal(new DateTime(2026, 10, 23, 21, 0, 0), QueryStoreRegressionBaseline.WithMeasuredHighStart(latest, TimeSpan.FromHours(3)).HighStart);
+        Assert.Equal(lastRunDay, QueryStoreRegressionBaseline.WithMeasuredHighStart(latest, QueryStoreIntervalWide.PurgeEdgeMargin).HighStart);
+        Assert.Equal(lastRunDay, QueryStoreRegressionBaseline.WithMeasuredHighStart(days, TimeSpan.FromHours(3)).HighStart);
+        var live = QueryStoreRegressionBaseline.AllLive(new DateTime(2026, 10, 24, 18, 0, 0)) with { RegularFromLatest = true };
+        Assert.Equal(live, QueryStoreRegressionBaseline.WithMeasuredHighStart(live, TimeSpan.FromHours(3)));
+    }
 }

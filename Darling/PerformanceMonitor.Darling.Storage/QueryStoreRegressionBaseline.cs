@@ -117,6 +117,28 @@ public static class QueryStoreRegressionBaseline
     public static bool LatestCoversRegularArms(DateTime? filledSince, bool hasPending, DateTime baselineStart) =>
         !hasPending && filledSince is DateTime f && f <= DateTime.SpecifyKind(baselineStart, DateTimeKind.Unspecified);
 
+    /// <summary>
+    /// The high live range's start raised from the last run day's midnight to the next midnight minus
+    /// <paramref name="edgeMargin"/> (#5506), on the latest form only. A row of the high range has its last execution on a
+    /// day after the run, so at or after that next midnight, and its first execution is within one interval before its last
+    /// (both inside one Query Store interval, on the monitored server's clock). The measured margin
+    /// (<see cref="QueryStoreIntervalWide.ResolveEdgeMarginAsync"/>) is at least the server's longest interval, so no row of
+    /// the high range starts below the raised bound. Never below today's bound, so the full 26-hour margin leaves it as it
+    /// is. Not applied to the wide form: measured on a production store, the narrower range flipped the wide table's plan
+    /// from a bitmap scan to a slower plain index scan, while on latest it cut the last run day's node from about 116 MB to
+    /// 12 MB read cold, the plan unchanged.
+    /// </summary>
+    public static Plan WithMeasuredHighStart(Plan plan, TimeSpan edgeMargin)
+    {
+        if (!plan.RegularFromLatest || plan.BuiltDayCount == 0)
+        {
+            return plan;
+        }
+
+        var raised = plan.HighStart.AddDays(1) - edgeMargin;
+        return raised > plan.HighStart ? plan with { HighStart = raised } : plan;
+    }
+
     /// <summary>The plan that reads nothing from the daily totals: the whole baseline is live.</summary>
     public static Plan AllLive(DateTime windowStart) =>
         new(Array.Empty<DateOnly>(), DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified), DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified));
