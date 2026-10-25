@@ -1,0 +1,107 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor analysis engine.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace PerformanceMonitor.Analysis;
+
+/// <summary>
+/// Builds the BLOCKING_CHAIN fact from a reconstruction. Shared by Lite's and Darling's fact collectors so the
+/// two cannot grade or describe the chain differently: both pick the worst chain the same way and stamp the same
+/// metadata, including whether the chain was still blocking when the window ended.
+/// </summary>
+internal static class BlockingChainFactBuilder
+{
+    /// <summary>
+    /// How many collection intervals old the chain's newest report or snapshot row may be and still count as
+    /// "still blocking at the window end". One interval is the normal gap between two samples of a live chain;
+    /// the second absorbs a late or skipped collection.
+    /// </summary>
+    internal const int OpenAtEndIntervals = 2;
+
+    /// <summary>
+    /// The chain the fact describes: the one with the highest BLOCKING_CHAIN grade, ties going to the structurally
+    /// larger chain (the reconstruction's own order). A long wait behind two sessions can outgrade a short
+    /// pile-up of twenty, and the fact has to describe the chain the grade came from.
+    /// </summary>
+    internal static ReconstructedChain PickWorst(IReadOnlyList<ReconstructedChain> chains) =>
+        chains.MaxBy(c => FactScorer.ScoreBlockingChainShape(c.Depth, c.VictimCount, c.MaxWaitMs))!;
+
+    /// <summary>
+    /// The aggregate BLOCKING_CHAIN fact for a non-empty reconstruction. <paramref name="rows"/> are the pair rows
+    /// the reconstruction came from (every sample of every pair, not just the longest-waiting one per edge);
+    /// <paramref name="collectionIntervalMinutes"/> is the effective cadence of the blocking collectors on this
+    /// server, which decides how recent the chain's last sample must be to count as still open.
+    /// </summary>
+    internal static Fact Build(
+        AnalysisContext context, BlockingReconstruction reconstruction,
+        IReadOnlyCollection<BlockingPairRow> rows, int collectionIntervalMinutes)
+    {
+        var worst = PickWorst(reconstruction.Chains);
+
+        var metadata = new Dictionary<string, double>
+        {
+            ["worst_chain_depth"] = worst.Depth,
+            ["worst_chain_victim_count"] = worst.VictimCount,
+            ["worst_apex_spid"] = worst.ApexSpid,
+            ["worst_apex_sleeping"] = worst.ApexSleeping ? 1 : 0,
+            ["worst_chain_max_wait_ms"] = worst.MaxWaitMs,
+            ["total_reconstructed_chains"] = reconstruction.Chains.Count,
+            ["deepest_chain_overall"] = reconstruction.Chains.Max(c => c.Depth),
+            ["max_victim_count_overall"] = reconstruction.Chains.Max(c => c.VictimCount),
+            ["depth_capped"] = reconstruction.DepthCapped ? 1 : 0,
+            ["traversal_truncated"] = reconstruction.TraversalTruncated ? 1 : 0,
+            ["cycle_detected"] = reconstruction.CycleDetected ? 1 : 0
+        };
+
+        if (NewestObservation(worst, rows) is DateTime newest)
+        {
+            var age = context.TimeRangeEnd - newest;
+            var open = age <= TimeSpan.FromMinutes(OpenAtEndIntervals * Math.Max(1, collectionIntervalMinutes));
+            metadata["worst_chain_open_at_end"] = open ? 1 : 0;
+            metadata["worst_chain_last_seen_age_ms"] = Math.Max(0, age.TotalMilliseconds);
+        }
+
+        // The head's transaction start is the monitored server's own wall clock, whose offset from UTC the
+        // analysis does not know, so it travels as a clock reading (seconds since 1970 on that clock), never as an age.
+        if (worst.ApexTranStarted is DateTime tran)
+            metadata["worst_apex_tran_started_clock_s"] = (tran - DateTime.UnixEpoch).TotalSeconds;
+
+        return new Fact
+        {
+            Source = "blocking",
+            Key = "BLOCKING_CHAIN",
+            Value = worst.Depth,
+            ServerId = context.ServerId,
+            Metadata = metadata
+        };
+    }
+
+    /// <summary>The newest sample time among rows where one of the chain's sessions blocks another of them.</summary>
+    private static DateTime? NewestObservation(ReconstructedChain chain, IEnumerable<BlockingPairRow> rows)
+    {
+        var members = new HashSet<int> { chain.ApexSpid };
+        foreach (var level in chain.Levels)
+        {
+            members.Add(level.BlockingSpid);
+            members.Add(level.BlockedSpid);
+        }
+
+        DateTime? newest = null;
+        foreach (var row in rows)
+        {
+            if (members.Contains(row.BlockingSpid) && members.Contains(row.BlockedSpid)
+                && (newest is null || row.EventTime > newest))
+                newest = row.EventTime;
+        }
+
+        return newest;
+    }
+}

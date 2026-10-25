@@ -1109,6 +1109,9 @@ public static class FactAdvice
         var sleeping = FactMeta(facts, "BLOCKING_CHAIN", "worst_apex_sleeping") is > 0;
         var maxWait = FactMeta(facts, "BLOCKING_CHAIN", "worst_chain_max_wait_ms");
         var totalChains = FactMeta(facts, "BLOCKING_CHAIN", "total_reconstructed_chains");
+        var open = FactMeta(facts, "BLOCKING_CHAIN", "worst_chain_open_at_end") is > 0;
+        var headSpid = FactMeta(facts, "BLOCKING_CHAIN", "worst_apex_spid");
+        var tranClock = FactMeta(facts, "BLOCKING_CHAIN", "worst_apex_tran_started_clock_s");
 
         var inv = new StringBuilder($"The worst blocking chain this window was {Plural(depth.Value, "session")} deep");
         if (victims is > 0)
@@ -1120,9 +1123,24 @@ public static class FactAdvice
             inv.Append($" The longest waiter sat for {Duration(maxWait.Value)}.");
         if (totalChains is > 1)
             inv.Append($" {Plural(totalChains.Value, "separate chain")} formed across the window.");
+        if (open)
+        {
+            // The chain was still being sampled when the window ended: say who is at the head, how long the
+            // longest waiter has waited, and (when the report carried it) since when the head's transaction has
+            // been open, on the monitored server's own clock.
+            inv.Append(" It was still blocking at the end of the window");
+            if (headSpid is > 0)
+                inv.Append($": session {headSpid.Value:0} was at the head");
+            if (maxWait is > 0)
+                inv.Append($", and its longest waiter had been waiting {Duration(maxWait.Value)}");
+            if (tranClock is double clock)
+                inv.Append($", with the head's transaction open since {DateTime.UnixEpoch.AddSeconds(clock):yyyy-MM-dd HH:mm:ss} on the monitored server's clock");
+            inv.Append('.');
+        }
 
-        var rem = new StringBuilder(
-            "This reports a window that has already passed, so the chain cleared long ago — a KILL now buys nothing; aim at the recurrence. ");
+        var rem = new StringBuilder(open
+            ? "This chain was still blocking at the end of the window, so it may be holding locks right now — look at the head session first, and if it is not doing work you can wait for, ending it (KILL) releases everyone queued behind it, at the cost of rolling back its open transaction. Then aim at the recurrence. "
+            : "This reports a window that has already passed, so the chain cleared long ago — a KILL now buys nothing; aim at the recurrence. ");
         rem.Append(sleeping
             ? "Because the head was sleeping, the fix is the code path that opens a BEGIN TRAN and never reaches COMMIT/ROLLBACK on an error or client-timeout path — and SET XACT_ABORT ON so an aborted batch rolls back automatically."
             : "Because the head was active, the fix is that one slow operation — find it and cut how long it holds locks: shorten the transaction and index it so it touches fewer rows.");
@@ -1133,7 +1151,9 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"A blocking chain {depth.Value:N0} deep formed — the session at the head held a resource the rest queued behind",
+            Headline = open
+                ? $"A blocking chain {depth.Value:N0} deep was still blocking at the end of the window — the session at the head held a resource the rest queued behind"
+                : $"A blocking chain {depth.Value:N0} deep formed — the session at the head held a resource the rest queued behind",
             Investigation = inv.ToString(),
             Remediation = rem.ToString()
         };

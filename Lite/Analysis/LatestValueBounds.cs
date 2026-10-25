@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
@@ -103,6 +104,28 @@ AND   collection_time <= $2";
         var traceFlagsFrequency = CollectorScheduleDefaults.ResolveFrequencyMinutes("trace_flags", traceFlagsConfigured, fleetOverride: null);
         starts["trace_flags"] = context.TimeRangeEnd - AnalysisContext.LatestValueLookbackFor(
             CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(traceFlagsFrequency))!.Value;
+
+        /* The blocking chain fact's "still open at the window end" test is measured in the blocking collectors'
+           own intervals: the slower of the two, mirroring Darling's PgLatestValueBounds. */
+        var blockingIntervals = new List<int>();
+        foreach (var name in new[] { "dmv_blocking_snapshot", "blocked_process_report" })
+        {
+            int? configured = null;
+            try
+            {
+                configured = frequencyMinutes?.Invoke(context.ServerId, name);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn("LatestValueBounds",
+                    $"Could not resolve the {name} schedule for {context.ServerName}; the blocking chain fact uses its default cadence this pass: {ex.Message}");
+            }
+
+            blockingIntervals.Add(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
+                CollectorScheduleDefaults.ResolveFrequencyMinutes(name, configured, fleetOverride: null)));
+        }
+
+        context.BlockingCollectionIntervalMinutes = blockingIntervals.Max();
 
         context.LatestValueStarts = starts;
     }
