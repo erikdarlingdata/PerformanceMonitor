@@ -356,6 +356,33 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         Assert.Contains("readable secondary", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A Secondary role with a health row for a database that is not flagged secondary (a database outside any availability group,
+    /// Query Store READ_WRITE): Query Store is still collected there, so the read must not say the server is a readable secondary.
+    /// The role decides only when the newest health capture is empty.
+    /// </summary>
+    [Fact]
+    public async Task GetQueryStoreTop_OnASecondaryRole_WithANonSecondaryDatabase_DoesNotAnswerNotCollected()
+    {
+        await SeedAgReplicaRoleAsync("Secondary");
+        await SeedQueryStoreHealthAsync("StandaloneDb", "READ_WRITE", readonlyReason: 0);
+
+        var root = Parse(await McpQueryTools.GetQueryStoreTop(_dataService, _serverManager));
+
+        Assert.NotEqual("not_collected", root.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task GetQueryStoreTop_OnASecondaryRole_WithNoHealthCapture_AnswersNotCollected()
+    {
+        await SeedAgReplicaRoleAsync("Secondary");
+
+        var root = Parse(await McpQueryTools.GetQueryStoreTop(_dataService, _serverManager));
+
+        Assert.Equal("not_collected", root.GetProperty("status").GetString());
+        Assert.Contains("readable secondary", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task GetQueryStoreTop_WithAStorageCapReadOnly_KeepsThePreconditionAnswer()
     {
@@ -431,6 +458,21 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         P(collectionTimeUtc);
         P(status);
         P(errorMessage);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private async Task SeedAgReplicaRoleAsync(string role)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, ag_replica_role) VALUES ($1, $2, $3, 'TestServer', 'Enterprise', '16.0.1000.6', 'RTM', 3, $4)";
+        void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        P(_nextId--);
+        P(DateTime.UtcNow.AddMinutes(-5));
+        P(_serverId);
+        P(role);
         await cmd.ExecuteNonQueryAsync();
     }
 

@@ -129,7 +129,40 @@ public sealed class QueryStoreReadableSecondaryNotCollectedLiveTests
             await SeedReplicaSettingAsync(c, ct);
 
             var forced = await DarlingMcpForcedPlanTools.GetForcedPlans(postgres, ServerName, 24, null, DatabaseFilter.All, ct);
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(forced));
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(forced));
+            return 0;
+        });
+    }
+
+    /// <summary>A Secondary role with a health row for a database that is not flagged secondary (a database outside any availability
+    /// group, Query Store READ_WRITE): Query Store is still collected there, so no read says it is a readable secondary.</summary>
+    [Fact]
+    public async Task SecondaryRole_WithAHealthRowForANonSecondaryDatabase_DoesNotClaimNotCollected()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            await SeedRoleAsync(c, ct, "Secondary");
+            await SeedHealthAsync(c, ct, "Standalone", "READ_WRITE", 0);
+
+            var forced = await DarlingMcpForcedPlanTools.GetForcedPlans(postgres, ServerName, 24, null, DatabaseFilter.All, ct);
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(forced));
+
+            var top = await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 24, 20, null, null, null, null, false, null, ct);
+            Assert.NotEqual("not_collected", DarlingMcpTestData.StatusOf(top));
+            return 0;
+        });
+    }
+
+    [Fact]
+    public async Task NoForcedPlanCapture_WithQueryStoreOffEverywhere_AnswersPrecondition()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            await SeedRoleAsync(c, ct, "Primary");
+            await SeedHealthAsync(c, ct, "Sales", "OFF", 0);
+
+            var forced = await DarlingMcpForcedPlanTools.GetForcedPlans(postgres, ServerName, 24, null, DatabaseFilter.All, ct);
+            Assert.Equal("precondition", DarlingMcpTestData.StatusOf(forced));
             return 0;
         });
     }
@@ -142,7 +175,7 @@ public sealed class QueryStoreReadableSecondaryNotCollectedLiveTests
             await SeedRoleAsync(c, ct, "Primary");
 
             var forced = await DarlingMcpForcedPlanTools.GetForcedPlans(postgres, ServerName, 24, null, DatabaseFilter.All, ct);
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(forced));
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(forced));
             return 0;
         });
     }

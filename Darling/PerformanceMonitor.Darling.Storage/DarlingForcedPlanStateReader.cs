@@ -102,11 +102,14 @@ public sealed record ForcedPlanCapture(string DatabaseName, DateTime NewestCaptu
 /// <param name="StatsFloor">The oldest Query Store stats row in the span the states were read over; null when there is none.</param>
 /// <param name="StatsComplete">False when the stored stats start after the oldest time a state is measured from, or hold nothing in the span: a
 /// NOT_EXERCISED state is then a statement about what the store holds, not about the server.</param>
+/// <param name="ReadCapped">The window holds more forces than <see cref="DarlingForcedPlanStateReader.MaxForces"/> and the read left some out: failing forces
+/// first, then the other forces of each database's newest capture, then the removed ones, each in database and plan order.</param>
 public sealed record ForcedPlanRead(
     IReadOnlyList<ForcedPlanFact> Plans,
     IReadOnlyList<ForcedPlanCapture> Captures,
     DateTime? StatsFloor,
-    bool StatsComplete);
+    bool StatsComplete,
+    bool ReadCapped = false);
 
 /// <summary>
 /// #5632 step 1b: whether each Query Store force works, from <c>collect.query_store_forced_plans</c> (V195, the collector's
@@ -177,7 +180,14 @@ LEFT JOIN query_plan_dim AS d
     }
 
     /// <summary>The newest collector capture of each force, read from the window. $1 server, $2 start, $3 end, $4 database filter, $5 query_id or NULL, $6 plan_id or NULL (#6560: both narrow the read itself, before the <see cref="MaxForces"/> cap, so a force past the cap is still found).</summary>
-    public static string ForcesSql(DatabaseFilter databases) => $@"
+    public static string ForcesSql(DatabaseFilter databases) => ForcesSql(databases, MaxForces);
+
+    /// <summary>
+    /// <see cref="ForcesSql(DatabaseFilter)"/> with the row cap given. The cap cuts the LAST rows of this order: a force that fails (a failure count or
+    /// a reason) in its database's newest capture first, then the other forces of the newest capture, then the removed ones, each by database and plan
+    /// id, so a standing force that needs a person is never what a cap drops. It reads one row past the cap so the caller can tell the read was cut.
+    /// </summary>
+    internal static string ForcesSql(DatabaseFilter databases, int maxForces) => $@"
 WITH win AS (
     SELECT database_name, collection_time, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason,
            variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
@@ -204,8 +214,11 @@ SELECT l.database_name, l.plan_id, l.query_id, l.plan_forcing_type, l.force_fail
 FROM latest AS l
 LEFT JOIN absent AS a ON a.database_name = l.database_name AND a.plan_id = l.plan_id
 LEFT JOIN newest AS n ON n.database_name = l.database_name
-ORDER BY l.database_name, l.plan_id
-LIMIT {MaxForces}";
+ORDER BY CASE WHEN l.collection_time >= n.newest_capture AND (l.force_failure_count > 0 OR btrim(COALESCE(l.last_force_failure_reason, '')) <> '') THEN 0
+              WHEN l.collection_time >= n.newest_capture THEN 1
+              ELSE 2 END,
+         l.database_name, l.plan_id
+LIMIT {maxForces + 1}";
 
     /// <summary>Each database's newest marker row in the window. $1 server, $2 start, $3 end, $4 database filter.</summary>
     public static string CapturesSql(DatabaseFilter databases) => $@"
@@ -430,8 +443,18 @@ LIMIT 50";
     /// narrowed to databases, to one query and to one plan id (<paramref name="planId"/>, a trailing parameter). <paramref name="forcedAt"/> is the seam for a caller that knows when a force was
     /// placed (key: database and plan_id): the time replaces first seen for that force's IGNORED and WORKING rules.
     /// </summary>
-    public static async Task<ForcedPlanRead> ReadAsync(
+    public static Task<ForcedPlanRead> ReadAsync(
         NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, long? queryId, DateTime start, DateTime end,
+        IReadOnlyDictionary<(string Database, long PlanId), DateTime>? forcedAt = null,
+        int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds,
+        long? planId = null,
+        CancellationToken cancellationToken = default) =>
+        ReadAsync(postgres, serverId, databases, queryId, start, end, MaxForces, forcedAt, commandTimeoutSeconds, planId, cancellationToken);
+
+    /// <summary><see cref="ReadAsync(NpgsqlDataSource,int,DatabaseFilter,long?,DateTime,DateTime,IReadOnlyDictionary{ValueTuple{string,long},DateTime},int,long?,CancellationToken)"/> with the row cap given (a test lowers it).</summary>
+    internal static async Task<ForcedPlanRead> ReadAsync(
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, long? queryId, DateTime start, DateTime end,
+        int maxForces,
         IReadOnlyDictionary<(string Database, long PlanId), DateTime>? forcedAt = null,
         int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds,
         long? planId = null,
@@ -455,9 +478,10 @@ LIMIT 50";
         }
 
         var forces = new List<Force>();
+        var readCapped = false;
         if (captures.Count > 0)
         {
-            await using var command = postgres.CreateCommand(ForcesSql(databases));
+            await using var command = postgres.CreateCommand(ForcesSql(databases, maxForces));
             command.CommandTimeout = commandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, from);
@@ -468,6 +492,13 @@ LIMIT 50";
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
+                if (forces.Count == maxForces)
+                {
+                    /* The one row past the cap: the read was cut, and this row is not kept. */
+                    readCapped = true;
+                    break;
+                }
+
                 forces.Add(new Force(
                     reader.GetString(0), reader.GetInt64(1), reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                     reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
@@ -582,6 +613,6 @@ LIMIT 50";
         var captureList = captures
             .Select(c => new ForcedPlanCapture(c.Database, c.Newest, perDatabase.TryGetValue(c.Database, out var n) ? n : 0))
             .ToList();
-        return new ForcedPlanRead(facts, captureList, floor, complete);
+        return new ForcedPlanRead(facts, captureList, floor, complete, readCapped);
     }
 }

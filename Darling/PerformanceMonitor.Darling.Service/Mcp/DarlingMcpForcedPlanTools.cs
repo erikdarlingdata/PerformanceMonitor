@@ -79,9 +79,10 @@ public sealed class DarlingMcpForcedPlanTools
         "(an OPTION (USE PLAN ...) hint in the query's own text also sets UsePlan, which is rare on a forced query). " +
         "plan_guide names a plan guide that covers the forced query (name, enabled, scope), found from the query's object (an OBJECT-scoped guide) or a guide name in the stored XML of a later plan of the query; " +
         "it sits beside the state and never changes it: a FAILING force with a guide may still be running fine. " +
-        "An empty answer says why: no capture in the window (the collector has not run, or Query Store is off for every database), or no forced plans in the newest captures. " +
+        "Status words: empty (databases were captured and none has a forced plan), unavailable (no capture in the window: the collector has not run in it, or Query Store is a readable secondary in every database), " +
+        "precondition (no capture and Query Store is off or in error in every database in scope; the message says what to run), not_collected (a readable secondary, or an engine without Query Store). " +
         "forced_plans lists the worst states first, at most limit (default and most 200) per call: when has_more is true, call again with offset = next_offset. " +
-        "query_id and plan_id narrow the read itself, so a force is found even on a server with more forces than one read holds (2000); with either, matched_forces, total_forces and state_counts count only the forces that match. Without them total_forces is capped at 2000. " +
+        "query_id and plan_id narrow the read itself, so a force is found even on a server with more forces than one read holds (2000); with either, matched_forces, total_forces and state_counts count only the forces that match. Without them total_forces is capped at 2000: read_capped is then true (and truncated with it), the read keeps failing forces first, and the rest are not listed or counted. " +
         "plan_forcing_type AUTO means SQL Server forced the plan itself (automatic plan correction), so force and unforce churn on it is normal; MANUAL is a person or a tool.")]
     public static async Task<string> GetForcedPlans(
         NpgsqlDataSource postgres,
@@ -132,8 +133,11 @@ public sealed class DarlingMcpForcedPlanTools
             var where = scope is null ? "" : $" for {(databases.Names.Count == 1 ? "database '" + scope + "'" : scope)}";
             if (read.Captures.Count == 0)
             {
+                /* #6753: no capture in the window is "could have it, does not now" (unavailable), as get_query_store_hints says for
+                   the same state. Query Store OFF or in ERROR in every database in scope is a setup step, so it answers precondition. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store_forced_plans", cancellationToken)
-                    ?? McpHelpers.Status("empty",
+                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken)
+                    ?? McpHelpers.Status("unavailable",
                         $"No forced-plan capture{where} in the {hours_back}-hour window ending {Format(windowEnd)}. Either the query_store_forced_plans collector has not run in it, " +
                         "or Query Store is off, in error or a readable secondary in every database (such a database writes no capture).");
             }
@@ -168,6 +172,11 @@ public sealed class DarlingMcpForcedPlanTools
                 pageNote = "No force in the newest captures matches query_id/plan_id.";
             else if (offset >= matched.Count && matched.Count > 0)
                 pageNote = $"offset {offset} is past the {matched.Count} matching forces.";
+            /* #6753: the reader holds at most MaxForces forces (failing ones first, then the rest of each database's newest capture, then removed ones); say so when it cut. */
+            var readCapped = read.ReadCapped;
+            if (readCapped)
+                pageNote = (pageNote is null ? "" : pageNote + " ") +
+                    $"The read holds at most {DarlingForcedPlanStateReader.MaxForces} forces, failing ones first, and the window has more: the rest are not listed or counted. Filter by database_name, query_id or plan_id to reach them.";
             return JsonSerializer.Serialize(new Dictionary<string, object?>
             {
                 ["server"] = resolved.DisplayName,
@@ -179,7 +188,8 @@ public sealed class DarlingMcpForcedPlanTools
                 ["offset"] = offset,
                 ["limit"] = limit,
                 ["forced_plans"] = listed.Select(ForceNode),
-                ["truncated"] = hasMore,
+                ["read_capped"] = readCapped,
+                ["truncated"] = hasMore || readCapped,
                 ["has_more"] = hasMore,
                 ["next_offset"] = hasMore ? offset + listed.Count : null,
                 ["page_note"] = pageNote,
@@ -251,6 +261,7 @@ public sealed class DarlingMcpForcedPlanTools
             if (read.Captures.Count == 0)
             {
                 return await HintsNotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken)
+                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken)
                     ?? McpHelpers.Status("unavailable",
                         $"No Query Store hint capture{where} in the {hours_back}-hour window ending {Format(windowEnd)}. Either the query_store_hints collector has not run in it, " +
                         "or Query Store is off, in error or a readable secondary in every database (such a database writes no capture).");

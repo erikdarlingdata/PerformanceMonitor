@@ -116,6 +116,30 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,$12,0)",
         await CaptureAsync(c, ct, "OlderDb", T0.AddMinutes(30), (61, 6, 0, null));
     }
 
+    /// <summary>The read's row cap cuts the last rows of its order: a failing force first-kept, then the rest of each database's newest capture, then removed
+    /// ones. Before, the order was database and plan id, so a standing failing force in a later database could be cut with nothing said.</summary>
+    [Fact]
+    public async Task WhenTheReadHitsItsCap_FailingForcesAreKept_AndTheReadSaysItWasCapped()
+    {
+        await WithStoreAsync(async (rig, ct) =>
+        {
+            await SeedStatesAsync(rig.Connection, ct);
+
+            var capped = await DarlingForcedPlanStateReader.ReadAsync(rig.Postgres, ServerId, DatabaseFilter.All, null, T0.AddHours(-1), AsOf, 3, null, 30, null, ct);
+            Assert.True(capped.ReadCapped);
+            Assert.Equal(3, capped.Plans.Count);
+            var kept = capped.Plans.Select(p => (p.DatabaseName, p.PlanId)).ToHashSet();
+            Assert.Contains(("StateDb", 41L), kept);
+            Assert.DoesNotContain(("StateDb", 51L), kept);
+            Assert.DoesNotContain(("OlderDb", 62L), kept);
+
+            var whole = await DarlingForcedPlanStateReader.ReadAsync(rig.Postgres, ServerId, DatabaseFilter.All, null, T0.AddHours(-1), AsOf, 7, null, 30, null, ct);
+            Assert.False(whole.ReadCapped);
+            Assert.Equal(7, whole.Plans.Count);
+            return 0;
+        });
+    }
+
     [Fact]
     public async Task EachState_IsReadFromItsOwnSeededRows_AndADatabaseReadsItsOwnNewestCapture()
     {
@@ -206,7 +230,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,$12,0)",
             /* No capture at all in the window. */
             using (var none = JsonDocument.Parse(await DarlingMcpForcedPlanTools.GetForcedPlans(rig.Postgres, ServerName, 24, asOf, DatabaseFilter.All, ct)))
             {
-                Assert.Equal("empty", none.RootElement.GetProperty("status").GetString());
+                Assert.Equal("unavailable", none.RootElement.GetProperty("status").GetString());
                 Assert.Contains("No forced-plan capture", none.RootElement.GetProperty("message").GetString());
             }
 
