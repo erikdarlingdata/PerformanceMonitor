@@ -63,7 +63,7 @@ This section moved to [Install Darling](../docs/darling/install.md#check-hoststo
 
 ### Diagnostics Bundle
 
-This section moved to [Install Darling](../docs/darling/install.md#diagnostics-bundle).
+This section moved to [The command line reference](../docs/darling/cli.md#diagnostics-bundle).
 
 <a id="run-on-linux-docker-compose-or-systemd-1804"></a>
 ### Run on Linux (Docker Compose or systemd)

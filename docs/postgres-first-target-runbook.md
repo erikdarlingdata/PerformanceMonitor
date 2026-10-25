@@ -765,7 +765,7 @@ and `pg_replication_slots`:
 - Thresholds derive from the target's own settings — wraparound grades against *that cluster's*
   `autovacuum_freeze_max_age`, not a constant — and **these three have no knob**, by decision rather than
   by omission: each bar is a ratio of a setting the row itself carries, so there is no number a user would
-  set differently, and [`postgres-alerting-design-note.md`](postgres-alerting-design-note.md) is the record
+  set differently, and [`postgres-alerting-design-note.md`](design/postgres-alerting-design-note.md) is the record
   of that decision. Do not widen it into "PostgreSQL alert thresholds are not configurable"; the next
   group's are.
 
@@ -879,7 +879,7 @@ sends a new operator away from the thing that would have answered their first we
   target-side log.
 - **Blocking chains** shipped: `pg_blocking` (step 7 — a sample, not an event log), `get_pg_blocking`
   (step 8) and the `Blocking Detected` alert with its own count knob (step 9). The
-  [blocking design note](postgres-blocking-design-note.md) records what building it changed.
+  [blocking design note](design/postgres-blocking-design-note.md) records what building it changed.
 - **Configurable alert thresholds** shipped for the alerts that have a number worth moving:
   `pgDeadlockCountThreshold` and `pgBlockingCountThreshold` (#3444, V122), on `get_alert_settings` /
   `update_alert_settings`, the Viewer and `darling.json`. Step 9 has the table. The three Tier 0

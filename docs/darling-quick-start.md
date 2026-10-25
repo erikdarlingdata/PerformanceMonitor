@@ -23,7 +23,7 @@ For a PostgreSQL server as a monitored target, set `"engine": "postgres"` on its
 
 ## Turn on the web dashboard or MCP
 
-Both surfaces are off by default. After the service collects, turn them on with `--enable-web` (the browser dashboard on port 5153) or `--enable-mcp` (the MCP endpoint on port 5152). Both take effect live, with no restart. The steps and proof points are in [The web dashboard](darling/web-dashboard.md) and [Darling MCP setup](darling/mcp.md).
+Both surfaces are off by default. After the service collects, turn them on with `--enable-web` (the browser dashboard on port 5153) or `--enable-mcp` (the MCP endpoint on port 5152). Both take effect live, with no restart. The steps and proof points are in [The web dashboard](darling/web-dashboard.md) and [MCP server](mcp-server.md#darling).
 
 ## Install on Linux
 

@@ -76,7 +76,7 @@ The service log is the first place to look. On Windows it is `%ProgramData%\Perf
 | The service log says `Failed to ensure XE sessions`. Deadlock and blocked process data stay empty. | The login lacks `ALTER ANY EVENT SESSION`. | Grant the permission, or have an administrator create and start the sessions `PerformanceMonitor_Deadlock`, `PerformanceMonitor_BlockedProcess` and `PerformanceMonitor_Attention`. | [The Extended Events sessions](darling/monitored-servers.md#the-extended-events-sessions-the-service-creates) |
 | The Recommendations tab shows no findings. | Analysis needs 24 hours of collected data for each server. A new install has none yet. | Wait one day. | [Install Darling](darling/install.md#things-that-will-bite-you) |
 | The Viewer will not connect. | The Viewer read a different `darling.json` than the one you edited, or a value in it is wrong. | Read the **Configuration this viewer used** block in the failure window. It names the file and the rule that picked it. | [The Viewer will not connect](darling/troubleshooting.md) and [The WPF viewer](darling/viewer.md) |
-| An MCP client cannot connect. | MCP is off by default. If the log says `Port 5152 is already in use`, another program holds the port. A client that gets 401 is missing the bearer token. | Turn MCP on in the Viewer settings or set `mcp.enabled: true` in `darling.json`. If the port is busy, change `mcp.port`. | [Darling MCP setup](darling/mcp.md) |
+| An MCP client cannot connect. | MCP is off by default. If the log says `Port 5152 is already in use`, another program holds the port. A client that gets 401 is missing the bearer token. | Turn MCP on in the Viewer settings or set `mcp.enabled: true` in `darling.json`. If the port is busy, change `mcp.port`. | [MCP server](mcp-server.md#darling) |
 | A server that is reachable only over a named pipe does not connect. | The service connects to a remote SQL Server over TCP only. | Turn on TCP/IP for the instance in SQL Server Configuration Manager. If the port is not 1433, write the host as `name,port`. | [Permissions](permissions.md#permissions) |
 
 ### Send a bug report
@@ -89,7 +89,7 @@ PerformanceMonitor.Darling.Service.exe --diagnostics-bundle darling-bundle.json
 
 The command writes one JSON file with the store's state, the collection health, slow reads, statement history and the recent service log. It replaces server, host, database and login names and IP addresses with aliases and leaves credentials out. It checks the finished file for every name that it knows and writes nothing if one remains. That check covers only the names it knows. Open the file and read it before you attach it to an issue.
 
-The operator guide lists every option, including `--hours`, `--server` and `--alias-map`. See [Diagnostics Bundle](darling/install.md#diagnostics-bundle).
+The operator guide lists every option, including `--hours`, `--server` and `--alias-map`. See [Diagnostics Bundle](darling/cli.md#diagnostics-bundle).
 
 ### More Darling help
 

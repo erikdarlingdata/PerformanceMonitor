@@ -20,7 +20,7 @@ Each page starts with an `Audience:` line under its title. The line tells you if
 - [Command line reference](darling/cli.md): every verb that the Darling service exe accepts.
 - [The WPF viewer](darling/viewer.md): open the desktop viewer on the service host or on another machine.
 - [The web dashboard](darling/web-dashboard.md): turn on the browser view and reach it from another machine.
-- [Darling MCP setup](darling/mcp.md): turn on the MCP endpoint for an LLM client.
+- [MCP server](mcp-server.md#darling): turn on the Darling MCP endpoint for an LLM client.
 - [Darling operations](darling/operations.md): the store, TimescaleDB, retention, the logs, restarts and watching the service from outside.
 - [Darling troubleshooting](darling/troubleshooting.md): every Darling service log line and what it means.
 - [Back up, restore and move the store](darling-store-backup.md): protect and relocate a Darling store.
@@ -69,8 +69,8 @@ Each page starts with an `Audience:` line under its title. The line tells you if
 
 These pages are kept as history. They record the reasoning at the time. Do not follow them as procedures.
 
-- [PostgreSQL alerting scoping note](postgres-alerting-design-note.md): why the PostgreSQL alert thresholds are constants.
-- [PostgreSQL blocking chains design note](postgres-blocking-design-note.md): how PostgreSQL blocking collection was designed and what building it changed.
+- [PostgreSQL alerting scoping note](design/postgres-alerting-design-note.md): why the PostgreSQL alert thresholds are constants.
+- [PostgreSQL blocking chains design note](design/postgres-blocking-design-note.md): how PostgreSQL blocking collection was designed and what building it changed.
 
 ## Maintainers
 
