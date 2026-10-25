@@ -1746,14 +1746,17 @@ GRANT UPDATE ({McpMonitoredServerUpdateColumns})
 {BuildCustomAlertResolveFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) TO {viewer}, {mcp};
 -- #6334: the known-pattern entries' writes. The web editor (viewer) and the Viewer (admin) write config.config_known_patterns only
---     through these three functions; no role holds a direct INSERT/UPDATE/DELETE on the table, and mcp gets neither the functions nor a write
---     (no MCP tool writes an entry: they are operator-written context). Owned by the store owner, pinned search_path, no dynamic SQL; created and
+--     through these three functions, and the MCP create_known_pattern / update_known_pattern / delete_known_pattern tools (#6398) call the same
+--     functions as mcp; no role holds a direct INSERT/UPDATE/DELETE on the table. Owned by the store owner, pinned search_path, no dynamic SQL; created and
 --     REVOKEd from PUBLIC by the shared builder. The reads need no grant: the schema-wide SELECT covers the table. The beacon trigger runs as
 --     the function's owner, so no config_service grant is needed either. NOT a versioned migration, for the same reason as the edit function.
 {BuildKnownPatternFunctionsSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.insert_known_pattern({InsertKnownPatternSignature}) TO {admin}, {viewer};
+GRANT EXECUTE ON FUNCTION {config}.insert_known_pattern({InsertKnownPatternSignature}) TO {mcp};
 GRANT EXECUTE ON FUNCTION {config}.update_known_pattern({UpdateKnownPatternSignature}) TO {admin}, {viewer};
+GRANT EXECUTE ON FUNCTION {config}.update_known_pattern({UpdateKnownPatternSignature}) TO {mcp};
 GRANT EXECUTE ON FUNCTION {config}.delete_known_pattern(bigint) TO {admin}, {viewer};
+GRANT EXECUTE ON FUNCTION {config}.delete_known_pattern(bigint) TO {mcp};
 -- #5240: the edit write. The web edit route (viewer) and the MCP edit_server tool (mcp) call
 --     {config}.edit_monitored_server for their one UPDATE of a config_monitored_servers row. It locks the row, checks
 --     the expected modified_at, and refuses a change of host or port that keeps the stored secret on a SQL or
@@ -1809,6 +1812,15 @@ GRANT EXECUTE ON FUNCTION {config}.create_notification_route(text, boolean, inte
 GRANT EXECUTE ON FUNCTION {config}.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer) TO {mcp};
 GRANT EXECUTE ON FUNCTION {config}.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) TO {mcp};
 GRANT EXECUTE ON FUNCTION {config}.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb) TO {mcp};
+-- #6394: the MCP generate_webhook_signing_key and remove_webhook_signing_key tools. mcp holds no UPDATE on a signing key column of {config}.config_notification
+--     or {config}.config_notification_routes (they are secret columns) and no SELECT on them, and gets none here. The service reads the saved (sealed) URL
+--     and proxy a new key is sealed for through its own store connection, so there is no function that returns them to mcp (an earlier build of this
+--     change made read_webhook_signing_target; it is dropped here). set_webhook_signing_key stores a key the service sealed (only the shape of one:
+--     sealed:v1:, the 16 character key id, base64) and moves the current key to the previous slot with the 7 day window the Viewer uses, and
+--     clear_webhook_signing_key clears the key, the previous key and the window. Neither returns a key. Granted to mcp only.
+{BuildWebhookSigningKeyFunctionsSql(config)}
+GRANT EXECUTE ON FUNCTION {config}.set_webhook_signing_key(integer, text, text, text) TO {mcp};
+GRANT EXECUTE ON FUNCTION {config}.clear_webhook_signing_key(integer) TO {mcp};
 -- #6392: the MCP update_notification_channels tool. mcp holds no UPDATE on any secret column of {config}.config_notification (the SMTP
 --     user name and password, the Teams, Slack and generic webhook URLs, the generic headers, the PagerDuty routing key) and no SELECT
 --     on them, and gets none here: set_notification_channels is the one way it writes the default channels. The service seals each
@@ -1881,8 +1893,10 @@ REVOKE EXECUTE ON FUNCTION {config}.config_bump_version(), {config}.config_servi
 --     six, so REVOKE ALL ... CASCADE takes every privilege from PUBLIC and the three roles, and SELECT goes back to
 --     all three (the web dashboard and the MCP list read them). Then each writer gets only what it writes. The
 --     service opens, joins, sweeps and journals as the owner. mcp (the claim and submit tools) updates only the
---     claim and report columns of a request, inserts a report and a journal row, and proposes a note without its
---     state column, so an agent's note stays pending until a person decides it. admin (the WPF viewer) closes a
+--     claim and report columns of a request, inserts a report and a journal row, and proposes a note. The agent
+--     tools (claim, submit) leave the note's state column to its default, pending, but the database does not hold mcp to
+--     that: since #6400 mcp also holds INSERT on state, because the person-only investigation tools (write, approve and reject a
+--     note, close a request, save a profile) run as mcp. What keeps an agent from them is the tool policy (NeverAgentTools), not this role. admin (the WPF viewer) closes a
 --     request, writes the environment profiles, writes, decides or deletes a note, and journals what it did.
 --     Nothing but the owner writes the alert links (but for the Viewer's practice copy, section 10e). An identity column needs no sequence grant. One table per write
 --     grant, so provision-roles.sql's mirror (its step 3i) is compared grant for grant. It runs after every blanket
@@ -1929,7 +1943,24 @@ GRANT UPDATE (state, closed_at, closed_by, closed_reason) ON {config}.investigat
 GRANT INSERT ({JournalWriterColumns}) ON {config}.investigation_journal TO {admin};
 GRANT INSERT, DELETE ON {config}.investigation_notes TO {admin};
 GRANT UPDATE (state, decided_at, decided_by, expires_at) ON {config}.investigation_notes TO {admin};
+-- #6400: the four investigation admin tools (write_investigation_note, approve_investigation_note, reject_investigation_note,
+--     close_investigation_request) run the same store code the web routes and the Viewer run, as mcp. They need the columns admin's
+--     statements set and nothing more: close stamps the three close columns beside the state mcp already updates; a written note is
+--     inserted approved (state, the two clock columns, expires_at and the decider) beside the columns an agent's proposal sets; a
+--     decision updates the three columns that set the state and the decider (admin also updates expires_at, which no
+--     mcp statement does: a note's expiry is set when it is inserted). The journal INSERT is mcp's already. No DELETE on notes, no INSERT on a
+--     request, no profile write: the tools do none of them. Provisioning re-runs every start, so no migration rung carries this.
+GRANT UPDATE (closed_at, closed_by, closed_reason) ON {config}.investigation_requests TO {mcp};
+GRANT INSERT (state, created_at, expires_at, decided_at, decided_by) ON {config}.investigation_notes TO {mcp};
+GRANT UPDATE (state, decided_at, decided_by) ON {config}.investigation_notes TO {mcp};
 GRANT INSERT, UPDATE, DELETE ON {config}.agent_environment_profiles TO {admin};
+-- #6400: save_environment_profile (the web's PUT /api/environment-profiles) runs InvestigationRequestStore.SaveProfileAsync as mcp. The
+--     statements set the five profile columns on an insert (the profile_id identity takes its default), update three of them on a
+--     conflict and a blank save deletes the scope's profile; the scope lock (SELECT ... FOR UPDATE) rides on the UPDATE grant. The
+--     journal INSERT is mcp's already. Provisioning re-runs every start, so no migration rung carries this.
+GRANT INSERT (scope_server_id, scope_tag_id, profile_text, modified_at, modified_by) ON {config}.agent_environment_profiles TO {mcp};
+GRANT UPDATE (profile_text, modified_at, modified_by) ON {config}.agent_environment_profiles TO {mcp};
+GRANT DELETE ON {config}.agent_environment_profiles TO {mcp};
 -- #6003 review: the journal is the event log the service signs and delivers, and mcp and admin hold INSERT on it, so a
 --     trigger keeps the event rows, their delivery and fallback marks and the time order to the owner (see
 --     BuildJournalEventRulesSql). Created here, not in a migration, as the password rules are; a self-managed store gets
@@ -1969,6 +2000,18 @@ GRANT UPDATE (agent_actions_enabled, updated_by) ON {config}.config_service TO {
 GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
    window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON {config}.investigation_requests TO {admin};
 GRANT INSERT ON {config}.investigation_request_alerts TO {admin};
+-- #6400: start_practice_request and record_investigation_feedback run InvestigationPracticeStore.OpenAsync and
+--     InvestigationFeedbackStore.RecordAsync as mcp, so mcp holds what those two statements set and nothing more: the practice's request row
+--     and its copied alert rows (the journal INSERT is mcp's already, and trg_investigation_request_alerts_owner_rows still refuses a
+--     link to any request but a practice one), and a feedback row (the insert's six columns, and on a conflict the author's earlier
+--     row is replaced: the five text columns and created_at). No DELETE on feedback, no UPDATE of a request. Provisioning re-runs
+--     every start, so no migration rung carries this.
+GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
+   window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON {config}.investigation_requests TO {mcp};
+GRANT INSERT (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json)
+   ON {config}.investigation_request_alerts TO {mcp};
+GRANT INSERT (request_id, verdict, corrected_verdict, missed_step, comment, author) ON {config}.investigation_feedback TO {mcp};
+GRANT UPDATE (verdict, corrected_verdict, missed_step, comment, author, created_at) ON {config}.investigation_feedback TO {mcp};
 
 -- 10e2. The per-server action switches (V196, #5632 step 5). Every role reads them and NO role but the store owner (the service)
 --     writes them: the default privileges would give admin INSERT/UPDATE/DELETE on a table made after them, so REVOKE ALL ... CASCADE
@@ -2461,8 +2504,7 @@ FROM (
     /// <summary>
     /// The <c>SECURITY DEFINER</c> functions (#6334) that are the writes of the known-pattern entries
     /// (<c>config.config_known_patterns</c>): <c>insert_known_pattern</c>, <c>update_known_pattern</c> and <c>delete_known_pattern</c>. The
-    /// web editor (viewer) and the Viewer (admin) call them; the table itself carries NO direct write grant for any reader role, and the
-    /// MCP role (mcp) gets neither the functions nor a write, because entries are operator-written context and no MCP tool writes them.
+    /// web editor (viewer), the Viewer (admin) and the MCP write tools (mcp, #6398) call them; the table itself carries NO direct write grant for any reader role.
     /// Returns the <c>CREATE OR REPLACE FUNCTION</c> statements plus the <c>REVOKE ALL ... FROM PUBLIC</c> of each (a new function is
     /// EXECUTE-able by PUBLIC); the caller adds the <c>GRANT EXECUTE</c>. Because the body runs as the owner, the table's
     /// <c>config_version</c> trigger bumps the beacon as the owner, so the caller needs no grant on <c>config_service</c>. Pinned
@@ -2487,9 +2529,14 @@ SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
    v_id bigint;
+   v_count bigint;
 BEGIN
    IF p_server_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_server_id) THEN
       RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   SELECT count(*) INTO v_count FROM {config}.config_known_patterns;
+   IF v_count >= {PerformanceMonitor.Common.KnownPatterns.KnownPatternMatcher.MaxEntries} THEN
+      RAISE EXCEPTION 'Known patterns are capped at {PerformanceMonitor.Common.KnownPatterns.KnownPatternMatcher.MaxEntries} entries and % exist. Delete entries you no longer need to make room.', v_count USING ERRCODE = 'DL409';
    END IF;
    INSERT INTO {config}.config_known_patterns
       (server_id, metric_name, time_of_day, time_zone, window_minutes, note, created_by, expires_at_utc)
@@ -3145,6 +3192,106 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION {config}.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) FROM PUBLIC;";
+
+    /// <summary>
+    /// The SECURITY DEFINER functions (#6394) the MCP webhook signing key tools write through: <c>set_webhook_signing_key</c> and
+    /// <c>clear_webhook_signing_key</c>. The saved URL and proxy a key is sealed for are read by the service on its own store connection, not
+    /// through a function the <c>mcp</c> role could call; <c>read_webhook_signing_target</c>, which an earlier build of this change created,
+    /// is dropped. A <c>NULL</c> route id is the settings row. The rotation
+    /// window is the 7 days of <c>WebhookSigning.RotationOverlapDays</c>, as in the Viewer.
+    /// </summary>
+    internal static string BuildWebhookSigningKeyFunctionsSql(string config) => $@"
+DROP FUNCTION IF EXISTS {config}.read_webhook_signing_target(integer);
+CREATE OR REPLACE FUNCTION {config}.set_webhook_signing_key(p_route_id integer, p_sealed_key text, p_stored_url text, p_proxy text)
+RETURNS timestamptz
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_url text;
+   v_until timestamptz;
+BEGIN
+   IF p_sealed_key IS NULL OR length(p_sealed_key) > 16384
+      OR p_sealed_key !~ '^sealed:v1:[0-9a-f]+:[A-Za-z0-9+/]+=?=?$'
+      OR length(split_part(p_sealed_key, ':', 3)) <> 16 THEN
+      RAISE EXCEPTION 'A signing key is stored sealed by the Darling service, never as text.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_route_id IS NULL THEN
+      SELECT n.generic_url INTO v_url FROM {config}.config_notification AS n WHERE n.id = 1;
+      IF NOT FOUND THEN
+         RAISE EXCEPTION 'The notification settings row does not exist yet.' USING ERRCODE = 'DL404';
+      END IF;
+   ELSE
+      SELECT r.generic_url INTO v_url FROM {config}.config_notification_routes AS r WHERE r.route_id = p_route_id;
+      IF NOT FOUND THEN
+         RAISE EXCEPTION 'No notification route with route_id %.', p_route_id USING ERRCODE = 'DL404';
+      END IF;
+   END IF;
+   IF v_url !~ '^sealed:' THEN
+      RAISE EXCEPTION 'There is no saved generic webhook URL to tie a key to. Save the generic webhook URL first, then generate the key.' USING ERRCODE = 'DL400';
+   END IF;
+   -- The Viewer's own writes (ViewerDataService.SigningKeys): the current key moves to the previous slot with a window of 7 days when there
+   -- was one, and the write is guarded on the URL and proxy the key was sealed for still being what is stored. The route form reads the settings
+   -- row's proxy FOR SHARE, so it waits for a Settings save that holds that row.
+   IF p_route_id IS NULL THEN
+      UPDATE {config}.config_notification
+         SET previous_signing_key = signing_key,
+             previous_signing_key_until = CASE WHEN signing_key <> '' THEN now() + make_interval(days => {PerformanceMonitor.Notifications.WebhookSigning.RotationOverlapDays}) END,
+             signing_key = p_sealed_key
+       WHERE id = 1 AND generic_url = p_stored_url AND generic_proxy = p_proxy
+      RETURNING previous_signing_key_until INTO v_until;
+   ELSE
+      UPDATE {config}.config_notification_routes
+         SET previous_signing_key = signing_key,
+             previous_signing_key_until = CASE WHEN signing_key <> '' THEN now() + make_interval(days => {PerformanceMonitor.Notifications.WebhookSigning.RotationOverlapDays}) END,
+             signing_key = p_sealed_key
+       WHERE route_id = p_route_id AND generic_url = p_stored_url
+         AND COALESCE((SELECT n.generic_proxy FROM {config}.config_notification AS n WHERE n.id = 1 FOR SHARE), '') = p_proxy
+      RETURNING previous_signing_key_until INTO v_until;
+   END IF;
+   IF NOT FOUND THEN
+      RAISE EXCEPTION 'The generic webhook URL or proxy changed while the key was made. Nothing was written; try again.' USING ERRCODE = 'DL403';
+   END IF;
+   RETURN v_until;
+END
+$fn$;
+REVOKE ALL ON FUNCTION {config}.set_webhook_signing_key(integer, text, text, text) FROM PUBLIC;
+CREATE OR REPLACE FUNCTION {config}.clear_webhook_signing_key(p_route_id integer)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_url text;
+   v_had boolean;
+BEGIN
+   IF p_route_id IS NULL THEN
+      SELECT n.generic_url, n.signing_key <> '' INTO v_url, v_had FROM {config}.config_notification AS n WHERE n.id = 1 FOR UPDATE;
+      IF NOT FOUND THEN
+         RAISE EXCEPTION 'The notification settings row does not exist yet.' USING ERRCODE = 'DL404';
+      END IF;
+   ELSE
+      SELECT r.generic_url, r.signing_key <> '' INTO v_url, v_had FROM {config}.config_notification_routes AS r WHERE r.route_id = p_route_id FOR UPDATE;
+      IF NOT FOUND THEN
+         RAISE EXCEPTION 'No notification route with route_id %.', p_route_id USING ERRCODE = 'DL404';
+      END IF;
+   END IF;
+   -- A destination with no generic webhook has no key to remove (a key that is somehow still stored is cleared all the same).
+   IF v_url = '' AND NOT v_had THEN
+      RAISE EXCEPTION 'There is no generic webhook on this destination, so there is no signing key to remove.' USING ERRCODE = 'DL400';
+   END IF;
+   -- The Viewer's own clear: the key, the previous key and the window.
+   IF p_route_id IS NULL THEN
+      UPDATE {config}.config_notification SET signing_key = '', previous_signing_key = '', previous_signing_key_until = NULL WHERE id = 1;
+   ELSE
+      UPDATE {config}.config_notification_routes SET signing_key = '', previous_signing_key = '', previous_signing_key_until = NULL WHERE route_id = p_route_id;
+   END IF;
+   RETURN v_had;
+END
+$fn$;
+REVOKE ALL ON FUNCTION {config}.clear_webhook_signing_key(integer) FROM PUBLIC;";
 
     /// <summary>
     /// The SECURITY DEFINER function (#6392) the MCP <c>update_notification_channels</c> tool writes the default notification channels through: <c>set_notification_channels</c>. The <c>mcp</c> login holds no UPDATE on a secret column of <c>config_notification</c>; the service seals each secret and this function stores only sealed text or empty, makes the Viewer's refusals on the stored row, and returns only whether each secret was saved. Created and REVOKEd from PUBLIC here; the caller adds the GRANT EXECUTE to mcp only.
@@ -3824,7 +3971,9 @@ REVOKE ALL ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLegacy
     /// by <c>event_time</c>. <c>mcp</c> (the claim and submit tools) and <c>admin</c> (the desktop Viewer) hold INSERT on it
     /// (the columns of <see cref="JournalWriterColumns"/>) to journal their own actions, so this <c>BEFORE INSERT</c> trigger
     /// refuses a row from any role but the owner that
-    /// (a) is an event (<see cref="InvestigationEvents.Kinds"/>) or a delivery or fallback mark, but for the one
+    /// (a) is an event (<see cref="InvestigationEvents.Kinds"/>), a delivery or fallback mark, a server action switch (#6269) or one of
+    /// the three rows of an agent action (<see cref="AgentActionEvents.OwnerOnly"/>, #6569: the service journals them itself, on the
+    /// owner connection, and the Agent changes list offers Undo on the <c>action_called</c> row), but for the one
     /// <c>opened</c> row of a practice request (the Viewer opens those, #5918), whose reason is exactly
     /// <c>practice of &lt;the case's request id&gt;</c>; or
     /// (b) carries a once key other than the prefixes the tools and the Viewer write (<see cref="JournalWriterOnceKeyPrefixes"/>),
@@ -3883,7 +4032,7 @@ CREATE OR REPLACE TRIGGER trg_investigation_journal_owner_rows
 
     /// <summary>
     /// The columns of <c>config.investigation_journal</c> that <c>mcp</c> and <c>admin</c> may set on an insert: every column the
-    /// claim, submit and change tools and the Viewer's journal writers name. Not <c>journal_id</c> (the identity: a role that
+    /// claim and submit tools and the Viewer's journal writers name (the change tools' rows are the owner's, #6569). Not <c>journal_id</c> (the identity: a role that
     /// set it could fill the next million values and make every service insert fail) and not <c>event_id</c> (the unique
     /// webhook id): both take their defaults.
     /// </summary>
@@ -3930,9 +4079,12 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
    FOR EACH ROW EXECUTE FUNCTION {config}.investigation_request_alerts_owner_rows();";
 
     /// <summary>The journal events only the owner writes (<see cref="BuildJournalEventRulesSql"/>), as a SQL list. <c>server_action_switched</c>
-    /// is the owner's alone (#6269): only the switch writer, on the owner connection, journals it, so no other login can forge who changed a switch.</summary>
+    /// is the owner's alone (#6269): only the switch writer, on the owner connection, journals it, so no other login can write who changed a switch.
+    /// So are the three rows of an agent action (<see cref="AgentActionEvents.OwnerOnly"/>, #6569): the Agent changes list offers Undo on an
+    /// <c>action_called</c> row, so only the service, which runs the action and checks the request, journals it and its result.</summary>
     internal static string JournalOwnerEventList => string.Join(", ",
         InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent).Append(ServerActionSwitches.JournalEvent)
+            .Concat(AgentActionEvents.OwnerOnly)
             .Select(k => "'" + k + "'"));
 
     /// <summary>
@@ -4069,7 +4221,9 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
     /// the table. The check and the command run under the provisioning advisory lock (#5560,
     /// <see cref="ProvisioningLockKey"/>), so two services starting against one store do not both replace the function
     /// at once. The two <c>edit_monitored_server</c> overloads are part of the rules (#6170): a store that holds them from an
-    /// older script keeps a version that does not know the hypothetical-index pair, so they are replaced the same way. Returns whether the rules are in place.
+    /// older script keeps a version that does not know the hypothetical-index pair, so they are replaced the same way. The journal's owner-row
+    /// function (<see cref="BuildJournalEventRulesSql"/>, #6569) is checked and replaced in the same lock and the same transaction, so a store
+    /// upgraded by replacing the binaries refuses the owner-only journal events from the mcp and admin logins at the next start. Returns whether the rules are in place.
     /// </summary>
     public static async Task<bool> EnsureServerPasswordRulesAsync(
         NpgsqlDataSource dataSource, ILogger logger, CancellationToken cancellationToken = default)
@@ -4092,9 +4246,13 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
                 /* #6170: the edit function is part of the same rules (it answers the host change before the trigger is reached),
                    and a store whose script was not re-run keeps the version that knows only the remediation column. */
                 alreadyInPlace &= await EditMonitoredServerFunctionsAreCurrentAsync(connection, transaction, token);
+                /* #6569: the journal's owner-only event list is part of the same start check. A store upgraded by replacing the binaries
+                   keeps the older function, which still accepts action_called, action_done and action_failed from mcp and admin. */
+                var journal = await JournalEventRulesAreInPlaceAsync(connection, transaction, token);
+                alreadyInPlace &= journal is not false;
                 return alreadyInPlace
                     ? null
-                    : new NpgsqlCommand(BuildServerPasswordRulesSql("config") + BuildEditMonitoredServerFunctionsSql("config"), connection, transaction)
+                    : new NpgsqlCommand(BuildServerPasswordRulesSql("config") + BuildEditMonitoredServerFunctionsSql("config") + (journal is null ? "" : BuildJournalEventRulesSql("config")), connection, transaction)
                     {
                         CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
                     };
@@ -4102,14 +4260,14 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
 
             logger.LogInformation(
                 alreadyInPlace
-                    ? "The store's password rules are already in place on config.config_monitored_servers"
-                    : "The store's password rules are in place on config.config_monitored_servers");
+                    ? "The store's password and journal rules are already in place"
+                    : "The store's password and journal rules are in place");
             return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(
-                "Could not create the store's password rules on config.config_monitored_servers ({Message}). Run provision-roles.sql against the store as the role that owns its tables.",
+                "Could not create the store's password or journal rules ({Message}). Run provision-roles.sql against the store as the role that owns its tables.",
                 ex.Message);
             return false;
         }
@@ -4153,6 +4311,82 @@ WHERE t.tgrelid = 'config.config_monitored_servers'::regclass
             }
 
             var built = BuildServerPasswordRulesSql("config");
+            const string quote = "$rules$";
+            var open = built.IndexOf(quote, StringComparison.Ordinal);
+            var close = built.IndexOf(quote, open + quote.Length, StringComparison.Ordinal);
+            if (open < 0 || close < 0)
+            {
+                return false;
+            }
+
+            return string.Equals(
+                NormalizeRulesText(stored),
+                NormalizeRulesText(built.Substring(open + quote.Length, close - open - quote.Length)),
+                StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await RecoverFromReadAsync(transaction);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether the journal's owner-row trigger (<see cref="BuildJournalEventRulesSql"/>) is on <c>config.investigation_journal</c>, enabled,
+    /// a row-level BEFORE INSERT one, and its function has the text this build writes (full-line comments and spacing set aside) and the pinned
+    /// search path (#6569). A store below V191, which has no journal or no <c>practice_of</c> column yet, answers null: the function reads that
+    /// column, so there is nothing to replace until the service has migrated the store (the script skips it the same way). A read that fails
+    /// answers false, so the caller falls back to replacing the function.
+    /// </summary>
+    internal static async Task<bool?> JournalEventRulesAreInPlaceAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await TakeReadSavepointAsync(transaction, cancellationToken);
+            await using (var applicable = new NpgsqlCommand(@"
+SELECT pg_catalog.to_regclass('config.investigation_journal') IS NOT NULL
+   AND pg_catalog.to_regclass('config.investigation_request_alerts') IS NOT NULL
+   AND EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+               WHERE attrelid = pg_catalog.to_regclass('config.investigation_requests')
+                 AND attname = 'practice_of' AND NOT attisdropped)", connection, transaction)
+            {
+                CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
+            })
+            {
+                if (!(bool)(await applicable.ExecuteScalarAsync(cancellationToken) ?? false))
+                {
+                    return null;
+                }
+            }
+
+            await using var read = new NpgsqlCommand(@"
+SELECT p.prosrc, p.proconfig
+FROM pg_catalog.pg_trigger AS t
+JOIN pg_catalog.pg_proc AS p ON p.oid = t.tgfoid
+WHERE t.tgrelid = 'config.investigation_journal'::regclass
+  AND t.tgname = 'trg_investigation_journal_owner_rows'
+  AND t.tgenabled = 'O'
+  AND t.tgtype = 7
+  AND p.proname = 'investigation_journal_owner_rows'
+  AND p.pronamespace = 'config'::regnamespace", connection, transaction)
+            {
+                CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
+            };
+            await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return false;
+            }
+
+            var stored = reader.GetString(0);
+            var settings = reader.IsDBNull(1) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(1);
+            if (settings.Length != 1 || !string.Equals(settings[0], "search_path=pg_catalog, pg_temp", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var built = BuildJournalEventRulesSql("config");
             const string quote = "$rules$";
             var open = built.IndexOf(quote, StringComparison.Ordinal);
             var close = built.IndexOf(quote, open + quote.Length, StringComparison.Ordinal);

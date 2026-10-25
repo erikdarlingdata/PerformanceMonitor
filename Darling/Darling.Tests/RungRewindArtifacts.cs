@@ -520,6 +520,19 @@ DO $$ BEGIN
         ALTER TABLE config.config_alert_settings ALTER COLUMN client_timeouts_enabled SET DEFAULT FALSE;
     END IF;
 END $$;"),
+        // V217 (#6581): the Query Store hints table. The table is the probe's newest sentinel. The rewind drops it (its indexes go with it), so a
+        // re-run of V217 does everything again. Safe on a store that never had it.
+        new(217, "hasQueryStoreHints",
+            "DROP TABLE IF EXISTS collect.query_store_hints;"),
+        // V218 (#6569): the module recompile and plan guide switches. The stored CHECK naming it is the probe's newest sentinel. The rewind puts V196's three-word CHECK
+        // back (it deletes any recompile_module row first, which the old CHECK could not hold), so a re-run of V218 widens it again. Safe on a store that never had it.
+        new(218, "hasServerActionRecompile",
+            @"
+DO $$ BEGIN IF to_regclass('config.config_server_actions') IS NOT NULL THEN
+  DELETE FROM config.config_server_actions WHERE action IN ('recompile_module', 'create_plan_guide', 'drop_plan_guide');
+  ALTER TABLE config.config_server_actions DROP CONSTRAINT IF EXISTS ck_config_server_actions_action;
+  ALTER TABLE config.config_server_actions ADD CONSTRAINT ck_config_server_actions_action CHECK (action IN ('force_plan', 'evict_plan', 'kill_session'));
+END IF; END $$;"),
     ];
 
     /// <summary>

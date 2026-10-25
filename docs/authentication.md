@@ -1,5 +1,7 @@
 # Authentication
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 `PerformanceMonitor.Common.AuthenticationTypes` supports seven authentication types, defined once there and named the same way in every edition. **Not every edition connects with all seven**, so the table says which does what: Lite offers all of them. The Darling service and its Viewer connect with four: Windows, SQL Server, Service Principal and Managed Identity (`auth` set to `integrated`, `sql`, `serviceprincipal` or `managedidentity` in `darling.json`). The service runs headless, so it refuses the other three, which need a person at the machine or their own sign-in on it.
@@ -21,7 +23,7 @@ Part of the [Performance Monitor documentation](../README.md#documentation).
 - **Managed Identity** requires the machine running the app/service to itself be an Azure resource (VM, App Service, etc.) with a system- or user-assigned managed identity. That identity is then provisioned as a user directly on each target database (see the [Azure SQL Database section of Permissions](permissions.md#azure-sql-database-lite--darling)). Nothing is stored locally.
 - **Service Principal** uses an Entra app registration's client id + secret. The client id is non-secret and stored in config. In Lite the secret is stored only in Windows Credential Manager, same as a SQL auth password. Darling keeps it the way it keeps a SQL password (above).
 
-In `darling.json`, a Service Principal server sets `"auth": "serviceprincipal"`, the application (client) id in `username`, and the client secret in `encryptedPassword`. That is the same pair of fields as a SQL login. A Managed Identity server sets `"auth": "managedidentity"`. A system-assigned identity needs no other field. A user-assigned identity puts its client id in `username`. The Darling Viewer writes the same values, and the other server fields are in [Configure darling.json](../Darling/README.md#configure-darlingjson).
+In `darling.json`, a Service Principal server sets `"auth": "serviceprincipal"`, the application (client) id in `username`, and the client secret in `encryptedPassword`. That is the same pair of fields as a SQL login. A Managed Identity server sets `"auth": "managedidentity"`. A system-assigned identity needs no other field. A user-assigned identity puts its client id in `username`. The Darling Viewer writes the same values, and the other server fields are in [Configure darling.json](darling/install.md#configure-darlingjson).
 
 ### Existing Azure Sign-In (Lite only, `ActiveDirectoryDefault`)
 

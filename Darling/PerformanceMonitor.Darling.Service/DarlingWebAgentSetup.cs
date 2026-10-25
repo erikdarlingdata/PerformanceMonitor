@@ -284,10 +284,6 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
         {
             return Error(403, RefusedMessage(managedStore, adminWritesOff));
         }
-        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation)
-        {
-            return Error(400, "That server or tag does not exist.");
-        }
     }
 
     /// <summary>Puts the body's fields on the draft; the sentence of the first field that is not the right kind, or null.</summary>

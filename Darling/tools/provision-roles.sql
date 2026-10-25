@@ -1253,8 +1253,8 @@ REVOKE ALL ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], 
 GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) TO viewer, mcp;
 
 -- #6334: the known-pattern entries' writes. The web editor (viewer) and the Viewer (admin) write config.config_known_patterns only
---     through these three functions; no role holds a direct INSERT/UPDATE/DELETE on the table, and mcp gets neither the functions nor a write
---     (no MCP tool writes an entry: they are operator-written context). Same functions, same text, as managed provisioning rebuilds on every
+--     through these three functions, and the MCP create_known_pattern / update_known_pattern / delete_known_pattern tools (#6398) call the same
+--     functions as mcp; no role holds a direct INSERT/UPDATE/DELETE on the table. Same functions, same text, as managed provisioning rebuilds on every
 --     start. The reads need no grant: the schema-wide SELECT covers the table. The table exists from V214, so re-run this script after upgrading. All three bodies are plpgsql (late-bound) so the script also runs on a store that has not reached V214 yet; a LANGUAGE sql body would fail the CREATE there.
 CREATE OR REPLACE FUNCTION config.insert_known_pattern(
    p_server_id integer,
@@ -1272,9 +1272,14 @@ SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
    v_id bigint;
+   v_count bigint;
 BEGIN
    IF p_server_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM config.config_monitored_servers WHERE server_id = p_server_id) THEN
       RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   SELECT count(*) INTO v_count FROM config.config_known_patterns;
+   IF v_count >= 500 THEN
+      RAISE EXCEPTION 'Known patterns are capped at 500 entries and % exist. Delete entries you no longer need to make room.', v_count USING ERRCODE = 'DL409';
    END IF;
    INSERT INTO config.config_known_patterns
       (server_id, metric_name, time_of_day, time_zone, window_minutes, note, created_by, expires_at_utc)
@@ -1333,8 +1338,11 @@ END;
 $fn$;
 REVOKE ALL ON FUNCTION config.delete_known_pattern(bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION config.insert_known_pattern(integer, text, time, text, integer, text, text, timestamp) TO admin, viewer;
+GRANT EXECUTE ON FUNCTION config.insert_known_pattern(integer, text, time, text, integer, text, text, timestamp) TO mcp;
 GRANT EXECUTE ON FUNCTION config.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp, text) TO admin, viewer;
+GRANT EXECUTE ON FUNCTION config.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp, text) TO mcp;
 GRANT EXECUTE ON FUNCTION config.delete_known_pattern(bigint) TO admin, viewer;
+GRANT EXECUTE ON FUNCTION config.delete_known_pattern(bigint) TO mcp;
 
 -- #5941: the run-collectors-now request. The web route (viewer) and the MCP run_collectors_now tool (mcp) queue a
 --     snapshot_now command through config.request_snapshot_now, the only way those two roles write a command row.
@@ -1892,6 +1900,105 @@ GRANT EXECUTE ON FUNCTION config.create_notification_route(text, boolean, intege
 GRANT EXECUTE ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer) TO mcp;
 GRANT EXECUTE ON FUNCTION config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) TO mcp;
 GRANT EXECUTE ON FUNCTION config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb) TO mcp;
+-- #6394: the MCP generate_webhook_signing_key and remove_webhook_signing_key tools. mcp holds no UPDATE on a signing key column of config.config_notification
+--     or config.config_notification_routes (they are secret columns) and no SELECT on them, and gets none here. The service reads the saved (sealed) URL
+--     and proxy a new key is sealed for through its own store connection, so there is no function that returns them to mcp (an earlier build of this
+--     change made read_webhook_signing_target; it is dropped here). set_webhook_signing_key stores a key the service sealed (only the shape of one:
+--     sealed:v1:, the 16 character key id, base64) and moves the current key to the previous slot with the 7 day window the Viewer uses, and
+--     clear_webhook_signing_key clears the key, the previous key and the window. Neither returns a key. Granted to mcp only.
+DROP FUNCTION IF EXISTS config.read_webhook_signing_target(integer);
+CREATE OR REPLACE FUNCTION config.set_webhook_signing_key(p_route_id integer, p_sealed_key text, p_stored_url text, p_proxy text)
+RETURNS timestamptz
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_url text;
+   v_until timestamptz;
+BEGIN
+   IF p_sealed_key IS NULL OR length(p_sealed_key) > 16384
+      OR p_sealed_key !~ '^sealed:v1:[0-9a-f]+:[A-Za-z0-9+/]+=?=?$'
+      OR length(split_part(p_sealed_key, ':', 3)) <> 16 THEN
+      RAISE EXCEPTION 'A signing key is stored sealed by the Darling service, never as text.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_route_id IS NULL THEN
+      SELECT n.generic_url INTO v_url FROM config.config_notification AS n WHERE n.id = 1;
+      IF NOT FOUND THEN
+         RAISE EXCEPTION 'The notification settings row does not exist yet.' USING ERRCODE = 'DL404';
+      END IF;
+   ELSE
+      SELECT r.generic_url INTO v_url FROM config.config_notification_routes AS r WHERE r.route_id = p_route_id;
+      IF NOT FOUND THEN
+         RAISE EXCEPTION 'No notification route with route_id %.', p_route_id USING ERRCODE = 'DL404';
+      END IF;
+   END IF;
+   IF v_url !~ '^sealed:' THEN
+      RAISE EXCEPTION 'There is no saved generic webhook URL to tie a key to. Save the generic webhook URL first, then generate the key.' USING ERRCODE = 'DL400';
+   END IF;
+   -- The Viewer's own writes (ViewerDataService.SigningKeys): the current key moves to the previous slot with a window of 7 days when there
+   -- was one, and the write is guarded on the URL and proxy the key was sealed for still being what is stored. The route form reads the settings
+   -- row's proxy FOR SHARE, so it waits for a Settings save that holds that row.
+   IF p_route_id IS NULL THEN
+      UPDATE config.config_notification
+         SET previous_signing_key = signing_key,
+             previous_signing_key_until = CASE WHEN signing_key <> '' THEN now() + make_interval(days => 7) END,
+             signing_key = p_sealed_key
+       WHERE id = 1 AND generic_url = p_stored_url AND generic_proxy = p_proxy
+      RETURNING previous_signing_key_until INTO v_until;
+   ELSE
+      UPDATE config.config_notification_routes
+         SET previous_signing_key = signing_key,
+             previous_signing_key_until = CASE WHEN signing_key <> '' THEN now() + make_interval(days => 7) END,
+             signing_key = p_sealed_key
+       WHERE route_id = p_route_id AND generic_url = p_stored_url
+         AND COALESCE((SELECT n.generic_proxy FROM config.config_notification AS n WHERE n.id = 1 FOR SHARE), '') = p_proxy
+      RETURNING previous_signing_key_until INTO v_until;
+   END IF;
+   IF NOT FOUND THEN
+      RAISE EXCEPTION 'The generic webhook URL or proxy changed while the key was made. Nothing was written; try again.' USING ERRCODE = 'DL403';
+   END IF;
+   RETURN v_until;
+END
+$fn$;
+REVOKE ALL ON FUNCTION config.set_webhook_signing_key(integer, text, text, text) FROM PUBLIC;
+CREATE OR REPLACE FUNCTION config.clear_webhook_signing_key(p_route_id integer)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_url text;
+   v_had boolean;
+BEGIN
+   IF p_route_id IS NULL THEN
+      SELECT n.generic_url, n.signing_key <> '' INTO v_url, v_had FROM config.config_notification AS n WHERE n.id = 1 FOR UPDATE;
+      IF NOT FOUND THEN
+         RAISE EXCEPTION 'The notification settings row does not exist yet.' USING ERRCODE = 'DL404';
+      END IF;
+   ELSE
+      SELECT r.generic_url, r.signing_key <> '' INTO v_url, v_had FROM config.config_notification_routes AS r WHERE r.route_id = p_route_id FOR UPDATE;
+      IF NOT FOUND THEN
+         RAISE EXCEPTION 'No notification route with route_id %.', p_route_id USING ERRCODE = 'DL404';
+      END IF;
+   END IF;
+   -- A destination with no generic webhook has no key to remove (a key that is somehow still stored is cleared all the same).
+   IF v_url = '' AND NOT v_had THEN
+      RAISE EXCEPTION 'There is no generic webhook on this destination, so there is no signing key to remove.' USING ERRCODE = 'DL400';
+   END IF;
+   -- The Viewer's own clear: the key, the previous key and the window.
+   IF p_route_id IS NULL THEN
+      UPDATE config.config_notification SET signing_key = '', previous_signing_key = '', previous_signing_key_until = NULL WHERE id = 1;
+   ELSE
+      UPDATE config.config_notification_routes SET signing_key = '', previous_signing_key = '', previous_signing_key_until = NULL WHERE route_id = p_route_id;
+   END IF;
+   RETURN v_had;
+END
+$fn$;
+REVOKE ALL ON FUNCTION config.clear_webhook_signing_key(integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION config.set_webhook_signing_key(integer, text, text, text) TO mcp;
+GRANT EXECUTE ON FUNCTION config.clear_webhook_signing_key(integer) TO mcp;
 -- #6392: the MCP update_notification_channels tool. mcp holds no UPDATE on any secret column of config.config_notification (the SMTP
 --     user name and password, the Teams, Slack and generic webhook URLs, the generic headers, the PagerDuty routing key) and no SELECT
 --     on them, and gets none here: set_notification_channels is the one way it writes the default channels. The service seals each
@@ -2880,8 +2987,10 @@ END $do$;
 -- 3i. Investigation tables (V184, #5632), mirroring managed provisioning's section 10d grant for grant. Step 3 and the
 --     default privileges gave admin INSERT/UPDATE/DELETE on all six, so REVOKE ALL ... CASCADE takes every privilege
 --     from PUBLIC and the three roles, and SELECT goes back to all three. mcp (the claim and submit tools) updates only
---     the claim and report columns of a request, inserts a report and a journal row, and proposes a note without its
---     state column, so an agent's note stays pending until a person decides it. admin (the desktop Viewer) closes a
+--     the claim and report columns of a request, inserts a report and a journal row, and proposes a note. The agent
+--     tools (claim, submit) leave the note's state column to its default, pending, but the database does not hold mcp to
+--     that: since #6400 mcp also holds INSERT on state, because the person-only investigation tools (write, approve and reject a
+--     note, close a request, save a profile) run as mcp. What keeps an agent from them is the tool policy (NeverAgentTools), not this role. admin (the desktop Viewer) closes a
 --     request, writes the environment profiles, writes, decides or deletes a note, and journals what it did. The
 --     service writes the rest as the owner. On a store below V184 the block warns and skips, as the agent route column
 --     grants in steps 2b and 2c do, so the whole script runs clean on a V181-V183 store; re-run it once the service has
@@ -2936,15 +3045,27 @@ $v193c$;
       ON config.investigation_journal TO admin;
    GRANT INSERT, DELETE ON config.investigation_notes TO admin;
    GRANT UPDATE (state, decided_at, decided_by, expires_at) ON config.investigation_notes TO admin;
+   -- #6400: the investigation admin tools (write, approve, reject a note; close a request) run as mcp: the columns admin's
+   --     statements set and nothing more. BRING-YOUR-OWN STORES: re-run this script to add them.
+   GRANT UPDATE (closed_at, closed_by, closed_reason) ON config.investigation_requests TO mcp;
+   GRANT INSERT (state, created_at, expires_at, decided_at, decided_by) ON config.investigation_notes TO mcp;
+   GRANT UPDATE (state, decided_at, decided_by) ON config.investigation_notes TO mcp;
    GRANT INSERT, UPDATE, DELETE ON config.agent_environment_profiles TO admin;
+   -- #6400: save_environment_profile runs InvestigationRequestStore.SaveProfileAsync as mcp: the columns the statements set, and
+   --     the delete a blank save does. BRING-YOUR-OWN STORES: re-run this script to add them.
+   GRANT INSERT (scope_server_id, scope_tag_id, profile_text, modified_at, modified_by) ON config.agent_environment_profiles TO mcp;
+   GRANT UPDATE (profile_text, modified_at, modified_by) ON config.agent_environment_profiles TO mcp;
+   GRANT DELETE ON config.agent_environment_profiles TO mcp;
 END $do$;
 
 -- 3i (continued). #6003 review: the journal is the request event log the service signs and delivers, and mcp and admin
 --     hold INSERT on it (the nine columns above: not journal_id, the identity, and not event_id, the webhook id, so a role
 --     cannot fill the next million values and make every service insert fail), so this trigger (managed provisioning's
---     BuildJournalEventRulesSql, text for text) refuses a row from any role but the owner that is an event or a delivery
---     or fallback mark (but for a practice request's one opened row, which the Viewer writes with the reason "practice of
---     <case id>"), or that carries a once key other than the prefixes the tools and the Viewer write. A practice opened
+--     BuildJournalEventRulesSql, text for text) refuses a row from any role but the owner that is an event, a delivery
+--     or fallback mark, a server action switch (#6269) or one of the three rows an agent action writes, action_called,
+--     action_done and action_failed (#6569: the service writes them itself, on the owner login, and a person's Undo
+--     acts on the action_called row) (but for a practice request's one opened row, which the Viewer writes with the
+--     reason "practice of <case id>"), or that carries a once key other than the prefixes the tools and the Viewer write. A practice opened
 --     row gets the once key practice_opened:<request id> from the trigger, so a second one fails on the unique index. A row
 --     dated ahead of the store's clock is clamped to it. The alert links get the twin rule (BuildRequestAlertLinkRulesSql):
 --     only a practice request takes a link from a role but the owner. Both read V191's practice_of, so on a store below
@@ -2973,7 +3094,7 @@ BEGIN
       RETURN NEW;
    END IF;
 
-   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched') THEN
+   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed') THEN
       IF NEW.event = 'opened'
          AND EXISTS (SELECT 1 FROM config.investigation_requests AS r
                      WHERE r.request_id = NEW.request_id AND r.practice_of IS NOT NULL
@@ -3066,6 +3187,14 @@ BEGIN
    GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
       window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON config.investigation_requests TO admin;
    GRANT INSERT ON config.investigation_request_alerts TO admin;
+   -- #6400: start_practice_request and record_investigation_feedback run the practice and feedback stores as mcp: the columns their
+   --     statements set and nothing more. BRING-YOUR-OWN STORES: re-run this script to add them.
+   GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
+      window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON config.investigation_requests TO mcp;
+   GRANT INSERT (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json)
+      ON config.investigation_request_alerts TO mcp;
+   GRANT INSERT (request_id, verdict, corrected_verdict, missed_step, comment, author) ON config.investigation_feedback TO mcp;
+   GRANT UPDATE (verdict, corrected_verdict, missed_step, comment, author, created_at) ON config.investigation_feedback TO mcp;
 END $do$;
 
 -- 3j2. The per-server action switches (V196, #5632 step 5), mirroring managed provisioning's section 10e2. Every role reads them and

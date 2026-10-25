@@ -167,7 +167,8 @@ public class DarlingRuntimePreflightTests
     [InlineData("Darling", "Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj", "Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj")]
     public void Readme_QuotesTheCetMessage_AndGivesTheOptOutAndItsUndoForEveryExe(string product, params string[] projects)
     {
-        var readme = (product == "Lite" ? ReadRepoFile("docs", "troubleshooting.md") : ReadRepoFile(product, "README.md")).ReplaceLineEndings("\n");
+        var readme = (product == "Lite" ? ReadRepoFile("docs", "troubleshooting.md") : ReadRepoFile("docs", "darling", "install.md")) // #6416: the CET section moved from Darling/README.md to the install page
+           .ReplaceLineEndings("\n");
         Assert.Contains(CetMessage, readme, StringComparison.Ordinal);
         Assert.Contains("0x80131506", readme, StringComparison.Ordinal);
         /* The undo is the registry way, proven on build 20348.5622; the cmdlet's own -Remove failed there. */

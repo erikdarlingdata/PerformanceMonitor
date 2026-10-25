@@ -69,9 +69,21 @@ FOR UPDATE";
 DELETE FROM config.agent_environment_profiles
 WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope_tag_id, 0) = coalesce($2::integer, 0)";
 
-    /// <summary>A profile: one scope at most (fleet, a server or a tag), at most <see cref="MaxLength"/> characters.</summary>
+    /// <summary>Whether a tag exists (#6400). $1 tag id. No foreign key ties a profile to its tag, so a save checks it.</summary>
+    public const string TagExistsSql = "SELECT 1 FROM config.server_tags WHERE id = $1";
+
+    /// <summary>Whether a server is registered (#6400): defined in <c>config.config_monitored_servers</c>, the set every picker and
+    /// <c>list_servers</c> offer. Not <c>collect.servers</c>: that is the observed registry, written on a server's first connection (so a server
+    /// just added has no row there yet) and never pruned (so a removed server keeps its row). $1 server id. No foreign key ties a profile to its
+    /// server, so a save checks it.</summary>
+    public const string ServerExistsSql = "SELECT 1 FROM config.config_monitored_servers WHERE server_id = $1";
+
+    /// <summary>A profile: one scope at most (fleet, a server or a tag), at most <see cref="MaxLength"/> characters. A tag id is 1 or more
+    /// (#6400): the store matches a scope on <c>coalesce(scope_tag_id, 0)</c>, so a profile saved for tag 0 would stand in the fleet profile's place.</summary>
     public static string? Validate(int? scopeServerId, int? scopeTagId, string? profileText) =>
         scopeServerId.HasValue && scopeTagId.HasValue ? "A profile is for the fleet, one server or one tag, not a server and a tag."
+        : scopeServerId is <= 0 ? string.Create(CultureInfo.InvariantCulture, $"Server id {scopeServerId} is not a server; server ids start at 1.")
+        : scopeTagId is <= 0 ? string.Create(CultureInfo.InvariantCulture, $"Tag id {scopeTagId} is not a tag; tag ids start at 1.")
         : (profileText?.Trim().Length ?? 0) > MaxLength
             ? string.Create(CultureInfo.InvariantCulture, $"A profile must be {MaxLength:N0} characters or fewer.")
         : null;
@@ -145,6 +157,27 @@ public sealed partial class InvestigationRequestStore
         var actor = InvestigationPersonWrites.PersonActor(login);
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        /* #6400: no foreign key ties a profile to its server or its tag, so an id that names none is refused here, in the save's transaction.
+           A blank save is let through: it only removes, and a profile left behind by a deleted server or tag must still be removable. */
+        if (!blank && scopeServerId is { } serverId)
+        {
+            await using var serverCommand = Command(connection, transaction, InvestigationProfiles.ServerExistsSql, P(serverId));
+            if (await serverCommand.ExecuteScalarAsync(cancellationToken) is null)
+            {
+                throw new ArgumentException(string.Create(CultureInfo.InvariantCulture, $"Server {serverId} is not a registered server, so no profile was saved."), nameof(profileText));
+            }
+        }
+
+        if (!blank && scopeTagId is { } tagId)
+        {
+            await using var tagCommand = Command(connection, transaction, InvestigationProfiles.TagExistsSql, P(tagId));
+            if (await tagCommand.ExecuteScalarAsync(cancellationToken) is null)
+            {
+                throw new ArgumentException(string.Create(CultureInfo.InvariantCulture, $"Tag {tagId} does not exist, so no profile was saved."), nameof(profileText));
+            }
+        }
+
         DateTime? current;
         await using (var lockCommand = Command(connection, transaction, InvestigationProfiles.LockSql, NullableInt(scopeServerId), NullableInt(scopeTagId)))
         {

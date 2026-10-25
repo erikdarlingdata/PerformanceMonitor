@@ -189,7 +189,7 @@ public class EmailAlertService : IFindingAlertSender
             if (result.Route is { } route)
             {
                 context ??= new AlertContext();
-                context.Route = route.ToDto(result.ChannelOutcomes);
+                context.Route = route.ToDto(result.ChannelOutcomes, result.GenericDedupKey, result.PagerDutyDedupKey);
             }
 
             /* Always log the alert, regardless of email status. The numeric current/threshold

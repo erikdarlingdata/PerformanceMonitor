@@ -3326,6 +3326,10 @@ LIMIT 1";
            Never throws; a key that cannot be used is a refusing ring with the reason logged and recorded in the store. */
         _passwordKeyRuntime = await DarlingPasswordKeyRuntime.StartForServiceAsync(
             config, DarlingConfig.ResolveConfigPath(), postgres, _logger, stoppingToken);
+        /* #6715: the seed above copies the webhook values from darling.json as plain text, because the ring it would seal them with
+           needs the seeded store and loads only now. Seal those (and any an older build left) here, before the first view reads the
+           row, so this host's reload baseline already includes the write's config_version bump. Never stops the start. */
+        await configProvider.SealPlainWebhookSettingsAsync(_passwordKeyRuntime.Ring, stoppingToken);
         /* #5456: a pin step that could not run is tried again on every sweep, and until it does the re-enter line says to wait.
            Set before the first view so that view's line already knows; the pins it takes bump config_version, which every
            host's reload beacon picks up. */
@@ -17411,6 +17415,7 @@ LIMIT 1";
         ["ag_database_replica_states"] = (r, s, ct) => r.RunAsync(AgDatabaseReplicaStatesCollector.Instance, s, ct),
         ["plan_correction"] = (r, s, ct) => r.RunAsync(PlanCorrectionCollector.Instance, s, ct),
         ["query_store_forced_plans"] = (r, s, ct) => r.RunAsync(QueryStoreForcedPlansCollector.Instance, s, ct),
+        ["query_store_hints"] = (r, s, ct) => r.RunAsync(QueryStoreHintsCollector.Instance, s, ct),
         ["pvs_stats"] = (r, s, ct) => r.RunAsync(PvsStatsCollector.Instance, s, ct),
         /* PostgreSQL. Dispatch is by name and engine-agnostic; the engine gate upstream in
            RunDueCollectorsAsync means this lambda is only ever reached for a Postgres target. */

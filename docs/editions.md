@@ -1,5 +1,7 @@
 # Choosing an edition
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 ## Editions
@@ -12,7 +14,7 @@ Pick by how you want collection to run — the monitoring brain (collectors, ale
 | **Installs on your server?** | No | No | Yes (a `PerformanceMonitor` database) |
 | **Stores data** | Local DuckDB + Parquet | PostgreSQL + TimescaleDB (bundled on Windows) | In the target SQL Server |
 | **Best for** | Quick triage, Azure SQL DB, locked-down servers, consultants, firefighting | Always-on monitoring of many SQL Server and PostgreSQL servers from one service | *Existing installs only — new deployments should use Lite or Darling* |
-| **Requires** | `VIEW SERVER STATE` ([permissions](permissions.md#permissions)) | `VIEW SERVER STATE` (SQL Server) or [these grants](../Darling/README.md#permissions-on-a-postgresql-target) (PostgreSQL), plus a place to run the service | SQL Agent ([Dashboard docs](../deprecated/Dashboard/README.md)) |
+| **Requires** | `VIEW SERVER STATE` ([permissions](permissions.md#permissions)) | `VIEW SERVER STATE` (SQL Server) or [these grants](darling/postgresql-targets.md#permissions-on-a-postgresql-target) (PostgreSQL), plus a place to run the service | SQL Agent ([Dashboard docs](../deprecated/Dashboard/README.md)) |
 
 > **⚠️ The "Full" Dashboard edition is deprecated.** Existing installs keep working and remain on bug-fix support, but it is no longer the recommended path and — as of v3.3.0 — the Dashboard and its CLI installer are **no longer included in release assets**. The last shipped builds are in the [v3.2.0 release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/tag/v3.2.0), and both remain buildable from the repo. New deployments should use **Lite** or **Darling**. Its docs live with the code: **[deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)** (the app, tabs, permissions) and **[deprecated/Installer/README.md](../deprecated/Installer/README.md)** (the CLI database installer).
 
@@ -37,8 +39,8 @@ All editions include real-time alerts (email + webhooks), charts and graphs, Dar
 | Themes | Dark, Light and Cool Breeze, with per-color overrides | Dark, Light and Cool Breeze, with per-color overrides (viewer) | Dark, Light and Cool Breeze |
 | Web dashboard | Not available | Optional, off by default (port 5153) | Not available |
 | Portability | Single executable | Portable service + viewer zip (Windows), service tarball (Linux) | Server-bound |
-| SQL Server collectors | 43 (the long-running-query trace is opt-in) | 44 (adds a forced-plan collector) | Its own set, installed on the target |
-| PostgreSQL collectors | None | 29 | None |
+| SQL Server collectors | More than 40 (the long-running-query trace is opt-in) | Lite's set, plus a forced-plan collector and a Query Store hint collector | Its own set, installed on the target |
+| PostgreSQL collectors | None | More than 25 | None |
 | Agent investigations (your own AI agent picks up an alert and reports) | Level 1: the agent reads and reports | Level 1 to 3: reports, plus agent-made alert changes and server actions, each behind its own switch | Not available |
 | Agent changes on a monitored server (force or unforce a Query Store plan, evict a cached plan, kill a session) | Not available | Yes, one switch per server and action, all off until you turn them on | Not available |
 | Query tags (name a group of queries and see its resource use) | Yes | Yes | Not available |

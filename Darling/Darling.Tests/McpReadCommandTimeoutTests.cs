@@ -41,8 +41,8 @@ namespace Darling.Tests;
 /// constant, and <c>Targets/HypotheticalIndexExperiment</c> builds transaction-scoped commands against a
 /// monitored PostgreSQL target under its own <c>SET LOCAL statement_timeout</c>. Both are other groups'
 /// territory, and both would be flagged as offenders by a directory-scoped sweep that could not tell a store
-/// command from a target one. Every site in THIS scope was classified by hand and all 126 are store
-/// commands, which is what makes one store-derived constant correct for them; the receiver allowlist in
+/// command from a target one. Every site in THIS scope was classified by hand and each is a store command,
+/// which is what makes one store-derived constant correct for them; the receiver allowlist in
 /// <see cref="EveryCommandInScope_IsBuiltAgainstTheStore_NotAMonitoredTarget"/> is that classification
 /// written down, so a future target command here fails rather than silently inheriting a store bound.</para>
 ///
@@ -114,7 +114,7 @@ public sealed class McpReadCommandTimeoutTests
     /// <summary>
     /// The STORE receivers, and only these. <c>postgres</c> is the <c>NpgsqlDataSource</c> the MCP host and
     /// the web host inject into every reader and tool; <c>_dataSource</c> is <see cref="CustomViewStore"/>'s
-    /// field; <c>connection</c> is a connection opened from one of those two by
+    /// field; <c>owner</c> is the store owner pool from <c>StoreOwnerSource</c>, never a monitored target; <c>connection</c> is a connection opened from one of those two by
     /// <c>postgres.OpenConnectionAsync</c>, asserted per file below.
     ///
     /// <para>A monitored-TARGET command matches none of these: the provider form carries a plan, a
@@ -129,7 +129,7 @@ public sealed class McpReadCommandTimeoutTests
     /// fails asking for a decision, which is the direction a guard should err in.</para>
     /// </summary>
     private static readonly Regex s_storeReceiver = new(
-        @"(?<![A-Za-z0-9_])(?:postgres|_dataSource)\.CreateCommand\s*\("
+        @"(?<![A-Za-z0-9_])(?:postgres|_dataSource|owner)\.CreateCommand\s*\("
         + @"|new (?:Npgsql\.)?NpgsqlCommand\s*\([A-Za-z_][A-Za-z0-9_.]*\s*,\s*(?<![A-Za-z0-9_])connection\s*(?:,\s*[A-Za-z_][A-Za-z0-9_]*\s*)?\)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -175,7 +175,7 @@ public sealed class McpReadCommandTimeoutTests
                    name the construction is bound to, so a sibling's `other.CommandTimeout = …` in the
                    same two-statement window cannot certify a site that set nothing itself. Both are
                    stricter than the bare value regex this used to apply, and neither moves a verdict on
-                   today's tree — all 126 sites are certified by the name-qualified assignment half. */
+                   today's tree — every site is certified by the name-qualified assignment half. */
                 if (!CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index))
                 {
                     var line = text.Take(ctor.Index).Count(c => c == '\n') + 1;

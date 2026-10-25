@@ -78,12 +78,20 @@ public static class ServerActionSwitches
     /// <summary>The journal event of a switch change. Not an <c>action_called</c> row, so the Agent changes list (an agent's calls) never shows it.</summary>
     public const string JournalEvent = "server_action_switched";
 
-    internal const string ServerSql =
-        "SELECT server_id, name, engine FROM config.config_monitored_servers WHERE server_id = $1 FOR SHARE";
+    /* #6727: sql_engine_edition (5 Azure SQL Database, 8 Azure SQL Managed Instance) is what the tools read to refuse an Azure target, and the registry
+       does not carry it. A server with no collect.servers row yet, or no probed edition, reads NULL and answers as an ordinary SQL Server. The lock
+       stays on the registry row (FOR SHARE OF cannot name the nullable side of the join). */
+    internal const string ServerSql = @"
+SELECT m.server_id, m.name, m.engine, c.sql_engine_edition
+FROM config.config_monitored_servers AS m
+LEFT JOIN collect.servers AS c ON c.server_id = m.server_id
+WHERE m.server_id = $1
+FOR SHARE OF m";
 
     internal const string ListSql = @"
-SELECT s.server_id, s.name, s.engine, a.action, a.enabled, a.set_by, a.updated_at
+SELECT s.server_id, s.name, s.engine, a.action, a.enabled, a.set_by, a.updated_at, c.sql_engine_edition
 FROM config.config_monitored_servers AS s
+LEFT JOIN collect.servers AS c ON c.server_id = s.server_id
 LEFT JOIN config.config_server_actions AS a ON a.server_id = s.server_id
 ORDER BY s.name, s.server_id";
 
@@ -147,6 +155,7 @@ ORDER BY s.name, s.server_id";
 
         string? serverName = null;
         string? engine = null;
+        int? edition = null;
         await using (var command = new NpgsqlCommand(ServerSql, connection, transaction) { CommandTimeout = lockWaitSeconds, Parameters = { new NpgsqlParameter<int> { TypedValue = serverId } } })
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
@@ -154,6 +163,7 @@ ORDER BY s.name, s.server_id";
             {
                 serverName = reader.GetString(1);
                 engine = reader.IsDBNull(2) ? null : reader.GetString(2);
+                edition = reader.IsDBNull(3) ? null : reader.GetInt32(3);
             }
         }
 
@@ -161,10 +171,10 @@ ORDER BY s.name, s.server_id";
             return Refused("unknown_server", "That server is not in the registry.", serverId, null, name);
 
         /* Turning a switch OFF is never refused for the engine: a switch left on before an engine edit must still be clearable (#6269). */
-        if (enabled && !ServerActionNames.IsValidForEngine(name, IsPostgres(engine)))
+        if (enabled && !ServerActionNames.IsValidForEngine(name, IsPostgres(engine), edition))
         {
             return Refused("not_for_engine",
-                $"{ServerActionNames.Label(name)} cannot run on {serverName}: it is a {(IsPostgres(engine) ? "PostgreSQL" : "SQL Server")} target. The switch was not changed.", serverId, serverName, name);
+                $"{ServerActionNames.Label(name)} cannot run on {serverName}: it is {ServerActionNames.EngineDescription(IsPostgres(engine), edition)}. The switch was not changed.", serverId, serverName, name);
         }
 
         /* No row is off, as the gate reads it. The row is locked so two changes in a row see each other's state. */
@@ -241,7 +251,7 @@ ON CONFLICT (server_id, action) DO UPDATE SET enabled = EXCLUDED.enabled, set_by
     public static async Task<IReadOnlyList<ServerActionSwitchRow>> ListAsync(NpgsqlDataSource source, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
-        var servers = new List<(int Id, string Name, string Engine, Dictionary<string, (bool Enabled, string? SetBy, DateTime? At)> Rows)>();
+        var servers = new List<(int Id, string Name, string Engine, int? Edition, Dictionary<string, (bool Enabled, string? SetBy, DateTime? At)> Rows)>();
         await using var connection = await source.OpenConnectionAsync(cancellationToken);
         await using var command = new NpgsqlCommand(ListSql, connection) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds };
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -250,7 +260,8 @@ ON CONFLICT (server_id, action) DO UPDATE SET enabled = EXCLUDED.enabled, set_by
             var id = reader.GetInt32(0);
             if (servers.Count == 0 || servers[^1].Id != id)
             {
-                servers.Add((id, reader.GetString(1), reader.IsDBNull(2) ? "sqlserver" : reader.GetString(2), new(StringComparer.Ordinal)));
+                servers.Add((id, reader.GetString(1), reader.IsDBNull(2) ? "sqlserver" : reader.GetString(2),
+                    reader.IsDBNull(7) ? null : reader.GetInt32(7), new(StringComparer.Ordinal)));
             }
 
             if (!reader.IsDBNull(3))
@@ -263,7 +274,7 @@ ON CONFLICT (server_id, action) DO UPDATE SET enabled = EXCLUDED.enabled, set_by
         return servers.Select(s => new ServerActionSwitchRow(s.Id, s.Name, s.Engine,
             ServerActionNames.All.Select(a =>
             {
-                var valid = ServerActionNames.IsValidForEngine(a, IsPostgres(s.Engine));
+                var valid = ServerActionNames.IsValidForEngine(a, IsPostgres(s.Engine), s.Edition);
                 return s.Rows.TryGetValue(a, out var row)
                     ? new ServerActionSwitchState(a, valid, row.Enabled, row.SetBy, row.At)
                     : new ServerActionSwitchState(a, valid, false, null, null);

@@ -45,7 +45,7 @@ public sealed class DarlingMcpPlanUndoTools
     internal const string Login = "mcp";
 
     [McpServerTool(Name = "undo_plan_change"), Description(
-        "Undoes ONE agent change to a Query Store plan (a plan force or unforce) by its called_id from get_agent_changes (can_undo true): puts the query back to the state before the change. The server's own state decides what is put back: undoing a force puts the plan that was forced before back, or unforces the plan when none was forced; undoing an unforce forces that plan again. Anything else is refused (changed_since when another change was made since, nothing_to_undo when the server shows it never took effect). Two steps: call with confirm=false (the default) to get the exact statement and the state it read, which writes nothing; then call again with confirm=true and that statement to write. Needs that server's force_plan switch and remediation login (the same gate as force_query_store_plan and unforce_query_store_plan; ships off) and mcp.allowWrites. The undo is journaled in Agent changes as person:mcp, and the answer says how to put the change back (force or unforce again). Check with get_agent_changes and get_forced_plans.")]
+        "Undoes ONE agent change to a Query Store plan or a plan guide by its called_id from get_agent_changes (can_undo true), of the kinds plan_force, plan_unforce, plan_guide_create and plan_guide_drop: puts the server back to the state before the change. The server's own state decides what is put back: undoing a force puts the plan that was forced before back, or unforces the plan when none was forced; undoing an unforce forces that plan again; undoing plan_guide_create drops the guide it made; undoing plan_guide_drop re-creates the guide from the definition journaled with the drop. Anything else is refused (changed_since when another change was made since, nothing_to_undo when the server shows it never took effect). Two steps: call with confirm=false (the default) to get the exact statement and the state it read, which writes nothing; then call again with confirm=true and that statement to write. Needs the server switch of the kind: force_plan for plan_force and plan_unforce (the gate of force_query_store_plan and unforce_query_store_plan), create_plan_guide for plan_guide_create, drop_plan_guide for plan_guide_drop; each ships off. It also needs that server's remediation login and mcp.allowWrites. The undo is journaled in Agent changes as person:mcp, and the answer says how to put the change back (make it again with the tool that made it). Check with get_agent_changes and get_forced_plans.")]
     public static Task<string> UndoPlanChange(
         NpgsqlDataSource postgres,
         [Description("The called_id of the change, from get_agent_changes.")] long called_id,
@@ -66,7 +66,8 @@ public sealed class DarlingMcpPlanUndoTools
                 return Refuse("invalid", "called_id is a positive number from get_agent_changes. Nothing was written.");
             }
 
-            var changes = new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds);
+            /* #6569: an undo whose reply was lost journals an action_called row (kind plan_undo), which only the store owner may write. */
+            var changes = new AgentChangeUndo(owner ?? postgres, McpCommandDeadlines.ReadSeconds);
             var answer = await DarlingMcpPlanForceTools.UndoPlanChangeAsync(changes, owner, logger ?? NullLogger.Instance, calledId, Login, confirm, shown, ct);
             var node = answer.ToJson();
             if (answer.Status == PlanUndoAnswer.Failed)
@@ -77,7 +78,7 @@ public sealed class DarlingMcpPlanUndoTools
 
             if (answer.Status == PlanUndoAnswer.Undone)
             {
-                node["undo"] = "To put the change back: force or unforce the plan again with force_query_store_plan or unforce_query_store_plan (the pre-check get_plan_force_precheck first). "
+                node["undo"] = "To put the change back, make it again with the tool that made it: force_query_store_plan or unforce_query_store_plan (the pre-check get_plan_force_precheck first), create_plan_guide or drop_plan_guide. "
                     + (answer.RestoredAs is null ? string.Empty : $"It was restored as {answer.RestoredAs}.");
                 node["check_with"] = new JsonObject { ["tool"] = "get_agent_changes", ["note"] = "the change now reads undone" };
             }

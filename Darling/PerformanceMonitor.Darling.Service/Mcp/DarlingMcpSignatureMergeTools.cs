@@ -88,7 +88,7 @@ public sealed class DarlingMcpSignatureMergeTools
             }
 
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
-            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: seat!.Owner?.Read());
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, signature, null);
             long mergeId = 0;
             try

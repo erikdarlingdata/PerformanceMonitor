@@ -1278,9 +1278,9 @@ public sealed class DarlingMcpHostService : BackgroundService
            arm they go through the agent_action gate and under the writes arm they write as before. A service parameter, so a
            client cannot supply it. */
         if (perRequest)
-            services.AddTransient<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(PolicyOf(sp)));
+            services.AddTransient<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(PolicyOf(sp), sp.GetService<StoreOwnerSource>()));
         else
-            services.AddSingleton<DarlingAgentActionSeat>(new DarlingAgentActionSeat(writes));
+            services.AddSingleton<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(writes, sp.GetService<StoreOwnerSource>()));
 
         /* #4442 scope 2: the per-tool latency filter needs the SAME accumulator singleton the web host and
            worker flush use (Program.cs registers ONE ReadLatencyAccumulator for the whole process) -- an
@@ -1703,6 +1703,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpChangeWatchTools>()
             /* The known-pattern read - get_known_patterns (#6334) - the operator-written entries that get_alert_history rows carry the matches of. */
             .WithGeminiCompatibleTools<DarlingMcpKnownPatternTools>()
+            /* The known-pattern writes - create_known_pattern / update_known_pattern / delete_known_pattern (#6398) - admin writes over the same store
+               functions the web editor calls; write tools (mcp.allowWrites), never offered to an investigation agent. */
+            .WithGeminiCompatibleTools<DarlingMcpKnownPatternWriteTools>()
             /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
                _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
                _severe_errors / _significant_waits / _system_health — the same names the Dashboard
@@ -1761,6 +1764,12 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #6397: get_database_state_expectations (read) and set_database_state_expected (write): the Database State alert's per-database
                expected state, through the store code the Viewer's override editor runs. The mcp role holds INSERT/UPDATE/DELETE on only that table. */
             .WithGeminiCompatibleTools<DarlingMcpDatabaseStateTools>()
+            /* #6400: write_investigation_note, approve_investigation_note, reject_investigation_note and close_investigation_request, through the store
+               code the web routes and the Viewer run. The mcp role holds only the columns those statements set; an agent never gets them. */
+            .WithGeminiCompatibleTools<DarlingMcpInvestigationAdminTools>()
+            /* #6400 part 2: start_practice_request, save_environment_profile and record_investigation_feedback, through the practice, profile and
+               feedback store code the web routes and the Viewer run. The mcp role holds only the columns those statements set; an agent never gets them. */
+            .WithGeminiCompatibleTools<DarlingMcpInvestigationFeedbackTools>()
             /* #6230: pause / resume collection, disable / enable one server, set a server's excluded databases and reload the config,
                with get_collection_state to read the result. Each runs the command plane's own plan (or the Viewer's shared exclusions
                write) as the mcp role; the role holds UPDATE on only the paused column of config_service for it. */

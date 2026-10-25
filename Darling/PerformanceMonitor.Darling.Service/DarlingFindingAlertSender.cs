@@ -188,7 +188,7 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                 if (result.Route is { } route)
                 {
                     context ??= new AlertContext();
-                    context.Route = route.ToDto(result.ChannelOutcomes);
+                    context.Route = route.ToDto(result.ChannelOutcomes, result.GenericDedupKey, result.PagerDutyDedupKey);
                 }
             }
 

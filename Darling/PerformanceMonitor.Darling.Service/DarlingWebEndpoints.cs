@@ -152,6 +152,12 @@ public static class DarlingWebEndpoints
         "evict_cached_plan",
         /* #5632 step 12: a kill ends a session on a monitored SQL Server through the server action gate; the web has no route for it. */
         "kill_session",
+        /* #6569: a module recompile runs sp_recompile on a monitored SQL Server through the server action gate; the web has no route for it. */
+        "recompile_module",
+        /* #6569: a plan guide create runs sys.sp_create_plan_guide on a monitored SQL Server through the server action gate; the web has no route for it (a person undoes it from Agent changes). */
+        "create_plan_guide",
+        /* #6569, slice 2b: a plan guide drop runs sys.sp_control_plan_guide on a monitored SQL Server through the server action gate; the web has no route for it (a person undoes it from Agent changes). */
+        "drop_plan_guide",
         /* #5632 step 10: an agent's read of what compiled after its eviction, served over MCP by journal id; no page read mirrors it. */
         "get_compiles_after_evict",
         /* #6230 part B: the incident actions queue a command to the service over MCP; the web has its own routes for them, none a generic read.
@@ -170,6 +176,8 @@ public static class DarlingWebEndpoints
         "set_notification_route_fallback",
         "create_notification_route",
         "update_notification_route",
+        "generate_webhook_signing_key",
+        "remove_webhook_signing_key",
         "update_notification_channels",
         "dismiss_alert_history",
         "restore_alert_history",
@@ -178,6 +186,16 @@ public static class DarlingWebEndpoints
         /* #6397: the Database State expectations are edited in the Viewer's override editor; the web has no route for them. */
         "get_database_state_expectations",
         "set_database_state_expected",
+        /* #6400: the web has its own routes for these seven (PUT /api/investigation-notes, .../approve, .../reject,
+           /api/investigation-requests/{id}/close, /api/investigation-practice-requests/{id}, /api/environment-profiles and
+           /api/investigation-feedback/{id}); the MCP tools are not dispatched through /api/read. */
+        "write_investigation_note",
+        "approve_investigation_note",
+        "reject_investigation_note",
+        "close_investigation_request",
+        "start_practice_request",
+        "save_environment_profile",
+        "record_investigation_feedback",
         /* #5632 Phase A: claim and submit write investigation state for an agent over MCP; the web serves the two
            investigation reads only (/api/read). */
         "claim_investigation_request",
@@ -240,6 +258,10 @@ public static class DarlingWebEndpoints
         "set_collector_databases",
         "reset_collector_schedules",
         "get_collector_schedules",
+        /* #6398: the known-pattern writes are MCP-only; the web editor has its own routes (POST/PUT/DELETE /api/known-patterns, see DarlingKnownPatternRoutes). */
+        "create_known_pattern",
+        "update_known_pattern",
+        "delete_known_pattern",
         /* #6393: update_service_flags is MCP-only; the Viewer's Settings window is the page for a person. */
         "update_service_flags",
         /* #6269: the server action switches have their own web routes (GET /api/server-actions and PUT /api/servers/{id}/actions/{action}, admin role); the MCP write is under mcp.allowServerAdmin. */
@@ -1868,7 +1890,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <c>not_found</c>); a server that took no write is 502. A viewer-role store is 403 before anything else, as the store kinds' undo answers it
     /// (the route checks that, then sweeps what this returns).
     /// </summary>
-    private static async Task<(JsonObject Body, int Status)> UndoPlanChangeAsync(HttpContext context, AgentChangeUndo changes, StoreOwnerSource? ownerSource, ILogger logger,
+    internal static async Task<(JsonObject Body, int Status)> UndoPlanChangeAsync(HttpContext context, AgentChangeUndo changes, StoreOwnerSource? ownerSource, ILogger logger,
         long id, string login)
     {
         var confirm = false;
@@ -1892,7 +1914,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
         }
 
-        var answer = await Mcp.DarlingMcpPlanForceTools.UndoPlanChangeAsync(changes, ownerSource?.Read(), logger, id, login, confirm, shown, context.RequestAborted);
+        /* #6569: an undo whose reply is lost journals a result-unknown action_called row, which only the store owner may write, so the plan undo runs on the owner source, as the
+           MCP undo does. The gate above (IsSignedInAdmin, CanDecide) stays on the web login: it is the web's own, not the journal writer's. */
+        var owner = ownerSource?.Read();
+        var planChanges = owner is null ? changes : new AgentChangeUndo(owner, McpCommandDeadlines.ReadSeconds);
+        var answer = await Mcp.DarlingMcpPlanForceTools.UndoPlanChangeAsync(planChanges, owner, logger, id, login, confirm, shown, context.RequestAborted);
         if (answer.Succeeded)
         {
             return (answer.ToJson(), StatusCodes.Status200OK);
@@ -6125,6 +6151,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_query_store_clutter"] = R(CatData, "The Query Store CLUTTER view: per database the collector's read cost (how often and by how much it was the slowest fan-out item), plan churn (plans per query, arrivals per day, one-shot plans) and the options row, each with raw numbers and a decomposed verdict; ONE per-server overhead block (non-sleep QDS_* wait deltas with the excluded sleep waits named, and the Query Store memory clerk). Replicas excluded by architecture with the reason on the row; query_capture_mode (ALL / AUTO / CUSTOM / NONE) carried with capture_mode_known beside it, null meaning a capture older than the V137 rung rather than NONE. window_truncated says the raw tier did not hold the whole window. Composed from collected rows - no new query against the server.", PServer(), PHours(24), PLimit(DarlingMcpQueryStoreClutterTools.DefaultLimit), PBool("include_fleet_median", false), PAsOf(), PDatabases()),
             ["get_resource_use_by_tag"] = R(CatData, "Resource use rolled up by query tag, one section per source (plan cache, Query Store, procedures, blocking, deadlocks); sections are never summed. Omit the server for the fleet.", PServer(), PHours(24), PText("tag"), PLimit(DarlingMcpQueryTagRollupTools.DefaultLimit), PAsOf()),
             ["get_query_store_query_history"] = R(CatData, "One Query Store query's executions, duration and CPU per plan over the window (requires database_name, query_id).", PReqText("database_name"), PReqInt("query_id"), PServer(), PHours(24), PAsOf()),
+            ["get_query_store_hints"] = R(CatData, "Which Query Store hints are in place: one entry per hint in its database's newest capture, with the query, the hint text, its source, whether the engine records a failure (FAILING or NO_FAILURE) and the query text (database_name optional). SQL Server 2022 and later.", PServer(), PHours(24), PAsOf(), PDatabases()),
             ["get_forced_plans"] = R(CatData, "Whether each Query Store force works: one entry per plan forced in its database's newest capture, with a state (WORKING, NOT_EXERCISED, IGNORED, FAILING, UNKNOWN_PLAN_NOT_COLLECTED or REMOVED) and the evidence (database_name optional).", PServer(), PHours(24), PAsOf(), PDatabases()),
             ["get_plan_force_precheck"] = R(CatData, "Reads one Query Store plan before anyone forces it: verdict blocked (plan_not_found or plan_already_forced, a force that cannot work) or not_blocked (never safe), the warnings with stable codes for the agent's own instructions to weigh, what a person should read first, and the checks the store could not answer (requires database_name, query_id, plan_id; compare_plan_id optional).", PReqText("database_name"), PReqInt("query_id"), PReqInt("plan_id"), PInt("compare_plan_id"), PServer(), PHours(24), PAsOf()),
             ["get_query_store_aborts"] = R(CatData, "Queries ranked by Query Store runs that ended aborted (a client timeout or cancel) or with an exception, with each query's share of its own runs, the average aborted duration and the newest failure time; window_truncated says the store did not hold the whole window.", PServer(), PHours(24), PTop(20), PText("database_name"), PAsOf(), PBool("full_text", false)),
@@ -6234,7 +6261,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── jobs (DarlingMcpJobTools) ── */
             ["get_running_jobs"] = R(CatJobs, "Currently-running SQL Agent jobs.", PServer()),
-            ["get_job_history"] = R(CatJobs, "Retained SQL Agent job runs, newest first; omit server for every server.", PServer(), PHours(24), PText("job_name"), PText("status"), PText("category"), PLimit(100), PAsOf()),
+            ["get_job_history"] = R(CatJobs, "Retained SQL Agent job runs, newest first; omit server for every server.", PServer(), PHours(24), PText("job_name"), PText("status"), PText("category"), PLimit(100), PInt("min_duration_seconds"), PAsOf()),
 
             /* ── stored plan XML (DarlingMcpPlanTools; the analyze_*_plan compute family stays excluded) ── */
             ["get_plan_xml"] = R(CatPlans, "The stored execution-plan XML for a query (requires query_hash).", PReqText("query_hash"), PServer(), PText("database_name")),
@@ -7209,6 +7236,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_forced_plans"] = (c, pg, an) => DatabaseNames(c) is { } fpDatabases
                 ? DarlingMcpForcedPlanTools.GetForcedPlans(pg, Server(c), Hours(c, 24), AsOf(c), fpDatabases, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
+            ["get_query_store_hints"] = (c, pg, an) => DatabaseNames(c) is { } qshHintDatabases
+                ? DarlingMcpForcedPlanTools.GetQueryStoreHints(pg, Server(c), Hours(c, 24), AsOf(c), qshHintDatabases, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_plan_force_precheck"] = (c, pg, an) => !RequireText(c, "database_name", out var pfDatabase)
                 ? MissingParam("database_name")
                 : !OptionalLong(c, "query_id", out var pfQueryId) ? UnparseableParam("query_id")
@@ -7405,7 +7435,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── jobs ── */
             ["get_running_jobs"] = (c, pg, an) => DarlingMcpJobTools.GetRunningJobs(pg, Server(c), c.RequestAborted),
-            ["get_job_history"] = (c, pg, an) => DarlingMcpJobTools.GetJobHistory(pg, Server(c), Hours(c, 24), Str(c, "job_name"), Str(c, "status"), Str(c, "category"), Rows(c, "limit", 100), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_job_history"] = (c, pg, an) => OptionalInt(c, "min_duration_seconds", out var minDurationSeconds)
+                ? DarlingMcpJobTools.GetJobHistory(pg, Server(c), Hours(c, 24), Str(c, "job_name"), Str(c, "status"), Str(c, "category"), Rows(c, "limit", 100), as_of: AsOf(c), min_duration_seconds: minDurationSeconds, cancellationToken: c.RequestAborted)
+                : UnparseableParam("min_duration_seconds"),
 
             /* ── stored plan XML (READ; the analyze_*_plan compute family stays excluded) ── */
             ["get_plan_xml"] = (c, pg, an) => RequireText(c, "query_hash", out var queryHash)

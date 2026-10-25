@@ -52,12 +52,12 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)";
     }
 
     /// <summary>One Query Store interval of one plan: it ran <paramref name="executions"/> times and last ran at <paramref name="lastRun"/>.</summary>
-    private static Task RanAsync(NpgsqlConnection c, CancellationToken ct, string db, long query, long plan, DateTime lastRun, long executions) =>
+    private static Task RanAsync(NpgsqlConnection c, CancellationToken ct, string db, long query, long plan, DateTime lastRun, long executions, bool forcedWhenSampled = false) =>
         Exec(c, ct, @"INSERT INTO query_store_stats
 (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc, runtime_stats_interval_id,
  interval_start_time_utc, first_execution_time, last_execution_time, execution_count, avg_cpu_time_us, avg_duration_us, avg_rowcount, is_forced_plan, force_failure_count)
-VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
-            CollectionIdGenerator.Next(), lastRun.AddMinutes(1), ServerId, ServerName, db, query, plan, plan * 1000 + lastRun.Minute, lastRun.AddMinutes(-30), lastRun, executions);
+VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,$12,0)",
+            CollectionIdGenerator.Next(), lastRun.AddMinutes(1), ServerId, ServerName, db, query, plan, plan * 1000 + lastRun.Minute, lastRun.AddMinutes(-30), lastRun, executions, forcedWhenSampled);
 
     private sealed record Rig(NpgsqlDataSource Postgres, NpgsqlConnection Connection);
 
@@ -109,7 +109,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
         /* #6221: plan 32 is a LATER plan of the query, so it is another plan by its stored XML (an ordinary plan: no UsePlan). */
         await StoredPlanSeed.AddAsync(c, ct, ServerId, db, 32, StoredPlanSeed.Plain);
         await RanAsync(c, ct, db, 4, 41, T0.AddMinutes(20), 3);
-        await RanAsync(c, ct, db, 5, 51, T0.AddMinutes(10), 3);
+        await RanAsync(c, ct, db, 5, 51, T0.AddMinutes(10), 3, forcedWhenSampled: true);
 
         /* OlderDb's newest capture is at T0+30m, 60 minutes before StateDb's. Plan 61 is in it, so it is still forced; plan 62 was only in the first. */
         await CaptureAsync(c, ct, "OlderDb", T0, (61, 6, 0, null), (62, 7, 0, null));
@@ -234,7 +234,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
     }
 
     [Fact]
-    public async Task TheHistoryTool_ListsAForcedPlanWithNoExecutionsInTheWindow_AndNotARemovedOne()
+    public async Task TheHistoryTool_ListsAForcedPlanWithNoExecutionsInTheWindow_AndARemovedOneWithItsState()
     {
         await WithStoreAsync(async (rig, ct) =>
         {
@@ -260,11 +260,21 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
                 Assert.Equal(JsonValueKind.Null, byPlan[32].GetProperty("forced_state").ValueKind);
             }
 
-            /* Query 5: its force was removed, so plan 51 is no longer listed as forced. */
+            /* Query 5 (#6598): plan 51 was forced when sampled and its force was removed. It says so: forced, state REMOVED, and the force is listed. */
             using (var removed = JsonDocument.Parse(await DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory(rig.Postgres, "StateDb", 5, ServerName, 24, asOf, ct)))
             {
-                Assert.Empty(removed.RootElement.GetProperty("forced_plans").EnumerateArray());
-                Assert.Equal(JsonValueKind.Null, Assert.Single(removed.RootElement.GetProperty("plans").EnumerateArray()).GetProperty("forced_state").ValueKind);
+                var plan = Assert.Single(removed.RootElement.GetProperty("plans").EnumerateArray());
+                Assert.True(plan.GetProperty("is_forced_plan").GetBoolean());
+                Assert.Equal("REMOVED", plan.GetProperty("forced_state").GetString());
+                var force = Assert.Single(removed.RootElement.GetProperty("forced_plans").EnumerateArray());
+                Assert.Equal(51, force.GetProperty("plan_id").GetInt64());
+                Assert.Equal("REMOVED", force.GetProperty("state").GetString());
+                Assert.Equal("ok", removed.RootElement.GetProperty("forced_plans_status").GetString());
+                /* The plan ran 3 times, and the force's own runs were not read, so the force does not say it ran zero times. */
+                Assert.Equal(3, plan.GetProperty("execution_count").GetInt64());
+                Assert.False(force.GetProperty("runs_read").GetBoolean());
+                Assert.Equal(JsonValueKind.Null, force.GetProperty("forced_plan").ValueKind);
+                Assert.Equal(JsonValueKind.Null, force.GetProperty("other_plans_total").ValueKind);
             }
 
             return 0;
