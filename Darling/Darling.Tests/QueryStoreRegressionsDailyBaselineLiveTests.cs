@@ -100,7 +100,7 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
         await IntervalAsync(day0.AddDays(2).AddHours(10), 10, 101, 100, 1_000);       /* D-6 10:00 */
         await IntervalAsync(day0.AddDays(4).AddHours(-0.33), 10, 101, 1, 9_000);      /* first D-5 23:40, last D-4 00:10: a seam inside the run, day D-4 */
         await IntervalAsync(day0.AddDays(5).AddHours(10), 10, 101, 10, 2_000);        /* D-3 10:00 */
-        await IntervalAsync(day0.AddDays(6).AddHours(-0.33), 10, 101, 7, 3_000);      /* first D-2 23:40, last D-1 00:10: the trailing seam, an open day read live */
+        await IntervalAsync(day0.AddDays(6).AddHours(-0.33), 10, 101, 7, 3_000);      /* first D-3 23:40, last D-2 00:10: the trailing seam, on the last run day D-2, so the daily totals serve it */
         await IntervalAsync(start.AddMinutes(-50), 10, 101, 20, 1_500);               /* last = start - 20 min: baseline, live */
         await IntervalAsync(start.AddMinutes(-10), 10, 102, 50, 5_000);               /* last = start + 20 min: recent, never baseline */
         await IntervalAsync(start.AddHours(2), 10, 102, 10, 4_000);                   /* recent */
@@ -123,6 +123,12 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
                see RecollectAsync) last D-4 00:30 with 25. */
             await IntervalAsync(day0.AddDays(3).AddHours(23), 41, 411, 10, 1_000, RecollectedIntervalId);
             await IntervalAsync(start.AddHours(4), 41, 411, 10, 5_000);
+
+            /* Query 10 again, a seam interval on the open day after the run: first D-2 23:40, last D-1 00:10. D-1 is no run day
+               and its last execution is before the window start (D-1 06:00), so the live baseline serves it, from the high
+               range. Its first execution is below D-1's midnight, so only a high range start below the next midnight reaches it
+               (#5506): the latest form's raised bound, the next midnight minus the edge margin. The shared seed has no such row. */
+            await IntervalAsync(day0.AddDays(7).AddHours(-0.33), 10, 101, 4, 6_000);
         }
     }
 
@@ -483,8 +489,9 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.NotEmpty(reference);
 
         /* A measured 60-minute interval, so the reads take the three-hour margin and the latest form raises its high range
-           start to the last run day's next midnight minus three hours: the trailing seam interval (first 23:40, last 00:10)
-           must still be counted. */
+           start to the last run day's next midnight (D-1) minus three hours (D-2 21:00). The extra seed's query 10 interval
+           (first D-2 23:40, last D-1 00:10) is read only from the high live range, and its first execution is above that raised
+           bound and below D-1's midnight: it must still be counted, and a bound at or above the midnight loses it. */
         await ExecAsync(f.Connection, $"""
             INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, interval_length_minutes)
             SELECT row_number() OVER (), c.c, {ServerId}, 'qsdaily', '{Db}', 60
@@ -507,13 +514,34 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         var plan = await ResolveAsync(f.Postgres, f.BaselineStart, f.Start, ct);
         Assert.True(plan.RegularFromLatest);
         Assert.NotEmpty(plan.RunDays);
+
+        /* The raised bound is D-1's midnight minus the margin, and the seam interval's first execution (D-2 23:40) lies between
+           it and the midnight. The latest form read with that bound gives the all-live rows. The same read with the bound at the
+           next midnight (no margin) loses the interval, so the rows move: the margin term is what keeps it. */
+        var latestSql = DarlingQueryStoreRegressionReader.BuildSql(wide: true, useDailyTotals: true, regularFromLatest: true);
+        var nextMidnight = f.Today.AddDays(-1);
+        var raised = QueryStoreRegressionBaseline.WithMeasuredHighStart(plan, TimeSpan.FromHours(3));
+        Assert.Equal(nextMidnight.AddHours(-3), raised.HighStart);
+        Assert.Equal(reference, await RunAsync(f.Connection, latestSql, f.Start, f.End, f.BaselineStart, raised, ct));
+        Assert.NotEqual(reference, await RunAsync(f.Connection, latestSql, f.Start, f.End, f.BaselineStart, plan with { HighStart = nextMidnight }, ct));
         Assert.Equal(reference, await RunAsync(f.Connection, DarlingQueryStoreRegressionReader.BuildSql(wide: true, useDailyTotals: true, regularFromLatest: true), f.Start, f.End, f.BaselineStart, plan, ct));
         Assert.Equal(reference, await RunAsync(f.Connection, DarlingQueryStoreRegressionReader.BuildSql(wide: true, useDailyTotals: false, regularFromLatest: true), f.Start, f.End, f.BaselineStart, QueryStoreRegressionBaseline.AllLive(f.Start), ct));
         Assert.Equal(reference, await ServedRowsAsync(f, ct));
         var viewerReference = await ViewerRowsAsync();
         Assert.Equal(reference, viewerReference);
 
-        /* Poison the recent intervals in latest only: the served rows move, so latest is what the Regular arms read. */
+        /* Poison the seam interval in latest only. Only the baseline's high live arm reads it (its last execution is before the
+           window start), so the served rows move if that arm reads latest. Then restore it. */
+        var seamPoison = $"server_id = {ServerId} AND query_id = 10 AND first_execution_time < TIMESTAMP '{nextMidnight:yyyy-MM-dd HH:mm:ss}' AND first_execution_time >= TIMESTAMP '{nextMidnight.AddHours(-1):yyyy-MM-dd HH:mm:ss}'";
+        Assert.Equal(1L, await ScalarAsync(f.Connection, $"SELECT count(*) FROM collect.query_store_interval_latest WHERE {seamPoison}", ct));
+        await ExecAsync(f.Connection, $"UPDATE collect.query_store_interval_latest SET avg_cpu_time_us = avg_cpu_time_us * 5 WHERE {seamPoison}", ct);
+        Assert.Equal(reference, await AllLiveAsync(f, ct));
+        Assert.NotEqual(reference, await ServedRowsAsync(f, ct));
+        Assert.NotEqual(viewerReference, await ViewerRowsAsync());
+        await ExecAsync(f.Connection, $"UPDATE collect.query_store_interval_latest SET avg_cpu_time_us = avg_cpu_time_us / 5 WHERE {seamPoison}", ct);
+        Assert.Equal(reference, await ServedRowsAsync(f, ct));
+
+        /* Poison the recent intervals in latest only: the served rows move, so the recent arm reads latest too. */
         await ExecAsync(f.Connection, $"UPDATE collect.query_store_interval_latest SET avg_cpu_time_us = avg_cpu_time_us * 5 WHERE server_id = {ServerId} AND last_execution_time >= TIMESTAMP '{f.Start:yyyy-MM-dd HH:mm:ss}'", ct);
         Assert.Equal(reference, await AllLiveAsync(f, ct));
         Assert.NotEqual(reference, await ServedRowsAsync(f, ct));
