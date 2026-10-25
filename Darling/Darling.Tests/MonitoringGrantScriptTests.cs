@@ -164,12 +164,20 @@ public sealed class MonitoringGrantScriptTests
         var with = MonitoringGrantScript.Build(principal, finOps: true, azureSqlDatabase: false);
         var without = MonitoringGrantScript.Build(principal, finOps: false, azureSqlDatabase: false);
 
-        Assert.Contains("sp_MSforeachdb", with);
-        Assert.Contains("GRANT VIEW DATABASE STATE TO [pm_monitor];", with);
-        Assert.Contains("GRANT VIEW DEFINITION TO [pm_monitor];", with);
-        Assert.Contains("GRANT SELECT ON sys.sql_expression_dependencies TO [pm_monitor];", with);
-        Assert.Contains("''pm_monitor''", with);
-        Assert.DoesNotContain("sp_MSforeachdb", without);
+        /* A cursor over sys.databases, with the login handed to each database as a parameter and quoted there. */
+        Assert.DoesNotContain("sp_MSforeach", with);
+        Assert.Contains("CURSOR LOCAL FAST_FORWARD", with);
+        Assert.Contains("FROM sys.databases AS d", with);
+        Assert.Contains("d.state = 0", with);
+        Assert.Contains("DATABASEPROPERTYEX(d.name, N'Updateability') = N'READ_WRITE'", with);
+        Assert.Contains("@login sysname = N'pm_monitor'", with);
+        Assert.Contains("N'@login sysname',", with);
+        Assert.Contains("@login = @login;", with);
+        Assert.Contains("N''GRANT VIEW DATABASE STATE TO '' + QUOTENAME(@login)", with);
+        Assert.Contains("N''GRANT VIEW DEFINITION TO '' + QUOTENAME(@login)", with);
+        Assert.Contains("N''GRANT SELECT ON sys.sql_expression_dependencies TO '' + QUOTENAME(@login)", with);
+        Assert.DoesNotContain("TO [pm_monitor]", with[with.IndexOf("FinOps Index Analysis", StringComparison.Ordinal)..]);   /* no name in the per-database text */
+        Assert.DoesNotContain("database_cursor", without);
         Assert.DoesNotContain("sql_expression_dependencies", without);
     }
 
@@ -193,7 +201,8 @@ public sealed class MonitoringGrantScriptTests
 
         Assert.Contains("[o'b]]d]", script);
         Assert.Contains("N'o''b]d'", script);
-        Assert.Contains("N''o''''b]d''", script);   /* inside the FinOps string, the literal's own quote doubles again */
+        Assert.Contains("@login sysname = N'o''b]d'", script);   /* the FinOps cursor takes the name as one literal, doubled once */
+        Assert.DoesNotContain("N''o''''b]d''", script);
     }
 
     [Theory]
@@ -318,7 +327,8 @@ public sealed class MonitoringGrantScriptTests
         Assert.Equal(0, code);
         Assert.Equal("", error.ToString());
         Assert.Contains("CREATE LOGIN [pm_monitor] WITH PASSWORD = N'<strong password>'", output.ToString());
-        Assert.Contains("sp_MSforeachdb", output.ToString());
+        Assert.Contains("database_cursor", output.ToString());
+        Assert.DoesNotContain("sp_MSforeach", output.ToString());
         Assert.DoesNotContain("encryptedPassword", output.ToString());
     }
 

@@ -94,19 +94,68 @@ GRANT VIEW DEFINITION                           TO [YourLogin];
 GRANT SELECT ON sys.sql_expression_dependencies TO [YourLogin];
 ```
 
-Or apply broadly with `sp_MSforeachdb`:
+Or apply it to every online, writable user database with a cursor over `sys.databases`. Set `@login` to your login's name at the top. Each database receives the name as a parameter, so a name with a quote, a bracket or a question mark in it still works:
 
 ```sql
-EXEC sp_MSforeachdb N'
-USE [?];
-IF DB_ID() > 4 AND DATABASEPROPERTYEX(DB_NAME(), ''Updateability'') = ''READ_WRITE''
+DECLARE
+    @login sysname = N'YourLogin',
+    @database_name sysname,
+    @procedure nvarchar(600),
+    @sql nvarchar(max) = N'
+DECLARE
+    @statement nvarchar(max) = N'''';
+
+IF NOT EXISTS
+(
+    SELECT
+        1/0
+    FROM sys.database_principals AS dp
+    WHERE dp.name = @login
+)
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = ''YourLogin'')
-        CREATE USER [YourLogin] FOR LOGIN [YourLogin];
-    GRANT VIEW DATABASE STATE                       TO [YourLogin];
-    GRANT VIEW DEFINITION                           TO [YourLogin];
-    GRANT SELECT ON sys.sql_expression_dependencies TO [YourLogin];
-END';
+    SET @statement += N''CREATE USER '' + QUOTENAME(@login) + N'' FOR LOGIN '' + QUOTENAME(@login) + N'';'';
+END;
+
+SET @statement += N''GRANT VIEW DATABASE STATE TO '' + QUOTENAME(@login) + N'';'';
+SET @statement += N''GRANT VIEW DEFINITION TO '' + QUOTENAME(@login) + N'';'';
+SET @statement += N''GRANT SELECT ON sys.sql_expression_dependencies TO '' + QUOTENAME(@login) + N'';'';
+
+EXECUTE sys.sp_executesql
+    @statement;';
+
+DECLARE
+    database_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT
+        d.name
+    FROM sys.databases AS d
+    WHERE d.database_id > 4
+    AND   d.state = 0
+    AND   DATABASEPROPERTYEX(d.name, N'Updateability') = N'READ_WRITE'
+    ORDER BY
+        d.database_id;
+
+OPEN database_cursor;
+
+FETCH NEXT
+FROM database_cursor
+INTO @database_name;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    PRINT N'Granting in ' + QUOTENAME(@database_name);
+    SET @procedure = QUOTENAME(@database_name) + N'.sys.sp_executesql';
+    EXECUTE @procedure
+        @sql,
+        N'@login sysname',
+        @login = @login;
+
+    FETCH NEXT
+    FROM database_cursor
+    INTO @database_name;
+END;
+
+CLOSE database_cursor;
+DEALLOCATE database_cursor;
 ```
 
 **Symptoms if missing.** Two distinct failure modes depending on which grant is absent:

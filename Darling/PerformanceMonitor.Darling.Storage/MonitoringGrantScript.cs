@@ -49,10 +49,10 @@ public enum GrantScope
 public sealed record GrantEntry(GrantSet Set, GrantScope Scope, string Permission, string? OnObject, bool Required, string Why)
 {
     /// <summary>The statement that grants this to <paramref name="principal"/> (a bare name, bracket-quoted here).</summary>
-    public string Statement(string principal) =>
-        OnObject is null
-            ? $"GRANT {Permission} TO {MonitoringGrantScript.QuoteName(principal)};"
-            : $"GRANT {Permission} ON {OnObject} TO {MonitoringGrantScript.QuoteName(principal)};";
+    public string Statement(string principal) => GrantPrefix + MonitoringGrantScript.QuoteName(principal) + ";";
+
+    /// <summary>The statement up to the principal: <c>GRANT ... TO </c>, for a script that quotes the principal itself.</summary>
+    public string GrantPrefix => OnObject is null ? $"GRANT {Permission} TO " : $"GRANT {Permission} ON {OnObject} TO ";
 }
 
 /// <summary>The kind of principal a script creates.</summary>
@@ -356,7 +356,7 @@ public static class MonitoringGrantScript
         if (finOps)
         {
             Line();
-            AppendFinOps(sb, name, q);
+            AppendFinOps(sb, name);
         }
 
         return sb.ToString();
@@ -368,24 +368,54 @@ public static class MonitoringGrantScript
             .Append(Literal(name)).Append("\n)\nBEGIN\n").Append(createStatement).Append("\nEND;\n\n");
     }
 
-    private static void AppendFinOps(StringBuilder sb, string name, string q)
+    private static void AppendFinOps(StringBuilder sb, string name)
     {
-        /* The block docs/permissions.md gives for "all databases", built from the list. The statements sit inside a string, so each
-           quote doubles once for the string; the principal name's own quote doubles first (Literal), then again for the string. */
+        /* The block docs/permissions.md gives for "all databases", built from the list: a cursor over the online read-write user
+           databases (not sp_MSforeachdb, which can skip databases and replaces every question mark in the batch, one inside the
+           login's name too). The login goes in as a parameter of each database's sp_executesql and is quoted there with QUOTENAME,
+           so its name is never spliced into the per-database text. The per-database text sits inside a string, so each quote in it
+           doubles once. */
         string InString(string t) => t.Replace("'", "''", StringComparison.Ordinal);
-        sb.Append("/* FinOps Index Analysis: the per-database grants, in every writable user database. */\n");
-        sb.Append("EXECUTE sys.sp_MSforeachdb N'\n");
-        sb.Append("USE [?];\n");
-        sb.Append("IF DB_ID() > 4 AND DATABASEPROPERTYEX(DB_NAME(), ''Updateability'') = ''READ_WRITE''\n");
-        sb.Append("BEGIN\n");
-        sb.Append("    IF NOT EXISTS (SELECT 1/0 FROM sys.database_principals AS dp WHERE dp.name = ").Append(InString(Literal(name))).Append(")\n");
-        sb.Append("        CREATE USER ").Append(InString(q)).Append(" FOR LOGIN ").Append(InString(q)).Append(";\n");
+        var inner = new StringBuilder();
+        inner.Append("DECLARE\n");
+        inner.Append("    @statement nvarchar(max) = N'';\n\n");
+        inner.Append("IF NOT EXISTS\n(\n    SELECT\n        1/0\n    FROM sys.database_principals AS dp\n    WHERE dp.name = @login\n)\n");
+        inner.Append("BEGIN\n");
+        inner.Append("    SET @statement += N'CREATE USER ' + QUOTENAME(@login) + N' FOR LOGIN ' + QUOTENAME(@login) + N';';\n");
+        inner.Append("END;\n\n");
         foreach (var entry in All.Where(e => e.Set == GrantSet.FinOps))
         {
-            sb.Append("    ").Append(InString(entry.Statement(name))).Append('\n');
+            inner.Append("SET @statement += N'").Append(entry.GrantPrefix).Append("' + QUOTENAME(@login) + N';';\n");
         }
 
-        sb.Append("END';\n");
+        inner.Append("\nEXECUTE sys.sp_executesql\n    @statement;");
+
+        sb.Append("/* FinOps Index Analysis: the per-database grants, in every online read-write user database. */\n");
+        sb.Append("DECLARE\n");
+        sb.Append("    @login sysname = ").Append(Literal(name)).Append(",\n");
+        sb.Append("    @database_name sysname,\n");
+        sb.Append("    @procedure nvarchar(600),\n");
+        sb.Append("    @sql nvarchar(max) = N'\n").Append(InString(inner.ToString())).Append("\n';\n\n");
+        sb.Append("DECLARE\n    database_cursor CURSOR LOCAL FAST_FORWARD FOR\n");
+        sb.Append("    SELECT\n        d.name\n    FROM sys.databases AS d\n");
+        sb.Append("    WHERE d.database_id > 4\n");
+        sb.Append("    AND   d.state = 0\n");
+        sb.Append("    AND   DATABASEPROPERTYEX(d.name, N'Updateability') = N'READ_WRITE'\n");
+        sb.Append("    ORDER BY\n        d.database_id;\n\n");
+        sb.Append("OPEN database_cursor;\n\n");
+        sb.Append("FETCH NEXT\nFROM database_cursor\nINTO @database_name;\n\n");
+        sb.Append("WHILE @@FETCH_STATUS = 0\n");
+        sb.Append("BEGIN\n");
+        sb.Append("    PRINT N'Granting in ' + QUOTENAME(@database_name);\n");
+        sb.Append("    SET @procedure = QUOTENAME(@database_name) + N'.sys.sp_executesql';\n");
+        sb.Append("    EXECUTE @procedure\n");
+        sb.Append("        @sql,\n");
+        sb.Append("        N'@login sysname',\n");
+        sb.Append("        @login = @login;\n\n");
+        sb.Append("    FETCH NEXT\n    FROM database_cursor\n    INTO @database_name;\n");
+        sb.Append("END;\n\n");
+        sb.Append("CLOSE database_cursor;\n");
+        sb.Append("DEALLOCATE database_cursor;\n");
     }
 
     private static void AppendAzure(StringBuilder sb, GrantPrincipal principal, string q, bool finOps)

@@ -58,8 +58,8 @@ public sealed class MonitoringGrantScriptLiveSqlTests
         SqlConnection.ClearAllPools();
         try
         {
-            await Exec(adminCs, $"USE [msdb]; IF DATABASE_PRINCIPAL_ID(N'{login}') IS NOT NULL DROP USER [{login}];", ct);
-            await Exec(adminCs, $"IF SUSER_ID(N'{login}') IS NOT NULL DROP LOGIN [{login}];", ct);
+            await Exec(adminCs, $"USE [msdb]; IF DATABASE_PRINCIPAL_ID({Lit(login)}) IS NOT NULL DROP USER {MonitoringGrantScript.QuoteName(login)};", ct);
+            await Exec(adminCs, $"IF SUSER_ID({Lit(login)}) IS NOT NULL DROP LOGIN {MonitoringGrantScript.QuoteName(login)};", ct);
         }
         catch (SqlException)
         {
@@ -123,7 +123,7 @@ public sealed class MonitoringGrantScriptLiveSqlTests
     }
 
     [Fact]
-    public async Task FinOpsScript_RunsTwice_AndGrantsEachUserDatabase()
+    public async Task FinOpsScript_RunsTwice_AndGrantsEachOnlineReadWriteUserDatabaseAndNothingElse()
     {
         var admin = Admin();
         Assert.SkipWhen(admin is null, "Set DARLING_TEST_SQL, DARLING_TEST_SQL_USER and DARLING_TEST_SQL_PASSWORD (a sysadmin on the sql2019 dev box) to run the live grant script test.");
@@ -131,35 +131,71 @@ public sealed class MonitoringGrantScriptLiveSqlTests
         var adminCs = Cs(host, user, password);
         var ct = TestContext.Current.CancellationToken;
 
-        var login = NewName();
-        var database = "pm_grant_db_" + Guid.NewGuid().ToString("N")[..8];
+        /* A login name holding a question mark, a quote and a closing bracket, and database names holding a quote and a closing bracket:
+           the cases sp_MSforeachdb broke (it replaced every question mark in the batch, and put the database name in unescaped). */
+        var login = NewName() + "?'x]y";
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var database = "pm_grant_db_" + suffix + "'a]b";
+        var readOnlyDatabase = "pm_grant_ro_" + suffix + "'c]d";
+        var offlineDatabase = "pm_grant_off_" + suffix + "'e]f";
+        var quotedLogin = MonitoringGrantScript.QuoteName(login);
         try
         {
-            /* One scratch database, so the FinOps loop has a writable user database to grant in without touching the box's own databases' users:
-               the loop reaches every user database, so the cleanup below drops the login's user from each. */
-            await Exec(adminCs, $"CREATE DATABASE [{database}];", ct);
+            /* Three scratch databases beside whatever the box already holds: one writable (the script must grant in it), one read-only and
+               one offline (it must leave both alone). */
+            foreach (var name in new[] { database, readOnlyDatabase, offlineDatabase })
+            {
+                await Exec(adminCs, $"CREATE DATABASE {MonitoringGrantScript.QuoteName(name)};", ct);
+            }
+
+            await Exec(adminCs, $"ALTER DATABASE {MonitoringGrantScript.QuoteName(readOnlyDatabase)} SET READ_ONLY WITH ROLLBACK IMMEDIATE;", ct);
+            await Exec(adminCs, $"ALTER DATABASE {MonitoringGrantScript.QuoteName(offlineDatabase)} SET OFFLINE WITH ROLLBACK IMMEDIATE;", ct);
+
             var script = MonitoringGrantScript
                 .Build(MonitoringGrantScript.ChoosePrincipal(new GrantPrincipalInputs("sql", login, host, null, "NOMACHINE", null)), finOps: true, azureSqlDatabase: false)
                 .Replace("<strong password>", NewPassword(), StringComparison.Ordinal);
             await Exec(adminCs, script, ct);
             await Exec(adminCs, script, ct);
 
-            /* The login holds the FinOps grants in the scratch database (an effective-permission check as the login itself). */
+            /* The login exists under its exact name, and the user in the scratch database carries the same name. */
+            Assert.Equal(login, await Scalar(adminCs, "master", $"SELECT sp.name FROM sys.server_principals AS sp WHERE sp.name = {Lit(login)};", ct));
+            Assert.Equal(login, await Scalar(adminCs, database, $"SELECT dp.name FROM sys.database_principals AS dp WHERE dp.name = {Lit(login)};", ct));
+
             /* All three FinOps grants, checked from inside the scratch database so each securable resolves (an object name in another
-               database answers NULL, which says nothing). A NULL fails with its position, not as a cast error. */
+               database answers NULL, which says nothing). The database name holds a quote and a bracket, so this reads the permissions
+               of the current database rather than naming it. */
             var scratchCs = new SqlConnectionStringBuilder(adminCs) { InitialCatalog = database }.ConnectionString;
-            await using var connection = new SqlConnection(scratchCs);
-            await connection.OpenAsync(ct);
-            await using var check = new SqlCommand(
-                $"EXECUTE AS LOGIN = N'{login}'; SELECT HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'VIEW DEFINITION'), " +
-                "HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'VIEW DATABASE STATE'), " +
-                "HAS_PERMS_BY_NAME(N'sys.sql_expression_dependencies', N'OBJECT', N'SELECT'); REVERT;", connection);
-            await using var reader = await check.ExecuteReaderAsync(ct);
-            Assert.True(await reader.ReadAsync(ct));
-            var names = new[] { "VIEW DEFINITION", "VIEW DATABASE STATE", "SELECT on sys.sql_expression_dependencies" };
-            for (var i = 0; i < names.Length; i++)
+            await using (var connection = new SqlConnection(scratchCs))
             {
-                Assert.True(!reader.IsDBNull(i) && Convert.ToInt32(reader.GetValue(i)) == 1, $"The FinOps script left {names[i]} ungranted in the scratch database (answer: {(reader.IsDBNull(i) ? "NULL" : reader.GetValue(i))}).");
+                await connection.OpenAsync(ct);
+                await using var check = new SqlCommand(
+                    $"EXECUTE AS LOGIN = {Lit(login)}; SELECT " +
+                    "(SELECT COUNT(*) FROM sys.fn_my_permissions(NULL, N'DATABASE') AS p WHERE p.permission_name = N'VIEW DEFINITION'), " +
+                    "(SELECT COUNT(*) FROM sys.fn_my_permissions(NULL, N'DATABASE') AS p WHERE p.permission_name = N'VIEW DATABASE STATE'), " +
+                    "(SELECT COUNT(*) FROM sys.fn_my_permissions(N'sys.sql_expression_dependencies', N'OBJECT') AS p WHERE p.permission_name = N'SELECT'); REVERT;", connection);
+                await using var reader = await check.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                var names = new[] { "VIEW DEFINITION", "VIEW DATABASE STATE", "SELECT on sys.sql_expression_dependencies" };
+                for (var i = 0; i < names.Length; i++)
+                {
+                    Assert.True(!reader.IsDBNull(i) && Convert.ToInt32(reader.GetValue(i)) == 1, $"The FinOps script left {names[i]} ungranted in the scratch database (answer: {(reader.IsDBNull(i) ? "NULL" : reader.GetValue(i))}).");
+                }
+            }
+
+            /* Every online read-write user database holds the user, and no other database does: the read-only scratch database, and the
+               system databases the loop skips (msdb holds the user from the base grants, so it is left out of this check). */
+            var writable = await Names(adminCs,
+                "SELECT d.name FROM sys.databases AS d WHERE d.database_id > 4 AND d.state = 0 AND DATABASEPROPERTYEX(d.name, N'Updateability') = N'READ_WRITE';", ct);
+            Assert.Contains(database, writable);
+            Assert.DoesNotContain(readOnlyDatabase, writable);
+            foreach (var name in writable)
+            {
+                Assert.True(await HasUser(adminCs, name, login, ct), $"The FinOps script left no user in the writable database {name}.");
+            }
+
+            foreach (var name in new[] { readOnlyDatabase, "master", "model", "tempdb" })
+            {
+                Assert.False(await HasUser(adminCs, name, login, ct), $"The FinOps script made a user in {name}, which it must skip.");
             }
         }
         finally
@@ -167,10 +203,18 @@ public sealed class MonitoringGrantScriptLiveSqlTests
             System.Threading.CancellationToken none = default;
             try
             {
-                await Exec(adminCs, $"IF DB_ID(N'{database}') IS NOT NULL BEGIN ALTER DATABASE [{database}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{database}]; END;", none);
-                /* The loop made the login's user in every writable user database of the box; remove each before the login goes. */
-                await Exec(adminCs,
-                    $"EXECUTE sys.sp_MSforeachdb N'USE [?]; IF DB_ID() > 4 AND DATABASE_PRINCIPAL_ID(N''{login}'') IS NOT NULL AND DATABASEPROPERTYEX(DB_NAME(), ''Updateability'') = ''READ_WRITE'' DROP USER [{login}];';", none);
+                /* The loop made the login's user in every writable user database of the box; remove each before the login goes, then the scratch databases. */
+                foreach (var name in await Names(adminCs,
+                    "SELECT d.name FROM sys.databases AS d WHERE d.database_id > 4 AND d.state = 0 AND DATABASEPROPERTYEX(d.name, N'Updateability') = N'READ_WRITE';", none))
+                {
+                    await Exec(adminCs, $"USE {MonitoringGrantScript.QuoteName(name)}; IF DATABASE_PRINCIPAL_ID({Lit(login)}) IS NOT NULL DROP USER {quotedLogin};", none);
+                }
+
+                foreach (var name in new[] { database, readOnlyDatabase, offlineDatabase })
+                {
+                    await Exec(adminCs,
+                        $"IF DB_ID({Lit(name)}) IS NOT NULL BEGIN IF DATABASEPROPERTYEX({Lit(name)}, N'Status') = N'ONLINE' ALTER DATABASE {MonitoringGrantScript.QuoteName(name)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {MonitoringGrantScript.QuoteName(name)}; END;", none);
+                }
             }
             catch (SqlException)
             {
@@ -179,4 +223,32 @@ public sealed class MonitoringGrantScriptLiveSqlTests
             await Cleanup(adminCs, login, none);
         }
     }
+
+    private static string Lit(string value) => "N'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+
+    private static async Task<string?> Scalar(string adminCs, string database, string sql, System.Threading.CancellationToken ct)
+    {
+        await using var connection = new SqlConnection(new SqlConnectionStringBuilder(adminCs) { InitialCatalog = database }.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new SqlCommand(sql, connection);
+        return (await command.ExecuteScalarAsync(ct)) as string;
+    }
+
+    private static async Task<System.Collections.Generic.List<string>> Names(string adminCs, string sql, System.Threading.CancellationToken ct)
+    {
+        var names = new System.Collections.Generic.List<string>();
+        await using var connection = new SqlConnection(adminCs);
+        await connection.OpenAsync(ct);
+        await using var command = new SqlCommand(sql, connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            names.Add(reader.GetString(0));
+        }
+
+        return names;
+    }
+
+    private static async Task<bool> HasUser(string adminCs, string database, string login, System.Threading.CancellationToken ct) =>
+        await Scalar(adminCs, database, $"SELECT dp.name FROM sys.database_principals AS dp WHERE dp.name = {Lit(login)};", ct) is not null;
 }
