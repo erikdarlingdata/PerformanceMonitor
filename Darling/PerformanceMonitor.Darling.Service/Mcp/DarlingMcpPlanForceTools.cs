@@ -282,7 +282,7 @@ public sealed partial class DarlingMcpPlanForceTools
             /* 3b: a database the server's entry excludes is one Darling does not act in (#5632), the same refusal recompile_module and the plan guide tools make. Refused before the dry run reads anything. */
             if (IsExcludedDatabase(row.ExcludedDatabases, database_name.Trim()))
             {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, ct);
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, agentTokenName, ct);
                 return DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database_name.Trim()));
             }
 
