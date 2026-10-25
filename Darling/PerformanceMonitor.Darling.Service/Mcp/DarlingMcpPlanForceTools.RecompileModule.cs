@@ -90,7 +90,7 @@ public sealed partial class DarlingMcpPlanForceTools
             /* 3b: a database the server's entry excludes is one Darling does not act in. Refused before the dry run reads anything, with the Azure kill's sentence. */
             if (IsExcludedDatabase(row.ExcludedDatabases, database))
             {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, ct);
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, agentTokenName, ct);
                 return DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database));
             }
 
@@ -107,7 +107,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (dry.Outcome != RemediationOutcome.Done)
             {
                 if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
-                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, ct);
+                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, agentTokenName, ct);
                 return Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message,
                     new { dry_run, statement = dry.Statement ?? statement, before });
             }
@@ -135,7 +135,7 @@ public sealed partial class DarlingMcpPlanForceTools
                         return JsonSerializer.Serialize(new { statement = written.Statement ?? statement, message = written.Message }, McpHelpers.JsonOptions);
                     },
                 };
-                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.ModuleRecompile, action!, target), hooks, ct);
+                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.ModuleRecompile, action!, target, agentTokenName), hooks, ct);
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
                 return WithWarnings(Answer("done", null,

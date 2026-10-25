@@ -232,6 +232,33 @@ public sealed class McpRouteAgentFieldsLiveTests
         });
     }
 
+    /// <summary>The legacy token's route change is journaled as <c>operator:legacy token</c>: the store row holds the token's kind, never the
+    /// hex fingerprint of its value that the write log lines carry.</summary>
+    [Fact]
+    public async Task TheLegacyWritesToken_IsJournaledWithItsKind_NotItsFingerprint()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var fingerprint = ReadCaller.OfMcpToken("a-legacy-bearer-token");
+            Assert.Matches("[0-9a-f]{8}", fingerprint);
+            ReadCaller.SetAmbientMcpToken(fingerprint);
+            try
+            {
+                var created = await DarlingMcpAlertTools.CreateNotificationRoute(
+                    asMcp, "Blocking", agent_level: 1, served: LegacyPolicy(), cancellationToken: ct);
+                Assert.Equal("created", Status(created));
+                var actor = await ScalarAsync(owner,
+                    $"SELECT actor FROM config.investigation_journal WHERE route_id = {RouteIdOf(created)} AND event = 'route_agent_changed'", ct);
+                Assert.Equal("operator:legacy token", actor);
+                Assert.DoesNotMatch("[0-9a-f]{8}", actor!);
+            }
+            finally
+            {
+                ReadCaller.SetAmbientMcpToken(null);
+            }
+        });
+    }
+
     /// <summary>L5 of the #6593 review: an operator token puts a level 2 route back to Inherit with clear_agent_level. The stored level is NULL,
     /// the limits are kept (the Viewer's Inherit keeps them), the journal row has before 2 and after null, and previous shows level 2.</summary>
     [Fact]

@@ -105,7 +105,7 @@ public sealed partial class DarlingMcpPlanForceTools
             /* 3b: a database the server's entry excludes is one Darling does not act in. */
             if (IsExcludedDatabase(row.ExcludedDatabases, database))
             {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, ct);
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, agentTokenName, ct);
                 return DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database));
             }
 
@@ -123,7 +123,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (dry.Outcome != RemediationOutcome.Done)
             {
                 if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
-                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, ct);
+                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, agentTokenName, ct);
                 return Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message,
                     new { dry_run, statement = dry.Statement ?? statementText, before });
             }
@@ -163,7 +163,7 @@ public sealed partial class DarlingMcpPlanForceTools
                         return JsonSerializer.Serialize(new { statement = written.Statement ?? statementText, message = written.Message, matches = written.CachedMatches }, McpHelpers.JsonOptions);
                     },
                 };
-                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.PlanGuideCreate, action!, target), hooks, ct);
+                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.PlanGuideCreate, action!, target, agentTokenName), hooks, ct);
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
                 if (result.OutcomeUnknown && unknown is not null)
@@ -365,7 +365,7 @@ public sealed partial class DarlingMcpPlanForceTools
             /* 3b: a database the server's entry excludes is one Darling does not act in. */
             if (IsExcludedDatabase(row.ExcludedDatabases, database))
             {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, ct);
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, agentTokenName, ct);
                 return DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database));
             }
 
@@ -377,7 +377,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (dry.Outcome != RemediationOutcome.Done || dry.Guide is null)
             {
                 if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
-                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, ct);
+                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, agentTokenName, ct);
                 return Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message,
                     new { dry_run, statement = dry.Statement ?? statementText, before = new { database } });
             }
@@ -391,7 +391,7 @@ public sealed partial class DarlingMcpPlanForceTools
             {
                 var notUndoable = "Plan guide " + guideName + " was not dropped: its definition does not pass the checks a create makes ("
                     + undoMessage!.Replace(" Nothing was run.", "", StringComparison.Ordinal) + "), so the Undo could not re-create it. Nothing was run.";
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, GuideNotUndoable, ct);
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, GuideNotUndoable, agentTokenName, ct);
                 return Answer("refused", GuideNotUndoable, notUndoable, new { dry_run, statement = dry.Statement ?? statementText, before = new { database } });
             }
 
@@ -432,7 +432,7 @@ public sealed partial class DarlingMcpPlanForceTools
                         return JsonSerializer.Serialize(new { statement = written.Statement ?? statementText, message = written.Message }, McpHelpers.JsonOptions);
                     },
                 };
-                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.PlanGuideDrop, action!, target), hooks, ct);
+                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.PlanGuideDrop, action!, target, agentTokenName), hooks, ct);
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
                 if (result.OutcomeUnknown && unknown is not null)

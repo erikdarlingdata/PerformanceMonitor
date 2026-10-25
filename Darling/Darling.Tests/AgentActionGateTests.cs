@@ -297,8 +297,8 @@ public sealed class AgentActionGateLiveTests
 
             /* The next hour journals the refusal again, once. */
             _now = T0.AddMinutes(61);
-            await store.RecordAgentActionRefusalAsync(request, "agent-a", "create_mute_rule", AgentActionCodes.Invalid, ct);
-            await store.RecordAgentActionRefusalAsync(request, "agent-a", "create_mute_rule", AgentActionCodes.Invalid, ct);
+            await store.RecordAgentActionRefusalAsync(request, "agent-a", "create_mute_rule", AgentActionCodes.Invalid, null, ct);
+            await store.RecordAgentActionRefusalAsync(request, "agent-a", "create_mute_rule", AgentActionCodes.Invalid, null, ct);
             Assert.Equal("1", await ScalarAsync(connection,
                 $"SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = '{AgentActionCodes.Invalid}'", ct));
         });

@@ -142,11 +142,21 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Single(await RowsAsync(c, "action_done"));
 
             var calledId = (long)json["journal_id"]!;
-            Assert.Equal("undone", (string?)Parse(await McpUndoAsync(c, mcp, calledId))["status"]);
+            /* The undo journals the token that made it: its name here, never the token's fingerprint. */
+            ReadCaller.SetAmbientMcpToken("named token ops");
+            try
+            {
+                Assert.Equal("undone", (string?)Parse(await McpUndoAsync(c, mcp, calledId))["status"]);
+            }
+            finally
+            {
+                ReadCaller.SetAmbientMcpToken(null);
+            }
+
             Assert.Null(await c.Sql.ForcedPlanAsync(query, c.Ct));
             var undone = Assert.Single(await RowsAsync(c, "action_undone"));
             Assert.Equal(calledId, (long)undone["called_id"]!);
-            Assert.Equal("person:mcp", await PgScalarAsync(c.Connection, "SELECT actor FROM config.investigation_journal WHERE event = 'action_undone'", c.Ct));
+            Assert.Equal("person:mcp named token ops", await PgScalarAsync(c.Connection, "SELECT actor FROM config.investigation_journal WHERE event = 'action_undone'", c.Ct));
             AssertNoSecret(c, answer, await JournalTextAsync(c));
         });
     }
