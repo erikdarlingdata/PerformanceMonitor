@@ -16,6 +16,7 @@
   ],
   "web": {
     "enabled": true,
+    "allowAdminWrites": true,
     "port": 5153,
     "network": {
       "// tls": "Without this the token above and the session cookie it mints cross the network in the clear, so docker-compose.yml publishes the port on the docker host's loopback address only and the service logs a Warning line at every plain-HTTP network start. To enable: mount a PEM pair as the web_tls_cert / web_tls_key secrets (see docker-compose.yml) and add \"tls\": { \"certPath\": \"/run/secrets/web_tls_cert\", \"keyPath\": \"/run/secrets/web_tls_key\" } here. A bad or expired certificate keeps the dashboard loopback-only rather than falling back to HTTP, which in a container means unreachable — that is the intended failure. Behind a TLS-terminating reverse proxy instead, list the proxy in \"trustedProxies\" (IPs or CIDRs) so the cookie and the OIDC redirect follow the proxy's HTTPS.",

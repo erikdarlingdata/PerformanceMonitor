@@ -874,6 +874,7 @@ public sealed class DarlingWebHostService : BackgroundService
             if (OperatingSystem.IsWindows())
             {
                 _adminArm = WebAdminArm.ForHost(config.Postgres, web.AllowAdminWrites, _logger);
+                WebAdminArm.WarnWhenEveryOidcUserIsAnAdmin(_oidcClient is not null, _oidcClient?.Options.RoleClaim is not null, _adminArm is not null, _logger);
             }
 
             /* FOOTGUN (load-bearing): pin BOTH the content root AND the web root to the binary's directory. A

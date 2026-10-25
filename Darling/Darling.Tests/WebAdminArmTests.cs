@@ -85,11 +85,15 @@ public sealed class WebAdminArmTests
     }
 
     [Fact]
-    public void TheSwitchDefaultsToOn_AndTheArmExistsOnlyOnTheManagedStoreWithTheSwitchOn()
+    public void TheSwitchDefaultsToOff_AMissingKeyKeepsItOff_AndTheArmExistsOnlyOnTheManagedStoreWithTheSwitchOn()
     {
-        Assert.True(new WebConfig().AllowAdminWrites);
-        Assert.True(System.Text.Json.JsonSerializer.Deserialize<WebConfig>("{}")!.AllowAdminWrites);
+        // An upgrade from 3.11 has no key: it must keep 3.11's web scope (no admin pool) until the operator sets it.
+        Assert.False(new WebConfig().AllowAdminWrites);
+        Assert.False(System.Text.Json.JsonSerializer.Deserialize<WebConfig>("{}")!.AllowAdminWrites);
+        Assert.False(DarlingConfig.Parse("{\"web\": {\"enabled\": true}}").Web.AllowAdminWrites);
         Assert.False(System.Text.Json.JsonSerializer.Deserialize<WebConfig>("{\"allowAdminWrites\": false}")!.AllowAdminWrites);
+        Assert.True(System.Text.Json.JsonSerializer.Deserialize<WebConfig>("{\"allowAdminWrites\": true}")!.AllowAdminWrites);
+        Assert.True(DarlingConfig.Parse("{\"web\": {\"allowAdminWrites\": true}}").Web.AllowAdminWrites);
 
         if (!OperatingSystem.IsWindows())
         {
@@ -100,6 +104,41 @@ public sealed class WebAdminArmTests
         Assert.NotNull(managedOn);
         Assert.Null(WebAdminArm.ForHost(new PostgresConfig { Managed = true }, false, NullLogger.Instance));
         Assert.Null(WebAdminArm.ForHost(new PostgresConfig { Managed = false }, true, NullLogger.Instance));
+    }
+
+    [Fact]
+    public void TheFilesWrittenForANewInstall_SetTheSwitchOnExplicitly()
+    {
+        var sample = DarlingConfig.Parse(System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "darling.sample.json")));
+        Assert.True(sample.Web.AllowAdminWrites);
+
+        // The compose sample names container secret files, so it is read as JSON rather than resolved through the config loader.
+        using var compose = System.Text.Json.JsonDocument.Parse(
+            System.IO.File.ReadAllText(System.IO.Path.Combine(RepoRoot(), "Darling", "compose", "darling.sample.json")));
+        Assert.True(compose.RootElement.GetProperty("web").GetProperty("allowAdminWrites").GetBoolean());
+    }
+
+    private static string RepoRoot([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
+        => System.IO.Path.GetFullPath(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(thisFile)!, "..", ".."));
+
+    [Theory]
+    [InlineData(true, false, true, true)]
+    [InlineData(false, false, true, false)]
+    [InlineData(true, true, true, false)]
+    [InlineData(true, false, false, false)]
+    public void TheOidcWarning_FiresOnlyWithOidcOn_NoRoleMapping_AndAdminWritesOn(bool oidcOn, bool roleMappingSet, bool adminWritesOn, bool warns)
+    {
+        var log = new ListLogger();
+        Assert.Equal(warns, WebAdminArm.WarnWhenEveryOidcUserIsAnAdmin(oidcOn, roleMappingSet, adminWritesOn, log));
+        if (!warns)
+        {
+            Assert.Empty(log.Lines);
+            return;
+        }
+
+        var line = Assert.Single(log.Lines);
+        Assert.Contains("every user who signs in is an admin", line, StringComparison.Ordinal);
+        Assert.Contains("web.network.oidc.roleClaim", line, StringComparison.Ordinal);
     }
 
     [Fact]

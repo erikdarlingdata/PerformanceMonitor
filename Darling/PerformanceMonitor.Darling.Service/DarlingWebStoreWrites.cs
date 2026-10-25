@@ -75,6 +75,19 @@ public sealed class WebAdminArm : IDisposable
         return new WebAdminArm(() => DarlingManagedPostgres.TryBuildWebAdminConnectionStringFromStoredCredential(postgres));
     }
 
+    /// <summary>The start-up warning for OIDC sign-in with no role mapping while the admin arm is on: every signed-in user then holds the
+    /// edit seat, so every one of them can make the Admin writes. Logs nothing in any other combination. Returns whether it warned.</summary>
+    internal static bool WarnWhenEveryOidcUserIsAnAdmin(bool oidcOn, bool roleMappingSet, bool adminWritesOn, ILogger logger)
+    {
+        if (!oidcOn || roleMappingSet || !adminWritesOn)
+        {
+            return false;
+        }
+
+        logger.LogWarning("web.network.oidc has no role mapping and web.allowAdminWrites is on, so every user who signs in is an admin and can make the dashboard's Admin writes. Set web.network.oidc.roleClaim with adminRoles and viewerRoles to limit who can, or set web.allowAdminWrites to false.");
+        return true;
+    }
+
     /// <summary>The admin pool, built on first use, or null while its credential is not stored yet (or after disposal).</summary>
     internal NpgsqlDataSource? Source
     {
