@@ -576,8 +576,15 @@ public static class QueryStoreRegressionBaseline
            {{DatabaseFilter.ExcludeClause("f.database_name", ExcludeToken)}}
             /* #6654: the monitor's own statement is left out before the cap too. The collector's drop of it never fires on Darling
                (the text arrives separately, so the row it tests is empty), so the stored statement is found by the shared read-side
-               predicate: the marker against the text in query_store_text, with the MAX(query_text) sample as its fallback. */
-            AND   {{QueryStoreSelfStatement.NotSelfOfKeyedText("$1", "f.database_name", "f.query_id", "f.query_text_sample")}}
+               predicate: the marker against the text in query_store_text, with the MAX(query_text) sample as its fallback.
+               #5506: the text test is a primary-key probe per row, and it reads only recent-side columns, so written as a plain
+               AND the planner ran it below the baseline join on every candidate key (37.8k probes, 12 s cold on a measured store)
+               while the flags below keep about 3k. The CASE puts the flags in front of it and reads the baseline-side columns the
+               flags come from, so the probe runs only on rows that already pass them. The result is the same: a row the flags
+               drop was dropped by the WHERE above anyway. */
+            AND   CASE WHEN (f.is_cost OR f.is_timeouts OR f.is_errors)
+                       THEN {{QueryStoreSelfStatement.NotSelfOfKeyedText("$1", "f.database_name", "f.query_id", "f.query_text_sample")}}
+                       ELSE false END
         ),
         ranked AS (
             SELECT
