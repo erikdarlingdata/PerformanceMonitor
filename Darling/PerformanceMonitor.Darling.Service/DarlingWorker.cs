@@ -3833,6 +3833,14 @@ LIMIT 1";
            was built: the store retries and migrations before this point can take minutes. */
         _collectionPressure.MarkCollectionStarted();
 
+        /* A stop that lands where a pass awaits the store (the config beacon, the password key check, a version stamp)
+           raises OperationCanceledException from the pass itself. It must end the loop and fall to the drain below, as the
+           two delay arms do: leaving by the exception disposes the store sources while the command, external alert,
+           investigation, backfill and heartbeat loops are still running, and a pass of theirs in flight then fails on a
+           disposed source and logs a false warning. The try's braces sit at the loop's own indent and the pass is not
+           re-indented under them, so the lines that tests and other branches read by column stay where they were. */
+        try
+        {
         while (!stoppingToken.IsCancellationRequested)
         {
             /* #4732: tells the skipped-slot count when this loop was not running. First thing in the pass and on the
@@ -4460,6 +4468,11 @@ LIMIT 1";
             {
                 break;
             }
+        }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            /* Expected on shutdown. */
         }
 
         /* Shutdown drain for the fire-and-track bodies (#1553): the launch loop does NOT await the per-server
