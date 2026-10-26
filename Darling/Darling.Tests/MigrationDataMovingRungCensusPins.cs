@@ -334,6 +334,15 @@ public sealed class MigrationDataMovingRungCensusPins
             + "(the marker rows, one per captured database per pass): a read of that plain table once, a few seconds on a store that keeps "
             + "30 days of captures. It does not move the lock-wait floor."),
         new(
+            220,
+            SetsTheFloor: false,
+            "CREATE INDEX over the populated collect.job_history hypertable (#6798, created V1/V24), a partial index on the successful "
+            + "job outcomes (step_id = 0 AND run_status = 1). V150's case on the same table: a real collected series, costed rather than "
+            + "assumed. Measured on a rig shaped like one production store (42 servers, 9.8M rows in 101 twelve-hour chunks, 98 "
+            + "compressed): the build took 0.18 s, because a compressed chunk's index is an empty shell and only the uncompressed newest "
+            + "day or so holds rows, and the partial predicate keeps about 23% of those. A store many times that size still builds in "
+            + "seconds, nowhere near a MigrationCommandTimeoutSeconds window, so this rung does not move the multiple"),
+        new(
             215,
             SetsTheFloor: false,
             "six CREATE INDEX IF NOT EXISTS over config.investigation_requests and config.investigation_reports (both created V184), "
