@@ -248,7 +248,7 @@ internal static class DarlingQueryStoreRegressionReader
             clampToRawFloor: true);
         /* #6750: the divisors start at this server's data start, not at the store-wide chunk floor the row clamp above reads. */
         plan = QueryStoreRegressionBaseline.WithHoursHeldStart(plan, baselineStartUtc, dataStartUtc);
-        var rawSql = plan.BuiltDayCount > 0 ? QueryStoreRegressionsSql : s_rawLiveSql;
+        var rawSql = await WithSelfKeysWhenReadyAsync(connection, transaction, plan.BuiltDayCount > 0 ? QueryStoreRegressionsSql : s_rawLiveSql, cancellationToken);
         await using var command = new NpgsqlCommand(rawSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
         AddParameters(command, serverId, startUtc, endUtc, databases, limit, baselineStartUtc, plan);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -283,6 +283,13 @@ internal static class DarlingQueryStoreRegressionReader
             : plan.RegularFromLatest
                 ? (plan.BuiltDayCount > 0 ? s_latestDailySql : s_latestLiveSql)
                 : (plan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql);
+
+    /// <summary>#6750 part 3: <paramref name="sql"/> with the self-statement test on the key table once its backfill has run
+    /// (<see cref="QueryStoreSelfKeys.ReadyAsync"/>, read in this read's snapshot), else as it is, with the text probe.</summary>
+    private static async Task<string> WithSelfKeysWhenReadyAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, CancellationToken cancellationToken) =>
+        await QueryStoreSelfKeys.ReadyAsync(connection, transaction, McpCommandDeadlines.ReadSeconds, cancellationToken)
+            ? QueryStoreRegressionBaseline.WithSelfKeys(sql)
+            : sql;
 
     private static async Task SetReadOnlyAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken)
     {
@@ -365,7 +372,7 @@ internal static class DarlingQueryStoreRegressionReader
                Regular bind, the hours held and cost_baseline_start use. */
             spans = QueryStoreRegressionBaseline.WithPlanStart(spans, plan);
             plan = QueryStoreRegressionBaseline.WithArmStarts(plan, spans, wide.ClampedStart, dataStartUtc);
-            var wideSql = TableSqlFor(plan);
+            var wideSql = await WithSelfKeysWhenReadyAsync(connection, transaction, TableSqlFor(plan), cancellationToken);
 
             /* #5506 step 2: the first_execution_time floors of the live arms reach PurgeEdgeMargin (26 hours) before their bound,
                because an interval may span a day. When the server's own intervals are shorter, the floors shrink to what they need

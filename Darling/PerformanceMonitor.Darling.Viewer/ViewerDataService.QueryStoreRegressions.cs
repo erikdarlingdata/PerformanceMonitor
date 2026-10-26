@@ -108,6 +108,14 @@ public sealed class ViewerQueryStoreRegressionRow
 
 public sealed partial class ViewerDataService
 {
+    /// <summary>#6750 part 3: <paramref name="sql"/> with the self-statement test on the key table once its backfill has run
+    /// (<see cref="QueryStoreSelfKeys.ReadyAsync"/>, read in this read's snapshot, closed on a store without the state table), else as it
+    /// is, with the text probe. The MCP read's <c>DarlingQueryStoreRegressionReader.WithSelfKeysWhenReadyAsync</c> is the same shape.</summary>
+    private static async Task<string> WithSelfKeysWhenReadyAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, CancellationToken cancellationToken) =>
+        await QueryStoreSelfKeys.ReadyAsync(connection, transaction, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken)
+            ? QueryStoreRegressionBaseline.WithSelfKeys(sql)
+            : sql;
+
     /// <summary>
     /// The baseline's lookback (#4217, the same bound #4195 gave the MCP tool and Lite's copy of this same
     /// read): a fixed 7 days ending at the recent window's start, so the comparison period stops growing with
@@ -291,7 +299,10 @@ public sealed partial class ViewerDataService
             connection, transaction, serverId, baselineStartUtc, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken,
             clampToRawFloor: true);
         plan = QueryStoreRegressionBaseline.WithHoursHeldStart(plan, baselineStartUtc, dataStartUtc);
-        await using var command = new NpgsqlCommand(plan.BuiltDayCount > 0 ? QueryStoreRegressionsSql : s_rawLiveSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+        /* #6750 part 3: the self-statement test on the key table once its backfill has run, read in this snapshot. */
+        var rawSql = await WithSelfKeysWhenReadyAsync(connection, transaction, plan.BuiltDayCount > 0 ? QueryStoreRegressionsSql : s_rawLiveSql, cancellationToken);
+
+        await using var command = new NpgsqlCommand(rawSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
         AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, baselineStartUtc, plan, excludedDatabases);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return new ViewerQueryStoreRegressionsRead(await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken), DatabasesLeftOut.Distinct(excludedDatabases));
@@ -341,7 +352,8 @@ public sealed partial class ViewerDataService
             /* #6750: the cost start the plan chose, as in the MCP read, so the banner and the divisors follow it. */
             spans = QueryStoreRegressionBaseline.WithPlanStart(spans, baselinePlan);
             baselinePlan = QueryStoreRegressionBaseline.WithArmStarts(baselinePlan, spans, plan.ClampedStart, dataStartUtc);
-            var wideSql = QueryStoreRegressionsTableSqlFor(baselinePlan);
+            /* #6750 part 3: as the MCP read, the key table once its backfill has run. */
+            var wideSql = await WithSelfKeysWhenReadyAsync(connection, transaction, QueryStoreRegressionsTableSqlFor(baselinePlan), cancellationToken);
 
             /* #5506 step 2: the same measured margin as the MCP read (DarlingQueryStoreRegressionReader.TryGetQueryStoreRegressionsFromTableAsync
                explains it): the server's longest interval in place of the 26-hour floor, or the 26 hours where it is not known. */

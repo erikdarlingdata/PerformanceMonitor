@@ -877,4 +877,38 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
             earlyForced.Where(r => !r.StartsWith(q55, StringComparison.Ordinal)).ToList());
         Assert.Equal("9", Row(earlyForced, 55)[10]);
     }
+    /// <summary>
+    /// #6750 part 3, review round 2: the recent-days tier with the self-statement keys. Query 50 regresses on the recent days read from
+    /// the daily totals. Once its stored text carries the monitor's marker, the MCP read hides it with the gate closed (the text probe,
+    /// with the recent days' sample from latest) and with it open (the keys), and lists it again when the key is taken away, so it is
+    /// the key that hides it on this tier.
+    /// </summary>
+    [Fact]
+    public async Task TheRecentDaysTier_HidesTheMonitorsOwnStatement_WithTheSelfKeyGateClosedAndOpen()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #6750 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var f = await BuildFixtureAsync(extra: false, timescale: false, ct, recent: true);
+        var start = RecentStart(f.Today);
+        var baselineStart = f.Today.AddDays(-10).AddHours(12);
+        Assert.NotEmpty((await ResolveAsync(f.Postgres, baselineStart, start, ct, f.End)).RecentDays);
+
+        async Task<List<long>> ServedIdsAsync() =>
+            (await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(f.Postgres, ServerId, start, f.End, DatabaseFilter.One(Db), 50, baselineStart, ct)).Rows.Select(r => r.QueryId).ToList();
+        Assert.Contains(50L, await ServedIdsAsync());
+
+        await QueryStoreTextWriter.WriteAsync(f.Connection, ServerId, Db,
+            [new FetchedQueryText(50, "SELECT /* " + QueryStoreCollector.SelfQueryMarker + " */ 50", null)],
+            DateTime.SpecifyKind(LiveClock.Now().AddMinutes(1), DateTimeKind.Utc), 30, cancellationToken: ct);
+        Assert.False(await QueryStoreSelfKeys.ReadyAsync(f.Connection, null, 30, ct));
+        var closed = await ServedIdsAsync();
+        Assert.DoesNotContain(50L, closed);
+
+        Assert.NotNull(await QueryStoreSelfKeys.BackfillAsync(f.Connection, ct));
+        Assert.True(await QueryStoreSelfKeys.ReadyAsync(f.Connection, null, 30, ct));
+        Assert.Equal(closed, await ServedIdsAsync());
+
+        await ExecAsync(f.Connection, "DELETE FROM collect.query_store_self_keys", ct);
+        Assert.Contains(50L, await ServedIdsAsync());
+    }
 }

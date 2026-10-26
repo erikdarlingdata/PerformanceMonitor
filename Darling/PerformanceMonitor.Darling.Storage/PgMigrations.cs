@@ -2390,6 +2390,21 @@ BEGIN
 END $do$;";
 
     /// <summary>
+    /// V219 (#6750 part 3): <c>collect.query_store_self_keys</c>, the keys of the monitor's own Query Store statements, and
+    /// <c>collect.query_store_self_keys_state</c>, the one-row record that their backfill has run (<see cref="QueryStoreSelfKeys"/>),
+    /// plus two row triggers on <c>collect.query_store_text</c> that keep the key table current for every writer of text, an older
+    /// build's included (<see cref="QueryStoreSelfKeys.TriggerSql"/>). The keys of text stored earlier are backfilled in the background
+    /// after start, because that is one scan of the TOAST-heavy text table and could pass the migration silence limit inside the startup
+    /// transaction. Both tables are new and empty, and <c>CREATE TRIGGER</c> reads no row, so the rung moves no data. The lock timeout
+    /// is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V173's, because <c>CREATE TRIGGER</c> needs a SHARE ROW EXCLUSIVE
+    /// lock on the text table, which an older instance sharing the store can be writing. Plain tables, no GRANT (the <c>collect</c>
+    /// schema's blanket SELECT and its default privileges cover a table a migration introduces, as V168 notes). Every statement is
+    /// idempotent. <b>No Lite twin:</b> Lite keeps the text inline and the collector drops the monitor's own row there.
+    /// </summary>
+    private static readonly string V219Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreSelfKeys.CreateSql + "\n" + QueryStoreSelfKeys.TriggerSql;
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2782,6 +2797,7 @@ $rung$;";
         new Migration(216, "client-timeouts-on-by-default", V216Sql),
         new Migration(217, "query-store-hints", V217Sql),
         new Migration(218, "server-action-recompile-module", V218Sql),
+        new Migration(219, "query-store-self-keys", V219Sql),
     };
 
     /// <summary>

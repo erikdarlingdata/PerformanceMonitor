@@ -55,6 +55,14 @@ public static class QueryStoreSelfStatement
         return Open + textExpression + Close + " = 0";
     }
 
+    /// <summary>The same test, true for the monitor's own statement, over a text expression. The self-statement key writers
+    /// (<see cref="QueryStoreSelfKeys"/>) use it, so the keys they record and the text probe they replace are one definition (#6750).</summary>
+    public static string SelfOfText(string textExpression)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(textExpression);
+        return Open + textExpression + Close + " > 0";
+    }
+
     /// <summary>
     /// The predicate for a read that has not resolved the text: the text is looked up in <c>query_store_text</c> by its key
     /// (one primary-key probe per row), falling back to <paramref name="inlineTextExpression"/> when that table has no row for the
@@ -66,4 +74,12 @@ public static class QueryStoreSelfStatement
         var lookup = $"(SELECT x.query_sql_text FROM query_store_text AS x WHERE x.server_id = {serverIdExpression} AND x.database_name = {databaseExpression} AND x.query_id = {queryIdExpression})";
         return NotSelfOfText(inlineTextExpression is null ? lookup : $"COALESCE({lookup}, {inlineTextExpression})");
     }
+
+    /// <summary>
+    /// #6750 part 3: the predicate over the key table the text writer fills (<see cref="QueryStoreSelfKeys"/>), true when the query is
+    /// not one of the monitor's own. One primary-key probe of that table per row, so it reads no text. Use it only once
+    /// <see cref="QueryStoreSelfKeys.ReadyAsync"/> says the backfill has run: before that the table misses the text stored earlier.
+    /// </summary>
+    public static string NotSelfOfKey(string serverIdExpression, string databaseExpression, string queryIdExpression) =>
+        $"NOT EXISTS (SELECT 1 FROM {QueryStoreSelfKeys.TableName} AS sk WHERE sk.server_id = {serverIdExpression} AND sk.database_name = {databaseExpression} AND sk.query_id = {queryIdExpression})";
 }
