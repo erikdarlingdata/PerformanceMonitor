@@ -25,7 +25,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// #6074: <c>find_database</c>, which monitored server holds a database. Tickets and traces name the tenant database, not the
 /// server, and agents kept a hand-written map from one to the other. The answer comes from the store's own database lists:
 /// <c>database_states</c>, written by the <see cref="PerformanceMonitor.Collectors.DatabaseStateCollector"/> (the
-/// <c>database_states</c> collector, every 30 minutes on a SQL Server target that is not Azure SQL Database). For each server the
+/// <c>database_states</c> collector, every minute by default on a SQL Server target that is not Azure SQL Database). For each server the
 /// NEWEST snapshot is the list; a database is on the server when that list names it. The same list decides the dropped-database
 /// scope (<see cref="PerformanceMonitor.Darling.Storage.CurrentDatabaseScope"/>), so this read and those agree. Lite's twin is
 /// <c>McpDiscoveryTools.FindDatabase</c>.
@@ -101,7 +101,7 @@ ORDER BY s.server_name";
                 return fleetNotCollected ?? McpHelpers.Status(
                     "empty",
                     rows.Count == 0
-                        ? $"No server has a database list in the last {(int)LookBack.TotalDays} days, so nothing was searched for '{requested}'. The database_states collector writes the list every 30 minutes on a SQL Server target (not on Azure SQL Database)."
+                        ? $"No server has a database list in the last {(int)LookBack.TotalDays} days, so nothing was searched for '{requested}'. The database_states collector writes the list every minute by default on a SQL Server target (not on Azure SQL Database)."
                         : $"No monitored server's newest database list names '{requested}' (searched {rows.Count} server(s) that have a list in the last {(int)LookBack.TotalDays} days). A database that was dropped, renamed, or created since the last list looks the same; servers with no list in that time (Azure SQL Database targets, or a stopped collector) were not searched.");
             }
 

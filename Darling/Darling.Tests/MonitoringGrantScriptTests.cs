@@ -110,6 +110,52 @@ public sealed class MonitoringGrantScriptTests
     }
 
     [Theory]
+    [InlineData("darling01")]
+    [InlineData("sql01")]
+    public void WhenTheServiceIsNotOnThisMachine_WindowsAuthNamesAPlaceholder_NotTheCallersMachineAccount(string host)
+    {
+        /* The Viewer on a workstation: the service's registry key is absent, so its account is unknown. The old script named the
+           workstation's own account (CORP\DARLING01$) or the virtual account as fact. */
+        var principal = MonitoringGrantScript.ChoosePrincipal(new GrantPrincipalInputs("integrated", null, host, null, "DARLING01", "CORP", ServiceNotOnThisMachine: true));
+
+        Assert.Equal(MonitoringGrantScript.PlaceholderServiceAccount, principal.Name);
+        Assert.True(principal.IsPlaceholder);
+        Assert.DoesNotContain("DARLING01", principal.Name, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(principal.Notes, n => n.Contains("PLACEHOLDER", StringComparison.Ordinal));
+        Assert.Contains(principal.Notes, n => n.Contains("--grant-script --host", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void WhenTheServiceAccountWasRead_ItWinsOverTheNotOnThisMachineFlag_AndIsNotAPlaceholder()
+    {
+        var principal = MonitoringGrantScript.ChoosePrincipal(new GrantPrincipalInputs("integrated", null, "sql01", @"CORP\gmsa-darling$", "WORKSTATION", "CORP", ServiceNotOnThisMachine: true));
+
+        Assert.Equal(@"CORP\gmsa-darling$", principal.Name);
+        Assert.False(principal.IsPlaceholder);
+    }
+
+    [Fact]
+    public void TheNotOnThisMachineFlag_DoesNotChangeSqlOrEntraPrincipals()
+    {
+        var sql = MonitoringGrantScript.ChoosePrincipal(new GrantPrincipalInputs("sql", "pm_monitor", "sql01", null, "WORKSTATION", "CORP", ServiceNotOnThisMachine: true));
+        var entra = MonitoringGrantScript.ChoosePrincipal(new GrantPrincipalInputs("managedidentity", null, "x.database.windows.net", null, "WORKSTATION", "CORP", ServiceNotOnThisMachine: true));
+
+        Assert.Equal("pm_monitor", sql.Name);
+        Assert.False(sql.IsPlaceholder);
+        Assert.Equal("your-managed-identity-name", entra.Name);
+    }
+
+    [Fact]
+    public void ThePlaceholderScript_QuotesThePlaceholderAndKeepsTheNotesInsideTheHeaderComment()
+    {
+        var principal = MonitoringGrantScript.ChoosePrincipal(new GrantPrincipalInputs("integrated", null, "sql01", null, "WORKSTATION", "CORP", ServiceNotOnThisMachine: true));
+        var script = MonitoringGrantScript.Build(principal, finOps: false, azureSqlDatabase: false);
+
+        Assert.Contains("[" + MonitoringGrantScript.PlaceholderServiceAccount + "]", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("WORKSTATION", script, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
     [InlineData(@"NT SERVICE\PerformanceMonitor Darling")]
     [InlineData("LocalSystem")]
     public void WhenTheServiceRunsAsItsVirtualAccount_TheMachineDecidesLikeNoAccountWasRead(string account)
@@ -472,6 +518,35 @@ public sealed class MonitoringGrantScriptTests
 
         Assert.Equal(0, code);
         Assert.Contains(@"CREATE LOGIN [CORP\gmsa-darling$] FROM WINDOWS;", output.ToString());
+    }
+
+    [Fact]
+    public async Task Verb_WhenNoServiceIsInstalledOnThisMachine_NamesAPlaceholder_NotThisMachinesAccount()
+    {
+        var output = new StringWriter();
+
+        var code = await DarlingCliCommands.GrantScriptAsync(
+            new[] { "--host", "sql01" }, output, new StringWriter(), TestContext.Current.CancellationToken,
+            readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP");
+
+        Assert.Equal(0, code);
+        Assert.Contains("PLACEHOLDER", output.ToString());
+        Assert.DoesNotContain("DARLING01$", output.ToString());
+        Assert.DoesNotContain(@"NT SERVICE\PerformanceMonitor Darling] FROM WINDOWS", output.ToString());
+    }
+
+    [Fact]
+    public async Task Verb_WithAServiceAccountOnTheCommandLine_UsesIt_EvenWhenTheRegistryHasNone()
+    {
+        var output = new StringWriter();
+
+        var code = await DarlingCliCommands.GrantScriptAsync(
+            new[] { "--host", "sql01", "--service-account", @"CORP\gmsa-darling$" }, output, new StringWriter(), TestContext.Current.CancellationToken,
+            readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP");
+
+        Assert.Equal(0, code);
+        Assert.Contains(@"CREATE LOGIN [CORP\gmsa-darling$] FROM WINDOWS;", output.ToString());
+        Assert.DoesNotContain("PLACEHOLDER", output.ToString());
     }
 
     [Fact]

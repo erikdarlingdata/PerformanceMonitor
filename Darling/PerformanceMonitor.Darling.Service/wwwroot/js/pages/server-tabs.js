@@ -2866,7 +2866,7 @@ export const POSTGRES_TABS = [
         "facets",
         PG_LOGGING_AUDIT_COLUMNS,
         "newest configuration snapshot; verdict describes the log lines each setting writes - partial means a threshold is filtering and is the recommended posture for log_min_duration_statement; the remedy is worded for this server's hosting flavour",
-        "No configuration snapshot to audit. pg_server_config runs hourly, so a server registered in the last hour has not reached its first collection - this is the absence of evidence, not a verdict about the server's logging."
+        "No configuration snapshot to audit. pg_server_config runs hourly unless its schedule was changed, so a server registered within the last collection interval has not reached its first collection - this is the absence of evidence, not a verdict about the server's logging."
       ),
       /* Directly UNDER the query shapes, because that is the question it answers (#2539). A statement whose
          time makes no sense from its row count usually spilled, and pg_stat_database's temp counters are the
@@ -2885,7 +2885,7 @@ export const POSTGRES_TABS = [
         },
         {
           title: "By Database",
-          subtitle: ctx.label + ", biggest spiller first",
+          subtitle: ctx.label + ", biggest temp-file spiller first, then by blocks read",
           viz: "table",
           rowsKey: "databases",
           columns: PG_DATABASE_COLUMNS,
@@ -2904,7 +2904,7 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours },
         "points",
         PG_DATABASE_TREND_COLUMNS,
-        ctx.label + ", the biggest temp-file spiller in this window; each row's hit ratio is its own intervals', not the lifetime average, and Worst Hit % is its worst single interval",
+        ctx.label + ", the biggest temp-file spiller in this window, or the busiest by block access when nothing spilled; each row's hit ratio is its own intervals', not the lifetime average, and Worst Hit % is its worst single interval",
         "No differenced intervals for this database in the window. A trend needs at least two snapshots, so a short window is legitimately empty here."
       ),
       /* #2629: sampled lock activity. On Activity rather than a Blocking tab because PostgreSQL has no
@@ -3400,7 +3400,7 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours },
         "changes",
         PG_CONFIG_CHANGE_COLUMNS,
-        ctx.label + ", newest first; the collector runs hourly, so a change happened in the hour before it was seen",
+        ctx.label + ", newest first; the collector runs hourly unless its schedule was changed, so a change happened in the collection interval before it was seen",
         "No configuration parameter changed value in this window. This compares consecutive snapshots, so an unchanged server is legitimately empty here - it is a finding, not missing data."
       ),
       table(
@@ -3410,7 +3410,7 @@ export const POSTGRES_TABS = [
         "settings",
         PG_SERVER_CONFIG_COLUMNS,
         "non-default first; pending restart means the file and the running server disagree",
-        "No configuration snapshot has been collected yet. This collector runs hourly, so a server registered within the last hour has not reached its first collection."
+        "No configuration snapshot has been collected yet. This collector runs hourly unless its schedule was changed, so a server registered within the last collection interval has not reached its first collection."
       ),
     ],
   },

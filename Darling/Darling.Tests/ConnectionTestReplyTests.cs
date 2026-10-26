@@ -300,7 +300,7 @@ public sealed class ConnectionTestReplyTests : IDisposable
     public void TheWebRoutesPassTheServiceLogger_ToBothCores()
     {
         var text = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWebEndpoints.cs");
-        Assert.Contains("DarlingMcpServerAdminTools.AddServers(postgres, body, logger)", text, StringComparison.Ordinal);
-        Assert.Contains("CancellationToken.None, probeLogger: logger)", text, StringComparison.Ordinal);
+        Assert.Contains("DarlingMcpServerAdminTools.AddServers(postgres, body, logger, windowsAuthScreen)", text, StringComparison.Ordinal);
+        Assert.Contains("CancellationToken.None, probeLogger: logger, webScreen: windowsAuthScreen)", text, StringComparison.Ordinal);
     }
 }
