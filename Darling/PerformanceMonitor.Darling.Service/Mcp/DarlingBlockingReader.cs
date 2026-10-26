@@ -127,8 +127,10 @@ internal static class DarlingBlockingReader
         public int BlockedPriority { get; set; }
         public int BlockingPriority { get; set; }
 
-        /// <summary>#5632, DMV-snapshot rows only (the report XML carries none of the four): when the head blocker's session signed in,
-        /// converted from the monitored server's clock to UTC at the read. A later kill step compares it with the server's own value.</summary>
+        /// <summary>#5632, DMV-snapshot rows only (the report XML carries none of the four, so it is null on an XE report row unless a
+        /// same-minute DMV row for the pair was folded into it by BlockedProcessReportMerge): when the head blocker's session signed in,
+        /// converted from the monitored server's clock to UTC at the read. A later kill step compares it with the server's own value. On a
+        /// folded row it is the login time of the session the DMV snapshot saw in that minute, which is the session a kill would match.</summary>
         public DateTime? BlockingLoginTimeUtc { get; set; }
 
         /// <summary>#5632: when the head blocker's last request ended, in UTC. For an idle (<c>sleeping</c>) head it is how long it has been idle.</summary>

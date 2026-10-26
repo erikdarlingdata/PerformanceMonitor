@@ -1634,7 +1634,8 @@ public class BlockedProcessReportRow : BlockedProcessAlertRow
     public int BlockedPriority { get; set; }
     public int BlockingPriority { get; set; }
 
-    /* #5632, DMV-snapshot rows only: the head blocker's evidence. The two stamps are the monitored server's local clock, stored raw. */
+    /* #5632, DMV-snapshot rows only (null on an XE report row unless a same-minute DMV row for the pair was folded into it by
+       BlockedProcessReportMerge): the head blocker's evidence. The two stamps are the monitored server's local clock, stored raw. */
     public DateTime? BlockingLoginTime { get; set; }
     public DateTime? BlockingLastRequestEndTime { get; set; }
     public int? BlockingOpenTransactionCount { get; set; }
