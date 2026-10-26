@@ -126,15 +126,44 @@ public static class PlanDimRecompression
     /// (<see cref="DryRunSampleSize"/> rows) because summing octet_length over the whole dimension detoasts
     /// the entire content — minutes of read for a preflight that needs one significant digit.
     /// </summary>
-    public const string EstimateCompactedSql = """
+    public const string EstimateCompactedSql = $"""
         SELECT
-            pg_relation_size('query_plan_dim')
-            + pg_indexes_size('query_plan_dim')
+            {HeapAndIndexBytesExpression}
             + (SELECT COUNT(*) FROM query_plan_dim)
               * COALESCE((SELECT AVG(octet_length(query_plan_gz))::bigint
                           FROM (SELECT query_plan_gz FROM query_plan_dim
                                 WHERE query_plan_gz IS NOT NULL LIMIT 500) AS sample), 0)
         """;
+
+    /// <summary>
+    /// The heap + index part of <see cref="EstimateCompactedSql"/> alone (#6792). The dry run of a store with
+    /// pending rows cannot use the full estimate: before any row is converted its TOAST term is 0 or far too
+    /// small. It samples the pending rows' gzip size itself and adds the term with
+    /// <see cref="ProjectCompactedBytes"/>.
+    /// </summary>
+    public const string HeapAndIndexBytesSql = "SELECT " + HeapAndIndexBytesExpression;
+
+    private const string HeapAndIndexBytesExpression =
+        "pg_relation_size('query_plan_dim') + pg_indexes_size('query_plan_dim')";
+
+    /// <summary>
+    /// The compacted size once every row carries gzip: heap + indexes copy as-is, and the TOAST rebuilds to
+    /// <paramref name="totalRows"/> x <paramref name="averageGzipBytes"/> (the same shape as
+    /// <see cref="EstimateCompactedSql"/>, with the dry run's own sampled average instead of a stored one).
+    /// </summary>
+    public static long ProjectCompactedBytes(long heapAndIndexBytes, long totalRows, double averageGzipBytes) =>
+        heapAndIndexBytes + (long)(totalRows * averageGzipBytes);
+
+    /// <summary>Heap + index bytes for <see cref="ProjectCompactedBytes"/> (see <see cref="HeapAndIndexBytesSql"/>).</summary>
+    public static async Task<long> HeapAndIndexBytesAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        await using var command = new NpgsqlCommand(HeapAndIndexBytesSql, connection) { CommandTimeout = MaintenanceStatementTimeoutSeconds };
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is long bytes ? bytes : Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
 
     /// <summary>Rewrites the dimension to its live content. Unbounded command timeout — a 100+ GB relation
     /// legitimately takes many minutes, and killing it mid-rewrite just wastes the work (the rewrite is

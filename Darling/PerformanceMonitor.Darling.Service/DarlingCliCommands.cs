@@ -6161,6 +6161,13 @@ public static partial class DarlingCliCommands
             }
         }
 
+        // --free-space only feeds the closing VACUUM FULL's disk check, which --no-vacuum-full skips (#6791).
+        if (freeBytes is not null && mode == RecompressVacuumMode.Skip)
+        {
+            return (null, false, RecompressVacuumMode.Auto, null,
+                "--free-space has no effect with --no-vacuum-full: it only feeds the free-disk check before the closing VACUUM FULL, which --no-vacuum-full skips");
+        }
+
         return (configPath, dryRun, mode, freeBytes, null);
     }
 
@@ -6435,8 +6442,8 @@ public static partial class DarlingCliCommands
             return 1;
         }
 
-        output.WriteLine($"  {survey.Pending:N0} text row(s) to convert; {survey.Converted:N0} already gzip; {survey.Total:N0} total.");
-        output.WriteLine($"  Relation size (table + TOAST + indexes): {survey.RelationBytes / (1024.0 * 1024 * 1024):N1} GB.");
+        output.WriteLine(Inv($"  {survey.Pending:N0} text row(s) to convert; {survey.Converted:N0} already gzip; {survey.Total:N0} total."));
+        output.WriteLine(Inv($"  Relation size (table + TOAST + indexes): {survey.RelationBytes / (1024.0 * 1024 * 1024):N1} GB."));
         output.WriteLine();
 
         if (!survey.HasWork)
@@ -6445,9 +6452,13 @@ public static partial class DarlingCliCommands
             output.WriteLine("  That is the expected end state: V54 writes gzip, and this verb (or GC attrition)");
             output.WriteLine("  has already converted whatever text rows existed.");
 
-            if (vacuumMode == RecompressVacuumMode.Force && !dryRun)
+            if (vacuumMode == RecompressVacuumMode.Force)
             {
-                return await CompactPlanDimAsync(connection, freeSpaceBytes, output, error, cancellationToken);
+                /* The dry run shows the same free-disk check the real compaction ends with (#6791): there is no
+                   conversion to project, so the estimate is the one the real run uses. */
+                return dryRun
+                    ? await PreviewCompactionAsync(connection, freeSpaceBytes, null, conversionWouldRun: false, output, error, cancellationToken)
+                    : await CompactPlanDimAsync(connection, freeSpaceBytes, output, error, cancellationToken);
             }
 
             output.WriteLine("  (Pass --vacuum-full to compact a previously-converted store whose file still");
@@ -6477,9 +6488,9 @@ public static partial class DarlingCliCommands
             var ratio = sample.GzipBytes == 0 ? 0 : (double)sample.TextBytes / sample.GzipBytes;
             var avgGzip = sample.GzipBytes / (double)sample.Rows;
             var projected = survey.Pending * avgGzip;
-            output.WriteLine($"  DRY RUN — sampled {sample.Rows:N0} pending row(s), compressed in memory, wrote nothing:");
-            output.WriteLine($"    measured ratio: {ratio:N1}x (raw text -> gzip), average {avgGzip / 1024.0:N1} KB per plan");
-            output.WriteLine($"    projected gzip content for all {survey.Pending:N0} pending rows: ~{projected / (1024.0 * 1024 * 1024):N1} GB");
+            output.WriteLine(Inv($"  DRY RUN — sampled {sample.Rows:N0} pending row(s), compressed in memory, wrote nothing:"));
+            output.WriteLine(Inv($"    measured ratio: {ratio:N1}x (raw text -> gzip), average {avgGzip / 1024.0:N1} KB per plan"));
+            output.WriteLine(Inv($"    projected gzip content for all {survey.Pending:N0} pending rows: ~{projected / (1024.0 * 1024 * 1024):N1} GB"));
             output.WriteLine();
             output.WriteLine("  The real run converts in 1,000-row batches (one transaction each) while the service");
             output.WriteLine("  runs; it is safe to interrupt and re-run. When the conversion CONVERGES it ends with");
@@ -6488,7 +6499,33 @@ public static partial class DarlingCliCommands
             output.WriteLine("  free disk. Size the lock window by your dimension: measured ~46 minutes on a 174 GB");
             output.WriteLine("  dimension (7.1M plans), during which collection freshness DEGRADES and recovers within");
             output.WriteLine("  minutes after. --no-vacuum-full skips it to schedule that window separately.");
-            return 0;
+
+            if (vacuumMode == RecompressVacuumMode.Skip)
+            {
+                return 0;
+            }
+
+            /* The real run would end with the compaction, so the dry run shows its free-disk check (#6791). The
+               estimate is what the compacted dimension will be AFTER conversion: heap + indexes + every row at the
+               sampled gzip size. The stored estimate cannot be used here: before any row is converted its gzip
+               term is 0 or far too small. */
+            long heapAndIndexes;
+            try
+            {
+                heapAndIndexes = await PlanDimRecompression.HeapAndIndexBytesAsync(connection, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                error.WriteLine($"  Could not estimate the compacted size: {ex.Message}");
+                return 1;
+            }
+
+            output.WriteLine();
+            output.WriteLine(Inv($"  Closing VACUUM FULL, previewed (estimate = heap + indexes + {survey.Total:N0} rows x the sampled average gzip size):"));
+            return await PreviewCompactionAsync(
+                connection, freeSpaceBytes,
+                PlanDimRecompression.ProjectCompactedBytes(heapAndIndexes, survey.Total, avgGzip),
+                conversionWouldRun: true, output, error, cancellationToken);
         }
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -6513,9 +6550,9 @@ public static partial class DarlingCliCommands
                     var rate = running.Rows / Math.Max(stopwatch.Elapsed.TotalSeconds, 1);
                     var etaSeconds = rate <= 0 ? 0 : (pending - running.Rows) / rate;
                     output.WriteLine(
-                        $"  {running.Rows:N0} / {pending:N0} ({pct:N1}%) — " +
-                        $"{running.TextBytes / (1024.0 * 1024 * 1024):N1} GB text -> {running.GzipBytes / (1024.0 * 1024 * 1024):N1} GB gzip — " +
-                        $"~{TimeSpan.FromSeconds(etaSeconds):hh\\:mm\\:ss} remaining");
+                        Inv($"  {running.Rows:N0} / {pending:N0} ({pct:N1}%) — ") +
+                        Inv($"{running.TextBytes / (1024.0 * 1024 * 1024):N1} GB text -> {running.GzipBytes / (1024.0 * 1024 * 1024):N1} GB gzip — ") +
+                        Inv($"~{TimeSpan.FromSeconds(etaSeconds):hh\\:mm\\:ss} remaining"));
                 },
                 cancellationToken);
         }
@@ -6539,16 +6576,16 @@ public static partial class DarlingCliCommands
 
         var finalRatio = result.GzipBytes == 0 ? 0 : (double)result.TextBytes / result.GzipBytes;
         output.WriteLine();
-        output.WriteLine($"  DONE in {stopwatch.Elapsed:hh\\:mm\\:ss} — {result.Rows:N0} row(s) converted, " +
-            $"{result.TextBytes / (1024.0 * 1024 * 1024):N1} GB text -> {result.GzipBytes / (1024.0 * 1024 * 1024):N1} GB gzip ({finalRatio:N1}x).");
+        output.WriteLine(Inv($"  DONE in {stopwatch.Elapsed:hh\\:mm\\:ss} — {result.Rows:N0} row(s) converted, ") +
+            Inv($"{result.TextBytes / (1024.0 * 1024 * 1024):N1} GB text -> {result.GzipBytes / (1024.0 * 1024 * 1024):N1} GB gzip ({finalRatio:N1}x)."));
         if (after.Total > 0)
         {
-            output.WriteLine($"  Remaining text rows: {after.Pending:N0} (new sightings during the run convert on the next pass).");
+            output.WriteLine(Inv($"  Remaining text rows: {after.Pending:N0} (new sightings during the run convert on the next pass)."));
         }
 
         if (result.VerifyFailures > 0)
         {
-            error.WriteLine($"  [WARN] {result.VerifyFailures:N0} row(s) FAILED round-trip verification and kept their text unchanged.");
+            error.WriteLine(Inv($"  [WARN] {result.VerifyFailures:N0} row(s) FAILED round-trip verification and kept their text unchanged."));
             error.WriteLine("  Investigate before re-running; those rows are readable exactly as before.");
             error.WriteLine("  VACUUM FULL was skipped — compaction can wait until the conversion is clean.");
             return 1;
@@ -6563,13 +6600,132 @@ public static partial class DarlingCliCommands
 
         if (after.Total > 0 && after.Pending > 0)
         {
-            output.WriteLine($"  {after.Pending:N0} row(s) arrived mid-run and are still text — re-run to convert them;");
+            output.WriteLine(Inv($"  {after.Pending:N0} row(s) arrived mid-run and are still text — re-run to convert them;"));
             output.WriteLine("  compaction will run when the conversion converges.");
             return 0;
         }
 
         return await CompactPlanDimAsync(connection, freeSpaceBytes, output, error, cancellationToken);
     }
+
+    /// <summary>Formats an interpolated line with the invariant culture, so a size or count reads the same on a
+    /// comma-decimal machine as in the docs (#6791).</summary>
+    private static string Inv(FormattableString text) => text.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// The dry run's version of the closing VACUUM FULL's free-disk check (#6791): resolves the free space exactly
+    /// as the real compaction does (the operator's <c>--free-space</c>, else measured), then runs the shared
+    /// <see cref="WritePlanDimVacuumPreflight"/>. <paramref name="projectedEstimate"/> is the post-conversion size
+    /// when rows are still pending; null means nothing is pending and the real run's own estimate applies.
+    /// Returns 0 when the compaction would fit, 1 when the real run would refuse it.
+    /// </summary>
+    private static async Task<int> PreviewCompactionAsync(
+        NpgsqlConnection connection, long? freeSpaceBytes, long? projectedEstimate, bool conversionWouldRun,
+        TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        var estimated = projectedEstimate ?? 0;
+        if (projectedEstimate is null)
+        {
+            try
+            {
+                estimated = await PlanDimRecompression.EstimateCompactedBytesAsync(connection, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                error.WriteLine($"  Could not estimate the compacted size: {ex.Message}");
+                return 1;
+            }
+        }
+
+        var (freeBytes, freeError) = await ResolveStoreFreeSpaceAsync(connection, freeSpaceBytes, cancellationToken);
+        return WritePlanDimVacuumPreflight(
+            estimated, freeBytes, freeError, freeSpaceBytes is not null, dryRun: true, conversionWouldRun, output, error)
+            ? 0
+            : 1;
+    }
+
+    /// <summary>
+    /// The free-disk check in front of the closing VACUUM FULL, shared by the real run and the dry run so they
+    /// cannot disagree (#6791). PURE over its inputs: the estimate, the resolved free space (a number, or the
+    /// refusal text from <c>ResolveStoreFreeSpaceAsync</c>) and whether that number came from <c>--free-space</c>.
+    /// Writes the provenance line when it did, and the estimate / required / free table on a shortfall (a dry run
+    /// also writes it when the compaction fits, since showing the comparison is its job). Returns true when the
+    /// compaction fits. The real run's wording is unchanged; a dry run says what the real run WOULD do.
+    /// </summary>
+    internal static bool WritePlanDimVacuumPreflight(
+        long estimated, long freeBytes, string? freeError, bool freeFromOption, bool dryRun, bool conversionWouldRun,
+        TextWriter output, TextWriter error)
+    {
+        var refusal = dryRun
+            ? "  DRY RUN — the real run would REFUSE to VACUUM FULL"
+            : "  REFUSING to VACUUM FULL";
+        var remedy = conversionWouldRun
+            ? "  The conversion itself would still run and commit; to compact afterwards, fix the above"
+            : "  Nothing would be converted; to compact, fix the above";
+
+        if (freeError is not null)
+        {
+            error.WriteLine($"{refusal}: {freeError}");
+            if (dryRun)
+            {
+                error.WriteLine($"{remedy} (or pass --free-space <size>), or pass --no-vacuum-full to skip the compaction.");
+            }
+            else
+            {
+                error.WriteLine("  The conversion is committed; re-run with --vacuum-full (after fixing the above, or");
+                error.WriteLine("  with --free-space <size>) to compact.");
+            }
+
+            return false;
+        }
+
+        if (freeFromOption)
+        {
+            output.WriteLine(Inv($"  Free space {GbText(freeBytes)} GB comes from --free-space; it was not measured."));
+        }
+
+        /* 1.2x headroom on a sampled estimate: the rewrite holds old + new copies simultaneously, and the
+           new copy is the estimate — the old one is already on disk and costs nothing extra. */
+        var required = (long)(estimated * 1.2);
+        var fits = freeBytes >= required;
+        if (!fits)
+        {
+            error.WriteLine($"{refusal}: not enough free disk for the compacted copy.");
+        }
+
+        if (!fits || dryRun)
+        {
+            var table = fits ? output : error;
+            table.WriteLine(Inv($"    estimated compacted size : {GbText(estimated)} GB"));
+            table.WriteLine(Inv($"    required (x1.2 headroom) : {GbText(required)} GB"));
+            table.WriteLine(Inv($"    free on the store volume : {GbText(freeBytes)} GB"));
+        }
+
+        if (fits)
+        {
+            if (dryRun)
+            {
+                output.WriteLine("  The compacted copy fits: the real run's VACUUM FULL would be allowed to start.");
+            }
+
+            return true;
+        }
+
+        if (dryRun)
+        {
+            error.WriteLine($"{remedy} (after freeing up disk, or pass --free-space <size>), or pass --no-vacuum-full to skip the compaction.");
+        }
+        else
+        {
+            error.WriteLine("  The conversion is committed and its space is reusable internally; free up disk and");
+            error.WriteLine("  re-run with --vacuum-full to compact.");
+        }
+
+        return false;
+    }
+
+    private static string GbText(long bytes) =>
+        (bytes / (1024.0 * 1024 * 1024)).ToString("N1", CultureInfo.InvariantCulture);
 
     /// <summary>
     /// The closing VACUUM FULL (#2076): rewrites the dimension to its live content so the conversion's
@@ -6595,36 +6751,15 @@ public static partial class DarlingCliCommands
         }
 
         var (freeBytes, freeError) = await ResolveStoreFreeSpaceAsync(connection, freeSpaceBytes, cancellationToken);
-        if (freeError is not null)
+        if (!WritePlanDimVacuumPreflight(
+                estimated, freeBytes, freeError, freeSpaceBytes is not null, dryRun: false, conversionWouldRun: false, output, error))
         {
-            error.WriteLine($"  REFUSING to VACUUM FULL: {freeError}");
-            error.WriteLine("  The conversion is committed; re-run with --vacuum-full (after fixing the above, or");
-            error.WriteLine("  with --free-space <size>) to compact.");
-            return 1;
-        }
-
-        if (freeSpaceBytes is not null)
-        {
-            output.WriteLine($"  Free space {freeBytes / (1024.0 * 1024 * 1024):N1} GB comes from --free-space; it was not measured.");
-        }
-
-        /* 1.2x headroom on a sampled estimate: the rewrite holds old + new copies simultaneously, and the
-           new copy is the estimate — the old one is already on disk and costs nothing extra. */
-        var required = (long)(estimated * 1.2);
-        if (freeBytes < required)
-        {
-            error.WriteLine("  REFUSING to VACUUM FULL: not enough free disk for the compacted copy.");
-            error.WriteLine($"    estimated compacted size : {estimated / (1024.0 * 1024 * 1024):N1} GB");
-            error.WriteLine($"    required (x1.2 headroom) : {required / (1024.0 * 1024 * 1024):N1} GB");
-            error.WriteLine($"    free on the store volume : {freeBytes / (1024.0 * 1024 * 1024):N1} GB");
-            error.WriteLine("  The conversion is committed and its space is reusable internally; free up disk and");
-            error.WriteLine("  re-run with --vacuum-full to compact.");
             return 1;
         }
 
         var before = (await PlanDimRecompression.SurveyAsync(connection, cancellationToken)).RelationBytes;
         output.WriteLine();
-        output.WriteLine($"  Compacting (VACUUM FULL): rewriting ~{estimated / (1024.0 * 1024 * 1024):N1} GB of live content.");
+        output.WriteLine(Inv($"  Compacting (VACUUM FULL): rewriting ~{estimated / (1024.0 * 1024 * 1024):N1} GB of live content."));
         output.WriteLine("  This takes an EXCLUSIVE lock on the plan dimension — collections DEGRADE until it");
         output.WriteLine("  finishes and recover within minutes after (measured: ~46 minutes of lock on a 174 GB");
         output.WriteLine("  dimension; scale by yours). The service does not need to stop.");
@@ -6643,8 +6778,8 @@ public static partial class DarlingCliCommands
         }
 
         var after = (await PlanDimRecompression.SurveyAsync(connection, cancellationToken)).RelationBytes;
-        output.WriteLine($"  COMPACTED in {stopwatch.Elapsed:hh\\:mm\\:ss} — " +
-            $"{before / (1024.0 * 1024 * 1024):N1} GB -> {after / (1024.0 * 1024 * 1024):N1} GB on disk.");
+        output.WriteLine(Inv($"  COMPACTED in {stopwatch.Elapsed:hh\\:mm\\:ss} — ") +
+            Inv($"{before / (1024.0 * 1024 * 1024):N1} GB -> {after / (1024.0 * 1024 * 1024):N1} GB on disk."));
         return 0;
     }
 
