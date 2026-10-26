@@ -175,6 +175,34 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
     }
 
     /// <summary>
+    /// #6750: a server whose first row comes after the 168-hour window's start has an empty baseline and a cut recent window, and the note
+    /// says so with the two shared sentences, not with the one for a baseline that holds part of its span. Lite's read still divides by the
+    /// window it was asked for, so the note does not claim hours held. A 24-hour read keeps the old sentence.
+    /// </summary>
+    [Fact]
+    public async Task AServerWhoseFirstRowIsAfterTheWindowStart_SaysTheBaselineIsEmpty_AndTheRecentWindowIsCut()
+    {
+        var service = new LocalDataService(_duckDb);
+        var baseNow = Truncate(DateTime.UtcNow);
+
+        await SeedAsync(baseNow.AddHours(-30), 3, 1000, 1000, intervalId: 3, queryId: 7, executionType: "Aborted");
+        await SeedAsync(baseNow.AddHours(-10), 6, 1000, 1000, intervalId: 4, queryId: 7, executionType: "Aborted");
+
+        var hit = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, 168));
+        Assert.True(hit.GetProperty("window_truncated").GetBoolean());
+        var note = hit.GetProperty("truncation_note").GetString()!;
+        Assert.EndsWith(
+            PerformanceMonitor.Common.QueryStoreRegressionRules.EmptyBaselineTail + " " + PerformanceMonitor.Common.QueryStoreRegressionRules.RecentCutTail,
+            note, StringComparison.Ordinal);
+        Assert.DoesNotContain(PerformanceMonitor.Common.QueryStoreRegressionRules.BaselineWindowTail, note, StringComparison.Ordinal);
+        Assert.Equal("timeouts", Assert.Single(hit.GetProperty("regressions").EnumerateArray()).GetProperty("regression_reason").GetString());
+
+        await SeedAsync(baseNow.AddHours(-2), 3, 1000, 1000, intervalId: 5, queryId: 7, executionType: "Aborted");
+        var day = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, 24));
+        Assert.EndsWith(PerformanceMonitor.Common.QueryStoreRegressionRules.BaselineWindowTail, day.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// #6654: with no database named, a regression in a database the server dropped (an earlier database_states snapshot lists it,
     /// the newest does not) is left out before the cap and named in databases_left_out; naming the database reads it as asked.
     /// </summary>
@@ -242,7 +270,7 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
     }
 
     private async Task SeedAsync(
-        DateTime collectionTime, long executions, long avgDurationUs, long avgCpuUs, long intervalId, long queryId = 1, string database = Db)
+        DateTime collectionTime, long executions, long avgDurationUs, long avgCpuUs, long intervalId, long queryId = 1, string database = Db, string executionType = "Regular")
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -260,7 +288,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
         cmd.Parameters.Add(new DuckDBParameter { Value = database });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryId });
         cmd.Parameters.Add(new DuckDBParameter { Value = 9L });
-        cmd.Parameters.Add(new DuckDBParameter { Value = "Regular" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executionType });
         cmd.Parameters.Add(new DuckDBParameter { Value = executions });
         cmd.Parameters.Add(new DuckDBParameter { Value = avgDurationUs });
         cmd.Parameters.Add(new DuckDBParameter { Value = avgCpuUs });

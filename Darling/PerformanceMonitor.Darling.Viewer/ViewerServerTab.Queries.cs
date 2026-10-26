@@ -549,11 +549,22 @@ public partial class ViewerServerTab
     /// <param name="banner">The grid's banner.</param>
     /// <param name="probe">The grid's data-start probe, started beside its read.</param>
     /// <param name="startUtc">The start of the RANGE the grid just drew (not of its baseline).</param>
-    internal static async Task ShowQueryStoreRegressionsDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc) =>
-        UpdateTruncationBanner(
-            banner,
-            await DataStartOrNullAsync(probe, "Query Store Regressions"),
-            ViewerDataService.QueryStoreRegressionsBaselineStart(startUtc));
+    internal static async Task ShowQueryStoreRegressionsDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc)
+    {
+        var floor = await DataStartOrNullAsync(probe, "Query Store Regressions");
+        UpdateTruncationBanner(banner, floor, ViewerDataService.QueryStoreRegressionsBaselineStart(startUtc));
+
+        /* #6750: a store that starts at or after the range's start has an EMPTY baseline: nothing is compared for cost, and only
+           timeouts and errors can be listed. "Showing since" alone read as a shorter baseline, so the banner says so. */
+        if (banner.Visibility == Visibility.Visible && floor is DateTime since && since >= startUtc)
+        {
+            banner.Text += QueryStoreRegressionsEmptyBaselineSuffix;
+        }
+    }
+
+    /// <summary>What the regressions banner adds when the store starts at or after the range's start (#6750).</summary>
+    internal const string QueryStoreRegressionsEmptyBaselineSuffix =
+        " · the baseline is empty, so no query can be flagged for cost, and only timeouts and errors were tested";
 
     /// <summary>
     /// Loads the Plan Corrections grid (#1952) — the engine's own automatic plan correction recommendations

@@ -418,6 +418,40 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
     }
 
     /// <summary>
+    /// #6750: a raw-only store whose first row comes after the 168-hour window's start. The baseline is empty and the recent window is
+    /// cut, so the note ends with those two sentences, not with the sentence for a baseline that holds part of its span. A timeouts
+    /// row still comes back (cost cannot flag). The store is a plain table, so raw binds the baseline start itself and divides by the window
+    /// it was asked for, and the note does not claim hours held. A 24-hour read of the same store keeps the old
+    /// sentence, because there the store starts inside the baseline.
+    /// </summary>
+    [Fact]
+    public async Task AStoreThatStartsAfterTheWindow_SaysTheBaselineIsEmpty_AndTheRecentWindowIsCut_AgainstDevPostgres()
+    {
+        await WithServerAsync(async (connection, postgres, baseNow, ct) =>
+        {
+            await SeedAsync(connection, ct, baseNow.AddHours(-30), 3, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 3, queryId: 7, executionType: "Aborted");
+            await SeedAsync(connection, ct, baseNow.AddHours(-10), 6, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 4, queryId: 7, executionType: "Aborted");
+
+            var hit = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 168));
+
+            Assert.Equal("raw", hit.GetProperty("history_source").GetString());
+            Assert.True(hit.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(baseNow.AddHours(-30)), hit.GetProperty("effective_start").GetString());
+            var note = hit.GetProperty("truncation_note").GetString()!;
+            Assert.EndsWith(PerformanceMonitor.Common.QueryStoreRegressionRules.EmptyBaselineTail + " " + PerformanceMonitor.Common.QueryStoreRegressionRules.RecentCutTail, note, StringComparison.Ordinal);
+            Assert.DoesNotContain(BaselineTail, note, StringComparison.Ordinal);
+
+            var row = Assert.Single(hit.GetProperty("regressions").EnumerateArray());
+            Assert.Equal("timeouts", row.GetProperty("regression_reason").GetString());
+
+            /* A 24-hour read: the store starts inside the baseline window, so the baseline holds part of its span. */
+            await SeedAsync(connection, ct, baseNow.AddHours(-2), 3, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 5, queryId: 7, executionType: "Aborted");
+            var day = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
+            Assert.EndsWith(BaselineTail, day.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>
     /// #4966: a quiet start. The store holds a row from before the baseline begins (nine days back, for a baseline that
     /// starts eight days back), so the baseline is covered whenever the rows inside it begin: false, no note, and
     /// <c>effective_start</c> is exactly <c>baseline_start</c>.
@@ -724,7 +758,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
     /// <summary>One Query Store interval of a query in <paramref name="database"/> (<see cref="Db"/> unless a test needs a second database to filter on).</summary>
     private static async Task SeedAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime collectionTime, long executions,
-        long avgDurationUs, long avgCpuUs, long intervalId, long queryId = 1, string database = Db) =>
+        long avgDurationUs, long avgCpuUs, long intervalId, long queryId = 1, string database = Db, string executionType = "Regular") =>
         await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO query_store_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
@@ -732,7 +766,7 @@ INSERT INTO query_store_stats
      runtime_stats_interval_id, query_text, last_execution_time)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTime), ServerId, ServerName,
-            database, queryId, 9L, "Regular", executions, avgDurationUs, avgCpuUs, 100L, intervalId,
+            database, queryId, 9L, executionType, executions, avgDurationUs, avgCpuUs, 100L, intervalId,
             "SELECT * FROM dbo.Widgets", DarlingMcpTestData.Naive(collectionTime));
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)

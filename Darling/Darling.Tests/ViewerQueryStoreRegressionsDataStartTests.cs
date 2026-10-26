@@ -185,7 +185,11 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
     [Fact]
     public void CoverageThatStartsInsideTheRecentWindow_RaisesTheNotice()
     {
-        Assert.Equal("Showing since 2026-09-11 00:00:00", BannerFor(RangeStart.AddDays(1)));
+        Assert.Equal("Showing since 2026-09-11 00:00:00" + ViewerServerTab.QueryStoreRegressionsEmptyBaselineSuffix, BannerFor(RangeStart.AddDays(1)));
+        /* The range's own start is the edge: the baseline ends there, so it is empty at the start itself (#6750). */
+        Assert.EndsWith(ViewerServerTab.QueryStoreRegressionsEmptyBaselineSuffix, BannerFor(RangeStart)!, StringComparison.Ordinal);
+        /* A store that starts inside the baseline holds part of it, and the banner does not call it empty. */
+        Assert.DoesNotContain("baseline is empty", BannerFor(RangeStart.AddDays(-2))!, StringComparison.Ordinal);
     }
 
     /* A quiet start: the store covered the whole baseline (coverage 20 days before the range). No notice. */

@@ -841,12 +841,20 @@ public static class QueryStoreRegressionBaseline
         + " AND CAST(l.last_execution_time AS date) = ANY(@@RDAYS) AND l.last_execution_time >= $2"
         + " AND l.collection_time >= @@B AND l.collection_time <= $3)";
 
+    /// <summary>
+    /// The suffix over the shared arms. <c>windows</c> holds the hours each side actually HOLDS (#6750), not the hours its window
+    /// names. The baseline holds <c>$2 - @@B</c>, and none when the start <c>@@B</c> (the raw floor on the raw arm, the gate's clamp
+    /// on the table arm) sits at or after the recent window's start <c>$2</c>: <c>GREATEST(.., 0)</c> then gives 0, which the
+    /// <c>NULLIF(.., 0)</c> on every per-hour term turns into NULL, where a negative divisor gave a negative rate. The recent side
+    /// holds <c>$3 - GREATEST($2, @@B)</c>, because its arm keeps <c>collection_time &gt;= @@B</c>. When <c>@@B &lt;= $2</c>
+    /// (every window whose store holds its whole baseline) both terms are what they were before, so those reads are unchanged.
+    /// </summary>
     private static string Suffix(string flaggedSample, string rankedSample) => $$"""
         ,
         windows AS (
             SELECT
-                CAST(EXTRACT(EPOCH FROM (CAST($2 AS timestamp) - CAST(@@B AS timestamp))) / 3600.0 AS double precision) AS base_hours,
-                CAST(EXTRACT(EPOCH FROM (CAST($3 AS timestamp) - CAST($2 AS timestamp))) / 3600.0 AS double precision) AS recent_hours
+                GREATEST(CAST(EXTRACT(EPOCH FROM (CAST($2 AS timestamp) - CAST(@@B AS timestamp))) / 3600.0 AS double precision), 0) AS base_hours,
+                CAST(EXTRACT(EPOCH FROM (CAST($3 AS timestamp) - GREATEST(CAST($2 AS timestamp), CAST(@@B AS timestamp)))) / 3600.0 AS double precision) AS recent_hours
         ),
         candidate_keys AS (
             SELECT database_name, query_id FROM recent_performance

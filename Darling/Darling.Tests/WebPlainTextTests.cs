@@ -134,6 +134,28 @@ public sealed class WebPlainTextTests
         }
     }
 
+    /* #6750: the empty-baseline sentence and the cut-recent-window sentences, read from the C# that owns them, reach the page without
+       the MCP answer's field names, as the baseline sentence above does. */
+    [Fact]
+    public void TheEmptyBaselineAndCutRecentWindowSentences_ReadAsThePagesWords()
+    {
+        var o = Run(
+        [
+            QueryStoreRegressionRules.EmptyBaselineTail,
+            QueryStoreRegressionRules.TailFor(new DateTime(2026, 1, 5), new DateTime(2026, 1, 1), ratesUseHoursHeld: true),
+        ], out _);
+        Assert.Equal("Here the store starts at or after the end of the baseline period, so the baseline is empty: no query can be flagged for cost, and only timeouts and errors were tested.", o[0]);
+        Assert.StartsWith(o[0], o[1], StringComparison.Ordinal);
+        Assert.Contains("The store also starts after the recent window began, so the recent window holds only the part the store has.", o[1], StringComparison.Ordinal);
+        Assert.EndsWith("Its per-hour rates divide by the hours it holds.", o[1], StringComparison.Ordinal);
+        foreach (var line in o)
+        {
+            Assert.DoesNotContain("baseline_end", line);
+            Assert.DoesNotContain("effective_start", line);
+            Assert.DoesNotContain("recent_window_start", line);
+        }
+    }
+
     /* #6649: a count can be negative or have a fraction, and either ended the run of pairs, so the whole note stayed raw. */
     [Fact]
     public void ACountRunWithANegativeOrFractionalValue_StillReadsAsWords()
