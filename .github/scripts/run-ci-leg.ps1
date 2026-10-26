@@ -17,6 +17,10 @@
   -Areas  all     the whole Darling suite and the whole Lite suite.
           darling the whole Darling suite, and of Lite.Tests the classes that read a Darling path (ci-select.py reads-classes
                   --suite lite), which is the scope build.yml gives a Darling-only change.
+          classes only the test classes the pull request changed (#6734): -OnlyDarlingClasses and -OnlyLiteClasses, comma lists of
+                  simple names. A side with no name runs nothing. A leg the cut gave none of the named classes runs no test and
+                  passes, because the other legs run them (the hash cut can leave a leg empty). Every named class must still be
+                  in the test host's listing, or the leg fails.
           lite    the whole Lite suite, and of Darling.Tests the Stage=Guard classes plus the classes that read a Lite
                   path (ci-select.py reads-classes), which is the scope build.yml gives a Lite-only change.
   The Darling slice is cut by run-darling-pg-shard.ps1 (shard Leg-1 of LegCount); the Lite slice is cut here, because
@@ -38,7 +42,11 @@
 param(
     [int] $Leg = 1,
     [Parameter(Mandatory)][int] $LegCount,
-    [ValidateSet('all', 'darling', 'lite')][string] $Areas = 'all',
+    [ValidateSet('all', 'darling', 'lite', 'classes')][string] $Areas = 'all',
+    # Not -DarlingClasses / -LiteClasses: PowerShell variable names ignore case, so those would be the [string] typed
+    # $darlingClasses and $liteClasses lists below, and every list assigned to them would collapse into one string (#6734).
+    [string] $OnlyDarlingClasses = '',
+    [string] $OnlyLiteClasses = '',
     [string] $RunAttempt = '1',
     [string] $ResultPrefix = 'darling-ci',
     [switch] $DryRun,
@@ -59,8 +67,22 @@ $darlingDll = 'Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.d
 $liteWeights = Join-Path $scripts 'lite-shard-weights.json'
 $darlingWeights = Join-Path $scripts 'darling-shard-weights.json'
 # Every area runs some Darling.Tests classes: all of them, or under 'lite' the Guard and Lite-reads scope.
-$runDarling = $true
-$runLite = $true
+$runDarling = $Areas -ne 'classes' -or [bool]$OnlyDarlingClasses
+$runLite = $Areas -ne 'classes' -or [bool]$OnlyLiteClasses
+if ($Areas -eq 'classes' -and -not $OnlyDarlingClasses -and -not $OnlyLiteClasses) { throw '-Areas classes needs -OnlyDarlingClasses or -OnlyLiteClasses' }
+function Select-ByKey([string[]] $names, [string] $csv) {
+    $only = @($csv -split ',' | Where-Object { $_ })
+    $picked = @($names | Where-Object { $only -contains ($_ -split '[.+/]')[-1] })
+    # #6734: every class the plan named must be in the listing. A name that matches nothing would otherwise run no test
+    # and pass the leg green.
+    $found = @($picked | ForEach-Object { ($_ -split '[.+/]')[-1] })
+    $missing = @($only | Where-Object { $found -notcontains $_ })
+    if ($missing.Count -gt 0) {
+        $message = "#6734: the plan named test classes the listing does not have: $($missing -join ', ')"
+        if ($DryRun) { Write-Warning $message } else { throw $message }
+    }
+    return $picked
+}
 # The Darling scope under -Areas lite, in run-darling-pg-shard.ps1's own -ScopeFilter vocabulary.
 $darlingScopeFilter = if ($Areas -eq 'lite') { '-trait Stage=Guard -trait Reads=Lite' } else { '' }
 
@@ -82,6 +104,11 @@ function Get-ListedClasses([string] $project, [string[]] $extra) {
 }
 
 function Get-DarlingClasses {
+    if ($Areas -eq 'classes') {
+        if (Test-Path -LiteralPath $darlingDll) { return @(Select-ByKey @(Get-ListedClasses $darlingProject @()) $OnlyDarlingClasses) }
+        if (-not $DryRun) { throw "no built Darling.Tests at $darlingDll - the build artifact was not unpacked" }
+        return @(Select-ByKey @(Get-WeightedNames $darlingWeights 'Darling.Tests.') $OnlyDarlingClasses)
+    }
     if (-not (Test-Path -LiteralPath $darlingDll)) {
         if (-not $DryRun) { throw "no built Darling.Tests at $darlingDll - the build artifact was not unpacked" }
         Write-Host "(dry run, no built Darling.Tests: Darling classes read from darling-shard-weights.json)"
@@ -115,6 +142,7 @@ function Get-LiteClasses {
         $names = @(Get-WeightedNames $liteWeights '')
     }
     else { $names = @(Get-ListedClasses $liteProject @()) }
+    if ($Areas -eq 'classes') { return @(Select-ByKey $names $OnlyLiteClasses) }
     if ($Areas -ne 'darling') { return $names }
     Write-Host "(darling scope: only the Lite classes that read a Darling file, $($reads.Count) named by the source scan)"
     return @($names | Where-Object { $reads -contains $_ })
@@ -137,6 +165,7 @@ function Get-Slice([string[]] $classes, [string] $weightsFile, [int] $shard, [st
 function Write-Slice([string] $title, $slice, [int] $total) {
     Write-Host "::group::$title - $($slice.Classes.Count) of $total classes ($($slice.Header))"
     foreach ($c in $slice.Classes) { Write-Host "  $c" }
+    if ($slice.Classes.Count -eq 0 -and $Areas -eq 'classes') { Write-Host "  (none of the named classes is in this slice: it runs no test, and the other legs run them)" }
     Write-Host '::endgroup::'
 }
 
@@ -158,7 +187,7 @@ if ($DryRun) {
             Write-Slice "Lite.Tests slice, leg $i" $s $liteClasses.Count
             foreach ($c in $s.Classes) { $seen["L:$c"] = 1 + [int]$seen["L:$c"] }
         }
-        if ($i -eq 1 -and $runDarling -and $Areas -ne 'lite' -and -not $NoTreeGuards) { Write-Host 'leg 1 would also run the whole-tree guards (no DARLING_TEST_PG*)' }
+        if ($i -eq 1 -and $runDarling -and $Areas -notin 'lite', 'classes' -and -not $NoTreeGuards) { Write-Host 'leg 1 would also run the whole-tree guards (no DARLING_TEST_PG*)' }
     }
     if ($AllLegs) {
         $expected = $darlingClasses.Count * [int]$runDarling + $liteClasses.Count * [int]$runLite
@@ -211,7 +240,7 @@ $testEnv = @(& (Join-Path $scripts 'start-test-pg.ps1') -Mode Env -Root (Get-Loc
 if ($testEnv.Count -eq 0) { throw 'start-test-pg.ps1 -Mode Env printed nothing' }
 
 # Whole-tree guards (leg 1): the whole Darling suite, no store, as build.yml's darling-tree-guards job ran it.
-if ($Leg -eq 1 -and $runDarling -and $Areas -ne 'lite' -and -not $NoTreeGuards) {
+if ($Leg -eq 1 -and $runDarling -and $Areas -notin 'lite', 'classes' -and -not $NoTreeGuards) {
     Invoke-Piece 'Whole-tree guards' {
         $saved = @{}
         foreach ($n in (Get-ChildItem Env: | Where-Object { $_.Name -like 'DARLING_TEST_*' }).Name) { $saved[$n] = [Environment]::GetEnvironmentVariable($n); Remove-Item "Env:$n" }
@@ -227,6 +256,7 @@ if ($runDarling) {
     Invoke-Piece "Darling.Tests slice $Leg of $LegCount" {
         $shardParams = @{ Shard = $shard; ShardCount = $LegCount; ResultPrefix = $ResultPrefix; RunAttempt = $RunAttempt }
         if ($darlingScopeFilter) { $shardParams.ScopeFilter = $darlingScopeFilter }
+        if ($Areas -eq 'classes') { $shardParams.OnlyClasses = $OnlyDarlingClasses }
         & (Join-Path $scripts 'run-darling-pg-shard.ps1') @shardParams
     }
 }
@@ -245,6 +275,11 @@ if ($runLite) {
             $length += $cost
         }
         if ($current.Count -gt 0) { $chunks.Add($current.ToArray()) }
+        if ($chunks.Count -eq 0) {
+            # Only the classes plan may hand a leg none of its few classes: the other legs run them all (the packer proves it).
+            if ($Areas -ne 'classes') { throw "lite shard $shard has no class to run" }
+            Write-Host "lite shard ${shard}: no named class in this slice, so it runs no test. The other legs run them."
+        }
         $failedChunks = 0
         $n = 0
         foreach ($chunk in $chunks) {

@@ -244,6 +244,93 @@ check("labels: empty", cp.parse_labels(""), [])
 check("labels: empty array", cp.parse_labels("[]"), [])
 check("bool", [cp.parse_bool(x) for x in ("true", "True", "false", "", "null")], [True, True, False, False, False])
 
+# --- the changed-classes plan (#6734) ---------------------------------------------------------------------------
+DT = "Darling/Darling.Tests/"
+LT = "Lite.Tests/"
+cc_files = {DT + "D1Tests.cs": {"suite": "darling", "classes": ["D1"], "tests": ["D1"], "safe": True},
+            DT + "D3Tests.cs": {"suite": "darling", "classes": ["D3", "D4"], "tests": ["D3", "D4"], "safe": True},
+            DT + "Helpers.cs": {"suite": "darling", "classes": ["Helper"], "tests": [], "safe": False},
+            LT + "L1Tests.cs": {"suite": "lite", "classes": ["L1"], "tests": ["L1"], "safe": True},
+            LT + "L2Tests.cs": {"suite": "lite", "classes": ["L2"], "tests": ["L2"], "safe": True}}
+for i in range(14):
+    cc_files[DT + f"B{i}Tests.cs"] = {"suite": "darling", "classes": [f"B{i}"], "tests": [f"B{i}"], "safe": True}
+cc_cat = {**catalog, "files": cc_files}
+big_cc = {**big, "files": cc_files}
+
+
+def cc(files, cat=cc_cat):
+    return run(files, cat=cat)
+
+
+r = cc(["README.md", DT + "D1Tests.cs"])
+check("classes: docs + one test class: areas", r["areas"], "classes")
+check("classes: docs + one test class: scope", (r["darling_scope"], r["lite_scope"]), ("classes", "none"))
+check("classes: docs + one test class: the class", r["darling_classes"], "D1")
+check("classes: docs + one test class: build and legs", (r["build"], r["legs"], r["legs_json"]), ("true", "1", "[1]"))
+check("classes: a file with two classes", cc([DT + "D3Tests.cs"])["darling_classes"], "D3,D4")
+check("classes: a file with two classes runs one leg", cc([DT + "D3Tests.cs"])["legs"], "1")
+r = cc(["README.md"] + [DT + f"B{i}Tests.cs" for i in range(14)], big_cc)
+check("classes: docs + 14 test classes: scope", (r["areas"], r["darling_scope"]), ("classes", "classes"))
+check("classes: 14 classes of 10 min: legs", r["legs"], "14")
+check("classes: 14 classes named", r["darling_classes"], ",".join(f"B{i}" for i in range(14)))
+check("classes: a helper beside a class is full", cc([DT + "D1Tests.cs", DT + "Helpers.cs"])["darling_scope"], "full")
+check("classes: a helper beside a class is areas darling", cc([DT + "D1Tests.cs", DT + "Helpers.cs"])["areas"], "darling")
+for odd in (DT + "Darling.Tests.csproj", DT + "packages.lock.json", DT + "Unmapped.cs"):
+    r = cc(["README.md", DT + "D1Tests.cs", odd])
+    check(f"classes: {odd} is full", (r["areas"], r["darling_scope"], r["darling_classes"]), ("darling", "full", ""))
+r = cc([DT + "D1Tests.cs", SERVICE])
+check("classes: product file keeps today's rules", (r["areas"], r["darling_scope"], r["darling_classes"]), ("darling", "full", ""))
+r = cc([DT + "D1Tests.cs", "PerformanceMonitor.Common/X.cs"])
+check("classes: core file keeps today's rules", (r["areas"], r["darling_scope"]), ("all", "full"))
+check("classes: a class missing from the map is full", cc([DT + "Missing.cs"])["darling_scope"], "full")
+check("classes: no file table at all is full", run([DT + "D1Tests.cs"], cat=catalog)["darling_scope"], "full")
+check("classes: docs only", cc(["README.md"])["areas"], "docs-only")
+check("classes: docs only builds nothing", (cc(["README.md"])["build"], cc(["README.md"])["legs"]), ("false", "0"))
+r = cc(["README.md", LT + "L1Tests.cs"])
+check("classes lite: scope", (r["areas"], r["darling_scope"], r["lite_scope"], r["lite_classes"]), ("classes", "none", "classes", "L1"))
+check("classes lite: build and legs", (r["build"], r["legs"]), ("true", "1"))
+check("classes lite: two classes", cc([LT + "L1Tests.cs", LT + "L2Tests.cs"])["lite_classes"], "L1,L2")
+r = cc([LT + "L1Tests.cs", DT + "D1Tests.cs"])
+check("classes both: scopes", (r["areas"], r["darling_scope"], r["lite_scope"]), ("classes", "classes", "classes"))
+check("classes lite: csproj is full", cc([LT + "L1Tests.cs", LT + "Lite.Tests.csproj"])["lite_scope"], "full")
+check("classes lite: lock file is full", cc([LT + "L1Tests.cs", LT + "packages.lock.json"])["lite_scope"], "full")
+check("classes lite: missing from the map is full", cc([LT + "Gone.cs"])["lite_scope"], "full")
+check("classes lite: product file keeps today's rules", cc([LT + "L1Tests.cs", "Lite/X.cs"])["lite_scope"], "full")
+check("classes: a push is never narrowed", run([DT + "D1Tests.cs"], event="push", base="dev", cat=cc_cat)["areas"], "all")
+check("classes: a non-dev base is never narrowed", run([DT + "D1Tests.cs"], base="main", cat=cc_cat)["areas"], "all")
+
+# A same-file helper (no test) stays safe but is never picked: the test host's class listing may not name it (#6734).
+with tempfile.TemporaryDirectory() as hroot:
+    hdir = os.path.join(hroot, "Darling", "Darling.Tests")
+    os.makedirs(hdir)
+    with open(os.path.join(hdir, "WithHelperTests.cs"), "w", encoding="utf-8") as fh:
+        fh.write("namespace N;\npublic class WithHelperTests\n{\n    [Fact]\n    public void A() { new FakeBox(); }\n}\n"
+                 "internal class FakeBox\n{\n}\n")
+    h_tbl = cp._file_table(hroot, cs.scan_classes(hroot))
+    h_row = h_tbl[DT + "WithHelperTests.cs"]
+    check("helper file: both classes recorded", h_row["classes"], ["WithHelperTests", "FakeBox"])
+    check("helper file: only the test class is a test", (h_row["tests"], h_row["safe"]), (["WithHelperTests"], True))
+    h_cat = {**catalog, "files": h_tbl}
+    r = run(["README.md", DT + "WithHelperTests.cs"], cat=h_cat)
+    check("helper file: the picks name only the test class", (r["areas"], r["darling_classes"]), ("classes", "WithHelperTests"))
+
+# The real file table: a class file maps to its classes, a helper and a missing map do not narrow.
+real_cat = cp.load_catalog()
+tbl = real_cat["files"]
+one = next(f for f, e in sorted(tbl.items()) if e["suite"] == "darling" and e["safe"] and len(e["classes"]) == 1)
+r = cp.plan("pull_request", "dev", "x", False, [], ["README.md", one], live_rules := cs.Rules(), real_cat)
+check("real table: one class file narrows", (r["areas"], r["darling_classes"]), ("classes", tbl[one]["classes"][0]))
+check("real table: every row has a class", all(e["classes"] for e in tbl.values()), True)
+no_test = {(s, c) for s, m in real_cat["classes"].items() for c, t in m.items() if cs.NO_TESTS_TRAIT in t}
+check("real table: no picked name is a class without tests",
+      sorted((e["suite"], c) for e in tbl.values() for c in e["tests"] if (e["suite"], c) in no_test), [])
+check("real table: some file has a helper beside its tests", any(set(e["classes"]) - set(e["tests"]) and e["tests"] for e in tbl.values()), True)
+check("real table: every safe file picks a class", all(e["tests"] for e in tbl.values() if e["safe"]), True)
+unsafe = [f for f, e in tbl.items() if not e["safe"]]
+check("real table: some helper files are unsafe", bool(unsafe), True)
+r = cp.plan("pull_request", "dev", "x", False, [], ["README.md", one, unsafe[0]], live_rules, real_cat)
+check("real table: an unsafe file is full", r["darling_scope"], "full")
+
 # --- the command line writes $GITHUB_OUTPUT --------------------------------------------------------------------
 files_path = os.path.join(tmp, "files.txt")
 out_path = os.path.join(tmp, "out.txt")
