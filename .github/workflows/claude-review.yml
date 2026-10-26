@@ -36,8 +36,9 @@ name: Claude Auto Review
 # started a full one. Rounds after the first found mostly comment accuracy, so the later pushes
 # now get the cheap follow-up.
 # Measured on 2026-10-26 (#6782), over 4 days and 397 reviews: about $1,315 at API prices, and the
-# Opus full tier was 83% of it, at $6.44 on average against $0.99 for the light tier. So the full
-# tier now runs Sonnet (120 turns), and a pull request gets at most ONE full-tier pass: once the
+# Opus 5 full tier was 83% of it, at $6.44 on average against $0.99 for the light tier. So the full
+# tier now runs Opus 5.5 (120 turns; $4/$20 per million tokens against Opus 5's $5/$25), and a pull
+# request gets at most ONE full-tier pass: once the
 # bot has posted a verdict whose ledger says tier=full, every later pass runs the light tier,
 # whatever its scope and whatever event started it. Only a pass the `re-review` label asked for
 # keeps the full tier. Which commits a pass covers (full scope or follow-up) is unchanged.
@@ -92,8 +93,8 @@ name: Claude Auto Review
 #     fails the job when the newest verdict lacks the header or the ledger.
 # Plus a model and a TIER: a paths-filter step routes changes to the shared libraries, the
 # Darling Storage/Analysis/Service trees, Lite's service/MCP/database layers, install/ and every
-# .sql file to a FULL pass (Sonnet, 120 turns; Opus with the 1M context window until #6782) and
-# everything else (tests, docs, viewer XAML, wwwroot) to a LIGHT pass (Sonnet, 100 turns). A FULL
+# .sql file to a FULL pass (Opus 5.5, 120 turns) and
+# everything else (tests, docs, viewer XAML, wwwroot) to a LIGHT pass (Sonnet 5.5, 100 turns). A FULL
 # pass on a pull request that already has a full-tier verdict runs the light tier unless the
 # `re-review` label asked for it. Same prompt, same verdict contract, one
 # review step -- the guard counts that step's conclusion and the bot's reviews, and neither
@@ -474,8 +475,8 @@ jobs:
       # the shared libraries every product compiles against, the Darling store/analysis/service
       # trees (Compose and Mcp are under Service), Lite's service, MCP and database layers, the
       # install scripts, and every .sql file wherever it sits (upgrades/, tools/, fixtures) -- and
-      # a change there gets the full tier (Opus with the 1M context window until #6782, now Sonnet
-      # with its default context window; see the tier step for the one-full-pass rule). Everything
+      # a change there gets the full tier (Opus 5.5; see the tier step for the one-full-pass
+      # rule). Everything
       # else is the LIGHT tier. Same version-tag pinning as the
       # rest of this repo's actions (build.yml uses dorny/paths-filter@v4; nothing here is
       # SHA-pinned, so neither is this).
@@ -528,13 +529,13 @@ jobs:
       # through a ${{ }} interpolation into script text -- a PR author controls file names, and an
       # interpolated name is the pull_request script-injection footgun build.yml describes.
       #
-      # Both tiers run `claude-sonnet-5-5` (Claude Code's own catalog id for the Sonnet family's
-      # current model, spelled out rather than left to the default so the ledger names it); the
-      # tiers differ in turns (120 and 100). Until #6782 the full tier ran `claude-opus-5[1m]`, the
-      # [1m] selector opting into the 1M context window. ONE FULL-TIER PASS PER PULL REQUEST: the
-      # decide job sets prior_full when the bot already posted a verdict whose ledger says
-      # tier=full, and this step then runs the light tier whatever the scope. The re-review label
-      # never sets it, so an explicit request keeps the full tier. No effort flag exists in
+      # The full tier runs `claude-opus-5-5` (120 turns) and the light tier `claude-sonnet-5-5` (100
+      # turns): Claude Code's own catalog ids for Opus 5.5 and Sonnet 5.5, spelled out rather than
+      # left to the default so the ledger names them. Both have the 1M context window natively, so
+      # no [1m] selector; until #6782 the full tier ran `claude-opus-5[1m]`. ONE FULL-TIER PASS PER
+      # PULL REQUEST: the decide job sets prior_full when the bot already posted a verdict whose
+      # ledger says tier=full, and this step then runs the light tier whatever the scope. The
+      # re-review label never sets it, so an explicit request keeps the full tier. No effort flag exists in
       # claude_args (#3710's ruling); the turn ceiling is the cost lever.
       - name: Decide the review tier
         id: tier
@@ -574,7 +575,7 @@ jobs:
             tier=light
           fi
           if [ "$tier" = full ]; then
-            model='claude-sonnet-5-5'; max_turns=120
+            model='claude-opus-5-5'; max_turns=120
           else
             model='claude-sonnet-5-5'; max_turns=100
           fi
@@ -588,7 +589,7 @@ jobs:
       # The step NAME is read by claude-review-guard.yml (REVIEW_STEP) to tell a clean no-op from a
       # run that said nothing; renaming it blinds the guard. The id is for the steps below.
       #
-      # The `|| 'full'` / `|| 'claude-sonnet-5-5'` / `|| '60'` fallbacks: if the tier step somehow
+      # The `|| 'full'` / `|| 'claude-opus-5-5'` / `|| '60'` fallbacks: if the tier step somehow
       # left an output empty, the review still runs, at the full tier -- the same fail-toward-
       # thorough direction the tier step takes -- instead of handing Claude Code `--model ""`.
       - name: Claude review
@@ -613,7 +614,7 @@ jobs:
             PR NUMBER: ${{ github.event.pull_request.number }}
             REVIEW PASS: ${{ needs.decide.outputs.pass }}
             REVIEW TIER: ${{ steps.tier.outputs.tier || 'full' }}
-            MODEL: ${{ steps.tier.outputs.model || 'claude-sonnet-5-5' }}
+            MODEL: ${{ steps.tier.outputs.model || 'claude-opus-5-5' }}
             FOLLOW-UP RANGE: ${{ needs.decide.outputs.base && format('{0}..{1}', needs.decide.outputs.base, github.event.pull_request.head.sha) || 'none (this is a full review)' }}
 
             You are reviewing a pull request in a repository whose defects recur in known shapes and
@@ -752,7 +753,7 @@ jobs:
             ### Reviewer checklist
             - [ ] <what a human should check by hand that a read-only tree could not: a live read, a build, a rig, a production page>
             <!-- review-pass: ${{ needs.decide.outputs.pass }} head=${{ github.event.pull_request.head.sha }} -->
-            <!-- review-ledger: verdict=LGTM verified=<N> unverified=<N> refuted=<N> traps=<N> tier=${{ steps.tier.outputs.tier || 'full' }} model=${{ steps.tier.outputs.model || 'claude-sonnet-5-5' }} -->
+            <!-- review-ledger: verdict=LGTM verified=<N> unverified=<N> refuted=<N> traps=<N> tier=${{ steps.tier.outputs.tier || 'full' }} model=${{ steps.tier.outputs.model || 'claude-opus-5-5' }} -->
 
             Ledger arithmetic: verified / unverified / refuted are the bullet counts under Claims
             in each state; traps is the bullet count under Traps near this diff; verdict matches
@@ -821,7 +822,7 @@ jobs:
           # configuration, which the Read rule above already keeps from the file tools. Claude Code runs
           # some read-only git commands with no allow rule, so these four need deny rules of their own.
           claude_args: |
-            --model "${{ steps.tier.outputs.model || 'claude-sonnet-5-5' }}"
+            --model "${{ steps.tier.outputs.model || 'claude-opus-5-5' }}"
             --max-turns ${{ steps.tier.outputs.max_turns || '120' }}
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff ${{ github.event.pull_request.number }}),Bash(gh pr diff ${{ github.event.pull_request.number }} --name-only),Bash(gh pr view ${{ github.event.pull_request.number }}),Bash(gh pr view ${{ github.event.pull_request.number }} --json commits),Bash(gh pr view ${{ github.event.pull_request.number }} --comments),Bash(gh pr comment ${{ github.event.pull_request.number }} --body-file -),Bash(gh pr review ${{ github.event.pull_request.number }} --comment --body-file -),Bash(gh pr review ${{ github.event.pull_request.number }} --request-changes --body-file -),Read(./**)${{ needs.decide.outputs.base && needs.decide.outputs.head && format(',Bash(git diff {0} {1}),Bash(git diff {0} {1} -- *)', needs.decide.outputs.base, needs.decide.outputs.head) || '' }}"
             --disallowedTools "Read(./.git/**),Read(//proc/**),Bash(git remote *),Bash(git config *),Bash(git ls-remote *),Bash(git var *)"
