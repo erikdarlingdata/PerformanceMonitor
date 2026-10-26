@@ -468,6 +468,32 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         Assert.Equal(Visibility.Collapsed, ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, history.NeverRan("server_config"), "server_config", rowCount: 0).Visibility);
     }
 
+    /* #6764: the two reconnect sentences the short form ends on, as the web page words them. */
+    private const string ReconnectSentences =
+        "After you fix the cause, the service must reconnect to this server before collection starts again. Restart the service, or change this server's settings.";
+
+    /* #6764: a running_jobs collector that went dark shows the short "nothing current to show" line, then the possible causes and the
+       reconnect sentences, and no closing sentence written for an MCP client. The tab shows it only over an empty grid. */
+    [Fact]
+    public void TheTab_ForARunningJobsCollectorThatWentDark_ShowsTheShortLine_OnlyOverAnEmptyGrid()
+    {
+        var serverLastCollected = DateTime.UtcNow.AddMinutes(-3);
+
+        var note = ServerTab.RunningJobsSkippedNote(ServerName, serverLastCollected.AddDays(-3), serverLastCollected, serverLastCollected.AddDays(-10));
+
+        Assert.Equal(
+            "The Running Jobs collector has not run for this server for over 24 hours, so there is nothing current to show. "
+            + CollectorRuntimePrecondition.RunningJobsPossibleCauses + " " + ReconnectSentences,
+            note);
+        Assert.DoesNotContain("runtime PRECONDITION", note, StringComparison.Ordinal);
+
+        var empty = ServerTab.EngineGapStateFromRuns(ServerName, false, "running_jobs", rowCount: 0, note, CollectorRunHistory.Empty);
+        var withRows = ServerTab.EngineGapStateFromRuns(ServerName, false, "running_jobs", rowCount: 2, note, CollectorRunHistory.Empty);
+        Assert.Equal(Visibility.Visible, empty.Visibility);
+        Assert.Equal(note, empty.Text);
+        Assert.Equal(Visibility.Collapsed, withRows.Visibility);
+    }
+
     /* When running_jobs is due on a server: its first collection, plus the collector's default interval, plus the slack. */
     private static int RunningJobsDueMinutes =>
         CollectorScheduleDefaults.All["running_jobs"].FrequencyMinutes + CollectorRuntimePrecondition.FirstRunSlackMinutes;
@@ -495,6 +521,22 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         Assert.Contains(tool.RootElement.EnumerateObject(), p => p.Value.ValueKind == JsonValueKind.String && p.Value.GetString() == tabNote);
     }
 
+    /* #6764: where the tool's answer is the long MCP form, the tab shows the short form for a reader: no closing sentence that
+       labels itself a runtime PRECONDITION and says to retry the read. The tool's answer is unchanged. */
+    private static void AssertTheToolIsTheLongFormAndTheTabTheShortOne(string? toolStatus, string? tabNote)
+    {
+        Assert.NotNull(toolStatus);
+        Assert.NotNull(tabNote);
+        using var tool = JsonDocument.Parse(toolStatus!);
+        Assert.Contains(
+            tool.RootElement.EnumerateObject(),
+            p => p.Value.ValueKind == JsonValueKind.String && p.Value.GetString()!.Contains("runtime PRECONDITION", StringComparison.Ordinal));
+        Assert.DoesNotContain("runtime PRECONDITION", tabNote, StringComparison.Ordinal);
+        Assert.DoesNotContain("Retrying this read", tabNote, StringComparison.Ordinal);
+        Assert.EndsWith(ReconnectSentences, tabNote, StringComparison.Ordinal);
+        Assert.True(tabNote!.Length < 600, $"The tab note is {tabNote.Length} characters.");
+    }
+
     [Fact]
     public async Task TheRunningJobsToolAndTheTab_SayTheSameThing_ForAServerWhoseRunningJobsNeverRan()
     {
@@ -504,8 +546,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
 
         var (tabNote, toolStatus) = await RunningJobsNotesAsync(ServerId);
 
-        AssertTheToolSays(toolStatus, tabNote);
-        Assert.Contains("has never run against", tabNote, StringComparison.Ordinal);
+        AssertTheToolIsTheLongFormAndTheTabTheShortOne(toolStatus, tabNote);
+        Assert.StartsWith("The Running Jobs collector has never run for this server, so there is nothing to show. ", tabNote, StringComparison.Ordinal);
         Assert.Contains(CollectorRuntimePrecondition.RunningJobsPossibleCauses, tabNote, StringComparison.Ordinal);
 
         /* A server that has collected nothing gets no note from either. */
@@ -534,9 +576,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
 
         var (due, dueTool) = await RunningJobsNotesAsync(ServerId);
 
-        AssertTheToolSays(dueTool, due);
-        Assert.Contains("has never run against", due, StringComparison.Ordinal);
-        Assert.Contains("usually means the collector is switched off", due, StringComparison.Ordinal);
+        AssertTheToolIsTheLongFormAndTheTabTheShortOne(dueTool, due);
+        Assert.StartsWith("The Running Jobs collector has never run for this server, so there is nothing to show. ", due, StringComparison.Ordinal);
         Assert.Contains(CollectorRuntimePrecondition.RunningJobsPossibleCauses, due, StringComparison.Ordinal);
     }
 
