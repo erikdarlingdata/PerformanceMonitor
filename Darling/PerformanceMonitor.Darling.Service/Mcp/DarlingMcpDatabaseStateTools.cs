@@ -64,17 +64,27 @@ public sealed class DarlingMcpDatabaseStateTools
             }
 
             var rows = await DatabaseStateExpectedStore.ReadAsync(postgres, resolved.ServerId, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            if (rows.Count == 0)
+            {
+                /* No snapshot exists for this server at all, so the database_name filter has nothing to say yet. A PostgreSQL target or an
+                   Azure SQL Database never writes one (not_collected, permanent); a SQL Server target that could have one has not been
+                   collected yet (unavailable). */
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.DisplayName, "database_states", cancellationToken);
+                return notCollected ?? DarlingMcpAlertTools.Outcome("unavailable",
+                    $"No database state has been collected for server '{resolved.DisplayName}' yet. The database_states collector writes it every 30 minutes on a SQL Server target, " +
+                    "so check collection health if the service has been running for longer than that.");
+            }
+
             if (!string.IsNullOrWhiteSpace(database_name))
             {
                 rows = rows.Where(r => string.Equals(r.DatabaseName, database_name, StringComparison.Ordinal)).ToList();
-            }
-
-            if (rows.Count == 0)
-            {
-                return DarlingMcpAlertTools.Outcome("empty",
-                    $"No database state is collected for server '{resolved.DisplayName}'" +
-                    (string.IsNullOrWhiteSpace(database_name) ? "." : $" for database '{database_name}'.") +
-                    " The collector may not have run yet, or the server's engine does not collect it.");
+                if (rows.Count == 0)
+                {
+                    return DarlingMcpAlertTools.Outcome("empty",
+                        $"The newest database state snapshot for server '{resolved.DisplayName}' does not list a database named '{database_name}'. " +
+                        "A database created, renamed or dropped since that snapshot is not in it.");
+                }
             }
 
             return JsonSerializer.Serialize(new
