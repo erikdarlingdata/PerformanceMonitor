@@ -417,10 +417,12 @@ public static class CollectorRuntimePrecondition
     /// classification, so the panel and the MCP tool decide from the same facts, but worded for the reader. The MCP answer is
     /// about 1200 characters and ends in a closing sentence that labels itself a runtime PRECONDITION and says to retry the read,
     /// which only an MCP client can use. The two "not being invoked" arms (never ran, gone dark) become one line saying which
-    /// data is missing, followed by <paramref name="gateCandidates"/> as written. The first-run sentence is already short and is
-    /// returned as <see cref="GatedOffMessage"/> gives it. The two wordings match the web page's
-    /// (<c>runtimePreconditionText</c> in plain-text.js), so all three human surfaces read the same. Null where
-    /// <see cref="GatedOffMessage"/> is null. <see cref="GatedOffMessage"/> itself is unchanged: it is the MCP answer.
+    /// data is missing, then <paramref name="gateCandidates"/> as written, then the two reconnect sentences that
+    /// <see cref="ConnectScopedEpilogue"/> carries in the MCP answer. The gone-dark line drops the two observed instants,
+    /// deliberately, the same as the web page. The first-run sentence is already short and is returned as
+    /// <see cref="GatedOffMessage"/> gives it. The words match the web page's (<c>runtimePreconditionText</c> in plain-text.js,
+    /// PR #6760), so all three human surfaces read the same. Null where <see cref="GatedOffMessage"/> is null.
+    /// <see cref="GatedOffMessage"/> itself is unchanged: it is the MCP answer.
     /// </summary>
     public static string? GatedOffReaderMessage(
         string serverName,
@@ -430,22 +432,29 @@ public static class CollectorRuntimePrecondition
         DateTime? serverLastCollectedUtc,
         DateTime? serverFirstCollectedUtc)
     {
+        var causes = gateCandidates.Trim();
+        var tail = (causes.Length == 0 ? "" : " " + causes) + ReconnectStep;
         switch (ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc))
         {
             case GatedOffCase.GoneDark:
                 return $"The {CollectorWords(collectorName)} collector has not run for this server for over " +
-                       $"{GoneDarkHours.ToString("0", CultureInfo.InvariantCulture)} hours, so what is shown is out of date. " +
-                       gateCandidates;
+                       $"{GoneDarkHours.ToString("0", CultureInfo.InvariantCulture)} hours, so there is nothing current to show." +
+                       tail;
 
             case GatedOffCase.NeverRan:
-                return $"The {CollectorWords(collectorName)} collector has never run for this server, so there is nothing to show. " +
-                       gateCandidates;
+                return $"The {CollectorWords(collectorName)} collector has never run for this server, so there is nothing to show." +
+                       tail;
 
             default:
                 return GatedOffMessage(
                     serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
         }
     }
+
+    /// <summary>What <see cref="ConnectScopedEpilogue"/> tells a reader to do, in the words the web page uses.</summary>
+    private const string ReconnectStep =
+        " After you fix the cause, the service must reconnect to this server before collection starts again. " +
+        "Restart the service, or change this server's settings.";
 
     /// <summary>A collector's name the way a panel says it: <c>running_jobs</c> is "Running Jobs".</summary>
     private static string CollectorWords(string collectorName) =>

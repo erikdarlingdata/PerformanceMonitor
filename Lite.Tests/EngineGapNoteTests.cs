@@ -468,20 +468,30 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         Assert.Equal(Visibility.Collapsed, ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, history.NeverRan("server_config"), "server_config", rowCount: 0).Visibility);
     }
 
-    /* #6764: a running_jobs collector that went dark shows the short "out of date" line, then the possible causes, and no closing
-       sentence written for an MCP client. */
+    /* #6764: the two reconnect sentences the short form ends on, as the web page words them. */
+    private const string ReconnectSentences =
+        "After you fix the cause, the service must reconnect to this server before collection starts again. Restart the service, or change this server's settings.";
+
+    /* #6764: a running_jobs collector that went dark shows the short "nothing current to show" line, then the possible causes and the
+       reconnect sentences, and no closing sentence written for an MCP client. The tab shows it only over an empty grid. */
     [Fact]
-    public void TheTab_ForARunningJobsCollectorThatWentDark_ShowsTheShortOutOfDateLine()
+    public void TheTab_ForARunningJobsCollectorThatWentDark_ShowsTheShortLine_OnlyOverAnEmptyGrid()
     {
         var serverLastCollected = DateTime.UtcNow.AddMinutes(-3);
 
         var note = ServerTab.RunningJobsSkippedNote(ServerName, serverLastCollected.AddDays(-3), serverLastCollected, serverLastCollected.AddDays(-10));
 
         Assert.Equal(
-            "The Running Jobs collector has not run for this server for over 24 hours, so what is shown is out of date. "
-            + CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            "The Running Jobs collector has not run for this server for over 24 hours, so there is nothing current to show. "
+            + CollectorRuntimePrecondition.RunningJobsPossibleCauses + " " + ReconnectSentences,
             note);
         Assert.DoesNotContain("runtime PRECONDITION", note, StringComparison.Ordinal);
+
+        var empty = ServerTab.EngineGapStateFromRuns(ServerName, false, "running_jobs", rowCount: 0, note, CollectorRunHistory.Empty);
+        var withRows = ServerTab.EngineGapStateFromRuns(ServerName, false, "running_jobs", rowCount: 2, note, CollectorRunHistory.Empty);
+        Assert.Equal(Visibility.Visible, empty.Visibility);
+        Assert.Equal(note, empty.Text);
+        Assert.Equal(Visibility.Collapsed, withRows.Visibility);
     }
 
     /* When running_jobs is due on a server: its first collection, plus the collector's default interval, plus the slack. */
@@ -523,6 +533,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
             p => p.Value.ValueKind == JsonValueKind.String && p.Value.GetString()!.Contains("runtime PRECONDITION", StringComparison.Ordinal));
         Assert.DoesNotContain("runtime PRECONDITION", tabNote, StringComparison.Ordinal);
         Assert.DoesNotContain("Retrying this read", tabNote, StringComparison.Ordinal);
+        Assert.EndsWith(ReconnectSentences, tabNote, StringComparison.Ordinal);
         Assert.True(tabNote!.Length < 600, $"The tab note is {tabNote.Length} characters.");
     }
 

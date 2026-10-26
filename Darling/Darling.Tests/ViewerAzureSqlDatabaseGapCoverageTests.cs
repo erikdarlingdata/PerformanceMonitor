@@ -366,7 +366,7 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         Assert.Equal(Visibility.Visible, state.Visibility);
         Assert.Equal(
             "The Running Jobs collector has never run for this server, so there is nothing to show. "
-            + CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            + CollectorRuntimePrecondition.RunningJobsPossibleCauses + " " + CollectorRuntimePreconditionTests.ReconnectSentences,
             state.Text);
         Assert.DoesNotContain("runtime PRECONDITION", state.Text, StringComparison.Ordinal);
         Assert.Contains("runtime PRECONDITION", mcp, StringComparison.Ordinal);
@@ -384,14 +384,19 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     }
 
     /// <summary>
-    /// A running_jobs collector that went dark shows the short "out of date" line (#6764), the same words the web page uses, then the
-    /// possible causes, with no closing sentence meant for an MCP client. The MCP answer for the same facts still has it.
+    /// A running_jobs collector that went dark shows the short "nothing current to show" line (#6764), the same words the web page
+    /// uses, then the possible causes and the reconnect sentences, with no closing sentence meant for an MCP client. The MCP answer
+    /// for the same facts still has it. The note shows only over an empty grid: with rows the note stays collapsed, so the words
+    /// never sit next to data.
     /// </summary>
     [Fact]
-    public void RunningJobs_GoneDark_ShowsTheShortOutOfDateLine()
+    public void RunningJobs_GoneDark_ShowsTheShortLine_OnlyOverAnEmptyGrid()
     {
         var state = ViewerServerTab.EngineGapStateFromRuns(
             ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0,
+            ServerLastCollected.AddDays(-3), ServerLastCollected, ServerLastCollected.AddDays(-10));
+        var withRows = ViewerServerTab.EngineGapStateFromRuns(
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 3,
             ServerLastCollected.AddDays(-3), ServerLastCollected, ServerLastCollected.AddDays(-10));
 
         var mcp = CollectorRuntimePrecondition.GatedOffMessage(
@@ -400,9 +405,10 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
 
         Assert.Equal(Visibility.Visible, state.Visibility);
         Assert.Equal(
-            "The Running Jobs collector has not run for this server for over 24 hours, so what is shown is out of date. "
-            + CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            "The Running Jobs collector has not run for this server for over 24 hours, so there is nothing current to show. "
+            + CollectorRuntimePrecondition.RunningJobsPossibleCauses + " " + CollectorRuntimePreconditionTests.ReconnectSentences,
             state.Text);
+        Assert.Equal(Visibility.Collapsed, withRows.Visibility);
         Assert.DoesNotContain("runtime PRECONDITION", state.Text, StringComparison.Ordinal);
         Assert.Contains("runtime PRECONDITION", mcp, StringComparison.Ordinal);
     }
@@ -812,6 +818,7 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         Assert.Equal(Visibility.Visible, due.Visibility);
         Assert.Contains("runtime PRECONDITION", McpRunningJobsAnswer(reader.ServerFirstCollected), StringComparison.Ordinal);
         Assert.StartsWith("The Running Jobs collector has never run for this server, so there is nothing to show. ", due.Text, StringComparison.Ordinal);
+        Assert.EndsWith(CollectorRuntimePreconditionTests.ReconnectSentences, due.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("runtime PRECONDITION", due.Text, StringComparison.Ordinal);
         Assert.Contains(CollectorRuntimePrecondition.RunningJobsPossibleCauses, due.Text, StringComparison.Ordinal);
     }
