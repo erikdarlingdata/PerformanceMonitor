@@ -83,8 +83,8 @@ public partial class ViewerServerTab
     /// <see cref="EngineGapState"/> from the facts the viewer reads from <c>collection_log</c>: when the collector last ran
     /// for this server, and when the server last and first collected anything. All null mean no read was made or the read
     /// failed.
-    /// <para>running_jobs asks <see cref="CollectorRuntimePrecondition.GatedOffMessage"/>, so its note is the sentence the MCP
-    /// service gives for the same facts, first-run grace included. Every other collector shows a note only when it has no row
+    /// <para>running_jobs asks <see cref="CollectorRuntimePrecondition.GatedOffReaderMessage"/>, so its note is the MCP service's
+    /// answer for the same facts worded for a reader (#6764), first-run grace included. Every other collector shows a note only when it has no row
     /// at all and the server has one: inside the collector's first-run grace the shared not-yet sentence
     /// (<see cref="CollectorRuntimePrecondition.NotYetRunMessage"/>), and after it <see cref="NeverRanNote"/>. A row of any age
     /// means the collector ran, so a collector that runs once at load never reads as switched off. The first collection has no
@@ -98,7 +98,7 @@ public partial class ViewerServerTab
 
         if (SwitchedOffReasonsFor(collectorName) is { } reasons)
         {
-            note = CollectorRuntimePrecondition.GatedOffMessage(
+            note = CollectorRuntimePrecondition.GatedOffReaderMessage(
                 serverName, collectorName, reasons, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
         }
         else if (collectorLastRunUtc is null && serverLastCollectedUtc is not null)

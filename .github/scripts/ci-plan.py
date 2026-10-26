@@ -7,9 +7,12 @@ changed file list. Outputs, as `key=value` lines (stdout, and $GITHUB_OUTPUT whe
   run              true when the run does any work; false for a draft or a merge-train PR
   outcome          run | skip-draft | train-blocked  (train-blocked: the verdict job must fail, see below)
   why              one plain sentence for the job log
-  areas            docs-only | darling | lite | all | none
-  darling_scope    full | reads-lite | none   (reads-lite: the Stage=Guard classes plus the classes that read a Lite file)
-  lite_scope       full | reads | none        (reads: the Lite classes that read a Darling file)
+  areas            docs-only | darling | lite | all | none | classes
+  darling_scope    full | reads-lite | classes | none   (reads-lite: the Stage=Guard classes plus the classes that read a Lite file)
+  lite_scope       full | reads | classes | none        (reads: the Lite classes that read a Darling file)
+                   classes: only the test classes the pull request changed (#6734), named in darling_classes and lite_classes
+  darling_classes  comma list of simple class names, set when darling_scope is classes
+  lite_classes     comma list of simple class names, set when lite_scope is classes
   build            true when the shared test build is needed (any run that is not docs-only)
   test_minutes     estimated test time of the selected classes, in minutes
   legs             a pull request: N = ceil(test_minutes / MINUTES_PER_LEG), at most MAX_LEGS; a dev push: the same, at least DEV_PUSH_MIN_LEGS and at most DEV_PUSH_MAX_LEGS;
@@ -32,6 +35,9 @@ Rules, in order:
   5. Areas: base other than dev, a push, a path no area knows, an empty list, or a list the API may have cut: all.
      Only documentation: docs-only. Otherwise Darling files give the Darling suite, Lite files the Lite suite, and
      each side keeps its cross-reading classes of the other.
+  6. Areas classes (#6734): every changed file is documentation or a .cs file under Darling/Darling.Tests or Lite.Tests
+     whose every class holds tests and is no base class. Only those classes run. Any other file (a product file, a
+     helper, a fixture, a .csproj, a lock file), a file the test map does not know, or a missing map: rule 5.
 
 Standard library only. Run: python -I .github/scripts/ci-plan.py --event pull_request --base dev --files-file FILE
 """
@@ -42,6 +48,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -73,6 +80,8 @@ LITE_FULL_FALLBACK_MINUTES = 28.0
 LITE_READS_FALLBACK_MINUTES = 3.0
 
 WEB_JS_MARKER = "/wwwroot/js/"
+# The test trees a changed class file may sit in for the changed-classes plan (#6734).
+TEST_TREES = {"darling": "Darling/Darling.Tests/", "lite": "Lite.Tests/"}
 
 
 def _load_ci_select():
@@ -118,7 +127,27 @@ def unknown_paths(rules, files: "list[str]") -> "list[str]":
     return [f for f in files if f not in docs and f not in known]
 
 
-def classify(rules, event: str, base: str, files: "list[str]") -> dict:
+def changed_test_classes(rules, files: "list[str]", catalog: "dict | None") -> "dict[str, list[str]] | None":
+    """{suite: [class names]} when every file is documentation or a test-class file, else None (#6734).
+    A test-class file is a .cs file the catalog's file table knows, that declares a class holding a test, with no base class
+    in it and no helper class that another test file uses. Only the classes that hold a test are picked: a helper or fake of
+    the same file runs no test, so the test host's class listing may not name it, and the class beside it is what changes.
+    A file the table does not know (a helper, a fixture, a .csproj, a lock file, a deleted or new file, a missing table)
+    gives None, and so does a product file."""
+    table = (catalog or {}).get("files") or {}
+    docs = set(rules._hits(rules.build["docs"], files))
+    picks: "dict[str, list[str]]" = {"darling": [], "lite": []}
+    for f in files:
+        if f in docs:
+            continue
+        row = table.get(f) if f.endswith(".cs") else None
+        if not row or row["suite"] not in picks or not f.startswith(TEST_TREES[row["suite"]]) or not row["safe"]:
+            return None
+        picks[row["suite"]] += [c for c in row["tests"] if c not in picks[row["suite"]]]
+    return picks if any(picks.values()) else None
+
+
+def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | None" = None) -> dict:
     """The areas of one change: {areas, darling_scope, lite_scope, why}."""
     everything = {"areas": "all", "darling_scope": "full", "lite_scope": "full"}
     if event != "pull_request":
@@ -140,6 +169,13 @@ def classify(rules, event: str, base: str, files: "list[str]") -> dict:
                 "reason": "only documentation changed."}
 
     cs = _CS
+    if any(f.endswith(".cs") and f.startswith(tuple(TEST_TREES.values())) for f in files):
+        picks = changed_test_classes(rules, files, catalog if catalog is not None else load_catalog())
+        if picks:
+            return {"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
+                    "lite_scope": "classes" if picks["lite"] else "none",
+                    "darling_classes": picks["darling"], "lite_classes": picks["lite"],
+                    "reason": "only documentation and test classes changed, so only those classes run."}
     darling_full = a["gate_darling"] or a["darling_full"] or a["core"] or a["root"]
     lite_mode = cs.lite_scope("pull_request", a["lite_shard"], a["core_shard"], a["root_shard"],
                               a["darling_reads_shard"], a["lite_linked_shard"])
@@ -177,14 +213,53 @@ def load_weights(path: str) -> "dict[str, float]":
 
 def load_catalog(root: str = ROOT) -> dict:
     """The test classes of the tree with their traits, and the weight tables."""
-    return {"classes": _CS.scan_classes(root), "darling_weights": load_weights(DARLING_WEIGHTS),
+    classes = _CS.scan_classes(root)
+    return {"classes": classes, "files": _file_table(root, classes), "darling_weights": load_weights(DARLING_WEIGHTS),
             "lite_weights": load_weights(LITE_WEIGHTS)}
 
 
-def _selected(classes: "dict[str, set[str]]", scope: str, reads_trait: str) -> "list[str]":
+def _file_table(root: str, classes: "dict[str, dict[str, set[str]]]") -> "dict[str, dict]":
+    """{repo-relative .cs file: {suite, classes, tests, safe}} for the darling and lite test trees (#6734). classes: every
+    class the file declares. tests: those that hold a test (the only ones the plan names). safe: the file
+    declares at least one class that holds a test, none of its classes is the base class of another class (a derived
+    class would run its tests), and every class of it that holds no test (a helper, a fake) is named in no other test
+    file, so no other class can break when this file changes. A class with the same name in two files is unsafe."""
+    rows = [r for r in _CS._walk_classes(root) if r[0] in TEST_TREES]
+    bases = {x[len(_CS._BASE_MARK):] for _s, _f, _n, t in rows for x in t if x.startswith(_CS._BASE_MARK)}
+    owners: "dict[str, set[str]]" = {}
+    for _s, rel, name, _t in rows:
+        owners.setdefault(name, set()).add(rel)
+    table: "dict[str, dict]" = {}
+    helpers: "dict[str, list[str]]" = {}
+    for suite, rel, name, _traits in rows:
+        ent = table.setdefault(rel, {"suite": suite, "classes": [], "tests": [], "safe": True})
+        ent["classes"].append(name)
+        holds = _CS.NO_TESTS_TRAIT not in classes[suite].get(name, {_CS.NO_TESTS_TRAIT})
+        if holds:
+            ent["tests"].append(name)
+        if name in bases or len(owners[name]) > 1:
+            ent["safe"] = False
+        elif not holds:
+            helpers.setdefault(name, []).append(rel)
+    for rel, ent in table.items():
+        if not ent["tests"]:
+            ent["safe"] = False
+    if helpers:
+        for rel in table:
+            used = set(re.findall(r"\w+", _CS.read_source(os.path.join(root, rel), "replace"))) & helpers.keys()
+            for name in used:
+                for home in helpers[name]:
+                    if home != rel:
+                        table[home]["safe"] = False
+    return table
+
+
+def _selected(classes: "dict[str, set[str]]", scope: str, reads_trait: str, picks: "list[str] | None" = None) -> "list[str]":
     runs = [c for c, t in classes.items() if _CS.NO_TESTS_TRAIT not in t]
     if scope == "full":
         return runs
+    if scope == "classes":
+        return [c for c in runs if c in (picks or ())]
     if scope == "reads-lite":
         return [c for c in runs if "Stage=Guard" in classes[c] or reads_trait in classes[c]]
     if scope == "reads":
@@ -201,10 +276,11 @@ def suite_minutes(names: "list[str]", weights: "dict[str, float]", fallback: flo
     return sum(weights.get(n, mean) for n in names) / 60.0
 
 
-def estimate(catalog: dict, darling_scope: str, lite_scope: str) -> "tuple[float, float]":
+def estimate(catalog: dict, darling_scope: str, lite_scope: str, picks: "dict | None" = None) -> "tuple[float, float]":
     """(Darling minutes, Lite minutes) of the selected classes."""
-    d = _selected(catalog["classes"]["darling"], darling_scope, "Reads=Lite")
-    lt = _selected(catalog["classes"]["lite"], lite_scope, "Reads=Darling")
+    picks = picks or {}
+    d = _selected(catalog["classes"]["darling"], darling_scope, "Reads=Lite", picks.get("darling"))
+    lt = _selected(catalog["classes"]["lite"], lite_scope, "Reads=Darling", picks.get("lite"))
     fallback = LITE_FULL_FALLBACK_MINUTES if lite_scope == "full" else LITE_READS_FALLBACK_MINUTES
     return (suite_minutes(d, catalog["darling_weights"], 0.0),
             suite_minutes(lt, catalog["lite_weights"], fallback))
@@ -225,12 +301,14 @@ def plan(event: str, base: str, head_ref: str, draft: bool, labels: "list[str]",
     outcome, why = gate(event, head_ref, draft, labels)
     out = {"run": "true" if outcome == "run" else "false", "outcome": outcome, "why": why,
            "areas": "none", "darling_scope": "none", "lite_scope": "none", "build": "false",
-           "test_minutes": "0", "legs": "0", "legs_json": "[]",
+           "darling_classes": "", "lite_classes": "", "test_minutes": "0", "legs": "0", "legs_json": "[]",
            "actionlint": "false", "check_web_js": "false", "deprecated_tests": "false"}
     if outcome != "run":
         return out
 
-    c = classify(rules, event, base, files)
+    catalog = catalog if catalog is not None else (load_catalog() if _may_narrow(files) else None)
+    c = classify(rules, event, base, files, catalog)
+    out.update(darling_classes=",".join(c.get("darling_classes", [])), lite_classes=",".join(c.get("lite_classes", [])))
     out.update(areas=c["areas"], darling_scope=c["darling_scope"], lite_scope=c["lite_scope"])
     out["why"] = f"{why} {c['reason']}"
     out["build"] = "false" if c["areas"] == "docs-only" else "true"
@@ -239,13 +317,24 @@ def plan(event: str, base: str, head_ref: str, draft: bool, labels: "list[str]",
     out["deprecated_tests"] = _bool(any(f.startswith("deprecated/") for f in files))
 
     if out["build"] == "true":
-        d_min, l_min = estimate(catalog if catalog is not None else load_catalog(), c["darling_scope"], c["lite_scope"])
+        catalog = catalog if catalog is not None else load_catalog()
+        picks = {"darling": c.get("darling_classes", []), "lite": c.get("lite_classes", [])}
+        d_min, l_min = estimate(catalog, c["darling_scope"], c["lite_scope"], picks)
         total = d_min + l_min
         n = leg_count(total, event)
+        if c["areas"] == "classes":
+            # Never more legs than classes, so no leg is empty on the duration cut. The hash cut (a class the weight table does not
+            # know) can still leave one empty: the runners let such a leg pass under -Areas classes, and the other legs run every class.
+            sizes = [len(_selected(catalog["classes"][s], c[f"{s}_scope"], "", picks[s])) for s in ("darling", "lite") if picks[s]]
+            n = max(1, min([n] + sizes))
         out["test_minutes"] = f"{total:.1f}"
         out["legs"] = str(n)
         out["legs_json"] = json.dumps(list(range(1, n + 1)), separators=(",", ":"))
     return out
+
+
+def _may_narrow(files: "list[str]") -> bool:
+    return any(f.endswith(".cs") and f.startswith(tuple(TEST_TREES.values())) for f in files)
 
 
 def _bool(v: bool) -> str:

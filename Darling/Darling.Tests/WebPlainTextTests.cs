@@ -12,6 +12,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
@@ -63,6 +64,29 @@ public sealed class WebPlainTextTests
             notCollectedLine = doc.RootElement.GetProperty("line").GetString()!;
             string[] Strs(string name) => doc.RootElement.GetProperty(name).EnumerateArray().Select(e => e.GetString()!).ToArray();
             return (Strs("out"), Strs("named"), Strs("tools"), Strs("labels"), Strs("actions"), Strs("counts"));
+        }
+    }
+
+    /* #6764: the page and the two desktop apps say the same words for a collector that never ran or has gone dark. The page's copy
+       is runtimePreconditionText in plain-text.js, run here under Node on the real MCP answers; the desktop copy is
+       CollectorRuntimePrecondition.GatedOffReaderMessage. A word changed in either one fails this. */
+    [Fact]
+    public void ThePagesRuntimePreconditionText_IsTheDesktopReaderMessage_ForNeverRanAndGoneDark()
+    {
+        var serverLastCollected = DateTime.UtcNow.AddMinutes(-3);
+        var causes = CollectorRuntimePrecondition.RunningJobsPossibleCauses;
+        DateTime?[] collectorLastRuns = [null, serverLastCollected.AddDays(-20)];
+
+        foreach (var last in collectorLastRuns)
+        {
+            var mcp = CollectorRuntimePrecondition.GatedOffMessage("srv", "running_jobs", causes, last, serverLastCollected, null)!;
+            var reader = CollectorRuntimePrecondition.GatedOffReaderMessage("srv", "running_jobs", causes, last, serverLastCollected, null)!;
+
+            var page = Run([mcp], out _)[0];
+
+            Assert.Equal(reader, page);
+            Assert.DoesNotContain("runtime PRECONDITION", page, StringComparison.Ordinal);
+            Assert.EndsWith("Restart the service, or change this server's settings.", page, StringComparison.Ordinal);
         }
     }
 

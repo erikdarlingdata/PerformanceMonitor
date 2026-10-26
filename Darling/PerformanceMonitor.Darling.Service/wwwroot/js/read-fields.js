@@ -508,7 +508,7 @@ export const READ_FIELDS = {
       tools: false,
       emptyText: "No server summary is available.",
       columns: [
-        { key: "cpu_percent", label: "CPU", format: "pct" },
+        { key: "cpu_percent", label: "SQL CPU", format: "pct" },
         { key: "memory_mb", label: "Memory", format: "mb" },
         { key: "blocking_count", label: "Blocking (recent)", format: "int" },
         { key: "deadlock_count", label: "Deadlocks (recent)", format: "int" },
@@ -518,7 +518,7 @@ export const READ_FIELDS = {
     stat: {
       emptyText: "No server summary is available.",
       stats: [
-        { key: "cpu_percent", label: "CPU", format: "pct" },
+        { key: "cpu_percent", label: "SQL CPU", format: "pct" },
         { key: "memory_mb", label: "Memory", format: "mb" },
         { key: "blocking_count", label: "Blocking (recent)", format: "int" },
         { key: "deadlock_count", label: "Deadlocks (recent)", format: "int" },

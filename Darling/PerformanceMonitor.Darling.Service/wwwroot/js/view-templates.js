@@ -54,13 +54,7 @@ export const DASHBOARD_TEMPLATES = [
             params: { server },
             viz: "stat",
             span: 2,
-            stats: [
-              { key: "cpu_percent", label: "CPU", format: "pct" },
-              { key: "memory_mb", label: "Memory", format: "mb" },
-              { key: "blocking_count", label: "Blocking (recent)", format: "int" },
-              { key: "deadlock_count", label: "Deadlocks (recent)", format: "int" },
-              { key: "last_collection", label: "Last collection", format: "reltime", small: true },
-            ],
+            ...READ_FIELDS.get_server_summary.stat,
           },
           {
             title: "CPU Utilization",
