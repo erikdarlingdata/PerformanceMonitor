@@ -1918,7 +1918,7 @@ public sealed class WebConfig
     /// authentication, where this service presents its own computer account to the host the form names. Off, the web add and edit refuse a
     /// Windows-authentication server that also sets <c>trust_server_certificate</c> or an <c>encrypt_mode</c> other than Mandatory or
     /// Strict, because the service could not confirm which server it reached; an edit is judged only when it changes the host, the port,
-    /// the auth type, <c>trust_server_certificate</c> or <c>encrypt_mode</c>, on the server as it would be saved. On, the web accepts
+    /// the auth type, <c>trust_server_certificate</c>, <c>encrypt_mode</c> or the Query Store replica, on the server as it would be saved. On, the web accepts
     /// them. SQL authentication and the Entra modes are not affected. The same rule as <see cref="McpConfig.AllowWindowsAuthOverUnverifiedTls"/>
     /// for MCP; the <c>--add-server</c> command is the operator's own and is not gated. File-only and restart-only.
     /// </summary>

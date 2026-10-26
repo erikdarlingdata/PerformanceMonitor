@@ -388,10 +388,11 @@ LIMIT 1";
         }
 
         /* The web route's one rule (web.allowWindowsAuthOverUnverifiedTls), on the server as it would be saved. It runs only when the edit
-           changes what the Windows sign-in is judged on: the host, the port, the auth type, trust_server_certificate or encrypt_mode.
+           changes what the Windows sign-in is judged on: the host, the port, the auth type, trust_server_certificate, encrypt_mode or the
+           Query Store replica (the replica is reached with the primary's Windows sign-in and certificate settings).
            An edit of anything else (display name, thresholds, tags, enabled) is never refused, even on a server that already has the
            combination. It runs before any further store read or probe. */
-        if (webScreen is not null && plan.ChangedFields.Exists(f => f is "host" or "port" or "auth" or "trust_server_certificate" or "encrypt_mode")
+        if (webScreen is not null && (plan.ReplicaChanged || plan.ChangedFields.Exists(f => f is "host" or "port" or "auth" or "trust_server_certificate" or "encrypt_mode"))
             && webScreen.Refusal(plan.ProbeConfig) is { } webRefusal)
         {
             return Outcome(EditStatus.Invalid, RedactEditSecret(webRefusal.Replace("Not added:", "Not saved:", StringComparison.Ordinal), plan.PlaintextSecret, plan.PlaintextExternalId));

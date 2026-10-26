@@ -338,6 +338,41 @@ public sealed class WebServerWindowsAuthScreenTests
         Assert.Equal(1, web.Probes);
     }
 
+    [Fact]
+    public async Task Edit_ChangingOnlyTheQueryStoreReplica_OfAnUnverifiedWindowsServer_IsRefused()
+    {
+        /* The replica is reached with the primary's Windows sign-in and certificate settings, so changing it is judged like a change of host. */
+        var store = new CountingEditStore(Row("integrated", trust: true));
+        await using var web = await StartAsync(allow: false, editStore: store);
+
+        var (status, body) = await PatchAsync(web, "{\"query_store_replica\":\"replica-a.example.test\"}");
+
+        Assert.Equal("invalid", body["status"]!.GetValue<string>());
+        Assert.Equal(400, status);
+        var message = body.ToJsonString();
+        Assert.Contains("Not saved:", message, StringComparison.Ordinal);
+        Assert.Contains(WebKey, message, StringComparison.Ordinal);
+        Assert.Equal(0, store.Writes);
+        Assert.Equal(0, web.Probes);
+    }
+
+    [Fact]
+    public async Task Edit_ChangingOnlyTheQueryStoreReplica_OfAnUnverifiedWindowsServer_IsAllowed_WhenTheSettingIsOn()
+    {
+        var store = new CountingEditStore(Row("integrated", trust: true));
+        await using var web = await StartAsync(allow: true, editStore: store);
+
+        var (_, body) = await PatchAsync(web, "{\"query_store_replica\":\"replica-a.example.test\"}");
+
+        Assert.Equal("updated", body["status"]!.GetValue<string>());
+        Assert.Equal(1, store.Writes);
+        Assert.Equal(1, web.Probes);
+    }
+
+    /* The edit route's own default wiring (EditServerByIdAsync with the screen) has no test here: that core reads the row from a
+       PostgreSQL store before anything else, and the route offers no seam for a stub store behind its default edit; the tests above
+       hand the route their own closure. The add route's default wiring is tested above with the setting off. */
+
     /* ---------------- MCP keeps its own key ---------------- */
 
     [Fact]
