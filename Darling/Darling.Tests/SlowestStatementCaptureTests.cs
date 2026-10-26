@@ -73,7 +73,33 @@ public sealed class SlowestStatementCaptureTests
     }
 
     [Fact]
-    public void AStatementFasterThanEveryKeptOne_IsCountedAndNotKept_AndATieKeepsTheEarlierOne()
+    public void AStatementFasterThanEveryKeptOne_IsCountedAndNotKept()
+    {
+        using var opened = ReadScope.Open(null);
+        var scope = opened.Scope;
+        for (var i = 1; i <= ReadScope.MaxStatements; i++)
+        {
+            scope.AddStatement("SELECT kept_" + i, 10, null);
+        }
+
+        for (var i = 1; i <= 100; i++)
+        {
+            scope.AddStatement("SELECT faster_" + i, 5, null);
+        }
+
+        var kept = scope.Snapshot();
+        Assert.Equal(ReadScope.MaxStatements + 100, scope.StatementTotal);
+        Assert.Equal(100, scope.StatementsDropped);
+        Assert.Equal(Enumerable.Range(1, ReadScope.MaxStatements), kept.Select(t => t.Ordinal));
+        Assert.DoesNotContain(kept, t => t.Label.StartsWith("SELECT faster_", StringComparison.Ordinal));
+
+        /* The dropped ones did not disturb the set: a slower statement still evicts the latest of the tied ones. */
+        scope.AddStatement("SELECT slower", 11, null);
+        Assert.Equal(Enumerable.Range(1, ReadScope.MaxStatements - 1).Append(ReadScope.MaxStatements + 101), scope.Snapshot().Select(t => t.Ordinal));
+    }
+
+    [Fact]
+    public void ATieWithTheFastestKeptOne_KeepsTheEarlierStatement()
     {
         using var opened = ReadScope.Open(null);
         var scope = opened.Scope;
@@ -85,6 +111,24 @@ public sealed class SlowestStatementCaptureTests
         var kept = scope.Snapshot();
         Assert.Equal(200, scope.StatementTotal);
         Assert.Equal(Enumerable.Range(1, ReadScope.MaxStatements), kept.Select(t => t.Ordinal));
+    }
+
+    [Fact]
+    public void ASlowerStatement_EvictsTheLatestOfTheTiedFastestOnes_NotTheEarliest()
+    {
+        using var opened = ReadScope.Open(null);
+        var scope = opened.Scope;
+        for (var i = 1; i <= ReadScope.MaxStatements; i++)
+        {
+            scope.AddStatement("SELECT tied_" + i, 10, null);
+        }
+
+        scope.AddStatement("SELECT slower", 11, null);
+
+        /* Fifty at 10 ms, then one at 11 ms: the one that goes is the 50th, so the earlier tied statements stay. */
+        var kept = scope.Snapshot();
+        Assert.Equal(Enumerable.Range(1, ReadScope.MaxStatements - 1).Append(ReadScope.MaxStatements + 1), kept.Select(t => t.Ordinal));
+        Assert.Equal(ReadScope.MaxStatements + 1, scope.StatementTotal);
     }
 
     [Fact]
@@ -114,7 +158,7 @@ public sealed class SlowestStatementCaptureTests
 
     private const string AbortedRoute = "__test_aborted_slow_read";
 
-    private static async Task<TestServer> BuildServer(SlowReadLog slowReads)
+    private static async Task<TestServer> BuildServer(SlowReadLog slowReads, ReadLatencyAccumulator accumulator)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -135,7 +179,7 @@ public sealed class SlowestStatementCaptureTests
             new CollectorRuntimeState(),
             new WebTlsCertificateState(),
             baselineCache: null,
-            readLatency: new ReadLatencyAccumulator(),
+            readLatency: accumulator,
             slowReads: slowReads);
 
         host.ConfigurePipeline(
@@ -154,7 +198,7 @@ public sealed class SlowestStatementCaptureTests
     /// <summary>One web read that runs <paramref name="runMs"/>, runs one statement, and is then abandoned by the browser. The
     /// read ends either with the cancellation the token raises or, as a store connect that gives up can, with another
     /// exception while the token is already cancelled.</summary>
-    private static async Task<SlowReadRecord?> RunAbortedRead(int thresholdMs, int runMs, bool endsWithOtherException)
+    private static async Task<SlowReadRecord?> RunAbortedRead(int thresholdMs, int runMs, bool endsWithOtherException, ReadLatencyAccumulator accumulator)
     {
         var slowReads = new SlowReadLog(thresholdMs);
         using var aborted = new CancellationTokenSource();
@@ -172,7 +216,7 @@ public sealed class SlowestStatementCaptureTests
             return string.Empty;
         }));
 
-        var server = await BuildServer(slowReads);
+        var server = await BuildServer(slowReads, accumulator);
         await server.SendAsync(ctx =>
         {
             ctx.Request.Method = "GET";
@@ -191,7 +235,8 @@ public sealed class SlowestStatementCaptureTests
     [InlineData(true)]
     public async Task AWebReadTheBrowserCancelledAfterTheThreshold_IsCaptured_AsCancelled_WithRouteTimeAndStatements(bool endsWithOtherException)
     {
-        var record = await RunAbortedRead(thresholdMs: 150, runMs: 250, endsWithOtherException);
+        var accumulator = new ReadLatencyAccumulator();
+        var record = await RunAbortedRead(thresholdMs: 150, runMs: 250, endsWithOtherException, accumulator);
 
         Assert.NotNull(record);
         Assert.Equal("web", record!.Surface);
@@ -201,6 +246,10 @@ public sealed class SlowestStatementCaptureTests
         Assert.Equal(1, record.StatementCount);
         Assert.Contains("slow_thing", record.StatementsJson, StringComparison.Ordinal);
         Assert.Contains("hours", record.ArgumentsJson, StringComparison.Ordinal);
+
+        /* The same read is one cancelled read_latency sample, so get_read_latency and get_slow_reads agree about it. */
+        var sample = Assert.Single(accumulator.Drain(), d => d.Surface == ReadSurface.Web && d.Route == AbortedRoute && d.Outcome == ReadOutcome.Cancelled);
+        Assert.Equal(1, sample.Count);
     }
 
     [Theory]
@@ -208,8 +257,13 @@ public sealed class SlowestStatementCaptureTests
     [InlineData(true)]
     public async Task AWebReadTheBrowserCancelledUnderTheThreshold_IsNotCaptured(bool endsWithOtherException)
     {
-        var record = await RunAbortedRead(thresholdMs: 600_000, runMs: 250, endsWithOtherException);
+        var accumulator = new ReadLatencyAccumulator();
+        var record = await RunAbortedRead(thresholdMs: 600_000, runMs: 250, endsWithOtherException, accumulator);
 
         Assert.Null(record);
+
+        /* Under the threshold the slow-read log declines it, but the cancelled read still counts as one sample. */
+        var sample = Assert.Single(accumulator.Drain(), d => d.Surface == ReadSurface.Web && d.Route == AbortedRoute && d.Outcome == ReadOutcome.Cancelled);
+        Assert.Equal(1, sample.Count);
     }
 }

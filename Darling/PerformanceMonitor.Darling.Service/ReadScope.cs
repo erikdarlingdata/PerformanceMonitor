@@ -307,8 +307,11 @@ internal sealed class ReadScope
     /// <summary>
     /// Adds one statement timing (#6795). The scope keeps the slowest <see cref="MaxStatements"/> by time, each with its arrival
     /// ordinal, and counts the rest: a read that opens with many small statements keeps the big ones that come later. This runs
-    /// for every statement of every read, so a statement too fast to stay is counted under one short lock and its text is
-    /// never labelled or hashed. A tie keeps the earlier statement.
+    /// for every statement of every read, so a statement too fast to stay is counted and dropped under one short lock and its
+    /// text is never labelled or hashed. A statement that stays takes the lock twice: once to take its ordinal and see whether
+    /// it beats the fastest kept one, and once, after its text is labelled and hashed outside the lock, to join the kept set,
+    /// where the bound is enforced again because other statements may have arrived between the two. A tie keeps the earlier
+    /// statement.
     /// </summary>
     internal void AddStatement(string? sql, double durationMs, long? rows)
     {
