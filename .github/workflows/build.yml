@@ -1334,7 +1334,7 @@ jobs:
 
       # This run's own artifact (no run-id), so it reads nothing another run left behind.
       - name: Download the linux artifact
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: darling-linux-release
           path: releases
