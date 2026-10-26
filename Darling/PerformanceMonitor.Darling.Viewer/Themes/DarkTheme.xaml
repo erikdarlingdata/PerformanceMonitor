@@ -388,6 +388,7 @@
 
     <!-- Column Filter Button Style - small button with filter icon -->
     <Style x:Key="ColumnFilterButtonStyle" TargetType="Button">
+        <Setter Property="AutomationProperties.Name" Value="Filter this column"/>
         <Setter Property="Width" Value="18"/>
         <Setter Property="Height" Value="18"/>
         <Setter Property="Background" Value="Transparent"/>
