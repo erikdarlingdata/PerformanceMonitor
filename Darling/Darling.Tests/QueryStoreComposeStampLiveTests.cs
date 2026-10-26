@@ -61,7 +61,7 @@ public sealed class QueryStoreComposeStampLiveTests
         return Convert.ToString(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture) ?? string.Empty;
     }
 
-    private static DateTime ThisHour() => new(DateTime.UtcNow.Year, DateTime.UtcNow.Month, DateTime.UtcNow.Day, DateTime.UtcNow.Hour, 0, 0, DateTimeKind.Unspecified);
+    private static DateTime ThisHour() => ComposeStampLiveSupport.ThisHour();
 
     private static async Task<NpgsqlConnection> MigratedAsync(ScratchPostgres scratch, CancellationToken ct)
     {
@@ -71,10 +71,8 @@ public sealed class QueryStoreComposeStampLiveTests
         return connection;
     }
 
-    private static async Task EnrollAsync(NpgsqlConnection connection, int serverId, CancellationToken ct) =>
-        await ExecAsync(connection,
-            $"INSERT INTO collect.servers (server_id, server_name, is_enabled) VALUES ({serverId}, 'srv{serverId}', TRUE) ON CONFLICT (server_id) DO NOTHING;"
-            + $"INSERT INTO collect.query_store_interval_wide_coverage (server_id, filled_since, applied_through) VALUES ({serverId}, date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '30 hours', now() AT TIME ZONE 'UTC')", ct);
+    private static Task EnrollAsync(NpgsqlConnection connection, int serverId, DateTime hourNow, CancellationToken ct) =>
+        ComposeStampLiveSupport.EnrollAsync(connection, serverId, hourNow, ct);
 
     /// <summary>
     /// 30 hours of rows ending at <paramref name="hourNow"/>: 3 servers x 12 stamps an hour x 6 query hashes x 3 plans each. Hash 5 has a
@@ -105,12 +103,12 @@ CROSS JOIN generate_series(1, 3) AS p
 CROSS JOIN LATERAL (SELECT TIMESTAMP '{At(hourNow)}' - interval '30 hours' + h * interval '1 hour' + m * interval '5 minutes' AS ct) AS t", ct);
 
     /// <summary>Builds every hour that is due, tick by tick, and returns how many hours were built.</summary>
-    private static async Task<int> BuildAllAsync(NpgsqlDataSource source, CancellationToken ct)
+    private static async Task<int> BuildAllAsync(NpgsqlDataSource source, CancellationToken ct, DateTime? nowUtc = null)
     {
         var total = 0;
         for (var guard = 0; guard < 20; guard++)
         {
-            var result = await QueryStoreComposeStamp.RunTickAsync(source, DateTime.UtcNow, RetentionDays, NullLogger.Instance, ct);
+            var result = await QueryStoreComposeStamp.RunTickAsync(source, nowUtc ?? DateTime.UtcNow, RetentionDays, NullLogger.Instance, ct);
             Assert.Equal(0, result.Failed);
             if (result.Built == 0)
             {
@@ -177,16 +175,16 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
     {
         var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
         var connection = await MigratedAsync(scratch, ct);
+        var hourNow = ThisHour();
         for (var s = 1; s <= servers; s++)
         {
-            await EnrollAsync(connection, s, ct);
+            await EnrollAsync(connection, s, hourNow, ct);
         }
 
-        var hourNow = ThisHour();
         await SeedAsync(connection, hourNow, ct);
         await ComposeStampLiveSupport.SeedPrecisionRowsAsync(connection, hourNow, ComposeStampLiveSupport.PrecisionSpot.Built, ct);
         var source = NpgsqlDataSource.Create(scratch.ConnectionString);
-        Assert.Equal(28, await BuildAllAsync(source, ct));
+        Assert.Equal(28, await BuildAllAsync(source, ct, ComposeStampLiveSupport.ClockWithin(hourNow)));
         await ComposeStampLiveSupport.AssertPrecisionRowsHaveTeethAsync(connection, ct);
         return (scratch, connection, source, hourNow);
     }
@@ -461,8 +459,9 @@ SELECT md5(
             Assert.Equal(2, await CountAsync(connection, string.Format(CultureInfo.InvariantCulture, TriggersOf, "collect.qsiw_attached"), ct));
 
             /* A late row written through the parent into a day leaf marks, and so does one aimed at a leaf directly. */
-            var oldHour = ThisHour().AddHours(-6);
-            await EnrollAsync(connection, 1, ct);
+            var hourNow = ThisHour();
+            var oldHour = hourNow.AddHours(-6);
+            await EnrollAsync(connection, 1, hourNow, ct);
             await InsertRowAsync(connection, 1, oldHour.AddMinutes(10), 9_100_001, ct);
             Assert.Equal(1, await CountAsync(connection, $"SELECT count(*) FROM collect.query_store_compose_stamp_built WHERE server_id = 1 AND hour = TIMESTAMP '{At(oldHour)}' AND late_seq = 1", ct));
             bodySucceeded = true;

@@ -37,7 +37,12 @@ internal static class ComposeStampLiveSupport
 
     internal static string At(DateTime value) => value.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture);
 
-    internal static DateTime ThisHour() => new(DateTime.UtcNow.Year, DateTime.UtcNow.Month, DateTime.UtcNow.Day, DateTime.UtcNow.Hour, 0, 0, DateTimeKind.Unspecified);
+    /* One clock read: four separate DateTime.UtcNow reads can stitch a day from before midnight to an hour from after it (#6769). */
+    internal static DateTime ThisHour()
+    {
+        var now = DateTime.UtcNow;
+        return new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
+    }
 
     internal static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
@@ -57,10 +62,11 @@ internal static class ComposeStampLiveSupport
         return Convert.ToString(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture) ?? string.Empty;
     }
 
-    internal static async Task EnrollAsync(NpgsqlConnection connection, int serverId, CancellationToken ct) =>
+    /// <summary>Enrolls a server with a coverage claim written from <paramref name="hourNow"/>, the same hour the seed and the builder's clock use, so an arrange step that crosses the top of the hour cannot start the claim an hour before the seed (#6769).</summary>
+    internal static async Task EnrollAsync(NpgsqlConnection connection, int serverId, DateTime hourNow, CancellationToken ct) =>
         await ExecAsync(connection,
             $"INSERT INTO collect.servers (server_id, server_name, is_enabled) VALUES ({serverId}, 'srv{serverId}', TRUE) ON CONFLICT (server_id) DO NOTHING;"
-            + $"INSERT INTO collect.query_store_interval_wide_coverage (server_id, filled_since, applied_through) VALUES ({serverId}, date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '30 hours', now() AT TIME ZONE 'UTC')", ct);
+            + $"INSERT INTO collect.query_store_interval_wide_coverage (server_id, filled_since, applied_through) VALUES ({serverId}, TIMESTAMP '{At(hourNow.AddHours(-30))}', TIMESTAMP '{At(ClockWithin(hourNow))}')", ct);
 
     internal static Task SeedAsync(NpgsqlConnection connection, DateTime hourNow, CancellationToken ct) => ExecAsync(connection, $@"
 INSERT INTO collect.query_store_interval_wide
@@ -204,12 +210,12 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
         var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
+        var hourNow = ThisHour();
         for (var s = 1; s <= servers; s++)
         {
-            await EnrollAsync(connection, s, ct);
+            await EnrollAsync(connection, s, hourNow, ct);
         }
 
-        var hourNow = ThisHour();
         await SeedAsync(connection, hourNow, ct);
         var source = NpgsqlDataSource.Create(scratch.ConnectionString);
         if (build)
