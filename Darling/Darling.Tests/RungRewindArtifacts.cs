@@ -533,10 +533,15 @@ DO $$ BEGIN IF to_regclass('config.config_server_actions') IS NOT NULL THEN
   ALTER TABLE config.config_server_actions DROP CONSTRAINT IF EXISTS ck_config_server_actions_action;
   ALTER TABLE config.config_server_actions ADD CONSTRAINT ck_config_server_actions_action CHECK (action IN ('force_plan', 'evict_plan', 'kill_session'));
 END IF; END $$;"),
-        // V219 (#6750): the Query Store self-statement key tables. The state table is the probe's newest sentinel. The rewind drops both, so a
-        // re-run of V219 creates them again. Safe on a store that never had them.
+        // V219 (#6750): the Query Store self-statement key tables and the two triggers on the text table that fill the key table. The state
+        // table is the probe's newest sentinel. The rewind drops the triggers and their function first (a trigger left behind would write to a
+        // dropped table on the next marked text), then both tables, so a re-run of V219 creates them again. Safe on a store that never had them.
         new(219, "hasQueryStoreSelfKeys",
-            "DROP TABLE IF EXISTS collect.query_store_self_keys_state, collect.query_store_self_keys;"),
+            @"
+DROP TRIGGER IF EXISTS trg_query_store_self_keys_ins ON collect.query_store_text;
+DROP TRIGGER IF EXISTS trg_query_store_self_keys_upd ON collect.query_store_text;
+DROP FUNCTION IF EXISTS collect.query_store_self_keys_track();
+DROP TABLE IF EXISTS collect.query_store_self_keys_state, collect.query_store_self_keys;"),
     ];
 
     /// <summary>

@@ -1107,8 +1107,12 @@ public static class QueryStoreRegressionBaseline
     /// </summary>
     public static readonly string SuffixSql = Suffix("f.query_text_sample", "r.query_text_sample");
 
-    /// <summary>The comments around the self-statement test in <c>qualified</c>, so <see cref="WithSelfKeys"/> finds it after
-    /// <see cref="Bind"/> and <see cref="QueryStoreIntervalWide.WithEdgeMargin"/> have rewritten the rest of the text.</summary>
+    /// <summary>The comments around the self-statement test in <c>qualified</c>, so <see cref="WithSelfKeys"/> finds it in any form of
+    /// <see cref="Statement"/>. Both callers apply <see cref="WithSelfKeys"/> BEFORE <see cref="QueryStoreIntervalWide.WithEdgeMargin"/>,
+    /// and the markers carry no margin literal, so the order does not matter for finding them. It matters for one detail: on the
+    /// recent-days forms the replaced region holds <see cref="RecentDaysTextProbe"/>, the one place the margin appears inside the self
+    /// test, so the substitution removes an occurrence <see cref="QueryStoreIntervalWide.WithEdgeMargin"/> would otherwise narrow. That
+    /// call is a plain replace of every occurrence, so nothing depends on it.</summary>
     private const string SelfTestOpen = "/* self-test: */ (";
 
     private const string SelfTestClose = ") /* :self-test */";
@@ -1121,7 +1125,9 @@ public static class QueryStoreRegressionBaseline
     /// one case: a query whose stored text is not the monitor's but whose inline sample carries the marker. The probe lists it, and
     /// this test hides it. That case does not occur on a store today: under the separate text fetch the inline text is NULL, and the
     /// rows that carried it before the cutover were dropped at collection when they carried the marker. The recent-days form's extra
-    /// sample from latest is not read here, for the same reason.
+    /// sample from latest is not read here, for the same reason. <c>f.query_text_sample</c> is hardcoded although <see cref="Suffix"/>
+    /// takes the sample as a parameter: it resolves through <c>flagged AS f</c> to <c>joined</c>'s <c>r.query_text_sample</c>, so it
+    /// exists in every form, the pre-weighted recent-days one included.
     /// </summary>
     private static readonly string SelfKeysTest =
         QueryStoreSelfStatement.NotSelfOfKey("$1", "f.database_name", "f.query_id") + " AND " + QueryStoreSelfStatement.NotSelfOfText("f.query_text_sample");

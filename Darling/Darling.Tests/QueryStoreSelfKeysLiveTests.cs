@@ -22,10 +22,11 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #6750 part 3: the keys of the monitor's own Query Store statements (<see cref="QueryStoreSelfKeys"/>). The text writer records a
-/// key when the text it lands carries the marker and removes it when an overwrite lands text without it. The backfill records the
-/// keys of text stored before the table existed and opens the gate. The regressions read (the MCP tool and the Viewer grid) hides
-/// the monitor's own statement and counts only the other regressions, with the gate closed (the text probe) and open (the keys).
+/// #6750 part 3: the keys of the monitor's own Query Store statements (<see cref="QueryStoreSelfKeys"/>). The triggers on the text table
+/// record a key when a landed text carries the marker and remove it when an overwrite lands text without it, for this build's writer and
+/// for an older build's statement alike. The backfill records the keys of text stored before the rung and opens the gate. The regressions
+/// read (the MCP tool and the Viewer grid) hides the monitor's own statement and counts only the other regressions, with the gate closed
+/// (the text probe), open (the keys), and on a store without the V219 tables (the gate answers closed, no error).
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test reaches DARLING_TEST_PG only to CREATE and DROP its
    own database through ScratchPostgres and works entirely inside it. It shares the gap-cache collection with the other regressions
@@ -176,7 +177,12 @@ public sealed class QueryStoreSelfKeysLiveTests
         var now = LiveClock.Now();
         await using var rig = await OpenRigAsync(now, ct);
 
-        /* Text stored before the key table existed: written straight to the text table, so no key. */
+        /* Text stored before the rung: written straight to the text table with the insert trigger off, so no key. */
+        await using (var off = new NpgsqlCommand($"ALTER TABLE collect.query_store_text DISABLE TRIGGER {QueryStoreSelfKeys.InsertTriggerName}", rig.Connection))
+        {
+            await off.ExecuteNonQueryAsync(ct);
+        }
+
         await using (var old = new NpgsqlCommand(
             "INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen) SELECT $1, $2, q, CASE WHEN q = $3 THEN $4 ELSE 'SELECT ' || q END, $5 FROM unnest($6::bigint[]) AS q",
             rig.Connection))
@@ -190,6 +196,11 @@ public sealed class QueryStoreSelfKeysLiveTests
             await old.ExecuteNonQueryAsync(ct);
         }
 
+        await using (var on = new NpgsqlCommand($"ALTER TABLE collect.query_store_text ENABLE TRIGGER {QueryStoreSelfKeys.InsertTriggerName}", rig.Connection))
+        {
+            await on.ExecuteNonQueryAsync(ct);
+        }
+
         Assert.Equal(0L, await KeysAsync(rig.Connection, ct));
 
         /* The step records the one key, opens the gate, and a second run does nothing. */
@@ -197,6 +208,97 @@ public sealed class QueryStoreSelfKeysLiveTests
         Assert.True(await QueryStoreSelfKeys.ReadyAsync(rig.Connection, null, 30, ct));
         Assert.Null(await QueryStoreSelfKeys.BackfillAsync(rig.Connection, ct));
         Assert.Equal(1L, await CountAsync(rig.Connection, $"SELECT count(*) FROM collect.query_store_self_keys WHERE query_id = {Own}", ct));
+
+        AssertOwnHidden(await ReadBothAsync(rig, now, ct));
+    }
+
+    /// <summary>The text upsert as dev shipped it before #6750 part 3, copied as a literal: the statement an older build runs against a
+    /// store a newer build migrated past V219 (a rollback, or an older instance sharing the store). It knows nothing of the key table.</summary>
+    private const string PreV219UpsertSql = @"INSERT INTO collect.query_store_text
+    (server_id, database_name, query_id, query_sql_text, query_hash, last_seen)
+SELECT server_id, database_name, query_id, query_sql_text, query_hash, stamped
+FROM unnest($1::integer[], $2::text[], $3::bigint[], $4::text[], $5::text[], $6::timestamp[])
+     AS batch(server_id, database_name, query_id, query_sql_text, query_hash, stamped)
+ORDER BY server_id, database_name, query_id
+ON CONFLICT (server_id, database_name, query_id) DO UPDATE SET
+    query_sql_text = EXCLUDED.query_sql_text,
+    query_hash = COALESCE(EXCLUDED.query_hash, query_store_text.query_hash),
+    last_seen = EXCLUDED.last_seen
+WHERE EXCLUDED.last_seen >= query_store_text.last_seen";
+
+    private static async Task OldBuildUpsertAsync(NpgsqlConnection connection, (long QueryId, string Text)[] rows, DateTime stamp, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(PreV219UpsertSql, connection);
+        command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = [.. rows.Select(_ => ServerId)] });
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = [.. rows.Select(_ => Db)] });
+        command.Parameters.Add(new NpgsqlParameter<long[]> { TypedValue = [.. rows.Select(r => r.QueryId)] });
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = [.. rows.Select(r => r.Text)] });
+        command.Parameters.Add(new NpgsqlParameter<string?[]> { TypedValue = [.. rows.Select(_ => (string?)null)] });
+        command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = [.. rows.Select(_ => DateTime.SpecifyKind(stamp, DateTimeKind.Unspecified))] });
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// Review round 2: the gate stays open once stamped, so every writer of text has to keep the keys, an older build's included. With
+    /// the gate open, a marked text landed through the pre-V219 upsert gains a key and the read hides it. Overwriting it with ordinary
+    /// text through the same old statement removes the key. Red without the triggers: the old statement writes no key, and the read
+    /// lists the monitor's statement (#6654).
+    /// </summary>
+    [Fact]
+    public async Task AnOlderBuildsTextUpsert_KeepsTheKeysCurrent_WithTheGateOpen()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #6750 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var now = LiveClock.Now();
+        await using var rig = await OpenRigAsync(now, ct);
+
+        /* The gate opens over an empty text table, as on a store the newer build backfilled before the rollback. */
+        Assert.Equal(0, await QueryStoreSelfKeys.BackfillAsync(rig.Connection, ct));
+        Assert.True(await QueryStoreSelfKeys.ReadyAsync(rig.Connection, null, 30, ct));
+
+        /* The older build lands the text. */
+        await OldBuildUpsertAsync(rig.Connection, [.. Ordinary.Select(q => (q, "SELECT " + q)), (Own, SelfText(Own))], now, ct);
+        Assert.Equal(1L, await CountAsync(rig.Connection, $"SELECT count(*) FROM collect.query_store_self_keys WHERE server_id = {ServerId} AND database_name = '{Db}' AND query_id = {Own}", ct));
+        Assert.Equal(1L, await KeysAsync(rig.Connection, ct));
+        AssertOwnHidden(await ReadBothAsync(rig, now, ct));
+
+        /* The same id now names an ordinary statement (a Query Store reset), landed by the same old statement: the key goes. */
+        await OldBuildUpsertAsync(rig.Connection, [(Own, "SELECT after_reset")], now.AddMinutes(5), ct);
+        Assert.Equal(0L, await KeysAsync(rig.Connection, ct));
+    }
+
+    /// <summary>
+    /// Review round 2: the gate read is fail-safe. The MCP host answers while the worker's migration ladder runs, and the Viewer's connect
+    /// gate fails open, so a read can meet a store without the V219 tables. With both dropped (the rewind of
+    /// <see cref="RungRewindArtifacts"/>), the gate answers closed, and both the MCP tool and the Viewer grid answer through the text
+    /// probe and hide the monitor's statement, with no 42P01. Red without the <c>to_regclass</c> check.
+    /// </summary>
+    [Fact]
+    public async Task WithoutTheV219Tables_TheGateIsClosed_AndBothReadsHideTheMonitorsStatementThroughTheTextProbe()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #6750 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var now = LiveClock.Now();
+        await using var rig = await OpenRigAsync(now, ct);
+        await QueryStoreTextWriter.WriteAsync(rig.Connection, ServerId, Db,
+            [.. Ordinary.Select(q => new FetchedQueryText(q, "SELECT " + q, null)), new FetchedQueryText(Own, SelfText(Own), null)],
+            DateTime.SpecifyKind(now, DateTimeKind.Utc), 30, cancellationToken: ct);
+        Assert.Equal(0, await QueryStoreSelfKeys.BackfillAsync(rig.Connection, ct));
+
+        await using (var drop = new NpgsqlCommand(RungRewindArtifacts.Ladder.Single(r => r.Version == 219).DropSql, rig.Connection))
+        {
+            await drop.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.Equal(0L, await CountAsync(rig.Connection, "SELECT CASE WHEN to_regclass('collect.query_store_self_keys_state') IS NULL THEN 0 ELSE 1 END", ct));
+
+        /* In a transaction, as the reads run it: the gate answers closed and the transaction is still usable. */
+        await using (var transaction = await rig.Connection.BeginTransactionAsync(ct))
+        {
+            Assert.False(await QueryStoreSelfKeys.ReadyAsync(rig.Connection, transaction, 30, ct));
+            await using var after = new NpgsqlCommand("SELECT 1", rig.Connection, transaction);
+            Assert.Equal(1, await after.ExecuteScalarAsync(ct));
+        }
 
         AssertOwnHidden(await ReadBothAsync(rig, now, ct));
     }
