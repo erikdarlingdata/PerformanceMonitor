@@ -187,7 +187,7 @@ public partial class CustomViewRunWindow : Window
             ChartStyle.StyleScatter(scatter);
         }
 
-        chart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
+        chart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.FleetWideZone);
         ChartStyle.ApplyThemeToChart(chart);
         chart.Plot.ShowLegend();
         chart.Refresh();
