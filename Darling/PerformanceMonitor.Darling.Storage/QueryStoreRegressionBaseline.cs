@@ -133,6 +133,12 @@ public static class QueryStoreRegressionBaseline
         /// <see cref="FailureHoursHeldStartToken"/>. Null keeps <see cref="HoursHeldStart"/>: on the raw path both arms read one
         /// table, so they hold the same hours.</summary>
         public DateTime? FailureHoursHeldStart { get; init; }
+
+        /// <summary>The cost (Regular) baseline start the plan was chosen from, when <see cref="ResolveAsync"/> moved it down to
+        /// the baseline's first midnight (#6750, <see cref="ExtendToBuiltFirstDay"/>). Null when it kept the start it was given.
+        /// The table readers apply it to their spans with <see cref="WithPlanStart"/>, so the binds, the hours held and
+        /// <c>cost_baseline_start</c> follow it.</summary>
+        public DateTime? RegularStart { get; init; }
     }
 
     /// <summary>
@@ -140,7 +146,9 @@ public static class QueryStoreRegressionBaseline
     /// Regular (cost) baseline and the recent arm, <see cref="FailureStart"/> serves <c>nonregular_rows</c> (the Aborted and Exception
     /// runs, which only the wide table holds). <see cref="RegularFromLatestAllowed"/> false sends the Regular arms to the wide table,
     /// whose proven start is <see cref="FailureStart"/>, so the two starts are then equal. <see cref="LatestFloor"/> is latest's own
-    /// floor for this server, for the floor clause of <see cref="LatestCoversRegularArms"/>.
+    /// floor for this server, for the floor clause of <see cref="LatestCoversRegularArms"/>. <see cref="BaselineDay"/> is the
+    /// requested baseline start's midnight, set only where the Regular start came from latest's floor and so lies after it: the
+    /// built days may then move the start down to it (<see cref="ExtendToBuiltFirstDay"/>).
     /// </summary>
     public sealed record ArmSpans(
         DateTime RegularStart,
@@ -148,7 +156,12 @@ public static class QueryStoreRegressionBaseline
         DateTime FailureStart,
         QueryStoreIntervalWide.WideStartBound FailureBound,
         bool RegularFromLatestAllowed,
-        DateTime? LatestFloor);
+        DateTime? LatestFloor)
+    {
+        /// <summary>The requested baseline start rounded down to midnight, where the built first day may serve the cost
+        /// baseline (#6750). Null on every other path.</summary>
+        public DateTime? BaselineDay { get; init; }
+    }
 
     /// <summary>
     /// The exact start of each arm of the table read (#6750). Before this every arm bound the gate's clamp, max(baseline start, raw's
@@ -165,7 +178,10 @@ public static class QueryStoreRegressionBaseline
     /// latest's coverage claim and latest's floor plus <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/>, with the cadence and gap
     /// verdict keyed on latest's floor. Where that start does not exist or the verdict refuses, the clamp. Where latest cannot serve
     /// from it (a pending batch, no coverage, coverage or floor after it) or the wide table reaches further, the Regular arms read the
-    /// wide table from the failure arm's start.</item>
+    /// wide table from the failure arm's start. Latest drops whole days at 15 days, so on a full store its floor plus 26 hours is
+    /// 02:00 of the baseline's first day. That start is not final: <see cref="ResolveAsync"/> moves it down to the midnight
+    /// (<see cref="ArmSpans.BaselineDay"/>) when that day is a whole valid build at the head of the run
+    /// (<see cref="ExtendToBuiltFirstDay"/>).</item>
     /// </list>
     /// Reads latest's coverage inputs and its floor (<see cref="QueryStoreIntervalLatest.PlainTableFloorSql"/>, which the retention
     /// pass warms after a drain) inside the caller's transaction. A fault propagates, so the caller falls back to raw.
@@ -235,8 +251,21 @@ public static class QueryStoreRegressionBaseline
         logger?.LogDebug(
             "#6750 regressions spans for server {ServerId}: Regular arms from {RegularStart:o} on latest ({RegularBound}), failure arm from {FailureStart:o} ({FailureBound})",
             serverId, regularStart, regularBound, failureStart, wide.StartBound);
-        return new ArmSpans(regularStart, regularBound, failureStart, wide.StartBound, true, latestFloor);
+        /* #6750: a start from latest's floor that lies inside the baseline's first day may still move down to its midnight, where
+           the built totals of that day serve it (ResolveAsync, ExtendToBuiltFirstDay). */
+        var baselineDay = regularBound == QueryStoreIntervalWide.WideStartBound.TablePurgeEdge && regularStart > baselineStart.Date
+                ? baselineStart.Date
+                : (DateTime?)null;
+        return new ArmSpans(regularStart, regularBound, failureStart, wide.StartBound, true, latestFloor) { BaselineDay = baselineDay };
     }
+
+    /// <summary>
+    /// <paramref name="spans"/> with the cost start <see cref="ResolveAsync"/> chose (#6750, <see cref="Plan.RegularStart"/>), so the
+    /// Regular binds, <see cref="WithArmStarts"/>, the edge-margin lookup and <c>cost_baseline_start</c> all follow it. Unchanged when
+    /// the plan kept the start it was given.
+    /// </summary>
+    public static ArmSpans WithPlanStart(ArmSpans spans, Plan plan) =>
+        plan.RegularStart is DateTime start && start != spans.RegularStart ? spans with { RegularStart = start } : spans;
 
     /// <summary>
     /// <paramref name="plan"/> with <see cref="Plan.HoursHeldStart"/> set (#6750): the later of <paramref name="planStart"/>, the
@@ -258,7 +287,9 @@ public static class QueryStoreRegressionBaseline
     /// <para>The below-floor hours are deliberately not capped by <paramref name="dataStart"/>:</para>
     /// <list type="number">
     /// <item>A below-floor start is at least this server's own floor in that table plus <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> (26 h).
-    /// The coverage claim and the cadence and gap verdict prove complete history from there.</item>
+    /// The coverage claim and the cadence and gap verdict prove complete history from there. The one exception is the cost start at the
+    /// baseline's first midnight (<see cref="ExtendToBuiltFirstDay"/>): that day comes whole from a valid build, which summed the day while
+    /// latest still held the day before it, so the baseline holds its hours from the midnight.</item>
     /// <item>Raw's data start for this server is at or after raw's floor, because the older raw chunks are dropped. Capping by it would
     /// shrink the divisor back to raw's few days and overstate the baseline failure rates.</item>
     /// <item>A young server is unaffected. Its own table floor plus 26 h is after raw's floor, so it gets no below-floor start, and its arm
@@ -289,6 +320,10 @@ public static class QueryStoreRegressionBaseline
     /// 15 days against the wide table's 10. The per-arm start (<see cref="ResolveSpansAsync"/>) reaches below that clamp, so the
     /// floor is now checked. A null floor (latest holds no row for the server) passes, as the clause did not exist before.
     /// Otherwise the arms read the wide table.
+    /// <para>#6750: the clause is about the LIVE arms, the only part that reads latest's rows as they are now. When the cost
+    /// baseline starts at its first midnight from the built totals (<see cref="ExtendToBuiltFirstDay"/>), the live low arm reads
+    /// nothing below the run's first day, so <see cref="ResolveAsync"/> checks the start the live arms would read from without
+    /// that day (latest's floor plus the margin), never the lower start the built day serves.</para>
     /// </summary>
     public static bool LatestCoversRegularArms(DateTime? filledSince, bool hasPending, DateTime? latestFloor, DateTime baselineStart)
     {
@@ -417,6 +452,7 @@ public static class QueryStoreRegressionBaseline
                 latestFloor = await floor.ExecuteScalarAsync(cancellationToken) as DateTime?;
             }
 
+            /* #6750: checked on the start the live arms read from (baselineStart here), not on the built first day's midnight. */
             regularFromLatest = (spans?.RegularFromLatestAllowed ?? true) && LatestCoversRegularArms(filledSince, hasPending, latestFloor, baselineStart);
 
             /* Read before the built days: that read swallows its own fault, which leaves the transaction aborted. */
@@ -437,8 +473,10 @@ public static class QueryStoreRegressionBaseline
                 }
             }
 
+            /* #6750: from the baseline's first midnight when the built first day may serve it, the same date as before otherwise. */
+            var builtFrom = spans?.BaselineDay is DateTime day && day < baselineStart.Date ? day : baselineStart.Date;
             built = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(
-                connection, transaction, serverId, baselineStart.Date, commandTimeoutSeconds, logger,
+                connection, transaction, serverId, builtFrom, commandTimeoutSeconds, logger,
                 ex => ex is OperationCanceledException, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -451,10 +489,54 @@ public static class QueryStoreRegressionBaseline
             await transaction.RollbackAsync(savepoint, CancellationToken.None);
         }
 
-        var plan = Choose(built, baselineStart, windowStart) with { RegularFromLatest = regularFromLatest };
+        /* #6750: the cost baseline may start at its first midnight, from that day's built totals. Only on latest's arms: the
+           wide form and the raw arm keep the start they were given. */
+        var costStart = baselineStart;
+        if (regularFromLatest && !clampToRawFloor && spans?.BaselineDay is DateTime baselineDay)
+        {
+            costStart = ExtendToBuiltFirstDay(built, baselineDay, baselineStart, windowStart);
+        }
+
+        var plan = Choose(built, costStart, windowStart) with { RegularFromLatest = regularFromLatest };
+        if (costStart != baselineStart)
+        {
+            logger?.LogDebug("#6750 regressions read: server {ServerId}'s cost baseline starts at {CostStart:o}, its first day from the daily totals", serverId, costStart);
+            plan = plan with { RegularStart = costStart };
+        }
+
         return recentAllowed && windowEnd is DateTime windowEndValue
-            ? WithRecentDays(plan, ChooseRecent(built, baselineStart, windowStart, windowEndValue))
+            ? WithRecentDays(plan, ChooseRecent(built, costStart, windowStart, windowEndValue))
             : plan;
+    }
+
+    /// <summary>
+    /// The cost baseline's start, moved down to <paramref name="baselineDay"/> (the requested start's midnight) when the built
+    /// totals of that day can serve it (#6750), else <paramref name="regularStart"/> unchanged. Moved only when all hold:
+    /// <list type="bullet">
+    /// <item><paramref name="regularStart"/> (latest's floor plus <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/>) lies after the
+    /// midnight and inside that same day. On a full store latest drops whole days at 15 days, so the start is 02:00 of the first
+    /// day, which <see cref="Choose"/> could never take whole.</item>
+    /// <item>The day is a whole valid build in <paramref name="built"/> (<see cref="PlanRegressionDaily.BuiltDaysSql"/> returns only
+    /// days at or after <c>filled_since::date + 1</c>), and the run <see cref="Choose"/> picks from the midnight starts on it: the
+    /// days from it to the rest of the run are consecutive whole valid builds. A gap, or a stale first day, keeps the start.</item>
+    /// </list>
+    /// <para><b>Why the built day is exact although latest no longer holds the day before it.</b> The build of day D summed latest's
+    /// rows while latest still held [D - 1, D + 1): the builder reaches 14 days back and latest keeps 15. A valid build
+    /// (<c>built_seq = late_seq</c>) means no late row for D landed since. Rows dropped from latest after the build do not change the
+    /// build. The 26-hour bound protects only the live read of latest, and with the run starting at the midnight the live low arm
+    /// reads nothing below the run's first day.</para>
+    /// </summary>
+    internal static DateTime ExtendToBuiltFirstDay(IEnumerable<PlanRegressionDaily.BuiltDay> built, DateTime baselineDay, DateTime regularStart, DateTime windowStart)
+    {
+        var day = DateTime.SpecifyKind(baselineDay.Date, DateTimeKind.Unspecified);
+        var start = DateTime.SpecifyKind(regularStart, DateTimeKind.Unspecified);
+        if (start <= day || start >= day.AddDays(1))
+        {
+            return regularStart;
+        }
+
+        var run = Choose(built, day, windowStart).RunDays;
+        return run.Length > 0 && run[0] == DateOnly.FromDateTime(day) ? day : regularStart;
     }
 
     /// <summary>The selection of <see cref="ResolveAsync"/>, over the built days it read.</summary>
@@ -785,6 +867,10 @@ public static class QueryStoreRegressionBaseline
            in key order, one random heap read per row: a cold 168-hour read took 60.6 s. Materialized, it scans the
            (server_id, first_execution_time) range and sorts, the wide table's plan shape: 10.9 s. The wide text is unchanged. */
         var recentCte = regularFromLatest ? "deduped_recent AS MATERIALIZED (" : "deduped_recent AS (";
+        /* #6750: the low live arm reads [@@B, @@LOW). When the run starts at the cost start (the first day from the daily totals)
+           that range is empty, but the first_execution_time range below @@B still scanned latest's day before it: 16 MB and about
+           0.2 s cold on the large production store, for no row. "@@LOW > @@B" compares two parameters, so the planner folds it
+           into a one-time filter and that scan never runs. It holds for every row the arm could keep, so the answer is unchanged. */
         var arms = $$"""
         WITH deduped_baseline AS (
             SELECT database_name, query_id, plan_id, execution_count, avg_duration_us, avg_cpu_time_us, 1 AS rn
@@ -792,6 +878,7 @@ public static class QueryStoreRegressionBaseline
             WHERE server_id = $1{{onlyRegular}}
             AND   first_execution_time >= @@B - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time < @@LOW
+            AND   @@LOW > @@B
             AND   last_execution_time >= @@B
             AND   last_execution_time < $2
             AND   NOT (CAST(last_execution_time AS date) = ANY(@@DAYS))

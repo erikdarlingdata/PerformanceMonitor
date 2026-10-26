@@ -338,6 +338,8 @@ public sealed partial class ViewerDataService
             var baselinePlan = await QueryStoreRegressionBaseline.ResolveAsync(
                 connection, transaction, serverId, spans.RegularStart, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken,
                 windowEnd: endUtc, spans: spans);
+            /* #6750: the cost start the plan chose, as in the MCP read, so the banner and the divisors follow it. */
+            spans = QueryStoreRegressionBaseline.WithPlanStart(spans, baselinePlan);
             baselinePlan = QueryStoreRegressionBaseline.WithArmStarts(baselinePlan, spans, plan.ClampedStart, dataStartUtc);
             var wideSql = QueryStoreRegressionsTableSqlFor(baselinePlan);
 
