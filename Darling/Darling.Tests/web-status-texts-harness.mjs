@@ -56,9 +56,18 @@ globalThis.document = {
   createTextNode: (text) => new FakeNode("#text", text),
 };
 
+/* The fleet roll-up the server page loads its card from: one server whose collection is stale (is_online false), one collecting. */
+const FLEET = {
+  cards: [
+    { server_name: "page-stale", display_name: "page-stale", is_online: false },
+    { server_name: "page-online", display_name: "page-online", is_online: true },
+  ],
+};
 globalThis.fetch = async (url) => {
   const u = new URL(String(url), "http://viewer.test");
-  const body = u.pathname.endsWith("/get_running_jobs")
+  const body = u.pathname === "/api/fleet"
+    ? FLEET
+    : u.pathname.endsWith("/get_running_jobs")
     ? { status: "empty", message: "No running SQL Agent jobs found (or the running_jobs collector has not run yet)." }
     : {};
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
@@ -89,6 +98,17 @@ try {
     return panel ? panel.textContent : null;
   };
 
+  /* The server page itself: what its Running Jobs panel says once the page has the server's fleet card, which is what hands the
+     tab its ctx.offline (pages/server.js). The panel's own section is the heading's parent. */
+  const pageSrv = await import(pathToFileURL(path.join(scratch, "pages", "server.js")).href);
+  const pageRunningJobsText = async (server) => {
+    const holder = new FakeNode("div");
+    pageSrv.renderServer(holder, server, "activity", {});
+    await new Promise((r) => setTimeout(r, 300));
+    const section = find(holder, (n) => n.children.some((c) => c.tag === "h3" && c.textContent.startsWith("Running Jobs")));
+    return section ? section.textContent : null;
+  };
+
   const queries = tabs.SERVER_TABS.find((t) => t.id === "queries");
   const summary = fields.READ_FIELDS.get_server_summary;
   const noteStrip = tabs.tabNote(queries, 24);
@@ -101,6 +121,8 @@ try {
       columnLabel: summary.table.columns.find((c) => c.key === "cpu_percent").label,
       jobsOnline: await runningJobsText(false, "srv-online"),
       jobsStale: await runningJobsText(true, "srv-stale"),
+      pageJobsStale: await pageRunningJobsText("page-stale"),
+      pageJobsOnline: await pageRunningJobsText("page-online"),
     })
   );
 } finally {

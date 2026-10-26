@@ -97,6 +97,14 @@ public sealed class WebStatusTextsTests
 
         Assert.Contains("No running SQL Agent jobs found", online, StringComparison.Ordinal);
         Assert.DoesNotContain("stale", online, StringComparison.Ordinal);
+
+        /* The same through the server page, which hands the tab ctx.offline from the server's fleet card (is_online false). */
+        var pageStale = r.GetProperty("pageJobsStale").GetString()!;
+        var pageOnline = r.GetProperty("pageJobsOnline").GetString()!;
+        Assert.Contains("collection for this server is stale", pageStale, StringComparison.Ordinal);
+        Assert.DoesNotContain("No running SQL Agent jobs found", pageStale, StringComparison.Ordinal);
+        Assert.Contains("No running SQL Agent jobs found", pageOnline, StringComparison.Ordinal);
+        Assert.DoesNotContain("stale", pageOnline, StringComparison.Ordinal);
     }
 
     [Theory]
