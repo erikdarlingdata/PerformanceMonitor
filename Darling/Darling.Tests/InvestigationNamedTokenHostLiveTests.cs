@@ -39,6 +39,7 @@ public sealed class InvestigationNamedTokenHostLiveTests
     private const string SecondBearer = "agent-token-value-host-live-second-002";
     private const string LegacyBearer = "legacy-token-value-host-live-0003";
     private const int ServerId = 7_654_401;
+    private const int PgServerId = 7_654_402;
 
     private const string Evidence =
         "[{\"tool\":\"get_blocking\",\"arguments\":{},\"key_numbers\":\"412 s\",\"basis\":\"verified\"}]";
@@ -46,7 +47,7 @@ public sealed class InvestigationNamedTokenHostLiveTests
     private sealed record Ctx(Microsoft.AspNetCore.TestHost.TestServer Server, NpgsqlConnection Connection, string RequestId, string ClaimId,
         CancellationToken Ct);
 
-    private static async Task RunAsync(Func<Ctx, Task> body)
+    private static async Task RunAsync(Func<Ctx, Task> body, bool serveNamed = true)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the named token host tests.");
@@ -56,6 +57,8 @@ public sealed class InvestigationNamedTokenHostLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, "HostLiveSrv", ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, PgServerId, "HostLivePg", ct);
+        await ExecAsync(connection, $"UPDATE collect.servers SET engine_kind = 'postgres' WHERE server_id = {PgServerId}", ct);
         await ExecAsync(connection, "INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Blocking', 3)", ct);
 
         await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
@@ -67,11 +70,13 @@ public sealed class InvestigationNamedTokenHostLiveTests
         var mcp = new McpConfig
         {
             AllowInvestigations = true,
-            Tokens = new List<McpTokenEntry>
-            {
-                new() { Name = First, Token = FirstBearer, Role = "agent" },
-                new() { Name = Second, Token = SecondBearer, Role = "agent" },
-            },
+            Tokens = serveNamed
+                ? new List<McpTokenEntry>
+                {
+                    new() { Name = First, Token = FirstBearer, Role = "agent" },
+                    new() { Name = Second, Token = SecondBearer, Role = "agent" },
+                }
+                : new List<McpTokenEntry>(),
         };
         var legacy = DarlingMcpWritePolicy.ResolveForStart(mcp, LegacyBearer, out _);
         var tokens = DarlingMcpTokenSet.Resolve(mcp, LegacyBearer, legacy, null);
@@ -80,7 +85,7 @@ public sealed class InvestigationNamedTokenHostLiveTests
         using var server = await DarlingMcpWritePolicyTests.BuildServer(mcp, LegacyBearer, scratch.ConnectionString, tokens, owner: owner);
 
         /* The first token claims through the host, as an agent does. */
-        var claimed = await CallAsync(server, "claim_investigation_request", new JsonObject { ["request_id"] = requestId.ToString(), ["agent_id"] = First }, FirstBearer);
+        var claimed = await CallAsync(server, "claim_investigation_request", new JsonObject { ["request_id"] = requestId.ToString(), ["agent_id"] = First }, serveNamed ? FirstBearer : LegacyBearer);
         Assert.Equal("claimed", claimed.GetProperty("status").GetString());
         var claimId = claimed.GetProperty("claim_id").GetString()!;
 
@@ -210,5 +215,71 @@ public sealed class InvestigationNamedTokenHostLiveTests
             Assert.Equal("0", await ScalarAsync(c.Connection,
                 $"SELECT count(*) FROM config.investigation_journal WHERE actor = 'agent:{First}' AND event = 'refused'", c.Ct));
         });
+    }
+
+    /// <summary>Each refusal a tool makes before the gate: a mute with no metric, a kill with a bad session id, a force on a PostgreSQL target,
+    /// and an agent_action the gate cannot parse (at the Level 2 gate and at the server action gate). Returns the reasons the answers carried.</summary>
+    private static async Task<string[]> PreGateRefusalsAsync(Ctx c, string agentId, string bearer)
+    {
+        var action = AgentActionArgumentTests.Arg(c.RequestId, c.ClaimId, agentId: agentId, reason: "identity check");
+        var noEvidence = new JsonObject { ["request_id"] = c.RequestId, ["claim_id"] = c.ClaimId, ["agent_id"] = agentId, ["reason"] = "x" }.ToJsonString();
+        var answers = new[]
+        {
+            await CallAsync(c.Server, "create_mute_rule", new JsonObject { ["server_id"] = ServerId, ["agent_action"] = action }, bearer),
+            await CallAsync(c.Server, DarlingMcpPlanForceTools.KillToolName,
+                new JsonObject { ["server_name"] = "HostLiveSrv", ["session_id"] = 0, ["agent_action"] = action, ["dry_run"] = true }, bearer),
+            await CallAsync(c.Server, DarlingMcpPlanForceTools.ForceToolName, new JsonObject
+            {
+                ["server_name"] = "HostLivePg", ["database_name"] = "db", ["query_id"] = 1, ["plan_id"] = 1, ["agent_action"] = action, ["dry_run"] = true,
+            }, bearer),
+            await CallAsync(c.Server, "create_custom_alert_rule",
+                new JsonObject { ["name"] = "pregate-rule", ["definition"] = "{}", ["agent_action"] = noEvidence }, bearer),
+            await CallAsync(c.Server, DarlingMcpPlanForceTools.KillToolName,
+                new JsonObject { ["server_name"] = "HostLiveSrv", ["session_id"] = 87, ["agent_action"] = noEvidence, ["dry_run"] = true }, bearer),
+        };
+        var reasons = answers.Select(a => a.GetProperty("reason").GetString()!).ToArray();
+        Assert.Equal(DarlingMcpAgentActions.MuteNeedsMetric, reasons[0]);
+        Assert.Equal(PerformanceMonitor.Darling.Remediation.RemediationResult.Reasons.BadSession, reasons[1]);
+        Assert.Equal(DarlingMcpPlanForceTools.PostgresTarget, reasons[2]);
+        return reasons;
+    }
+
+    private static Task<string?> JournalRowsAsync(Ctx c, string actor) =>
+        ScalarAsync(c.Connection, $"SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND actor = 'agent:{actor}'", c.Ct);
+
+    [Fact]
+    public async Task TheLegacyToken_PreGateRefusals_WithAServedTokensName_AreJournaledAsInvalid_NotAsThatToken()
+    {
+        await RunAsync(async c =>
+        {
+            await PreGateRefusalsAsync(c, First, LegacyBearer);
+
+            Assert.Equal("0", await JournalRowsAsync(c, First));
+            Assert.Equal("5", await JournalRowsAsync(c, InvestigationRules.InvalidAgentId));
+        });
+    }
+
+    [Fact]
+    public async Task ANamedToken_PreGateRefusals_AreJournaledAsItself()
+    {
+        await RunAsync(async c =>
+        {
+            await PreGateRefusalsAsync(c, First, FirstBearer);
+
+            Assert.Equal("5", await JournalRowsAsync(c, First));
+            Assert.Equal("0", await JournalRowsAsync(c, InvestigationRules.InvalidAgentId));
+        });
+    }
+
+    [Fact]
+    public async Task WithNoNamedTokensServed_TheLegacyTokens_PreGateRefusals_AreJournaledAsTheAgentIdItPassed()
+    {
+        await RunAsync(async c =>
+        {
+            await PreGateRefusalsAsync(c, First, LegacyBearer);
+
+            Assert.Equal("5", await JournalRowsAsync(c, First));
+            Assert.Equal("0", await JournalRowsAsync(c, InvestigationRules.InvalidAgentId));
+        }, serveNamed: false);
     }
 }

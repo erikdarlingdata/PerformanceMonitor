@@ -73,7 +73,7 @@ internal static class ServerActionGate
         {
             /* A refused argument still journals under the named token, or the agent_id it carried when it names one. */
             await store.RecordAgentActionRefusalAsync(DarlingAgentActionGate.LooseRequestId(agentAction),
-                agentTokenName ?? DarlingAgentActionGate.LooseAgentId(agentAction), tool, problem.Reason, agentTokenName, cancellationToken);
+                DarlingAgentActionGate.JournalActor(agentTokenName, namedAgentNames, DarlingAgentActionGate.LooseAgentId(agentAction)), tool, problem.Reason, agentTokenName, cancellationToken);
             return new ServerActionDecision(null, problem);
         }
 

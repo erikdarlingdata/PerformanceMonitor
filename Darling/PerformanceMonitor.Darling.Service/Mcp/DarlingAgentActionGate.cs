@@ -68,7 +68,7 @@ internal static class DarlingAgentActionGate
         if (problem is not null)
         {
             /* #6542: a named agent token journals under its own name, never the agent_id the bad argument carried. */
-            await store.RecordAgentActionRefusalAsync(LooseRequestId(agentAction), policy.AgentTokenName ?? LooseAgentId(agentAction), tool, problem.Reason,
+            await store.RecordAgentActionRefusalAsync(LooseRequestId(agentAction), JournalActor(policy.AgentTokenName, namedAgentNames, LooseAgentId(agentAction)), tool, problem.Reason,
                 policy.AgentTokenName, cancellationToken);
             return AgentActionGateOutcome.Refused(problem);
         }
@@ -127,6 +127,17 @@ internal static class DarlingAgentActionGate
         LooseText(agentAction, "request_id") is { } text && Guid.TryParse(text, out var id) ? id : null;
 
     internal static string? LooseAgentId(string? agentAction) => LooseText(agentAction, "agent_id");
+
+    /// <summary>
+    /// The agent id a refusal made before the gate (or on a bad argument) is journaled under: the named token's own name when there is one;
+    /// <see cref="InvestigationRules.InvalidAgentId"/> when the caller is the legacy token, named tokens are served and the id it passed is one of
+    /// their names (the gates refuse that id the same way, so a refusal row never lands in a named agent's journal); otherwise the id it passed.
+    /// </summary>
+    internal static string? JournalActor(string? agentTokenName, IReadOnlySet<string>? namedAgentNames, string? passedAgentId) =>
+        agentTokenName
+        ?? (passedAgentId is not null && namedAgentNames is { Count: > 0 } && namedAgentNames.Contains(passedAgentId)
+            ? InvestigationRules.InvalidAgentId
+            : passedAgentId);
 
     private static string? LooseText(string? json, string key)
     {

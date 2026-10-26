@@ -52,14 +52,14 @@ public sealed partial class DarlingMcpPlanForceTools
             if (!ModuleRecompileStatement.TryNormalize(module_name, out var module))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadModuleName,
-                    "module_name is the two-part schema.name of a procedure, function or trigger, as get_procedure_stats returns it. Nothing was run.", ct, agentTokenName);
+                    "module_name is the two-part schema.name of a procedure, function or trigger, as get_procedure_stats returns it. Nothing was run.", ct, agentTokenName, namedAgentNames);
             }
 
             var database = database_name?.Trim();
             if (string.IsNullOrEmpty(database) || database.Length > 128 || ContainsControlCharacter(database))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadDatabase,
-                    "database_name is the database the module is in, at most 128 characters. Nothing was run.", ct, agentTokenName);
+                    "database_name is the database the module is in, at most 128 characters. Nothing was run.", ct, agentTokenName, namedAgentNames);
             }
 
             /* 2: SQL Server only (an Azure SQL Database has sp_recompile too). */
@@ -67,7 +67,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
-                    $"{resolved.DisplayName} is a PostgreSQL target. Recompiling a module is SQL Server only; there is no PostgreSQL equivalent.", ct, agentTokenName);
+                    $"{resolved.DisplayName} is a PostgreSQL target. Recompiling a module is SQL Server only; there is no PostgreSQL equivalent.", ct, agentTokenName, namedAgentNames);
             }
 
             if (owner is null)
