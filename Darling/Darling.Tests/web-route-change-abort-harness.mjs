@@ -85,7 +85,8 @@ globalThis.clearTimeout = () => {};
 let fetches = 0; let serverRenders = 0;
 const fetchLog = [];        // { at, url, signal, abortedAtStart, aborted }
 let slowReadMs = 140_000;
-const isSlow = (url) => url.includes("get_job_history") || url.includes("get_resource_use_by_tag") || (slowRegistry && url.includes("list_servers"));
+const isSlow = (url) => url.includes("get_job_history") || url.includes("get_resource_use_by_tag") || (slowRegistry && url.includes("list_servers")) || (slowTrend && url.includes("get_server_trend"));
+let slowTrend = false;      // a scenario sets this to leave the server page's trend reads out
 let slowRegistry = false;   // a scenario sets this to leave the list_servers read out
 let holdFleet = false;      // a scenario sets this to leave /api/fleet out until landFleet()
 let fleetBody = null;       // a body for /api/fleet, or null for the default 500
@@ -269,7 +270,22 @@ const scenarios = {
     await landFleet();
     tick(); await drain();
     const btn = refreshBtn();
-    return { panelReadsStartedAfterLeave: panelReads() - before, refreshDisabled: btn.disabled === true, pollBlocked: pending.length > 0 };
+    /* Whether the page moved to is still polled: advance past its due time (a minute) and count that it re-rendered. */
+    const started = panelReads() - before;
+    await settle();
+    const r0 = count("list_investigation_requests");
+    await advance(70);
+    return { panelReadsStartedAfterLeave: started, refreshDisabled: btn.disabled === true, pollReads: count("list_investigation_requests") - r0 };
+  },
+  /* The Memory tab's chart panels are hand-built and read get_server_trend with the signal of their batch: the trend read is still out when the user leaves. */
+  async leaveServerWithTrendReadOut() {
+    slowTrend = true;
+    await boot("#/server/alpha/memory");
+    await advance(2);
+    const trends = () => fetchLog.filter((r) => r.url.includes("get_server_trend"));
+    const before = { reads: trends().length, abortedAtStart: trends().some((r) => r.abortedAtStart), aborted: trends().some((r) => r.aborted) };
+    await go("#/investigations"); await settle();
+    return { before, reads: trends().length, allAborted: trends().length > 0 && trends().every((r) => r.aborted) };
   },
   /* Query Tag Usage stamps the footer's "Updated" time when its read lands, not when the page starts to render. */
   async tagUsageFooterStamp() {

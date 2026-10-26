@@ -149,7 +149,18 @@ public sealed class WebRouteChangeAbortBehaviourTests
         var r = Run("fleetReadLandsAfterLeaving");
         Assert.Equal(0, r.GetProperty("panelReadsStartedAfterLeave").GetInt32());
         Assert.False(r.GetProperty("refreshDisabled").GetBoolean());
-        Assert.False(r.GetProperty("pollBlocked").GetBoolean());
+        Assert.Equal(1, r.GetProperty("pollReads").GetInt32());
+    }
+
+    [Fact]
+    public void LeavingTheServerPage_AbortsTheTrendReadsOfItsHandBuiltChartPanels()
+    {
+        var r = Run("leaveServerWithTrendReadOut");
+        var before = r.GetProperty("before");
+        Assert.True(before.GetProperty("reads").GetInt32() > 0);
+        Assert.False(before.GetProperty("abortedAtStart").GetBoolean());
+        Assert.False(before.GetProperty("aborted").GetBoolean());
+        Assert.True(r.GetProperty("allAborted").GetBoolean());
     }
 
     [Fact]

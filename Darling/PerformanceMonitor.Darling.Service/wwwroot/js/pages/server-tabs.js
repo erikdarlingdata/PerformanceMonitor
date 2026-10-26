@@ -4668,12 +4668,21 @@ const SERVER_TRENDS = {
   },
 };
 
+/* #6793: the hand-built chart panels below read with `ctx.signal`, but the server page's ctx carries none, so leaving the page (or a redraw)
+   cancelled none of their reads. A panel takes the batch's signal when it is built, the one setPanelSignal holds while redrawPanels calls
+   build(), and keeps it in its own ctx, so a later picker draw reads on the batch it belongs to and not on whatever batch is current by then. */
+function withPanelSignal(ctx) {
+  return ctx && ctx.signal ? ctx : { ...ctx, signal: getPanelSignal() };
+}
+
 /** A get_server_trend line panel for `kind` (a key of SERVER_TRENDS), over the page's range and its `as_of`. */
 export function serverTrendPanel(server, ctx, kind) {
+  ctx = withPanelSignal(ctx);
   const spec = SERVER_TRENDS[kind];
   const { panel, body } = panelShell(spec.title + " Trend", ctx.label, 2, "get_server_trend");
   (async () => {
     const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: spec.metric, hours: ctx.hours }, ctx && ctx.signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(emptyHeadline(spec, res) || spec.emptyText)]);
     const points = res.data.trend || [];
@@ -4753,10 +4762,12 @@ const SERIES_TRENDS = {
 
 /** A get_server_trend panel for a named-series metric (a key of SERIES_TRENDS): one chart per spec chart over one read. */
 export function seriesTrendPanel(server, ctx, kind) {
+  ctx = withPanelSignal(ctx);
   const spec = SERIES_TRENDS[kind];
   const { panel, body } = panelShell(spec.title, spec.subtitle + ", " + ctx.label, 2, "get_server_trend");
   (async () => {
     const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: kind, hours: ctx.hours }, ctx && ctx.signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(emptyHeadline(spec, res) || spec.emptyText)]);
     const series = (res.data.series || []).filter((s) => s && s[spec.seriesKey] != null);
@@ -4807,9 +4818,11 @@ const DEFAULT_CLERKS_CHECKED = 5;
  * so the 60 s rebuild keeps them.
  */
 export function memoryClerksTrendPanel(server, ctx) {
+  ctx = withPanelSignal(ctx);
   const { panel, body } = panelShell("Memory Clerks Trend", ctx.label + ", with a trend for the clerks you check", 2, "get_memory_clerks");
   (async () => {
     const res = await readToolWithinKeptHistory("get_memory_clerks", { server }, ctx && ctx.signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
     const options = (res.data.clerks || []).map((c) => c.clerk_type);
@@ -4854,7 +4867,7 @@ export async function drawClerkTrends(slot, server, ctx, checked) {
     { server, metric: "memory_clerks", hours: ctx.hours, clerk_types: clerkTypes.join(",") },
     signal
   );
-  if (clerkDraws.get(server) !== mine || mine.signal.aborted) return;
+  if (clerkDraws.get(server) !== mine || mine.signal.aborted || trend.kind === "aborted") return;
 
   if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
   const missingOf = (data) => (data && Array.isArray(data.missing_clerk_types) ? data.missing_clerk_types : []);
@@ -4936,10 +4949,12 @@ const MAX_NAMES_CHARTED = 10;
 const DEFAULT_NAMES_CHECKED = 5;
 
 export function namedTrendPanel(server, ctx, kind) {
+  ctx = withPanelSignal(ctx);
   const spec = NAMED_TRENDS[kind];
   const { panel, body } = panelShell(spec.title, ctx.label + ", with a trend for the " + spec.plural + " you check", 2, spec.optionsTool);
   (async () => {
     const res = await readToolWithinKeptHistory(spec.optionsTool, { server, hours: ctx.hours, top: MAX_NAMES_CHARTED }, ctx && ctx.signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message || spec.noOptions)]);
     const options = (res.data[spec.rowsKey] || []).map((r) => r[spec.nameKey]).filter(Boolean);
@@ -4981,7 +4996,7 @@ export async function drawNamedTrends(slot, server, ctx, kind, checked) {
   mount(slot, loadingStrip());
   const signal = ctx && ctx.signal && typeof AbortSignal !== "undefined" && AbortSignal.any ? AbortSignal.any([mine.signal, ctx.signal]) : mine.signal;
   const trend = await readToolWithinKeptHistory("get_server_trend", { server, metric: kind, hours: ctx.hours, names: names.join(",") }, signal);
-  if (namedDraws.get(drawKey) !== mine || mine.signal.aborted) return;
+  if (namedDraws.get(drawKey) !== mine || mine.signal.aborted || trend.kind === "aborted") return;
 
   if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
   /* The read names the series it found no samples for under missing_names at the top level on a partial match and
@@ -5036,9 +5051,11 @@ const SESSION_TREND_SERIES = [
 
 /** Session Stats trend: the server-wide session counts per bucket, with the newest bucket's top application and host as text. */
 export function sessionStatsTrendPanel(server, ctx) {
+  ctx = withPanelSignal(ctx);
   const { panel, body } = panelShell("Session Stats Trend", ctx.label, 2, "get_server_trend");
   (async () => {
     const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: "session_stats", hours: ctx.hours }, ctx && ctx.signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message || "No session samples in this window.")]);
     const points = res.data.trend || [];
