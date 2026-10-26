@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -266,6 +267,7 @@ public partial class ViewerServerTab
             /* #4231 stage 3b: an hourly-routed page holds no object_type/sql_handle/plan_handle — the raw-floor
                banner and this tier disclosure are independent facts, same reasoning as the Queries sub-tab. */
             UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), startUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
+            await UpdateProcStatsLeftOutBannerAsync(read, startUtc, endUtc);
             await LoadProcStatsSlicerAsync(startUtc, endUtc, slicerTask);
         }
         catch
@@ -277,6 +279,25 @@ public partial class ViewerServerTab
         }
 
         await RefreshProcStatsComparisonAsync(startUtc, endUtc, timer);
+    }
+
+    /// <summary>
+    /// #6651 (#5633 item 4): says what the Top Procedures read left out. The grid's ranking skips the databases the server no longer
+    /// lists, so the page names them (the words the web page and get_top_procedures_by_cpu use), and an EMPTY page says only that
+    /// no procedure ran in a database the server still has, from the collector's own run history, never "nothing was recorded".
+    /// Collapsed when nothing was left out.
+    /// </summary>
+    private async Task UpdateProcStatsLeftOutBannerAsync(ViewerRoutedRead<ViewerProcedureStatsRow> read, DateTime startUtc, DateTime endUtc)
+    {
+        CollectorRunFacts? facts = null;
+        if (read.Rows.Count == 0 && read.LeftOutDatabases is { Count: > 0 })
+        {
+            facts = await _dataService.GetProcedureStatsRunFactsAsync(_server.ServerId, startUtc, endUtc);
+        }
+
+        var text = DatabasesLeftOut.ProcedureBanner(read.LeftOutDatabases, read.Rows.Count, facts, (int)Math.Max(1, Math.Round((endUtc - startUtc).TotalHours)));
+        ProcStatsLeftOutBanner.Text = text ?? "";
+        ProcStatsLeftOutBanner.Visibility = text is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private async Task LoadQueryStoreAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
@@ -466,12 +487,18 @@ public partial class ViewerServerTab
            step compares its answer with that window's start. The rows are ranked by added duration, not by time, so they name no
            earlier start and the cap rule does not apply. */
         var floorTask = _dataService.GetQueryStoreRegressionsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var floorReadTask = _dataService.GetQueryStoreRegressionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter,
-            literalEndUtc: IsCustomRange ? endUtc : null); /* #5809: the interval table gate's clause 4, as the grid passes it (#3953). */
+        var floorReadTask = _dataService.GetQueryStoreRegressionsWithScopeAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter,
+            literalEndUtc: IsCustomRange ? endUtc : null, /* #5809: the interval table gate's clause 4, as the grid passes it (#3953). */
+            dataStartProbe: floorTask); /* #6750: the rates divide from the data start the banner names. */
         await AwaitReadWatchingProbeAsync(floorReadTask, floorTask, "Query Store Regressions");
-        var rows = floorReadTask.Result;
-        _queryStoreRegressionsFilterMgr!.UpdateData(rows);
+        var read = floorReadTask.Result;
+        _queryStoreRegressionsFilterMgr!.UpdateData(read.Rows);
+        ShowDatabasesLeftOutBanner(QueryStoreRegressionsLeftOutBanner, read.DatabasesLeftOut);
+        /* #6750: when the interval tables served below raw's floor, the banner names where the cost baseline started, not raw's floor.
+           The read has awaited the probe already, so swapping the task here loses nothing. */
+        floorTask = ServedStartOr(read, floorTask);
         await ShowQueryStoreRegressionsDataStartAsync(QueryStoreRegressionsTruncationBanner, floorTask, startUtc);
+        AddQueryStoreRegressionsEmptyBaselineNote(QueryStoreRegressionsTruncationBanner, floorTask, startUtc);
         SetDefaultSortIfNone(QueryStoreRegressionsGrid, "DurationRegressionPercent", ListSortDirection.Descending);
     }
 
@@ -483,6 +510,37 @@ public partial class ViewerServerTab
     /// </summary>
     internal const string QueryStoreRegressionsEmptyText =
         "No regressions to show. Each query is compared with the 7 days before the selected range, so a range that reaches back to the start of the stored Query Store data has nothing earlier to compare with.";
+
+    /// <summary>
+    /// The banner text for a grid whose read left databases out (#6654 review), or null when none were left out. The grid has no
+    /// envelope to carry <see cref="DatabasesLeftOut.Note"/>, and without this a store whose only regressions were in a dropped database
+    /// would show the empty text that blames the baseline window. The same rule as <see cref="DatabasesLeftOut"/>: at most
+    /// <see cref="DatabasesLeftOut.MaxNamed"/> names, with the full count when there are more, and the same reason and way out, in
+    /// this grid's words (the database picker, not a tool argument).
+    /// </summary>
+    internal static string? DatabasesLeftOutBannerText(IReadOnlyList<string>? leftOut)
+    {
+        var all = DatabasesLeftOut.Distinct(leftOut);
+        if (all is null)
+        {
+            return null;
+        }
+
+        var named = DatabasesLeftOut.Named(all)!;
+        var more = all.Count > named.Count
+            ? string.Create(CultureInfo.InvariantCulture, $" ({all.Count} in all; the first {DatabasesLeftOut.MaxNamed} are listed)")
+            : string.Empty;
+        return "Left out of this grid: " + string.Join(", ", named) + more + ". The server's newest database snapshot no longer lists "
+            + (all.Count == 1 ? "it" : "them") + " (dropped or detached since an earlier snapshot did). Pick the database in the filter to read its history.";
+    }
+
+    /// <summary>Shows <paramref name="banner"/> with <see cref="DatabasesLeftOutBannerText"/>, or collapses it when no database was left out.</summary>
+    internal static void ShowDatabasesLeftOutBanner(TextBlock banner, IReadOnlyList<string>? leftOut)
+    {
+        var text = DatabasesLeftOutBannerText(leftOut);
+        banner.Text = text ?? string.Empty;
+        banner.Visibility = text is null ? Visibility.Collapsed : Visibility.Visible;
+    }
 
     /// <summary>
     /// Raises or hides the "Showing since" banner of the Query Store Regressions grid (#4966). The read compares the range with
@@ -501,6 +559,33 @@ public partial class ViewerServerTab
             banner,
             await DataStartOrNullAsync(probe, "Query Store Regressions"),
             ViewerDataService.QueryStoreRegressionsBaselineStart(startUtc));
+
+    /// <summary>
+    /// #6750: the start the regressions banner names. When the interval tables served below raw's floor, the read compared cost from
+    /// <see cref="ViewerQueryStoreRegressionsRead.CostBaselineStart"/>, so the banner names that instant; a banner over raw's probe would
+    /// show raw's floor for a read that compared days earlier. Otherwise the tab's raw probe.
+    /// </summary>
+    internal static Task<DateTime?> ServedStartOr(ViewerQueryStoreRegressionsRead read, Task<DateTime?> probe) =>
+        read.CostBaselineStart is DateTime cost ? Task.FromResult<DateTime?>(cost) : probe;
+
+    /// <summary>
+    /// #6750: after <see cref="ShowQueryStoreRegressionsDataStartAsync"/>, a store that starts at or after the range's start has a
+    /// baseline that holds no hours: timeouts and errors are flagged on recent runs alone, and cost only against a run from before the
+    /// window that was collected later. "Showing since" alone read as a
+    /// shorter baseline, so the banner says so. A separate step so the banner call above keeps its shape. The probe has been awaited by
+    /// then, so a probe that failed or was cancelled adds nothing (the first step already logged it).
+    /// </summary>
+    internal static void AddQueryStoreRegressionsEmptyBaselineNote(TextBlock banner, Task<DateTime?> probe, DateTime startUtc)
+    {
+        if (banner.Visibility == Visibility.Visible && probe.IsCompletedSuccessfully && probe.Result is DateTime since && since >= startUtc)
+        {
+            banner.Text += QueryStoreRegressionsEmptyBaselineSuffix;
+        }
+    }
+
+    /// <summary>What the regressions banner adds when the store starts at or after the range's start (#6750).</summary>
+    internal const string QueryStoreRegressionsEmptyBaselineSuffix =
+        " · the baseline holds no hours, so timeouts and errors are flagged on recent runs alone, and a cost flag can come only from a run before the window that was collected later";
 
     /// <summary>
     /// Loads the Plan Corrections grid (#1952) — the engine's own automatic plan correction recommendations
@@ -580,6 +665,7 @@ public partial class ViewerServerTab
             var rows = read.Rows;
             _procStatsFilterMgr!.UpdateData(rows);
             UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), e.StartUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
+            await UpdateProcStatsLeftOutBannerAsync(read, e.StartUtc, e.EndUtc);
             await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)

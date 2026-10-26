@@ -80,6 +80,7 @@ WHERE server_id = $1
   AND event_time >= $2
   AND event_time <= $3
   AND collection_time >= $4
+  AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + @"
 ORDER BY event_time DESC, wait_time_ms DESC
 LIMIT 500";
 
@@ -157,6 +158,15 @@ WHERE b.newest = 1
   AND g.plan_id <> b.plan_id
   AND g.cpu_per_exec_us > 0
   AND b.cpu_per_exec_us >= $5 * g.cpu_per_exec_us
+  -- #6548: SQL Server own housekeeping statements (change tracking cleanup and the like) are not application code. Left
+  -- out BEFORE the row cap, so they cannot use up its rows.
+  AND NOT EXISTS (SELECT 1 FROM query_store_text AS x
+                  WHERE x.server_id = $1
+                    AND x.database_name = b.database_name
+                    AND x.query_id = b.query_id
+                    AND (lower(x.query_sql_text) ~ '" + InternalStatements.LowerTextPattern + @"'
+                          -- #6665: or the monitor's own statement (its collector-side drop never fires on Darling)
+                          OR " + PerformanceMonitor.Darling.Storage.QueryStoreSelfStatement.SelfOfStoredText + @"))
 ORDER BY b.cpu_per_exec_us / g.cpu_per_exec_us DESC, b.database_name, b.query_id
 LIMIT $6";
 
@@ -615,8 +625,65 @@ LIMIT $6";
         return array;
     }
 
+    /// <summary>Characters of a top statement's sample text kept in <c>client_timeouts</c>.</summary>
+    internal const int ClientTimeoutStatementMaxChars = 1000;
+
+    /// <summary>
+    /// <c>client_timeouts</c> (#6553): the blocks <c>get_client_timeouts</c> answers for the window, from the same shared statements
+    /// (<see cref="AttentionWindowSql"/>, bounded: <c>collection_time &gt; from</c> and <c>&lt;= to</c>): the exact <c>count</c> of the
+    /// window's event_counter rows, the <c>sampled_events</c> behind the lists, and the <c>top_client_apps</c>, <c>top_hosts</c>,
+    /// <c>top_databases</c> and <c>top_statements</c> (a sample text each, cut to <see cref="ClientTimeoutStatementMaxChars"/>).
+    /// One row. A window with no count and no sampled event is a true negative: an empty list. The lists are sampled events, a
+    /// subset, so they say who was timing out and never how many; <c>count</c> is the exact figure.
+    /// </summary>
+    private async Task<List<JsonObject>> ReadClientTimeoutsAsync(int serverId, DateTime from, DateTime to, CancellationToken cancellationToken)
+    {
+        async Task<List<T>> Query<T>(string sql, Func<NpgsqlDataReader, T> map)
+        {
+            await using var command = _store.CreateCommand(sql);
+            command.CommandTimeout = CommandTimeoutSeconds;
+            DarlingMcpReadParameters.AddWindow(command, serverId, from, to);
+            var result = new List<T>();
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                result.Add(map(reader));
+            return result;
+        }
+
+        var count = (await Query(AttentionWindowSql.Counts("attention_events", bounded: true), r => r.GetInt64(1)).ConfigureAwait(false)).Sum();
+        var apps = await Query(AttentionWindowSql.TopBy("attention_events", "client_app_name", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
+        var hosts = await Query(AttentionWindowSql.TopBy("attention_events", "client_hostname", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
+        var databases = await Query(AttentionWindowSql.TopBy("attention_events", "database_name", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
+        var statements = await Query(AttentionWindowSql.TopStatements("attention_events", bounded: true),
+            r => (Fingerprint: r.GetString(0), Events: r.GetInt64(1), Text: r.IsDBNull(2) ? null : r.GetString(2))).ConfigureAwait(false);
+        if (count == 0 && apps.Count == 0 && hosts.Count == 0 && databases.Count == 0 && statements.Count == 0)
+            return new List<JsonObject>();
+
+        static JsonArray Named(IEnumerable<(string Name, long Events)> items, string key) =>
+            new(items.Select(i => (JsonNode?)new JsonObject { [key] = i.Name, ["sampled_events"] = i.Events }).ToArray());
+
+        return new List<JsonObject>
+        {
+            new()
+            {
+                ["count"] = count,
+                ["top_client_apps"] = Named(apps, "client_app_name"),
+                ["top_hosts"] = Named(hosts, "client_hostname"),
+                ["top_databases"] = Named(databases, "database_name"),
+                ["top_statements"] = new JsonArray(statements.Select(s => (JsonNode?)new JsonObject
+                {
+                    ["statement_fingerprint"] = s.Fingerprint,
+                    ["sampled_events"] = s.Events,
+                    ["sql_text"] = Cut(s.Text, ClientTimeoutStatementMaxChars),
+                }).ToArray()),
+                ["note"] = "count is exact (the session's event_counter). The lists come from sampled ring-buffer events, a subset: they show who and what was timing out, never how many.",
+            },
+        };
+    }
+
+    /* #6579: cut at a text-element boundary, like ClientTimeoutsRead, so a surrogate pair or combining sequence is never split. */
     private static string? Cut(string? text, int max) =>
-        string.IsNullOrEmpty(text) ? null : text.Length <= max ? text : text[..max];
+        string.IsNullOrEmpty(text) ? null : text.Length <= max ? text : text[..McpHelpers.TextElementCutLength(text, max)];
 
     /// <summary>Parses collected XML with DTDs refused; null for none or XML that does not parse.</summary>
     private static XElement? ParseXml(string? xml)

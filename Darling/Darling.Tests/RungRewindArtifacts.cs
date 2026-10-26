@@ -503,6 +503,45 @@ END IF; END $$;"),
         new(214, "hasKnownPatterns",
             @"
 DROP TABLE IF EXISTS config.config_known_patterns;"),
+        // V215: the agent-table indexes. The reports index is the probe's newest sentinel. The rewind drops all six, so a re-run of V215 builds them
+        // again. Safe on a store that never had them.
+        new(215, "hasAgentTableIndexes",
+            @"
+DROP INDEX IF EXISTS config.ix_investigation_requests_reported_condition, config.ix_investigation_requests_follow_up_of,
+    config.ix_investigation_requests_follow_up_at, config.ix_investigation_requests_opened_at,
+    config.ix_investigation_requests_practice_of, config.ix_investigation_reports_family_of;"),
+        // V216 (#5736): the Client Timeouts switch's column default is TRUE, the probe's newest sentinel. The rewind sets the default back to
+        // FALSE (V179's), so a re-run of V216 sets it again. The row's value is left as it is: V216 only ever moves FALSE to TRUE. Guarded, so
+        // it is safe on a store whose V179 columns are already gone.
+        new(216, "hasClientTimeoutsOnByDefault",
+            @"
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'client_timeouts_enabled' AND NOT attisdropped) THEN
+        ALTER TABLE config.config_alert_settings ALTER COLUMN client_timeouts_enabled SET DEFAULT FALSE;
+    END IF;
+END $$;"),
+        // V217 (#6581): the Query Store hints table. The table is the probe's newest sentinel. The rewind drops it (its indexes go with it), so a
+        // re-run of V217 does everything again. Safe on a store that never had it.
+        new(217, "hasQueryStoreHints",
+            "DROP TABLE IF EXISTS collect.query_store_hints;"),
+        // V218 (#6569): the module recompile and plan guide switches. The stored CHECK naming it is the probe's newest sentinel. The rewind puts V196's three-word CHECK
+        // back (it deletes any recompile_module row first, which the old CHECK could not hold), so a re-run of V218 widens it again. Safe on a store that never had it.
+        new(218, "hasServerActionRecompile",
+            @"
+DO $$ BEGIN IF to_regclass('config.config_server_actions') IS NOT NULL THEN
+  DELETE FROM config.config_server_actions WHERE action IN ('recompile_module', 'create_plan_guide', 'drop_plan_guide');
+  ALTER TABLE config.config_server_actions DROP CONSTRAINT IF EXISTS ck_config_server_actions_action;
+  ALTER TABLE config.config_server_actions ADD CONSTRAINT ck_config_server_actions_action CHECK (action IN ('force_plan', 'evict_plan', 'kill_session'));
+END IF; END $$;"),
+        // V219 (#6750): the Query Store self-statement key tables and the two triggers on the text table that fill the key table. The state
+        // table is the probe's newest sentinel. The rewind drops the triggers and their function first (a trigger left behind would write to a
+        // dropped table on the next marked text), then both tables, so a re-run of V219 creates them again. Safe on a store that never had them.
+        new(219, "hasQueryStoreSelfKeys",
+            @"
+DROP TRIGGER IF EXISTS trg_query_store_self_keys_ins ON collect.query_store_text;
+DROP TRIGGER IF EXISTS trg_query_store_self_keys_upd ON collect.query_store_text;
+DROP FUNCTION IF EXISTS collect.query_store_self_keys_track();
+DROP TABLE IF EXISTS collect.query_store_self_keys_state, collect.query_store_self_keys;"),
     ];
 
     /// <summary>

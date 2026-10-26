@@ -107,6 +107,10 @@ public enum InvestigationClaimOutcome
     /// <summary>Another claim holds a live lease.</summary>
     AlreadyClaimed,
 
+    /// <summary>#6576: the same agent id already holds the live lease. Its existing claim id comes back and the lease is
+    /// renewed; no new claim is made and the claim count does not move.</summary>
+    Reclaimed,
+
     /// <summary>The request is reported, closed or expired, or has used its three claims.</summary>
     NotOpen,
 
@@ -123,7 +127,7 @@ public enum InvestigationClaimOutcome
     JournalCapped,
 }
 
-/// <summary>The result of a claim. The lease and claim count are set only when <see cref="Outcome"/> is Claimed.</summary>
+/// <summary>The result of a claim. The claim id and lease are set when <see cref="Outcome"/> is Claimed or Reclaimed; the claim count is set for those two and for the refusals that read the row.</summary>
 public sealed record InvestigationClaimResult(
     InvestigationClaimOutcome Outcome, Guid? ClaimId, DateTime? LeaseUntilUtc, int ClaimCount, string? Reason);
 
@@ -254,6 +258,10 @@ public sealed record InvestigationOpenedRow(
     /// <summary>#6003: the journal row's detail (for <c>evidence_ready</c>, the sections to re-read).</summary>
     public string? DetailJson { get; init; }
 
+    /// <summary>#6551: a change-watch request's alert detail (the changes, the database of each query measure and the read it
+    /// came from, and every measure that moved), so an agent can triage the wake-up before it claims; null for any other request.</summary>
+    public string? DetailText { get; init; }
+
     /// <summary>The cursor's key for this row: the event id, else the request id.</summary>
     public Guid CursorKey => EventId == Guid.Empty ? RequestId : EventId;
 
@@ -267,7 +275,8 @@ public sealed record InvestigationOpenedRow(
 /// rename shows on the next read (<see cref="ServerName"/> stays the name the request was opened with). Darling always fills
 /// <see cref="DisplayName"/> (it falls back to the opened name) and leaves <see cref="InstanceName"/> null once the server has left the
 /// registry; a store built with no server list to read leaves both null. Lite names them from its server list (ServerManager, #6011). A null is absent from the answer.
-/// The answer key is <c>instance_name</c>, not <c>host_name</c>, which the MCP data-detail filter numbers as a client host.</summary>
+/// The answer key is <c>instance_name</c>, not <c>host_name</c>, which the MCP data-detail filter numbers as a client host.
+/// <see cref="DetailText"/> (#6551) is a change-watch request's alert detail, read for the list; null for every other request, and then absent from the answer.</summary>
 public sealed record InvestigationRequestRow(
     Guid RequestId,
     int RouteId,
@@ -287,7 +296,8 @@ public sealed record InvestigationRequestRow(
     DateTime? ReportedAtUtc,
     Guid? PracticeOf = null,
     string? DisplayName = null,
-    string? InstanceName = null);
+    string? InstanceName = null,
+    string? DetailText = null);
 
 /// <summary>What one expiry sweep did.</summary>
 public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired)
@@ -319,6 +329,9 @@ public static class ServerActionNames
     public const string ForcePlan = "force_plan";
     public const string EvictPlan = "evict_plan";
     public const string KillSession = "kill_session";
+    public const string RecompileModule = "recompile_module";
+    public const string CreatePlanGuide = "create_plan_guide";
+    public const string DropPlanGuide = "drop_plan_guide";
 
     /// <summary>An action in plain words, the label both switch screens show in their tables and the answers to a change use (#6269).</summary>
     public static string Label(string action) => action switch
@@ -326,20 +339,50 @@ public static class ServerActionNames
         ForcePlan => "Force or unforce plans",
         EvictPlan => "Evict plans from the plan cache",
         KillSession => "Kill sessions",
+        RecompileModule => "Recompile procedures, functions and triggers",
+        CreatePlanGuide => "Create plan guides",
+        DropPlanGuide => "Drop plan guides",
         _ => action,
     };
 
     /// <summary>Every server action, the table's CHECK list.</summary>
-    public static readonly IReadOnlyList<string> All = new[] { ForcePlan, EvictPlan, KillSession };
+    public static readonly IReadOnlyList<string> All = new[] { ForcePlan, EvictPlan, KillSession, RecompileModule, CreatePlanGuide, DropPlanGuide };
+
+    /// <summary>SERVERPROPERTY('EngineEdition') for an Azure SQL Database, as <c>collect.servers.sql_engine_edition</c> stores it (#6727). One spelling: it is <see cref="PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition"/>.</summary>
+    public const int AzureSqlDatabaseEdition = PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition;
+
+    /// <summary>SERVERPROPERTY('EngineEdition') for an Azure SQL Managed Instance (#6727).</summary>
+    public const int AzureManagedInstanceEdition = 8;
 
     /// <summary>
     /// Whether <paramref name="action"/> can ever run on a server of that engine (#6269): a Query Store plan force and a plan-cache
     /// eviction are SQL Server only, and a session kill runs on SQL Server and on PostgreSQL. A switch for an action the engine
     /// cannot run is refused, so no row says "on" for something the server can never do. False for a name not in <see cref="All"/>.
+    /// <para>#6727: <paramref name="sqlEngineEdition"/> is the probed edition of a SQL Server target. An Azure SQL Database has no plan handle
+    /// eviction and no plan guides, and an Azure SQL Managed Instance has no plan guides; the tools refuse those every time, so the switch does
+    /// not turn on for them. Null (not collected yet) answers as an ordinary SQL Server: the tool still refuses at run time.</para>
     /// </summary>
-    public static bool IsValidForEngine(string? action, bool postgres) =>
-        string.Equals(action, KillSession, StringComparison.Ordinal)
-        || (!postgres && (string.Equals(action, ForcePlan, StringComparison.Ordinal) || string.Equals(action, EvictPlan, StringComparison.Ordinal)));
+    public static bool IsValidForEngine(string? action, bool postgres, int? sqlEngineEdition)
+    {
+        if (string.Equals(action, KillSession, StringComparison.Ordinal))
+            return true;
+        if (postgres)
+            return false;
+        if (sqlEngineEdition == AzureSqlDatabaseEdition && string.Equals(action, EvictPlan, StringComparison.Ordinal))
+            return false;
+        if (sqlEngineEdition is AzureSqlDatabaseEdition or AzureManagedInstanceEdition
+            && (string.Equals(action, CreatePlanGuide, StringComparison.Ordinal) || string.Equals(action, DropPlanGuide, StringComparison.Ordinal)))
+            return false;
+        return string.Equals(action, ForcePlan, StringComparison.Ordinal) || string.Equals(action, EvictPlan, StringComparison.Ordinal) || string.Equals(action, RecompileModule, StringComparison.Ordinal)
+            || string.Equals(action, CreatePlanGuide, StringComparison.Ordinal) || string.Equals(action, DropPlanGuide, StringComparison.Ordinal);
+    }
+
+    /// <summary>The plain reason <see cref="IsValidForEngine"/> answered false, for the sentence of a refused switch (#6727).</summary>
+    public static string EngineDescription(bool postgres, int? sqlEngineEdition) =>
+        postgres ? "a PostgreSQL target"
+        : sqlEngineEdition == AzureSqlDatabaseEdition ? "an Azure SQL Database"
+        : sqlEngineEdition == AzureManagedInstanceEdition ? "an Azure SQL Managed Instance"
+        : "a SQL Server target";
 }
 
 /// <summary>What a server's remediation slots hold, as the server-action gate classifies them (#5632, step 5). The gate never

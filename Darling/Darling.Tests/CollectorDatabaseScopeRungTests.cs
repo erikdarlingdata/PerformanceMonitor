@@ -413,7 +413,7 @@ public sealed class CollectorDatabaseScopeRungTests
             }
         }
 
-        /* The census count IS the get_collection_health description's census: six enumerate. A seventh
+        /* The census count IS the get_collection_health description's census: seven enumerate. An eighth
            name appearing here is the signal to extend that description, not loosen this pin. */
         Assert.Equal(
             new[]
@@ -424,6 +424,7 @@ public sealed class CollectorDatabaseScopeRungTests
                 nameof(QueryStoreCollector),
                 nameof(QueryStoreForcedPlansCollector),
                 nameof(QueryStoreHealthCollector),
+                nameof(QueryStoreHintsCollector),
             },
             enumerators.OrderBy(n => n, StringComparer.Ordinal).ToArray());
 

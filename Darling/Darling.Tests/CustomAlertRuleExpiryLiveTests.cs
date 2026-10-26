@@ -144,8 +144,8 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
         var prefix = "car_exp_" + Guid.NewGuid().ToString("N") + "_";
         var definition = DefinitionFor(storage);
         var deliverer = new CapturingDeliverer();
-        var rules = new CustomAlertRuleStore(dataSource);
-        var state = new CustomAlertStateStore(dataSource);
+        var rules = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
+        var state = new CustomAlertStateStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
         var bodySucceeded = false;
         try
         {
@@ -160,7 +160,7 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
 
             var evaluator = new CustomAlertEvaluator(
                 rules, state, dataSource, deliverer, isAlertMuted: null, alertsEnabled: static () => true,
-                new PgAlertHistoryStore(dataSource), defaultIntervalSeconds: 0,
+                new PgAlertHistoryStore(dataSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds), defaultIntervalSeconds: 0,
                 cacheTtl: TimeSpan.Zero, NullLogger.Instance);
 
             await SeedCpuAsync(dataSource, serverId, storage, 30, ct);
@@ -205,7 +205,7 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
                 dataSource, prefix + "past", definition, expires_at_utc: DateTime.UtcNow.AddMinutes(-5).ToString("o", CultureInfo.InvariantCulture)))!;
             Assert.Equal("invalid", (string?)refused["status"]);
             Assert.Contains("in the past", (string?)refused["message"] ?? (string?)refused["error"] ?? refused.ToJsonString());
-            Assert.DoesNotContain(await new CustomAlertRuleStore(dataSource).ListAsync(ct), r => r.Name == prefix + "past");
+            Assert.DoesNotContain(await new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds).ListAsync(ct), r => r.Name == prefix + "past");
 
             // A future expiry saves, and the create answer says when the rule expires.
             var expiry = DateTime.UtcNow.AddDays(3);
@@ -253,7 +253,72 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
             Assert.False((bool)revived["expired"]!);
             Assert.Null((string?)revived["expires_at_utc"]);
             Assert.NotNull((string?)revived["previous_expires_at_utc"]);
-            Assert.Contains("update_custom_alert_rule", (string?)revived["undo"]);
+            Assert.Equal("update_custom_alert_rule", (string?)revived["undo"]!["tool"]);
+
+            // The undo must be a call the tool accepts: the expiry it undoes had already passed, which the tool refuses to set, so the
+            // undo restores "no expiry" and the answer says so (replaying a past instant answers "invalid" and writes nothing).
+            Assert.Contains("already passed", (string?)revived["undo_note"]);
+            var undoArguments = revived["undo"]!["arguments"]!;
+            Assert.Equal(string.Empty, (string?)undoArguments["expires_at_utc"]);
+            var replayed = JsonNode.Parse(await DarlingMcpCustomAlertTools.UpdateCustomAlertRule(
+                dataSource, (long)undoArguments["rule_id"]!, (int)undoArguments["version"]!, expires_at_utc: (string?)undoArguments["expires_at_utc"]))!;
+            Assert.NotEqual("invalid", (string?)replayed["status"]);
+            Assert.False((bool)replayed["expired"]!);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanAsync(connectionString, bodySucceeded, prefix, 0);
+        }
+    }
+
+    [Fact]
+    public async Task UpdateUndo_OnAnUnchangedResendOfAPassedExpiry_RestoresThatSameExpiry_WithNoNote()
+    {
+        // #6514 round 2: an update that resends the rule's own already-passed expiry unchanged (the tool accepts it, it is the current
+        // value) while it changes another field did not touch the expiry. Its undo must put the same expiry back and carry no
+        // "already passed" note; the clear-and-note path is only for a call that actually changed the expiry.
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var dataSource = await MigrateAndOpenAsync(connectionString, ct);
+
+        var prefix = "car_expu_" + Guid.NewGuid().ToString("N") + "_";
+        var definition = DefinitionFor("no_such_server_" + prefix);
+        var bodySucceeded = false;
+        try
+        {
+            var created = JsonNode.Parse(await DarlingMcpCustomAlertTools.CreateCustomAlertRule(
+                dataSource, prefix + "resend", definition,
+                expires_at_utc: DateTime.UtcNow.AddDays(3).ToString("o", CultureInfo.InvariantCulture)))!;
+            var id = (long)created["id"]!;
+            await using (var age = dataSource.CreateCommand(
+                "UPDATE custom_alert_rules SET expires_at_utc = (now() AT TIME ZONE 'UTC') - interval '1 minute' WHERE id = $1"))
+            {
+                age.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
+                await age.ExecuteNonQueryAsync(ct);
+            }
+
+            var got = JsonNode.Parse(await DarlingMcpCustomAlertTools.GetCustomAlertRule(dataSource, id))!;
+            Assert.True((bool)got["expired"]!);
+            var passedExpiry = (string)got["expires_at_utc"]!;
+
+            // Resend the same passed expiry and change the description.
+            var resent = JsonNode.Parse(await DarlingMcpCustomAlertTools.UpdateCustomAlertRule(
+                dataSource, id, (int)got["version"]!, description: "resent", expires_at_utc: passedExpiry))!;
+            Assert.NotEqual("invalid", (string?)resent["status"]);
+            Assert.Equal(passedExpiry, (string?)resent["expires_at_utc"]);
+            Assert.Null((string?)resent["undo_note"]);
+            var undoArguments = resent["undo"]!["arguments"]!;
+            Assert.Equal(passedExpiry, (string?)undoArguments["expires_at_utc"]);
+
+            // The undo replays cleanly and the expiry is unchanged.
+            var replayed = JsonNode.Parse(await DarlingMcpCustomAlertTools.UpdateCustomAlertRule(
+                dataSource, (long)undoArguments["rule_id"]!, (int)undoArguments["version"]!,
+                description: (string?)undoArguments["description"], expires_at_utc: (string?)undoArguments["expires_at_utc"]))!;
+            Assert.NotEqual("invalid", (string?)replayed["status"]);
+            var after = JsonNode.Parse(await DarlingMcpCustomAlertTools.GetCustomAlertRule(dataSource, id))!;
+            Assert.Equal(passedExpiry, (string?)after["expires_at_utc"]);
 
             bodySucceeded = true;
         }
@@ -271,7 +336,7 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
         await using var dataSource = await MigrateAndOpenAsync(connectionString, ct);
 
         var prefix = "car_expc_" + Guid.NewGuid().ToString("N") + "_";
-        var rules = new CustomAlertRuleStore(dataSource);
+        var rules = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
         var bodySucceeded = false;
         try
         {

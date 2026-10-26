@@ -328,9 +328,13 @@ public sealed class UncorroboratedRouteStoreKnobTests
         Assert.Contains("darling.json value (store column cleared)\" Tag=\"\"", xaml, StringComparison.Ordinal);
         /* The prose: what a lone finding is, that the store wins and when, and how to hand it back. */
         Assert.Contains("ONE fact in its chain and no matched co-fire check", xaml, StringComparison.Ordinal);
-        Assert.Contains("win over darling.json's analysis.uncorroboratedRoute", xaml, StringComparison.Ordinal);
-        Assert.Contains("within one collection sweep", xaml, StringComparison.Ordinal);
-        Assert.Contains("analysis.uncorroborated_route_source", xaml, StringComparison.Ordinal);
+        /* #6651 (W8): the note under the combo is ViewerLabels.UncorroboratedRouteNote, in words for a person: the page that shows which
+           value is in force, no MCP key name. */
+        Assert.Contains("{x:Static local:ViewerLabels.UncorroboratedRouteNote}", xaml, StringComparison.Ordinal);
+        Assert.Contains("win over darling.json's analysis.uncorroboratedRoute", ViewerLabels.UncorroboratedRouteNote, StringComparison.Ordinal);
+        Assert.Contains("within one collection sweep", ViewerLabels.UncorroboratedRouteNote, StringComparison.Ordinal);
+        Assert.Contains("The Alert Settings page shows which one is in force.", ViewerLabels.UncorroboratedRouteNote, StringComparison.Ordinal);
+        Assert.DoesNotContain("analysis.uncorroborated_route_source", ViewerLabels.UncorroboratedRouteNote, StringComparison.Ordinal);
         Assert.Contains("Escalation is the corroboration event", xaml, StringComparison.Ordinal);
 
         Assert.Contains("SelectAnalysisUncorroboratedRoute(r.AnalysisUncorroboratedRoute);", window, StringComparison.Ordinal);
@@ -361,7 +365,7 @@ public sealed class UncorroboratedRouteStoreKnobTests
         Assert.Contains($"config_alert_settings.{RouteColumn} column", sample, StringComparison.Ordinal);
         Assert.DoesNotContain("FILE-LEVEL like web.publicBaseUrl", sample, StringComparison.Ordinal);
 
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "alerts-and-notifications.md"); // #6416: moved from Darling/README.md
         Assert.Contains("**The file half of a two-home knob** since V137", readme, StringComparison.Ordinal);
         Assert.Contains("analysis.uncorroborated_route_source", readme, StringComparison.Ordinal);
         Assert.DoesNotContain("`update_alert_settings` refuses it by name; edit the file and restart", readme, StringComparison.Ordinal);

@@ -160,6 +160,48 @@ public sealed class InvestigationToolsLiveTests
         });
     }
 
+    /// <summary>#6576, #6586: through the tool on a named agent token, the agent that lost its claim_id claims again and gets status
+    /// renewed, reclaimed true and the live claim_id, with the lease moved on; another agent_id is refused. On the legacy token
+    /// (agent_id is free text there, and claimed_by is published by list_investigation_requests) the same call is already_claimed
+    /// and no claim_id comes back.</summary>
+    [Fact]
+    public async Task AReclaim_ReturnsTheLiveClaimId_OnlyOnANamedToken_AndTheLegacyTokenIsRefused()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var openedId = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
+            var id = openedId.ToString();
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+
+            var first = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", null, null, ct, "agent-a"));
+            var claimId = first.GetProperty("claim_id").GetString()!;
+            await ExecAsync(connection,
+                $"UPDATE config.investigation_requests SET lease_until = now() + interval '1 minute' WHERE request_id = '{id}'", ct);
+            var before = await ScalarAsync(connection,
+                $"SELECT lease_until::text FROM config.investigation_requests WHERE request_id = '{id}'", ct);
+
+            /* The legacy token: the claimed_by name is public, so naming it must not return the claim_id. */
+            var legacy = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", null, null, ct));
+            Assert.Equal("already_claimed", legacy.GetProperty("status").GetString());
+            Assert.False(legacy.TryGetProperty("claim_id", out _));
+            Assert.Equal("false", await ScalarAsync(connection,
+                $"SELECT (lease_until > '{before}'::timestamptz)::text FROM config.investigation_requests WHERE request_id = '{id}'", ct));
+
+            var again = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", null, null, ct, "agent-a"));
+            Assert.Equal("renewed", again.GetProperty("status").GetString());
+            Assert.True(again.GetProperty("reclaimed").GetBoolean());
+            Assert.Equal(claimId, again.GetProperty("claim_id").GetString());
+            Assert.Equal("true", await ScalarAsync(connection,
+                $"SELECT (lease_until > '{before}'::timestamptz)::text FROM config.investigation_requests WHERE request_id = '{id}'", ct));
+
+            var other = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-b", null, null, ct, "agent-b"));
+            Assert.Equal("already_claimed", other.GetProperty("status").GetString());
+            Assert.False(other.TryGetProperty("claim_id", out _));
+            Assert.Equal($"{claimId}|1", await ScalarAsync(connection,
+                $"SELECT claim_id || '|' || claim_count FROM config.investigation_requests WHERE request_id = '{id}'", ct));
+        });
+    }
+
     [Fact]
     public async Task List_WritesNothing_AndTheWebReadServesTheSameAnswer()
     {
@@ -389,7 +431,8 @@ public sealed class InvestigationToolsLiveTests
         });
     }
 
-    /// <summary>#6004: a family_of that names no request is refused as invalid, naming the id, and nothing is stored; one that
+    /// <summary>#6004: a family_of that is not a full id (the 8-character short form) or names no request is refused as invalid,
+    /// and nothing is stored. The second refusal names the id. One that
     /// names a request is stored and served back, with the queries run.</summary>
     [Fact]
     public async Task Submit_FamilyOf_MustNameARequest_AndIsServedBack()
@@ -401,6 +444,11 @@ public sealed class InvestigationToolsLiveTests
             var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
             var claimId = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, second, "agent-a", null, null, ct))
                 .GetProperty("claim_id").GetString()!;
+
+            var shortForm = Root(await DarlingMcpInvestigationTools.SubmitAsync(store, second, claimId, 1, "real", "a blocking chain", Evidence,
+                "summary", null, null, ct, family_of: first.ToString()[..8]));
+            Assert.Equal("invalid", shortForm.GetProperty("status").GetString());
+            Assert.Equal("0", await ScalarAsync(connection, $"SELECT count(*)::text FROM config.investigation_reports WHERE request_id = '{second}'", ct));
 
             var missing = Guid.NewGuid();
             var refused = Root(await DarlingMcpInvestigationTools.SubmitAsync(store, second, claimId, 1, "real", "a blocking chain", Evidence,
@@ -476,6 +524,43 @@ public sealed class InvestigationToolsLiveTests
             var row = Assert.Single(answer.GetProperty("requests").EnumerateArray().ToArray());
             Assert.Equal(first, row.GetProperty("request_id").GetGuid());
             Assert.Equal("srv-7", row.GetProperty("server_name").GetString());
+        });
+    }
+
+    /// <summary>#6551: a change-watch request has no alert row in the history, so the list and the wait answer carry its detail
+    /// (what changed, the database of each query measure, which measure moved) as <c>detail_text</c>; an alert's request carries none.</summary>
+    [Fact]
+    public async Task ListAndWait_CarryAChangeWatchRequestsDetail_AndAnAlertRequestsCarryNone()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var signal = new InvestigationOpenSignal();
+            var start = _now;
+            var cursor = Root(await DarlingMcpInvestigationTools.WaitAsync(store.OpenedSinceAsync, signal, () => _now, null, null, 0, ct))
+                .GetProperty("cursor").GetString();
+            const string detail = "After a recorded change: 10:00 plan 9 of query 5 in Sales: forced; query_avg_duration_ms:0xABC before 10 after 40 (read from the plan cache, query_hash 0xABC in database Sales)";
+            _now = _now.AddSeconds(1);
+            var watch = (await store.OpenOrJoinAsync(
+                new InvestigationAlert(1, 7, "srv-7", "query_performance", InvestigationTriggerKinds.ChangeWatchMetric, _now, new[] { "change-watch:1" }, null, 20, 100,
+                    LeaseMinutes: 15, ExpiryMinutes: 240, Facts: new InvestigationAlertFacts(1, 1, false, detail, null))
+                { TriggerKind = InvestigationTriggerKinds.ChangeWatch }, ct)).RequestId!.Value;
+            _now = _now.AddSeconds(1);
+            var alert = (await store.OpenOrJoinAsync(
+                new InvestigationAlert(2, 8, "srv-8", "resources", "High CPU", _now, new[] { "key-cpu" }, null, 20, 100,
+                    LeaseMinutes: 15, ExpiryMinutes: 240, Facts: new InvestigationAlertFacts(95, 90, false, "CPU is high", null)), ct)).RequestId!.Value;
+
+            var listed = Root(await DarlingMcpInvestigationTools.ListInvestigationRequests(dataSource, cancellationToken: ct))
+                .GetProperty("requests").EnumerateArray().ToDictionary(r => r.GetProperty("request_id").GetGuid());
+            Assert.Equal(detail, listed[watch].GetProperty("detail_text").GetString());
+            Assert.False(listed[alert].TryGetProperty("detail_text", out _));
+
+            var rows = (await store.OpenedSinceAsync(start, null, 10, ct)).ToDictionary(r => r.RequestId);
+            Assert.Equal(detail, rows[watch].DetailText);
+            Assert.Null(rows[alert].DetailText);
+            var answer = Root(await DarlingMcpInvestigationTools.WaitAsync(store.OpenedSinceAsync, signal, () => _now, null, cursor, 0, ct));
+            var byId = answer.GetProperty("requests").EnumerateArray().ToDictionary(r => r.GetProperty("request_id").GetGuid());
+            Assert.Equal(detail, byId[watch].GetProperty("detail_text").GetString());
+            Assert.False(byId[alert].TryGetProperty("detail_text", out _));
         });
     }
 

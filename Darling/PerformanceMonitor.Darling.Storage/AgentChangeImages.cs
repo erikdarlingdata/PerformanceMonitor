@@ -52,6 +52,15 @@ public static class AgentChangeKinds
     /// <summary>One session killed on a monitored SQL Server (#5632, step 12). It has no undo: a killed session cannot be brought back, so the kind is not in <see cref="AgentChangeUndo.UndoableKinds"/>.</summary>
     public const string SessionKill = "session_kill";
 
+    /// <summary>One procedure, function or trigger recompiled on a monitored SQL Server with <c>sys.sp_recompile</c> (#6569). It has no undo: the next run compiles a new plan, so the kind is not in <see cref="AgentChangeUndo.UndoableKinds"/>.</summary>
+    public const string ModuleRecompile = "module_recompile";
+
+    /// <summary>One plan guide created on a monitored SQL Server with <c>sys.sp_create_plan_guide</c> (#6569, slice 2a). A person undoes it from the Agent changes list: the undo drops the guide by name, so the kind is read by the plan undo (<see cref="AgentChangeUndo.PlanUndoTool"/>), not by <see cref="AgentChangeUndo.UndoableKinds"/>.</summary>
+    public const string PlanGuideCreate = "plan_guide_create";
+
+    /// <summary>One plan guide dropped on a monitored SQL Server with <c>sys.sp_control_plan_guide N'DROP'</c> (#6569, slice 2b). The call journals the whole definition it read (name, type, statement, module or batch, params, hints, is_disabled). A person undoes it from the Agent changes list: the undo re-creates the guide from that definition, so the kind is read by the plan undo (<see cref="AgentChangeUndo.UndoPlanChangeAsync"/>) and is not in <see cref="AgentChangeUndo.UndoableKinds"/>.</summary>
+    public const string PlanGuideDrop = "plan_guide_drop";
+
     /// <summary>A person's attempt to undo a plan change whose write was sent and whose reply was lost (#5632). Journaled as an <c>action_called</c> row with no result, so the list reads it as "result unknown". It has no undo.</summary>
     public const string PlanUndo = "plan_undo";
 }

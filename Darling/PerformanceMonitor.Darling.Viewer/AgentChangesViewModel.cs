@@ -86,12 +86,13 @@ public sealed partial class ViewerDataService
         }
     }
 
-    /// <summary>Turns every agent change on or off and journals it by the person.</summary>
-    public async Task SetAgentActionsEnabledAsync(bool enabled, string login, CancellationToken cancellationToken = default)
+    /// <summary>Turns every agent change on or off and journals it by the person. False when the store has no service row yet: nothing was
+    /// written (<see cref="AgentChangeUndo.SwitchStoreNotSetUpMessage"/>).</summary>
+    public async Task<bool> SetAgentActionsEnabledAsync(bool enabled, string login, CancellationToken cancellationToken = default)
     {
         try
         {
-            await new AgentChangeUndo(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds).SetEnabledAsync(enabled, login, cancellationToken);
+            return await new AgentChangeUndo(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds).SetEnabledAsync(enabled, login, cancellationToken);
         }
         catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
         {
@@ -128,6 +129,9 @@ public sealed class AgentChangeViewRow
         AgentChangeKinds.PlanUnforce => "unforce plan",
         AgentChangeKinds.PlanEvict => "evict plan",
         AgentChangeKinds.SessionKill => "kill session",
+        AgentChangeKinds.ModuleRecompile => "recompile module",
+        AgentChangeKinds.PlanGuideCreate => "create plan guide",
+        AgentChangeKinds.PlanGuideDrop => "drop plan guide",
         var other => other ?? "",
     };
 

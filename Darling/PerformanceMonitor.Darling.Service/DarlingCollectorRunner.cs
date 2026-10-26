@@ -359,7 +359,8 @@ public sealed class DarlingCollectorRunner
        collectors capture the execution plan when true (darling.json "capturePlans", default true).
        Lite never sets the context flag; this is what makes Darling the plan-capturing SKU. Read
        through a provider (not a captured bool) so a control-plane store reload of config_service's
-       capture_plans is honored on the NEXT cycle without reconstructing the runner. */
+       capture_plans is honored on the NEXT cycle without reconstructing the runner. #6771: this is the service-wide
+       value; a server's own capture_plans (ServerRuntime.CapturePlans) wins over it when not null (CapturePlansFor). */
     private readonly Func<bool> _capturePlans;
 
     /* Feeds CollectorContext.CollectSchemaChangeEvents on every cycle — the default_trace_events
@@ -1014,8 +1015,16 @@ public sealed class DarlingCollectorRunner
     /// decision is reachable from a test — a bare conjunction there is droppable by a refactor with every
     /// pin still green, which is the failure mode this shape removes.
     /// </summary>
-    internal bool ShouldCapturePlanXmlFor(string collectorName, int serverId) =>
-        _capturePlans() && ShouldCapturePlanForCollector(collectorName, serverId);
+    internal bool ShouldCapturePlanXmlFor(string collectorName, int serverId, bool? serverCapturePlans) =>
+        CapturePlansFor(serverCapturePlans) && ShouldCapturePlanForCollector(collectorName, serverId);
+
+    /// <summary>
+    /// #6771: whether plan XML is fetched for a server at all: the server's own <c>capture_plans</c> when it has one, else the
+    /// service-wide setting, read live. An explicit false stops the plan fetch for that server with the service-wide setting on, and
+    /// an explicit true keeps it with the service-wide setting off. Every decision below that used to read the service-wide
+    /// provider directly goes through here.
+    /// </summary>
+    internal bool CapturePlansFor(bool? serverCapturePlans) => serverCapturePlans ?? _capturePlans();
 
     /// <summary>
     /// #5158: whether this run of this collector leaves plan XML out of its main query and fetches it in a
@@ -1023,8 +1032,10 @@ public sealed class DarlingCollectorRunner
     /// target that captures plans, with the knob on. Azure SQL Database reads per database through a path with no
     /// second query, so it keeps the inline capture.
     /// </summary>
-    internal bool ShouldDeferPlanFetchFor(string collectorName, bool capturePlanXml, CollectorTargetInfo target) =>
-        ShouldDeferPlanFetchFor(collectorName, capturePlanXml, target, ProcedureStatsPlanFetchModeFor(collectorName, target));
+    internal bool ShouldDeferPlanFetchFor(
+        string collectorName, bool capturePlanXml, CollectorTargetInfo target, bool? serverCapturePlans) =>
+        ShouldDeferPlanFetchFor(
+            collectorName, capturePlanXml, target, ProcedureStatsPlanFetchModeFor(collectorName, target, serverCapturePlans));
 
     /// <summary>
     /// The same decision with procedure_stats' mode already resolved, so one run reads the knob and the capture setting
@@ -1046,9 +1057,9 @@ public sealed class DarlingCollectorRunner
     /// <see cref="ProcedureStatsPlanFetchModes.OfRun"/>.
     /// </summary>
     internal (bool DeferPlanXmlFetch, bool PlanIdentityColumns) StampPlanFetchFlags(
-        string collectorName, bool capturePlanXml, CollectorTargetInfo target)
+        string collectorName, bool capturePlanXml, CollectorTargetInfo target, bool? serverCapturePlans)
     {
-        var mode = ProcedureStatsPlanFetchModeFor(collectorName, target);
+        var mode = ProcedureStatsPlanFetchModeFor(collectorName, target, serverCapturePlans);
         return (
             ShouldDeferPlanFetchFor(collectorName, capturePlanXml, target, mode),
             /* Shadow adds the identity columns after the inline plan on a capture cycle; on sends them every cycle, a
@@ -1062,11 +1073,12 @@ public sealed class DarlingCollectorRunner
     /// no plans, and on Azure SQL Database, where whether <c>sys.dm_exec_query_stats</c> lists a module's statements
     /// is unverified, so the identity could not be trusted there. An unrecognized knob value is off and warns once.
     /// </summary>
-    internal ProcedureStatsPlanFetchMode ProcedureStatsPlanFetchModeFor(string collectorName, CollectorTargetInfo target)
+    internal ProcedureStatsPlanFetchMode ProcedureStatsPlanFetchModeFor(
+        string collectorName, CollectorTargetInfo target, bool? serverCapturePlans)
     {
         if (!string.Equals(collectorName, PlanCadenceGatedCollector, StringComparison.Ordinal)
             || target.IsAzureSqlDb
-            || !_capturePlans())
+            || !CapturePlansFor(serverCapturePlans))
         {
             return ProcedureStatsPlanFetchMode.Off;
         }
@@ -2733,8 +2745,8 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             }
         }
 
-        var capturePlanXml = ShouldCapturePlanXmlFor(definition.Name, server.ServerId);
-        var planFetchFlags = StampPlanFetchFlags(definition.Name, capturePlanXml, server.Target);
+        var capturePlanXml = ShouldCapturePlanXmlFor(definition.Name, server.ServerId, server.CapturePlans);
+        var planFetchFlags = StampPlanFetchFlags(definition.Name, capturePlanXml, server.Target, server.CapturePlans);
         var context = new CollectorContext
         {
             ServerId = server.ServerId,
@@ -2758,7 +2770,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             PerfmonCounterOverride = null,
             LongQuerySessionName = LongQuerySessionName(),
             /* #2862: plan capture is additionally cadence-gated for procedure_stats — see
-               ShouldCapturePlanForCollector. Every other collector reads exactly _capturePlans().
+               ShouldCapturePlanForCollector. Every other collector reads exactly CapturePlansFor(server.CapturePlans) (#6771).
                Only this path is gated: FetchRowsAsync below is the on-demand live fetch, which an
                operator asked for by name and which stores nothing, so it always renders. */
             CapturePlanXml = capturePlanXml,
@@ -5581,7 +5593,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             IgnoredWaitTypes = IgnoredWaitDefaults.All,
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = null,
-            CapturePlanXml = _capturePlans(),
+            CapturePlanXml = CapturePlansFor(server.CapturePlans),
             /* #2150: stays FALSE here, and NOT because the readers are behind — this is FetchRowsAsync, the
                on-demand live fetch. It returns the rows straight to the caller and writes nothing: no store
                insert, no text fetch, no watermark. Turning it on would null query_sql_text in rows that have

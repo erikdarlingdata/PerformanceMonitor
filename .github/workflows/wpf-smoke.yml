@@ -9,22 +9,19 @@ name: WPF smoke
 # is taken before anything of ours runs (the probe: proof that the runner gives an interactive desktop), and again when each
 # app's main window shows, after each walk, and on any failure. No screenshots are compared.
 #
-# Triggers: a pull request touching Lite, the Darling viewer or its storage, the harness or this workflow (a draft pull request is skipped until it is
-# marked ready), the nightly (workflow_call), and a manual dispatch. `pull_request`, never `pull_request_target`: the job
-# runs the pull request's own code, so it runs with the pull request's read-only token and no secrets.
+# Triggers: the nightly (workflow_call) and a manual dispatch. It no longer runs on pull requests (#6656): the pull request
+# workflow (pr.yml) is the one per-PR CI system, so this smoke is a nightly and on-demand check.
 #
-# Not a required check. A workflow that is skipped by its path filter never reports, so it cannot be one; the job name is
-# left free of the names build.yml's ruleset uses.
+# History (#6492): it was built to be a required check on pull requests, with no `paths:` filter, because a workflow its path
+# filter skips never reports, and a required check that never reports blocks the merge. The jobs keep that shape, and on the
+# two events left every `if` below takes its non-pull-request branch:
+#   * `changes` works out, on every event, whether the smoke is needed: a non-draft pull request that changes Lite, the Darling
+#     viewer or its storage, the harness, the seed or this workflow (the list the old filter held), or any event that is not a
+#     pull request (the nightly, a dispatch). A draft pull request is skipped until it is marked ready.
+#   * `smoke` runs only when `changes` says so.
+#   * `WPF smoke (result)` always runs and is the one check to require: success when the smoke passed or was not needed, failure
+#     when the smoke failed, was cancelled, or `changes` itself failed.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - 'Lite/**'
-      - 'Darling/**'
-      - 'tools/ui-smoke-wpf/**'
-      - 'tools/ui-smoke/**'
-      - 'Lite.Tests/TestDataSeeder.cs'
-      - '.github/workflows/wpf-smoke.yml'
   # The nightly runs it as a reusable workflow (nightly.yml, outside publish's needs).
   workflow_call:
   workflow_dispatch:
@@ -37,10 +34,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: WPF smoke (is it needed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.needed.outputs.run }}
+    steps:
+      # The pull request's merge commit: its first parent is the base branch tip, so `HEAD^1..HEAD` is exactly what the pull
+      # request changes. Two commits is all the diff needs. Only a non-draft pull request needs the checkout.
+      - uses: actions/checkout@v7
+        if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+        with:
+          fetch-depth: 2
+
+      - name: Work out whether the smoke is needed
+        id: needed
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Not a pull request ($EVENT_NAME): the smoke runs."
+            exit 0
+          fi
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Draft pull request: the smoke is skipped until it is marked ready."
+            exit 0
+          fi
+          # The paths the smoke exercises (the list the old `paths:` filter held).
+          pattern='^(Lite/|Darling/|tools/ui-smoke-wpf/|tools/ui-smoke/|Lite\.Tests/TestDataSeeder\.cs$|\.github/workflows/wpf-smoke\.yml$)'
+          files=$(git diff --name-only HEAD^1 HEAD)
+          echo "Changed files: $(printf '%s\n' "$files" | grep -c .)"
+          matched=$(printf '%s\n' "$files" | grep -E "$pattern" || true)
+          if [ -n "$matched" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "The pull request changes smoke paths, the smoke runs. First matches:"
+            printf '%s\n' "$matched" | head -5
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "The pull request changes none of the smoke paths: the smoke is not needed."
+          fi
+
   smoke:
     name: WPF smoke (Lite and the Darling viewer)
-    # Skip a draft pull request; a dispatch has no pull request and always runs.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: windows-latest
     # Expected 4 to 6 minutes warm (restore and builds of Lite, the service and the viewer 3, PostgreSQL and the store migration 1,
     # the two walks under 1); 3 more on a cold pg-runtime cache.
@@ -62,10 +104,21 @@ jobs:
           $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
           $bmp.Save("$out\desktop-probe.png")
 
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: global.json
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
@@ -206,3 +259,35 @@ jobs:
         run: |
           $bin = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
           if (Test-Path "$bin\pg_ctl.exe") { & "$bin\pg_ctl.exe" -D "$env:RUNNER_TEMP\darling-pgdata" -m fast stop }
+
+  # The one check to require. Always runs, so a pull request the smoke does not apply to (no smoke paths changed, or a draft)
+  # still reports success; a failed, cancelled or never-started smoke reports failure.
+  result:
+    name: WPF smoke (result)
+    needs: [changes, smoke]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUN_NEEDED: ${{ needs.changes.outputs.run }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+        run: |
+          echo "changes: $CHANGES_RESULT (smoke needed: ${RUN_NEEDED:-unknown}); smoke: $SMOKE_RESULT"
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::Could not work out whether the smoke is needed ($CHANGES_RESULT)."
+            exit 1
+          fi
+          if [ "$RUN_NEEDED" != "true" ]; then
+            echo "The smoke was not needed (no smoke paths changed, or a draft pull request): success."
+            exit 0
+          fi
+          if [ "$SMOKE_RESULT" = "success" ]; then
+            echo "The smoke passed."
+            exit 0
+          fi
+          echo "::error::The WPF smoke did not pass ($SMOKE_RESULT)."
+          exit 1

@@ -311,6 +311,75 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, 'ring_buffer_truncated=1 ring_buff
             Assert.DoesNotContain("quiet", message, StringComparison.Ordinal);
         });
 
+    /* #6650: events of the tool's type WERE read in the window and its gate dropped them. The truncation answer must say
+       how many were read, not "No ... events were found" over a count of one or more. */
+    [Fact]
+    public async Task ATruncatedRingBufferRun_WithEventsReadButGatedOut_SaysHowManyWereRead_AgainstDevPostgres() =>
+        await RunHealthAsync("rbtrunc-read", async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbtrunc-read", end.AddDays(-30), end.AddDays(-8), end.AddMinutes(-30));
+            var name = HealthName("rbtrunc-read");
+            var (eventType, fixture, _) = SourceOf(HealthTool.MemoryBroker);
+            var xml = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "SystemHealth", fixture));
+            await DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+                @"INSERT INTO system_health_events (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
+VALUES ($1,$2,$3,$4,$5,$6,$7)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(end.AddDays(-1)), ServerIdHelper.GetDeterministicHashCode(name), name,
+                DarlingMcpTestData.Naive(end.AddDays(-1)), eventType, xml);
+            await DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+                @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
+VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, 'ring_buffer_truncated=1 ring_buffer_events_hidden=773 newest_visible_event_age_s=19380')",
+                CollectionIdGenerator.Next(), ServerIdHelper.GetDeterministicHashCode(name), name, Collector, DarlingMcpTestData.Naive(end));
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(HealthTool.MemoryBroker, ds, "rbtrunc-read", 168, end));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.StartsWith($"1 {eventType} event(s) were read for {name}", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("events were found", message, StringComparison.Ordinal);
+            Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+            Assert.Contains("773 event(s) are hidden", message, StringComparison.Ordinal);
+        });
+
+    /* #6453: nothing of any type ever stored. The newest run read the live session through its event_file target and found
+       nothing: a true negative, `empty`. A fallback to the ring buffer, a ring buffer read with no note and a newest run that
+       was an ERROR keep `unavailable`, because the ring buffer path also records SUCCESS for a dead session. */
+    [Theory]
+    [InlineData(HealthTool.SystemHealth, "event_file_events=0", "SUCCESS", "empty")]
+    [InlineData(HealthTool.SignificantWaits, "event_file_events=0", "SUCCESS", "empty")]
+    [InlineData(HealthTool.SystemHealth, "event_file_fallback=1", "SUCCESS", "unavailable")]
+    [InlineData(HealthTool.SystemHealth, "event_file_fallback=1 event_file_error=297", "SUCCESS", "unavailable")]
+    [InlineData(HealthTool.SignificantWaits, "event_file_fallback=1", "SUCCESS", "unavailable")]
+    [InlineData(HealthTool.SystemHealth, null, "SUCCESS", "unavailable")]
+    [InlineData(HealthTool.SystemHealth, "event_file_events=0", "ERROR", "unavailable")]
+    public async Task NothingEverStored_IsEmptyOnlyAfterAnEventFileRead_AgainstDevPostgres(HealthTool tool, string? note, string status, string expected)
+    {
+        var scenario = "efread-" + tool + "-" + (note ?? "none").Replace(' ', '_').Replace('=', '-') + "-" + status;
+        await RunHealthAsync(scenario, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, scenario, end.AddDays(-30), null, end);
+            var name = HealthName(scenario);
+            await DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+                @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
+VALUES ($1, $2, $3, $4, $5, 12, $6, 0, $7)",
+                CollectionIdGenerator.Next(), ServerIdHelper.GetDeterministicHashCode(name), name, Collector, DarlingMcpTestData.Naive(end), status, note);
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, scenario, 168, end));
+
+            Assert.Equal(expected, root.GetProperty("status").GetString());
+            Assert.Equal(expected == "empty", root.GetProperty("source_observed").GetBoolean());
+            var message = root.GetProperty("message").GetString()!;
+            if (expected == "empty")
+            {
+                Assert.Contains("true negative", message, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+            }
+        });
+    }
+
     [Theory]
     [InlineData(HealthTool.SystemHealth)]
     [InlineData(HealthTool.SignificantWaits)]

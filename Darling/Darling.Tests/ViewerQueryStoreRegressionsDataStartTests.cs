@@ -99,12 +99,35 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
             step);
     }
 
+    /* #6654 review: the grid has no envelope, so the dropped databases it left out reach the user through this text. */
+    [Fact]
+    public void TheLeftOutBanner_NamesTheDatabases_InTheWordsOfDatabasesLeftOut()
+    {
+        Assert.Null(ViewerServerTab.DatabasesLeftOutBannerText(null));
+        Assert.Null(ViewerServerTab.DatabasesLeftOutBannerText(Array.Empty<string>()));
+        Assert.Null(ViewerServerTab.DatabasesLeftOutBannerText(new[] { " ", "" }));
+
+        var one = ViewerServerTab.DatabasesLeftOutBannerText(new[] { "Gone" })!;
+        Assert.StartsWith("Left out of this grid: Gone. ", one, StringComparison.Ordinal);
+        Assert.Contains("no longer lists it", one, StringComparison.Ordinal);
+        Assert.DoesNotContain("in all", one, StringComparison.Ordinal);
+
+        var two = ViewerServerTab.DatabasesLeftOutBannerText(new[] { "b", "a", "b" })!;
+        Assert.StartsWith("Left out of this grid: a, b. ", two, StringComparison.Ordinal);
+        Assert.Contains("no longer lists them", two, StringComparison.Ordinal);
+
+        var many = ViewerServerTab.DatabasesLeftOutBannerText(Enumerable.Range(0, 25).Select(i => "db" + i.ToString("00", System.Globalization.CultureInfo.InvariantCulture)).ToArray())!;
+        Assert.Contains("(25 in all; the first 20 are listed)", many, StringComparison.Ordinal);
+        Assert.Contains("db19", many, StringComparison.Ordinal);
+        Assert.DoesNotContain("db20", many, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void EveryTabRead_OfTheGrid_HasItsProbe()
     {
         var tabs = string.Join("\n", Directory.GetFiles(PathTo("Darling", "PerformanceMonitor.Darling.Viewer"), "ViewerServerTab*.cs").Select(File.ReadAllText));
 
-        Assert.Equal(1, Matches(tabs, @"_dataService\.GetQueryStoreRegressionsAsync\("));
+        Assert.Equal(1, Matches(tabs, @"_dataService\.GetQueryStoreRegressionsWithScopeAsync\("));
         Assert.Equal(1, Matches(tabs, @"_dataService\.GetQueryStoreRegressionsDataStartAsync\("));
         Assert.Equal(1, Matches(tabs, @"ShowQueryStoreRegressionsDataStartAsync\(QueryStoreRegressionsTruncationBanner,"));
     }
@@ -118,7 +141,7 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
         Assert.True(banner.Success, "QueryStoreRegressionsTruncationBanner is not declared in ViewerServerTab.xaml, in the row above the grid");
         Assert.Contains("Visibility=\"Collapsed\"", banner.Value, StringComparison.Ordinal);
         Assert.Contains("Background=\"#22FFAA00\"", banner.Value, StringComparison.Ordinal);
-        Assert.Matches(@"<DataGrid Grid\.Row=""2"" x:Name=""QueryStoreRegressionsGrid""", xaml);
+        Assert.Matches(@"<DataGrid Grid\.Row=""3"" x:Name=""QueryStoreRegressionsGrid""", xaml);
     }
 
     // ── What the banner shows ──
@@ -126,7 +149,13 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
     /* The banner the tab's own step (ShowQueryStoreRegressionsDataStartAsync) raises for the probe's answer on the range that starts at
        RangeStart, read off the control; null when it is hidden. Seeded visible, so a no-op cannot pass as a hidden banner. */
     private static string? BannerFor(DateTime? coverageStartUtc) =>
-        ReadBanner(banner => ViewerServerTab.ShowQueryStoreRegressionsDataStartAsync(banner, Task.FromResult(coverageStartUtc), RangeStart).GetAwaiter().GetResult());
+        ReadBanner(banner =>
+        {
+            /* The two steps the tab runs, in its order (#6750). */
+            var probe = Task.FromResult(coverageStartUtc);
+            ViewerServerTab.ShowQueryStoreRegressionsDataStartAsync(banner, probe, RangeStart).GetAwaiter().GetResult();
+            ViewerServerTab.AddQueryStoreRegressionsEmptyBaselineNote(banner, probe, RangeStart);
+        });
 
     /* The same answer compared with the RANGE's start, which is the keying the step moves off: the premise of the first case below. */
     private static string? BannerComparedWithTheRangeStart(DateTime? coverageStartUtc) =>
@@ -162,7 +191,11 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
     [Fact]
     public void CoverageThatStartsInsideTheRecentWindow_RaisesTheNotice()
     {
-        Assert.Equal("Showing since 2026-09-11 00:00:00", BannerFor(RangeStart.AddDays(1)));
+        Assert.Equal("Showing since 2026-09-11 00:00:00" + ViewerServerTab.QueryStoreRegressionsEmptyBaselineSuffix, BannerFor(RangeStart.AddDays(1)));
+        /* The range's own start is the edge: the baseline ends there, so it is empty at the start itself (#6750). */
+        Assert.EndsWith(ViewerServerTab.QueryStoreRegressionsEmptyBaselineSuffix, BannerFor(RangeStart)!, StringComparison.Ordinal);
+        /* A store that starts inside the baseline holds part of it, and the banner does not call it empty. */
+        Assert.DoesNotContain("baseline is empty", BannerFor(RangeStart.AddDays(-2))!, StringComparison.Ordinal);
     }
 
     /* A quiet start: the store covered the whole baseline (coverage 20 days before the range). No notice. */

@@ -385,8 +385,8 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
         }
     }
 
-    /// <summary>The truncated-baseline sentence Lite adds to its note, which this tool copies.</summary>
-    private const string BaselineTail = "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.";
+    /// <summary>The truncated-baseline sentence both products add to the note: one constant in Common (#6649).</summary>
+    private const string BaselineTail = PerformanceMonitor.Common.QueryStoreRegressionRules.BaselineWindowTail;
 
     /// <summary>
     /// #4966: the store's first Query Store row comes 40 hours back, inside the 7-day baseline, so the baseline holds only part
@@ -414,6 +414,41 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
 
             var names = hit.EnumerateObject().Select(p => p.Name).ToList();
             Assert.Equal(["effective_start", "window_truncated", "truncation_note"], names.Skip(names.IndexOf("hours_back") + 1).Take(3));
+        });
+    }
+
+    /// <summary>
+    /// #6750: a raw-only store whose first row comes after the 168-hour window's start. The baseline is empty and the recent window is
+    /// cut, so the note ends with those three sentences, not with the sentence for a baseline that holds part of its span. A timeouts
+    /// row still comes back (this store holds no interval from before baseline_end, so cost has nothing to flag against). A 24-hour read of the same store keeps the old
+    /// sentence, because there the store starts inside the baseline.
+    /// </summary>
+    [Fact]
+    public async Task AStoreThatStartsAfterTheWindow_SaysTheBaselineIsEmpty_AndTheRecentWindowIsCut_AgainstDevPostgres()
+    {
+        await WithServerAsync(async (connection, postgres, baseNow, ct) =>
+        {
+            await SeedAsync(connection, ct, baseNow.AddHours(-30), 3, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 3, queryId: 7, executionType: "Aborted");
+            await SeedAsync(connection, ct, baseNow.AddHours(-10), 6, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 4, queryId: 7, executionType: "Aborted");
+
+            var hit = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 168));
+
+            Assert.Equal("raw", hit.GetProperty("history_source").GetString());
+            Assert.True(hit.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(baseNow.AddHours(-30)), hit.GetProperty("effective_start").GetString());
+            var note = hit.GetProperty("truncation_note").GetString()!;
+            Assert.EndsWith(PerformanceMonitor.Common.QueryStoreRegressionRules.EmptyBaselineTail + " " + PerformanceMonitor.Common.QueryStoreRegressionRules.RecentCutTail + " " + PerformanceMonitor.Common.QueryStoreRegressionRules.RecentHoursHeldTail, note, StringComparison.Ordinal);
+            Assert.DoesNotContain(BaselineTail, note, StringComparison.Ordinal);
+
+            var row = Assert.Single(hit.GetProperty("regressions").EnumerateArray());
+            Assert.Equal("timeouts", row.GetProperty("regression_reason").GetString());
+
+            /* A 24-hour read: the store starts inside the baseline window, so the baseline holds part of its span. 3 timeouts in the
+               6 hours of baseline the store holds (0.5 an hour) against 36 in the 24-hour window (1.5 an hour). It must be a rise, or
+               the answer is the empty envelope, which carries the note under hints, not at the top (as in the Lite copy). */
+            await SeedAsync(connection, ct, baseNow.AddHours(-2), 30, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 5, queryId: 7, executionType: "Aborted");
+            var day = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
+            Assert.EndsWith(BaselineTail, day.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
         });
     }
 
@@ -724,7 +759,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
     /// <summary>One Query Store interval of a query in <paramref name="database"/> (<see cref="Db"/> unless a test needs a second database to filter on).</summary>
     private static async Task SeedAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime collectionTime, long executions,
-        long avgDurationUs, long avgCpuUs, long intervalId, long queryId = 1, string database = Db) =>
+        long avgDurationUs, long avgCpuUs, long intervalId, long queryId = 1, string database = Db, string executionType = "Regular") =>
         await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO query_store_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
@@ -732,7 +767,7 @@ INSERT INTO query_store_stats
      runtime_stats_interval_id, query_text, last_execution_time)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTime), ServerId, ServerName,
-            database, queryId, 9L, "Regular", executions, avgDurationUs, avgCpuUs, 100L, intervalId,
+            database, queryId, 9L, executionType, executions, avgDurationUs, avgCpuUs, 100L, intervalId,
             "SELECT * FROM dbo.Widgets", DarlingMcpTestData.Naive(collectionTime));
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)

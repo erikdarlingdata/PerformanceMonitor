@@ -1,5 +1,7 @@
 # Backfilling the #3653 A6 successor dailies
 
+Audience: operators and maintainers.
+
 `query_stats_interval_daily`, `procedure_stats_interval_daily` and `query_stats_db_interval_daily` are the
 interval-honest successor DAILIES added by #3653 A6 lane LB. They are created `WITH NO DATA` and hierarchical
 from the interval-honest successor HOURLIES (`query_stats_interval_hourly`, `procedure_stats_interval_hourly`,

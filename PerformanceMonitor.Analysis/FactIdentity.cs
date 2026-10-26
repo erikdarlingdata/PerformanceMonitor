@@ -68,10 +68,15 @@ public static class FactIdentity
     /// The SQL Server keys that name a thing (exact keys; <see cref="SqlServerBadActorPrefix"/> is the one
     /// dynamic family). <c>BLOCKING_CHAIN</c> names its lead-blocker session (<c>worst_apex_spid</c>);
     /// <c>RUNNING_JOBS</c> the Agent job running longest past its history (<see cref="Fact.ObjectName"/>,
-    /// #3693); the two object anomalies the table they observed. Today's SQL Server graph reaches the first two
-    /// as hops (<c>LCK → BLOCKING_CHAIN</c>, <c>SCH_M / WRITELOG / IO_WRITE_LATENCY_MS → RUNNING_JOBS</c>); the
-    /// others are rostered because they NAME something, which is this contract's question — not because an edge
-    /// reaches them today.
+    /// #3693); the two object anomalies the table they observed; the two query facts the query (or plan) they rank
+    /// first, as <c>database/query_hash</c> or <c>database/query_hash/query_plan_hash</c> (#6640). Today's SQL Server graph reaches
+    /// <c>BLOCKING_CHAIN</c>, <c>RUNNING_JOBS</c>, <c>QUERY_SPILLS</c> and <c>PARAMETER_SENSITIVITY</c> as hops
+    /// (<c>LCK → BLOCKING_CHAIN</c>, <c>SCH_M / WRITELOG / IO_WRITE_LATENCY_MS → RUNNING_JOBS</c>,
+    /// <c>RESOURCE_SEMAPHORE / MEMORY_GRANT_PENDING / TEMPDB_USAGE / PARAMETER_SENSITIVITY → QUERY_SPILLS</c>,
+    /// <c>CPU_SPIKE / MEMORY_GRANT_PENDING → PARAMETER_SENSITIVITY</c>), so a story rooted at one of those causes now
+    /// carries a "Behind it" sentence naming the query, which is the point of #6640: a query fact consumed mid-chain
+    /// used to leave the root card with no query to look at. The two anomaly keys are rostered because they NAME
+    /// something, which is this contract's question, and no edge reaches them today.
     /// </summary>
     public static readonly IReadOnlyList<string> SqlServerKeys = new[]
     {
@@ -79,6 +84,8 @@ public static class FactIdentity
         "RUNNING_JOBS",
         "ANOMALY_OBJECT_GROWTH",
         "ANOMALY_OBJECT_CONTENTION",
+        "QUERY_SPILLS",
+        "PARAMETER_SENSITIVITY",
     };
 
     /// <summary>The SQL Server per-statement family, keyed <c>BAD_ACTOR_&lt;query_hash&gt;</c>; the hash IS the name.</summary>
@@ -153,6 +160,10 @@ public static class FactIdentity
             case "ANOMALY_OBJECT_GROWTH":
             case "ANOMALY_OBJECT_CONTENTION":
                 return subject is null ? null : InDatabase($"table `{subject}`", fact.DatabaseName);
+            case "QUERY_SPILLS":
+                return subject is null ? null : $"most spilled query `{subject}`";
+            case "PARAMETER_SENSITIVITY":
+                return subject is null ? null : $"most sensitive plan `{subject}`";
         }
 
         if (key == PgTargetFactKeys.IdleInTransaction || key == PgTargetFactKeys.LongRunningQuery)

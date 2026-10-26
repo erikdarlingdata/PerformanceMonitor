@@ -49,6 +49,87 @@ public sealed class InvestigationEvidenceFamiliesLiveTests
         new(1, ServerId, ServerName, family, metric, at, new[] { ServerId + ":" + metric }, null, 20, 100, LeaseMinutes: 15, ExpiryMinutes: 240);
 
     [Fact]
+    public async Task AClientTimeoutsRequest_FreezesTheTopAppsHostsAndStatements_OfTheAlertWindow()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            /* #6553: 3 sampled timeouts from WS-ERIK and 1 from APP01 in the window, plus a row OUTSIDE it that must not count. */
+            await PlantAttentionAsync(setup.Connection, ct, 1, AlertAt.AddMinutes(-2), "count", 4, null, null, null, null, null);
+            await PlantAttentionAsync(setup.Connection, ct, 2, AlertAt.AddMinutes(-2), "sample", 0, Db, "SSMS", "WS-ERIK", "fp-a", "SELECT 'CANARYTEXT' FROM t");
+            await PlantAttentionAsync(setup.Connection, ct, 3, AlertAt.AddMinutes(-2), "sample", 0, Db, "SSMS", "WS-ERIK", "fp-a", "SELECT 'CANARYTEXT' FROM t");
+            await PlantAttentionAsync(setup.Connection, ct, 4, AlertAt.AddMinutes(-2), "sample", 0, Db, "SSMS", "WS-ERIK", "fp-a", "SELECT 'CANARYTEXT' FROM t");
+            await PlantAttentionAsync(setup.Connection, ct, 5, AlertAt.AddMinutes(-2), "sample", 0, Db, "web", "APP01", "fp-b", "SELECT 2");
+            await PlantAttentionAsync(setup.Connection, ct, 6, AlertAt.AddHours(-3), "sample", 0, Db, "old-app", "OLD01", "fp-old", "SELECT 3");
+            var requestId = (await setup.Requests.OpenOrJoinAsync(
+                Alert(InvestigationFamily.QueryPerformance, AlertFamily.ClientTimeoutsMetric, AlertAt), ct)).RequestId!.Value;
+            await PlantRunAsync(setup.Connection, ct, "attention", WindowEnd.AddSeconds(5));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var row = Assert.Single(Rows(await setup.Requests.ReadEvidenceAsync(requestId, ct), "client_timeouts"));
+            Assert.Equal(4, row["count"]!.GetValue<long>());
+            var hosts = row["top_hosts"]!.AsArray();
+            Assert.Equal(new[] { "WS-ERIK", "APP01" }, hosts.Select(h => h!["client_hostname"]!.GetValue<string>()));
+            Assert.Equal(3, hosts[0]!["sampled_events"]!.GetValue<long>());
+            Assert.Equal(new[] { "SSMS", "web" }, row["top_client_apps"]!.AsArray().Select(a => a!["client_app_name"]!.GetValue<string>()));
+            var statements = row["top_statements"]!.AsArray();
+            Assert.Equal(new[] { "fp-a", "fp-b" }, statements.Select(s => s!["statement_fingerprint"]!.GetValue<string>()));
+            Assert.Equal("SELECT 'CANARYTEXT' FROM t", statements[0]!["sql_text"]!.GetValue<string>());
+
+            /* #6579 review: the statement text is a statement-class key (sql_text), so metadataOnly masks it; full keeps it. */
+            var sources = await new PgInvestigationBriefSourceReader(setup.DataSource, utcNow: () => setup.Clock.Now).ReadAsync(requestId, ct);
+            Assert.Contains("CANARYTEXT", InvestigationBriefComposer.Compose(sources!, DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, setup.Clock.Now), StringComparison.Ordinal);
+            var masked = InvestigationBriefComposer.Compose(sources!, DarlingInvestigationBriefTools.Tools, McpDataDetail.MetadataOnly, setup.Clock.Now);
+            Assert.Contains("client_timeouts", masked, StringComparison.Ordinal);
+            Assert.DoesNotContain("CANARYTEXT", masked, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task AClientTimeoutsRequest_WithNoTimeoutsInTheWindow_FreezesAnEmptySection()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = (await setup.Requests.OpenOrJoinAsync(
+                Alert(InvestigationFamily.QueryPerformance, AlertFamily.ClientTimeoutsMetric, AlertAt), ct)).RequestId!.Value;
+            await PlantRunAsync(setup.Connection, ct, "attention", WindowEnd.AddSeconds(5));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var section = Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "client_timeouts");
+            Assert.Equal("ready", section.State);
+            Assert.Equal("empty", JsonNode.Parse(section.ContentJson!)!["status"]!.GetValue<string>());
+        });
+    }
+
+    /// <summary>#6579 review: a top statement longer than the cap is cut at a text-element boundary, never between the halves of a surrogate pair.</summary>
+    [Fact]
+    public async Task AClientTimeoutsStatement_CutAtTheCap_NeverSplitsASurrogatePair()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            var text = new string('a', InvestigationEvidenceCapture.ClientTimeoutStatementMaxChars - 1) + "😀 tail";
+            await PlantAttentionAsync(setup.Connection, ct, 1, AlertAt.AddMinutes(-2), "sample", 0, Db, "SSMS", "WS-ERIK", "fp-a", text);
+            var requestId = (await setup.Requests.OpenOrJoinAsync(
+                Alert(InvestigationFamily.QueryPerformance, AlertFamily.ClientTimeoutsMetric, AlertAt), ct)).RequestId!.Value;
+            await PlantRunAsync(setup.Connection, ct, "attention", WindowEnd.AddSeconds(5));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var row = Assert.Single(Rows(await setup.Requests.ReadEvidenceAsync(requestId, ct), "client_timeouts"));
+            var cut = Assert.Single(row["top_statements"]!.AsArray())!["sql_text"]!.GetValue<string>();
+            Assert.False(char.IsHighSurrogate(cut[^1]), "the cut left a lone high surrogate");
+            Assert.True(cut.Length <= InvestigationEvidenceCapture.ClientTimeoutStatementMaxChars);
+        });
+    }
+
+    private static Task PlantAttentionAsync(
+        NpgsqlConnection connection, CancellationToken ct, long id, DateTime at, string kind, int count,
+        string? db, string? app, string? host, string? fingerprint, string? text) =>
+        DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO attention_events
+    (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, client_hostname, statement_fingerprint, statement_text)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            id, DarlingMcpTestData.Naive(at), ServerId, ServerName, kind, count, db, app, host, fingerprint, text);
+
+    [Fact]
     public async Task ATemporaryObjectDeadlock_KeepsItsObjectAndIndexNames_AfterTheGraphRowIsGone()
     {
         await RunAsync(async (setup, ct) =>
@@ -136,6 +217,38 @@ public sealed class InvestigationEvidenceFamiliesLiveTests
             Assert.Equal(2, target["bad_plan_id"]!.GetValue<long>());
             Assert.Equal(0, target["window_executions"]!.GetValue<long>());
             Assert.True(target["stopped_running"]!.GetValue<bool>());
+        });
+    }
+
+    [Fact]
+    public async Task ARegressionOfSqlServersOwnCleanup_IsLeftOut_SoTheApplicationQueryLeads()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            /* #6548: change tracking cleanup regressed 100 times over; the application query 10 times over. */
+            await PlantQueryStoreAsync(setup.Connection, ct, 511, 21, 1, cpuUs: 1_000, lastExec: AlertAt.AddMinutes(-4));
+            await PlantQueryStoreAsync(setup.Connection, ct, 511, 22, 2, cpuUs: 10_000, lastExec: AlertAt.AddMinutes(-1));
+            await PlantQueryStoreAsync(setup.Connection, ct, 512, 23, 1, cpuUs: 1_000, lastExec: AlertAt.AddMinutes(-4));
+            await PlantQueryStoreAsync(setup.Connection, ct, 512, 24, 2, cpuUs: 100_000, lastExec: AlertAt.AddMinutes(-1));
+            /* #6665: the monitor's own statement regressed 200 times over, stored only in the text table; it is no target either. */
+            await PlantQueryStoreAsync(setup.Connection, ct, 513, 25, 1, cpuUs: 1_000, lastExec: AlertAt.AddMinutes(-4));
+            await PlantQueryStoreAsync(setup.Connection, ct, 513, 26, 2, cpuUs: 200_000, lastExec: AlertAt.AddMinutes(-1));
+            foreach (var (queryId, text) in new[]
+            {
+                (511L, "SELECT * FROM dbo.Orders"),
+                (512L, "(@csn bigint,@batch_size int)delete top(@batch_size) from sys.[change_tracking_1228027148] where sys_change_xdes_id < @csn"),
+                (513L, "(@cutoff_time datetime2(7))SELECT /* " + PerformanceMonitor.Collectors.QueryStoreCollector.SelfQueryMarker + " */ qsrs.plan_id"),
+            })
+            {
+                await DarlingMcpTestData.ExecAsync(setup.Connection, ct,
+                    "INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen) VALUES ($1, $2, $3, $4, $5)",
+                    ServerId, Db, queryId, text, DarlingMcpTestData.Naive(AlertAt));
+            }
+
+            var requestId = await OpenQueryPerformanceAndCaptureAsync(setup, ct);
+
+            var target = Assert.Single(Rows(await setup.Requests.ReadEvidenceAsync(requestId, ct), "regression_targets"));
+            Assert.Equal(511, target["query_id"]!.GetValue<long>());
         });
     }
 
@@ -272,6 +385,26 @@ public sealed class InvestigationEvidenceFamiliesLiveTests
                 "SELECT octet_length(content::text) FROM config.investigation_evidence WHERE section = 'blocking_chains' AND request_id = '" + requestId + "'",
                 setup.Connection).ExecuteScalarAsync(ct);
             Assert.InRange(Convert.ToInt32(stored, System.Globalization.CultureInfo.InvariantCulture), 1, InvestigationToolCore.MaxEvidenceBytes);
+        });
+    }
+
+    [Fact]
+    public async Task AParallelSelfWaitReport_IsLeftOut_SoTheRealHeadStaysTheHead()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            /* Session 70 is blocked by 55; a newer report has 70 waiting on itself (a parallel query's thread, not blocking). */
+            var report = BlockedProcessReport(blockingFrame: null);
+            await PlantBlockedReportAsync(setup.Connection, ct, AlertAt.AddMinutes(-3), report, blockedSpid: 70, blockingSpid: 55);
+            await PlantBlockedReportAsync(setup.Connection, ct, AlertAt.AddMinutes(-1), report, blockedSpid: 70, blockingSpid: 70);
+            var requestId = await OpenBlockingAndCaptureAsync(setup, ct);
+
+            var evidence = await setup.Requests.ReadEvidenceAsync(requestId, ct);
+            var chain = Assert.Single(Rows(evidence, "blocking_chains"));
+            Assert.Equal(70, chain["blocked_spid"]!.GetValue<int>());
+            Assert.Equal(55, chain["blocking_spid"]!.GetValue<int>());
+            Assert.Equal(55, chain["head_blocker_spid"]!.GetValue<int>());
+            Assert.Equal(55, Assert.Single(Rows(evidence, "head_blocker"))["spid"]!.GetValue<int>());
         });
     }
 

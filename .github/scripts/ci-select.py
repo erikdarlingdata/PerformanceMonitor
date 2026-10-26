@@ -41,6 +41,7 @@ Standard library only (the Windows and Linux runners both have Python 3).
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime
 import gzip
 import json
@@ -55,6 +56,7 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 WORKFLOW = os.path.join(ROOT, ".github", "workflows", "build.yml")
 DARLING_FILTER = os.path.join(ROOT, ".github", "darling-paths-filter.yml")
 LITE_FILTER = os.path.join(ROOT, ".github", "lite-paths-filter.yml")
+TREE_FILTER = os.path.join(ROOT, ".github", "darling-tree-paths-filter.yml")
 CORPUS = os.path.join(ROOT, ".github", "ci-history", "failures.jsonl")
 ACCEPTED = os.path.join(ROOT, ".github", "ci-history", "replay-accepted.txt")
 
@@ -172,7 +174,8 @@ def load_file_filters(path: str = DARLING_FILTER) -> dict[str, list[str]]:
 class Rules:
     """The pattern sets, loaded once."""
 
-    def __init__(self, workflow: str = WORKFLOW, darling_filter: str = DARLING_FILTER, lite_filter: str = LITE_FILTER) -> None:
+    def __init__(self, workflow: str = WORKFLOW, darling_filter: str = DARLING_FILTER, lite_filter: str = LITE_FILTER,
+                 tree_filter: str = TREE_FILTER) -> None:
         wf = load_workflow_filters(workflow)
         self.build = wf["build"]
         # The Lite shard sets live in their own file (#5669), the one the shard legs and the lite-scope job give
@@ -180,8 +183,7 @@ class Rules:
         self.lite_shards = load_file_filters(lite_filter)
         if not self.lite_shards:
             raise SystemExit(f"{lite_filter} holds no filters")
-        self.tree = wf["darling-tree-guards"]
-        self.guard = wf["guard-build"]
+        self.tree = load_file_filters(tree_filter)
         self.gate = load_file_filters(darling_filter)
 
     @staticmethod
@@ -398,48 +400,118 @@ def split_failed_class(cls: str) -> tuple[str, str]:
     return head.rpartition(".")[0], re.split(r"[.+/]", cls)[-1]
 
 
+_SOURCES: "dict[str, list]" = {}
+
+
+def _open_text(path: str, errors: str) -> str:
+    with open(path, encoding="utf-8-sig", errors=errors) as fh:
+        return fh.read()
+
+
+def read_source(path: str, errors: str = "strict") -> str:
+    """The text of one test source, read at most once per process (#6346). A replay or a selection reads every test
+    file for several rules (the class walk, the slow-class text, the Reads detector, the symbol index) and each used
+    to open it again: about 3,300 files, three or four times over, which a slow disk turned into minutes. The entry
+    is dropped when the file's size or modification time changes, so a caller that edits a tree and reads it again
+    sees the new text. Decoding is the same as open(): "replace" returns the strict text when that decodes."""
+    st = os.stat(path)
+    stamp = (st.st_mtime_ns, st.st_size)
+    ent = _SOURCES.get(path)
+    if ent is None or ent[0] != stamp:
+        ent = _SOURCES[path] = [stamp, None, None]
+    if errors == "strict":
+        if ent[1] is None:
+            ent[1] = _open_text(path, "strict")
+        return ent[1]
+    if ent[2] is None:
+        ent[2] = ent[1] if ent[1] is not None else _open_text(path, errors)
+    return ent[2]
+
+
+_PREFETCH_THREADS = 8
+
+
+def prefetch_sources(paths: "list[str]", errors: str = "strict") -> None:
+    """Fill read_source()'s cache for `paths` with a few threads: a file open is latency, not CPU, on a disk with a
+    virus scanner in front of it, so the opens overlap. A file that cannot be read is left for the caller's own read
+    to report, as before."""
+    todo = [p for p in paths if p not in _SOURCES]
+    if len(todo) < 16:
+        return
+
+    def one(path: str) -> None:
+        try:
+            read_source(path, errors)
+        except (OSError, UnicodeDecodeError):
+            pass
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_PREFETCH_THREADS) as pool:
+        list(pool.map(one, todo))
+
+
+_CLASS_ROWS: "dict[tuple[str, str], tuple[tuple[int, int], list[tuple[str, set[str]]]]]" = {}
+
+
+def _classes_of_file(root: str, path: str) -> "list[tuple[str, set[str]]] | None":
+    """[(simple class name, traits)] for every class declaration of one source file, parsed at most once per process;
+    None when the file cannot be read."""
+    try:
+        text = read_source(path)
+        st = os.stat(path)
+    except OSError:
+        return None
+    stamp = (st.st_mtime_ns, st.st_size)
+    hit = _CLASS_ROWS.get((root, path))
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    lines = text.split("\n")
+    gated = any(GATE_ENV_LITERAL.search(line) for line in lines)
+    holders = _holders_of(lines)
+    rows: "list[tuple[str, set[str]]]" = []
+    for n, line in enumerate(lines):
+        m = _CLASS_DECL.match(line)
+        if not m:
+            continue
+        traits: set[str] = {GATE_TRAIT} if gated else set()
+        # scan_classes() turns these two markers into NO_TESTS_TRAIT and drops them (#5872).
+        if m.group(1) in holders:
+            traits.add(_HOLDS_MARK)
+        tail = line[m.end():]
+        if ":" not in tail and "{" not in tail and n + 1 < len(lines):
+            tail += " " + lines[n + 1]
+        b = _BASE_LIST.match(tail)
+        if b:
+            traits.add(_BASE_MARK + b.group(1).split(".")[-1])
+        j = n - 1
+        while j >= 0:
+            s = lines[j].strip()
+            if s.startswith(("[", "///", "//", "*", "/*")) or s.endswith("*/") or s == "" and False:
+                traits.update(f"{k}={v}" for k, v in _TRAIT.findall(s))
+                traits.update(COLLECTION_PREFIX + c for c in _COLLECTION_ATTR.findall(s))
+                j -= 1
+            else:
+                break
+        rows.append((m.group(1), traits))
+    _CLASS_ROWS[(root, path)] = (stamp, rows)
+    return rows
+
+
 def _walk_classes(root: str):
     """Yield (suite, repo-relative file with '/', simple class name, {"Key=Value", ...}) for every class declaration."""
+    found: "list[tuple[str, str]]" = []
     for suite, rel in SUITE_DIRS.items():
         base = os.path.join(root, rel)
         for dp, dn, fn in os.walk(base):
             dn[:] = [d for d in dn if d not in ("bin", "obj")]
-            for f in fn:
-                if not f.endswith(".cs"):
-                    continue
-                path = os.path.join(dp, f)
-                try:
-                    with open(path, encoding="utf-8-sig") as fh:
-                        lines = fh.read().split("\n")
-                except OSError:
-                    continue
-                relfile = os.path.relpath(path, root).replace(os.sep, "/")
-                gated = any(GATE_ENV_LITERAL.search(line) for line in lines)
-                holders = _holders_of(lines)
-                for n, line in enumerate(lines):
-                    m = _CLASS_DECL.match(line)
-                    if not m:
-                        continue
-                    traits: set[str] = {GATE_TRAIT} if gated else set()
-                    # scan_classes() turns these two markers into NO_TESTS_TRAIT and drops them (#5872).
-                    if m.group(1) in holders:
-                        traits.add(_HOLDS_MARK)
-                    tail = line[m.end():]
-                    if ":" not in tail and "{" not in tail and n + 1 < len(lines):
-                        tail += " " + lines[n + 1]
-                    b = _BASE_LIST.match(tail)
-                    if b:
-                        traits.add(_BASE_MARK + b.group(1).split(".")[-1])
-                    j = n - 1
-                    while j >= 0:
-                        s = lines[j].strip()
-                        if s.startswith(("[", "///", "//", "*", "/*")) or s.endswith("*/") or s == "" and False:
-                            traits.update(f"{k}={v}" for k, v in _TRAIT.findall(s))
-                            traits.update(COLLECTION_PREFIX + c for c in _COLLECTION_ATTR.findall(s))
-                            j -= 1
-                        else:
-                            break
-                    yield suite, relfile, m.group(1), traits
+            found += [(suite, os.path.join(dp, f)) for f in fn if f.endswith(".cs")]
+    prefetch_sources([p for _s, p in found if (root, p) not in _CLASS_ROWS])
+    for suite, path in found:
+        rows = _classes_of_file(root, path)
+        if rows is None:
+            continue
+        relfile = os.path.relpath(path, root).replace(os.sep, "/")
+        for name, traits in rows:
+            yield suite, relfile, name, set(traits)
 
 
 def scan_classes(root: str = ROOT) -> dict[str, dict[str, set[str]]]:
@@ -820,10 +892,11 @@ def reads_classes(root: str = ROOT, suites: "tuple[str, ...]" = ("darling", "lit
     classes that read a Darling path}. Replaces the [Trait("Reads", "Lite")] and [Trait("Reads", "Darling")] attributes."""
     out: dict[str, set[str]] = {"darling": set(), "lite": set()}
     for suite, detector in (("darling", reads_lite_path), ("lite", reads_darling_path)):
-        for path in (_rc_suite_files(root, suite) if suite in suites else []):
+        paths = _rc_suite_files(root, suite) if suite in suites else []
+        prefetch_sources(paths)
+        for path in paths:
             try:
-                with open(path, encoding="utf-8-sig") as fh:
-                    text = fh.read().replace("\r\n", "\n")
+                text = read_source(path).replace("\r\n", "\n")
             except OSError:
                 continue
             # A file that names neither tree and calls no file enumeration cannot read a path: skip the character walk.
@@ -906,8 +979,7 @@ class SlowIndex:
             parts = []
             for rel in self.slow[suite][name]:
                 try:
-                    with open(os.path.join(self.root, rel), encoding="utf-8-sig") as fh:
-                        parts.append(fh.read())
+                    parts.append(read_source(os.path.join(self.root, rel)))
                 except OSError:
                     pass
             self._text[key] = "\n".join(parts)
@@ -952,7 +1024,8 @@ class SlowIndex:
             for name, own in classes.items():
                 text = self.text(suite, name)
                 reached = bool(changed.intersection(own)) or bool(stems & self.words(suite, name)) \
-                    or any(re.search(r"(?<![\w-])" + re.escape(x) + r"(?![\w-])", text) for x in odd_stems) \
+                    or any(x in text and re.search(r"(?<![\w-])" + re.escape(x) + r"(?![\w-])", text)
+                           for x in odd_stems) \
                     or (bool(exts) and (".mjs" in text or any(e in text for e in exts)))
                 if not reached:
                     out[suite].append(name)
@@ -1975,23 +2048,22 @@ def changed_symbols(diff_text: str, wide: bool = False) -> "tuple[dict[str, set[
 def test_file_index(root: str = ROOT) -> "list[tuple[str, str, list[str], bool, set[str]]]":
     """(suite, repo path, [class names], needs a PostgreSQL rig, {words}) for every test source file of SYMBOL_SUITES."""
     out = []
+    found: "list[tuple[str, str]]" = []
     for suite in SYMBOL_SUITES:
         base = os.path.join(root, SUITE_DIRS[suite])
         for dp, dn, fn in os.walk(base):
             dn[:] = [d for d in dn if d not in ("bin", "obj")]
-            for f in fn:
-                if not f.endswith(".cs"):
-                    continue
-                path = os.path.join(dp, f)
-                try:
-                    with open(path, encoding="utf-8-sig", errors="replace") as fh:
-                        text = fh.read()
-                except OSError:
-                    continue
-                classes = [m.group(1) for m in (_CLASS_DECL.match(ln) for ln in text.split("\n")) if m]
-                if classes:
-                    out.append((suite, os.path.relpath(path, root).replace(os.sep, "/"), classes,
-                                RIG_LITERAL in text, set(_WORD.findall(text))))
+            found += [(suite, os.path.join(dp, f)) for f in fn if f.endswith(".cs")]
+    prefetch_sources([p for _s, p in found], "replace")
+    for suite, path in found:
+        try:
+            text = read_source(path, "replace")
+        except OSError:
+            continue
+        classes = [m.group(1) for m in (_CLASS_DECL.match(ln) for ln in text.split("\n")) if m]
+        if classes:
+            out.append((suite, os.path.relpath(path, root).replace(os.sep, "/"), classes,
+                        RIG_LITERAL in text, set(_WORD.findall(text))))
     return out
 
 
@@ -2147,8 +2219,7 @@ def _test_holders(root: str, index: list, files: set[str]) -> set[str]:
         if rel not in files:
             continue
         try:
-            with open(os.path.join(root, rel), encoding="utf-8-sig", errors="replace") as fh:
-                lines = fh.read().split("\n")
+            lines = read_source(os.path.join(root, rel), "replace").split("\n")
         except OSError:
             continue
         # (indent, class) of the classes open at this line, by indentation: a test attribute belongs to the nearest

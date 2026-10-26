@@ -99,11 +99,11 @@ public sealed class NewerStoreWarningTests
     [Fact]
     public void The_readme_rollback_list_names_only_rungs_the_ladder_ships()
     {
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "admin.md"); // #6416: the rollback list moved from Darling/README.md, which keeps a stub heading
         var lines = readme.Split('\n').Select(l => l.TrimEnd('\r')).ToList();
 
         var heading = lines.FindIndex(l => l.StartsWith('#') && l.TrimStart('#').Trim() == "Rolling back to an older build");
-        Assert.True(heading >= 0, "Darling/README.md has no \"Rolling back to an older build\" heading");
+        Assert.True(heading >= 0, "docs/darling/admin.md has no \"Rolling back to an older build\" heading");
 
         var top = PgMigrations.Scripts[^1].Version;
         var bullets = lines.Skip(heading + 1).TakeWhile(l => !l.StartsWith('#')).Where(l => l.StartsWith("- **V", StringComparison.Ordinal));

@@ -26,6 +26,7 @@ using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -270,13 +271,35 @@ public sealed class RunCollectorsNowTests
 
         public Task<SnapshotCommandRow?> ReadLatestAsync(int serverId, CancellationToken cancellationToken) => Task.FromResult(Latest);
 
+        public Exception? EnqueueFails { get; set; }
+
         public Task<long> EnqueueAsync(int serverId, string? argsJson, string requestedBy, CancellationToken cancellationToken)
         {
+            if (EnqueueFails is not null)
+            {
+                throw EnqueueFails;
+            }
+
             Enqueued.Add((serverId, argsJson, requestedBy));
             return Task.FromResult(100L + Enqueued.Count);
         }
 
         public Task<SnapshotCommandState?> ReadStateAsync(long commandId, CancellationToken cancellationToken) => Task.FromResult(State);
+    }
+
+    [Fact]
+    public async Task AStoreRefusalOfTheRequestItself_Dl400_IsARefusedOutcome_WithTheStoresSentence_NotAnException()
+    {
+        var store = new FakeStore
+        {
+            EnqueueFails = new Npgsql.PostgresException("This request must run at the READ COMMITTED isolation level.", "ERROR", "ERROR", "DL400"),
+        };
+
+        var outcome = await new SnapshotNowRequests(store, new ManualTime()).RequestAsync(7, null, "t", TestContext.Current.CancellationToken);
+
+        Assert.False(outcome.Accepted);
+        Assert.Equal(SnapshotRequestOutcome.BadRequestCode, outcome.Code);
+        Assert.Contains("READ COMMITTED", outcome.Text, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -405,7 +428,7 @@ public sealed class RunCollectorsNowTests
     [Fact]
     public async Task TheWebRoute_AnswersEachResolverOutcome_ItsOwnStatus_WithAPlainMessage()
     {
-        var registry = new List<DarlingServerResolver.RegisteredServer>
+        var registry = new List<RegisteredServer>
         {
             new(1, "alpha-one", null),
             new(2, "alpha-two", null),

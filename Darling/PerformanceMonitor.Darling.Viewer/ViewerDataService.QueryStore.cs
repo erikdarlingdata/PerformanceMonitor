@@ -235,7 +235,7 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryStoreTopTableSql"/> — both prefixes above produce the same "one row per identity, every
     /// column deduped's dedupe/the table's own upsert already kept" shape, so this aggregates either one
     /// identically. References $1, $4 and $6, plus $2/$3 (#5420: the inline-text fallback's window bound, the same $2/$3 both prefixes bind), so both share it unchanged.</summary>
-    private const string QueryStoreTopSuffix = """
+    private const string QueryStoreTopSuffix = $$"""
         ranked AS (
             SELECT
                 database_name,
@@ -411,7 +411,11 @@ public sealed partial class ViewerDataService
                            )
                        ) AS query_text
             ) AS t ON TRUE
-            WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
+            /* #6665: the monitor's own statement is left out here too, before the LIMIT, by the shared read-side predicate
+               (QueryStoreSelfStatement): on Darling its row is stored, because the collector's drop tests an inline text column
+               that the separate text fetch leaves empty, and the marker is only in the text resolved above. */
+            WHERE (t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%')
+            AND   {{QueryStoreSelfStatement.NotSelfOfLateralText}}
             ORDER BY r.sort_cost DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role
             LIMIT $4
         ) AS p
@@ -681,7 +685,7 @@ public sealed partial class ViewerDataService
     /// a NULL key and an empty-string key stay apart (#5420). Returns the shared <see cref="QueryStatsComparisonItem"/>.
     /// $1 server_id, $2/$3 current window, $4/$5 baseline window (naive UTC).
     /// </summary>
-    public const string QueryStoreComparisonSql = """
+    public static readonly string QueryStoreComparisonSql = $$"""
         WITH deduped_current AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. The rows are CUMULATIVE per-interval
                snapshots and the collector re-fetches the OPEN interval every cycle, so the SAME interval
@@ -840,6 +844,9 @@ public sealed partial class ViewerDataService
           AND COALESCE(c.query_hash, '') = COALESCE(b.query_hash, '')
           AND (c.database_name IS NULL) = (b.database_name IS NULL)
           AND (c.query_hash IS NULL) = (b.query_hash IS NULL)
+        /* #6665: the monitor's own statement is left out of the comparison by the shared read-side predicate. It is applied to the
+           text the comparison resolved, after the top-100 cut, so a statement that ranks in the top 100 costs the grid one row. */
+        WHERE {{QueryStoreSelfStatement.NotSelfOfText("COALESCE(c.query_text, b.query_text)")}}
         """;
 
     /// <summary>Query-Store current-vs-baseline comparison rows (shared .Ui item; delta % + NEW/GONE badges).</summary>

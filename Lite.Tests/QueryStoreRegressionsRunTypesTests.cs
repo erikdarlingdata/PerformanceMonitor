@@ -58,8 +58,8 @@ public sealed class QueryStoreRegressionsRunTypesTests : IClassFixture<SharedDuc
         try { Directory.Delete(_configDir, recursive: true); } catch (IOException) { /* temp dir */ }
     }
 
-    /// <summary>Query 5: its Regular CPU FELL, but its timeouts rose from 2 in the baseline's 7 days to 4 in the last 24 hours. It is
-    /// listed for timeouts alone, which a Regular-only comparison (or one that blended the runs into one average) never shows.</summary>
+    /// <summary>Query 5: its Regular CPU FELL, but its timeouts rose from 4 in the 16 hours of baseline the store holds (its data starts 40
+    /// hours back) to 30 in the last 24 hours. It is listed for timeouts alone, which a Regular-only comparison (or one that blended the runs into one average) never shows.</summary>
     [Fact]
     public async Task ARiseInTimeouts_ListsTheQuery_EvenThoughItsRegularCostFell()
     {
@@ -68,29 +68,30 @@ public sealed class QueryStoreRegressionsRunTypesTests : IClassFixture<SharedDuc
         await SeedAsync("Regular", now.AddHours(-40), 100, 2000, 2000, intervalId: 1, queryId: 5);
         await SeedAsync("Regular", now.AddHours(-30), 300, 1000, 1000, intervalId: 2, queryId: 5);
         await SeedAsync("Regular", now.AddHours(-1), 200, 1000, 1000, intervalId: 3, queryId: 5);
-        /* Two timeouts in the baseline, four in the window, each 30 s of duration and 6 ms of CPU. */
-        await SeedAsync("Aborted", now.AddHours(-35), 2, 30_000_000, 5000, intervalId: 4, queryId: 5);
-        await SeedAsync("Aborted", now.AddHours(-2), 4, 30_000_000, 6000, intervalId: 5, queryId: 5);
+        /* Four timeouts in the baseline, thirty in the window, each 30 s of duration and 5 to 6 ms of CPU. */
+        await SeedAsync("Aborted", now.AddHours(-35), 4, 30_000_000, 5000, intervalId: 4, queryId: 5);
+        await SeedAsync("Aborted", now.AddHours(-2), 30, 30_000_000, 6000, intervalId: 5, queryId: 5);
 
         var rows = await ReadRowsAsync();
 
         var row = Assert.Single(rows);
         Assert.Equal(5, row.GetProperty("query_id").GetInt64());
         Assert.Equal("timeouts", row.GetProperty("regression_reason").GetString());
-        /* 4 / 24 h = 0.1667 per hour against 2 / 168 h = 0.0119 per hour: more than five times, so HIGH. */
+        /* 30 / 24 h = 1.25 per hour against 4 / 16 h = 0.25 per hour (#6750: the hours the store holds, from its first row 40 hours
+           back to the window's start, not the 168 asked for): five times, so HIGH. */
         Assert.Equal("HIGH", row.GetProperty("severity").GetString());
         Assert.Equal(1.25, row.GetProperty("baseline_cpu_ms").GetDouble(), 6);
         Assert.Equal(1.0, row.GetProperty("recent_cpu_ms").GetDouble(), 6);
         Assert.Equal(-20.0, row.GetProperty("cpu_regression_percent").GetDouble(), 6);
 
-        Assert.Equal(2, row.GetProperty("baseline_aborted_count").GetInt64());
-        Assert.Equal(4, row.GetProperty("recent_aborted_count").GetInt64());
+        Assert.Equal(4, row.GetProperty("baseline_aborted_count").GetInt64());
+        Assert.Equal(30, row.GetProperty("recent_aborted_count").GetInt64());
         Assert.Equal(5.0, row.GetProperty("baseline_aborted_cpu_ms").GetDouble(), 6);
         Assert.Equal(6.0, row.GetProperty("recent_aborted_cpu_ms").GetDouble(), 6);
         Assert.Equal(30_000.0, row.GetProperty("baseline_aborted_duration_ms").GetDouble(), 6);
         Assert.Equal(30_000.0, row.GetProperty("recent_aborted_duration_ms").GetDouble(), 6);
-        Assert.Equal(0.01, row.GetProperty("baseline_aborted_per_hour").GetDouble(), 6);
-        Assert.Equal(0.17, row.GetProperty("recent_aborted_per_hour").GetDouble(), 6);
+        Assert.Equal(0.25, row.GetProperty("baseline_aborted_per_hour").GetDouble(), 6);
+        Assert.Equal(1.25, row.GetProperty("recent_aborted_per_hour").GetDouble(), 6);
         Assert.Equal(0, row.GetProperty("baseline_exception_count").GetInt64());
         Assert.Equal(0, row.GetProperty("recent_exception_count").GetInt64());
         Assert.False(row.TryGetProperty("recent_exception_per_hour", out _));

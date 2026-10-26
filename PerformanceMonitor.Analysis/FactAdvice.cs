@@ -1109,6 +1109,14 @@ public static class FactAdvice
         var sleeping = FactMeta(facts, "BLOCKING_CHAIN", "worst_apex_sleeping") is > 0;
         var maxWait = FactMeta(facts, "BLOCKING_CHAIN", "worst_chain_max_wait_ms");
         var totalChains = FactMeta(facts, "BLOCKING_CHAIN", "total_reconstructed_chains");
+        // Three states: open (1), ended (0), unknown (key absent: the collector runs too seldom to judge).
+        var openMeta = FactMeta(facts, "BLOCKING_CHAIN", "worst_chain_open_at_end");
+        var open = openMeta is > 0;
+        var unknown = openMeta is null;
+        // An anchored (as_of) window ends in the past: a chain open at ITS end says nothing about locks held now.
+        var anchored = FactMeta(facts, "BLOCKING_CHAIN", "worst_chain_window_anchored") is > 0;
+        var headSpid = FactMeta(facts, "BLOCKING_CHAIN", "worst_apex_spid");
+        var tranClock = FactMeta(facts, "BLOCKING_CHAIN", "worst_apex_tran_started_clock_s");
 
         var inv = new StringBuilder($"The worst blocking chain this window was {Plural(depth.Value, "session")} deep");
         if (victims is > 0)
@@ -1120,9 +1128,28 @@ public static class FactAdvice
             inv.Append($" The longest waiter sat for {Duration(maxWait.Value)}.");
         if (totalChains is > 1)
             inv.Append($" {Plural(totalChains.Value, "separate chain")} formed across the window.");
+        if (open)
+        {
+            // The chain was still being sampled when the window ended: say who is at the head, how long the
+            // longest waiter has waited, and (when the report carried it) since when the head's transaction has
+            // been open, on the monitored server's own clock.
+            inv.Append(" It was still blocking at the end of the window");
+            if (headSpid is > 0)
+                inv.Append($": session {headSpid.Value:0} was at the head");
+            if (maxWait is > 0)
+                inv.Append($", and its longest waiter had been waiting {Duration(maxWait.Value)}");
+            if (tranClock is double clock)
+                inv.Append($", with the head's transaction open since {DateTime.UnixEpoch.AddSeconds(clock):yyyy-MM-dd HH:mm:ss} on the monitored server's clock");
+            inv.Append('.');
+        }
 
-        var rem = new StringBuilder(
-            "This reports a window that has already passed, so the chain cleared long ago — a KILL now buys nothing; aim at the recurrence. ");
+        var rem = new StringBuilder(unknown
+            ? "The blocking collector runs too seldom to tell whether this chain is still open, so check the server's current blocking before acting on it, and aim at the recurrence. "
+            : open && anchored
+            ? "This chain was still blocking at the end of a window that has already passed, so the session may well have ended since — check the server's current blocking before acting on it, and aim at the recurrence. "
+            : open
+            ? "This chain was still blocking at the end of the window, so it may be holding locks right now — look at the head session first, and if it is not doing work you can wait for, ending it (KILL) releases everyone queued behind it, at the cost of rolling back its open transaction. Then aim at the recurrence. "
+            : "This reports a window that has already passed, so the chain cleared long ago — a KILL now buys nothing; aim at the recurrence. ");
         rem.Append(sleeping
             ? "Because the head was sleeping, the fix is the code path that opens a BEGIN TRAN and never reaches COMMIT/ROLLBACK on an error or client-timeout path — and SET XACT_ABORT ON so an aborted batch rolls back automatically."
             : "Because the head was active, the fix is that one slow operation — find it and cut how long it holds locks: shorten the transaction and index it so it touches fewer rows.");
@@ -1133,7 +1160,9 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"A blocking chain {depth.Value:N0} deep formed — the session at the head held a resource the rest queued behind",
+            Headline = open
+                ? $"A blocking chain {depth.Value:N0} deep was still blocking at the end of the window — the session at the head held a resource the rest queued behind"
+                : $"A blocking chain {depth.Value:N0} deep formed — the session at the head held a resource the rest queued behind",
             Investigation = inv.ToString(),
             Remediation = rem.ToString()
         };
@@ -1637,6 +1666,7 @@ public static class FactAdvice
         if (distinct is > 0)
             inv.Append($", across {Plural(distinct.Value, "distinct query")}");
         inv.Append(". A spill means a query's memory grant was too small for its sort or hash operation, so the overflow went to tempdb — disk-speed work in place of memory-speed.");
+        inv.Append(NamedQueriesSentence(facts, "QUERY_SPILLS", "Most spilled", o => SpilledPagesText(o.Value)));
 
         var rem =
             "Spills are a symptom of under-estimated memory grants, almost always from stale or skewed " +
@@ -1652,6 +1682,16 @@ public static class FactAdvice
             Investigation = inv.ToString(),
             Remediation = rem
         };
+    }
+
+    /// <summary>#6640: " Label: name (figure), name (figure)." for the queries a fact ranks, subject first, or empty when the
+    /// fact ranked none. Unlike <see cref="NameTheRestList"/> it includes entry [0], because these cards have no other sentence
+    /// that names the subject.</summary>
+    private static string NamedQueriesSentence(IReadOnlyDictionary<string, Fact> facts, string key, string label, Func<RankedObject, string> figure)
+    {
+        if (!facts.TryGetValue(key, out var f) || f.Ranked.Count == 0)
+            return string.Empty;
+        return $" {label}: " + string.Join(", ", f.Ranked.Select(o => $"{o.ObjectName} ({figure(o)})")) + ".";
     }
 
     /// <summary>"1,234 pages (9.6 MB)" for a <c>total_spills</c> value: the DMV column counts 8 KB pages, so the
@@ -1712,6 +1752,7 @@ public static class FactAdvice
                 : grantDiv
                     ? " Memory grants diverged sharply across executions — a single plan's grant being wrong for the other parameter values."
                     : " Some executions spilled and others did not — a single plan's grant being wrong for the other parameter values.");
+        inv.Append(NamedQueriesSentence(facts, "PARAMETER_SENSITIVITY", "Worst plans (database/query_hash/query_plan_hash)", o => $"{o.Value:0.#}×"));
 
         var rem =
             "Do NOT force one of these plans — that locks in the wrong shape for the other parameter values. " +

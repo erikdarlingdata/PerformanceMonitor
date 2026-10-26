@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -125,6 +126,12 @@ AND   collection_time <= $2";
             "trace_flags", perServer.GetValueOrDefault("trace_flags"), fleet.GetValueOrDefault("trace_flags"));
         starts["trace_flags"] = context.TimeRangeEnd - AnalysisContext.LatestValueLookbackFor(
             CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(traceFlagsFrequency))!.Value;
+
+        /* The blocking chain fact's "still open at the window end" test is measured in the blocking collectors'
+           own intervals: the slower of the two, so a report read that lags its snapshot is not called closed. */
+        context.BlockingCollectionIntervalMinutes = CollectorScheduleDefaults.EffectiveBlockingIntervalMinutes(
+            name => CollectorScheduleDefaults.ResolveFrequencyMinutes(
+                name, perServer.GetValueOrDefault(name), fleet.GetValueOrDefault(name)));
 
         context.LatestValueStarts = starts;
     }

@@ -62,6 +62,13 @@ public partial class App : Application
     public static string DataDirectory { get; private set; } = string.Empty;
 
     /// <summary>
+    /// Whether this is the first start of this build with a data folder an earlier Lite used (its monitor.duckdb or
+    /// settings.json existed). Decides whether the first run of the per-user record of confirmed server settings binds
+    /// anything (ServerHostBindings.IsFirstStartInUsedFolder).
+    /// </summary>
+    public static bool HadLiteDataAtStart { get; private set; }
+
+    /// <summary>
     /// Gets the path to the DuckDB database file.
     /// </summary>
     public static string DatabasePath { get; private set; } = string.Empty;
@@ -229,9 +236,9 @@ public partial class App : Application
     public static bool AlertRunnableQueueEnabled { get; set; } = true;
     public static int AlertRunnableQueueWarningPerScheduler { get; set; } = PerformanceMonitor.Alerting.RunnableQueueEvaluator.DefaultWarningPerScheduler;
     public static int AlertRunnableQueueCriticalPerScheduler { get; set; } = PerformanceMonitor.Alerting.RunnableQueueEvaluator.DefaultCriticalPerScheduler;
-    /* #5640: the Client Timeouts alert - client attentions (cancels and timeouts) per minute over the covered span. OFF by default
-       (the bars are a guess until checked against captured data). The pair is clamped on read by AttentionEvaluator.ClampBars. */
-    public static bool AlertClientTimeoutsEnabled { get; set; }
+    /* #5640: the Client Timeouts alert - client attentions (cancels and timeouts) per minute over the covered span. ON by default since #5736
+       (the bars are relative to each server's own normal rate). The pair is clamped on read by AttentionEvaluator.ClampBars. */
+    public static bool AlertClientTimeoutsEnabled { get; set; } = true;
     public static int AlertClientTimeoutsWarningPerMinute { get; set; } = PerformanceMonitor.Alerting.AttentionEvaluator.DefaultWarningPerMinute;
     public static int AlertClientTimeoutsCriticalPerMinute { get; set; } = PerformanceMonitor.Alerting.AttentionEvaluator.DefaultCriticalPerMinute;
     /* #5736: the two bars above are FLOORS. The bar in force for a server is the higher of its floor and the multiple times the server's own
@@ -597,6 +604,9 @@ public partial class App : Application
         /* F17: tabs and column headers made of panels get an accessible name equal to their visible text. */
         PerformanceMonitor.Ui.AccessibleNames.Register();
 
+        /* #6678: chart text is drawn at the window's DPI scale, not at 100% of device pixels. */
+        PerformanceMonitor.Ui.ChartDisplayScale.Register();
+
         base.OnStartup(e);
 
         /* #5320 N1: the statement filter's judge takes 250-900 ms to build, and the first connection or AG alert
@@ -640,6 +650,12 @@ public partial class App : Application
         ConfigDirectory = Path.Combine(appDataRoot, "config");
         DatabasePath = Path.Combine(appDataRoot, "monitor.duckdb");
         ArchiveDirectory = Path.Combine(appDataRoot, "archive");
+
+        /* Read before anything below creates either file: whether this Windows user ran an earlier Lite with this folder. A
+           user who did is upgrading, and the servers they collected from are bound to their current settings; a new user
+           confirms each one. This only reads: the first-run step in the main window writes the marker once the record is
+           written, so a start that stops first (the store would not open) is worked out again on the next start. */
+        HadLiteDataAtStart = Services.ServerHostBindings.IsFirstStartInUsedFolder(DatabasePath, ConfigDirectory);
 
         // Ensure directories exist
         Directory.CreateDirectory(ConfigDirectory);
@@ -1284,6 +1300,20 @@ public partial class App : Application
             settings.State == SettingsFileState.Unreadable ? null : settings.Text);
     }
 
+    /// <summary>
+    /// #5736: writes the Client Timeouts switch beside its marker. The alert turned ON by default, and until then a Settings save wrote the
+    /// WHOLE alert block, so every settings.json that was saved even once holds <c>alert_client_timeouts_enabled</c> = false. That value is
+    /// the old default and not a choice, because the window never offered the alert any other way (the same reason the Darling store rung
+    /// moves its stored FALSE to TRUE). The loader therefore reads a saved switch only when <c>alert_client_timeouts_on_by_default_applied</c>
+    /// sits beside it. A file without the marker, saved or not, loads with the alert on. The first save by this build writes the marker, so a
+    /// switch turned off from then on stays off.
+    /// </summary>
+    internal static void WriteClientTimeoutsSwitch(JsonNode root)
+    {
+        root["alert_client_timeouts_enabled"] = AlertClientTimeoutsEnabled;
+        root["alert_client_timeouts_on_by_default_applied"] = true;
+    }
+
     public static void LoadAlertSettings() => LoadAlertSettings(ConfigDirectory, GetWebhookUrl, (key, url) => SaveWebhookUrl(key, url));
 
     /// <summary>
@@ -1386,7 +1416,9 @@ public partial class App : Application
             if (read.TryGetProperty("alert_runnable_queue_enabled", out v)) AlertRunnableQueueEnabled = v.Bool(AlertRunnableQueueEnabled);
             if (read.TryGetProperty("alert_runnable_queue_warning_per_scheduler", out v)) AlertRunnableQueueWarningPerScheduler = v.WholeNumber(AlertRunnableQueueWarningPerScheduler, 1, int.MaxValue);
             if (read.TryGetProperty("alert_runnable_queue_critical_per_scheduler", out v)) AlertRunnableQueueCriticalPerScheduler = v.WholeNumber(AlertRunnableQueueCriticalPerScheduler, 1, int.MaxValue);
-            if (read.TryGetProperty("alert_client_timeouts_enabled", out v)) AlertClientTimeoutsEnabled = v.Bool(AlertClientTimeoutsEnabled);
+            /* #5736: the saved switch counts only beside its marker. See WriteClientTimeoutsSwitch. */
+            var clientTimeoutsOnByDefaultApplied = read.TryGetProperty("alert_client_timeouts_on_by_default_applied", out v) && v.Bool(false);
+            if (clientTimeoutsOnByDefaultApplied && read.TryGetProperty("alert_client_timeouts_enabled", out v)) AlertClientTimeoutsEnabled = v.Bool(AlertClientTimeoutsEnabled);
             if (read.TryGetProperty("alert_client_timeouts_warning_per_minute", out v)) AlertClientTimeoutsWarningPerMinute = v.WholeNumber(AlertClientTimeoutsWarningPerMinute, 1, int.MaxValue);
             if (read.TryGetProperty("alert_client_timeouts_critical_per_minute", out v)) AlertClientTimeoutsCriticalPerMinute = v.WholeNumber(AlertClientTimeoutsCriticalPerMinute, 1, int.MaxValue);
             if (read.TryGetProperty("alert_client_timeouts_warning_multiple", out v)) AlertClientTimeoutsWarningMultiple = v.WholeNumber(AlertClientTimeoutsWarningMultiple, 1, int.MaxValue);

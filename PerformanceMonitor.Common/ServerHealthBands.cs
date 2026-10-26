@@ -1560,16 +1560,25 @@ namespace PerformanceMonitor.Common
         /// waiting (<c>waiting_tasks</c>), a request running (<c>query_snapshots</c>), a job running or
         /// finishing (<c>running_jobs</c>, <c>job_history</c>), a procedure executing since the last cycle
         /// (<c>procedure_stats</c>, a delta read), another backend holding or queueing a lock
-        /// (<c>pg_lock_stats</c>), a session holding a transaction open (<c>pg_session_states</c>). On a
+        /// (<c>pg_lock_stats</c>), a session holding a transaction open (<c>pg_session_states</c>), a statement
+        /// executing in the last ten minutes (<c>query_stats</c>, #6453). On a
         /// target that sits idle for a night or a weekend, each of these correctly returns nothing for hours
         /// at a time, so three zero-row cycles after a productive one is their ordinary shape there rather
         /// than a regression. <see cref="ProducedThenStopped"/> holds them to
         /// <see cref="ActivitySourcedQuietBar"/> as well as the streak.
         ///
         /// <para><b>Deliberately NOT in it:</b> <c>memory_grant_stats</c>, which reads
-        /// <c>sys.dm_exec_query_resource_semaphores</c> and so has rows whether or not anything is running,
-        /// and <c>query_stats</c>, which stored rows on 99.6–100% of its runs on every target measured. A
-        /// zero streak on either is a real fault, and both keep the streak-only rule.</para>
+        /// <c>sys.dm_exec_query_resource_semaphores</c> and so has rows whether or not anything is running.
+        /// A zero streak there is a real fault, and it keeps the streak-only rule.</para>
+        ///
+        /// <para><b><c>query_stats</c> joined the set in #6453.</b> #4620 left it out because it stored rows on
+        /// 99.6–100% of its runs on the busy targets measured then. It reads
+        /// <c>sys.dm_exec_query_stats</c> for statements whose <c>last_execution_time</c> is in the last ten
+        /// minutes, so on a target where nothing executes (an Azure SQL Database serverless or Hyperscale
+        /// database nobody is querying) every run is SUCCESS with zero rows and the streak alone banded it
+        /// WARNING <c>regressed_from_productive</c>. The classifier has no engine branch: the same history
+        /// bands the same way on any engine, and a local SQL Server that read HEALTHY beside it was simply
+        /// never idle. The 72 hour bar still flags a stop that outlasts an idle weekend.</para>
         ///
         /// <para><b>Polarity.</b> This list names the collectors to GIVE the longer leash to, so an omission
         /// fails toward the louder answer (the streak-only rule, a WARNING within minutes), never toward a
@@ -1586,6 +1595,7 @@ namespace PerformanceMonitor.Common
             "procedure_stats",
             "pg_lock_stats",
             "pg_session_states",
+            "query_stats",
         };
 
         /// <summary>
@@ -1651,6 +1661,7 @@ namespace PerformanceMonitor.Common
             "plan_correction",
             "query_store_health",
             "query_store_forced_plans",
+            "query_store_hints",
         };
 
         /// <summary>

@@ -72,13 +72,16 @@
 
   // ---- Client timeouts (#5640) -------------------------------------------------------
   // Alerts on client attentions (a client cancelled a query or its timeout expired) per minute over the
-  // covered span of the attention collector's last runs (about 3 minutes). OFF by default. Since #5736 the
+  // covered span of the attention collector's last runs (about 3 minutes). ON by default. Since #5736 the
   // two per-minute settings are FLOORS: each bar is the higher of its floor and a multiple of the server's
   // own baseline (the p99.9 of its 3-minute average rate over the last 7 days). A server with under a day
   // of capture, or under 720 minutes with a successful run, is graded on the floors alone. The floors and
   // multiples are whole numbers: floor at least 1, multiple at least 1, Critical never below Warning (a
   // lower Critical is raised to the Warning one).
-  "alert_client_timeouts_enabled": false,
+  "alert_client_timeouts_enabled": true,
+  // The marker that makes the switch above count. A settings.json without it is read as if it held the new default (on), because a Settings
+  // save used to write the whole block and its "false" was the old default, not a choice. The Settings window writes it on every save.
+  "alert_client_timeouts_on_by_default_applied": true,
   "alert_client_timeouts_warning_per_minute": 10,
   "alert_client_timeouts_critical_per_minute": 60,
   "alert_client_timeouts_warning_multiple": 3,
@@ -279,17 +282,24 @@
   // window is the supported route: that path also opens the firewall and restarts the host.
   "mcp_enabled": false,
   "mcp_port": 5151,
+  // NO UI. Off by default. Once the MCP endpoint is on, every request needs the token, like Darling's: Lite makes a token the
+  // first time the endpoint starts with none and keeps it in Windows Credential Manager (PerformanceMonitorLite.Mcp_McpToken)
+  // for the signed-in Windows user, never in a Lite file (the MCP client keeps its own copy in its config). Settings -> Access
+  // shows it, with Copy Token, Copy MCP config and New token buttons; a client sends the header "Authorization: Bearer <token>".
+  // Set this to true to serve local clients with no token, as earlier builds did: only the read tools are served then, and the
+  // write and investigation tools stay off. Import Settings never brings this value in. Change it, then restart Lite.
+  "mcp_allow_tokenless_loopback": false,
   // NO UI. Off by default. The MCP write tools (mute_analysis_finding and unmute_analysis_finding) are served only
   // when this is true; with it off a call to one fails as an unknown tool. Change it, then restart Lite. Mutes that
   // already exist stay in force while it is off; turn it on to remove one with unmute_analysis_finding.
-  // Lite's MCP endpoint has no token or caller check: with this on, ANY program on this computer that can reach
-  // the port can mute or unmute analysis findings. Leave it off unless you trust every program that runs here.
+  // The write tools also need the MCP token: with mcp_allow_tokenless_loopback on they stay off whatever this says, and Lite
+  // logs one Critical line. Import Settings never brings this value in.
   "mcp_allow_writes": false,
   // NO UI. Off by default. Serves the four investigation tools (list_investigation_requests, claim_investigation_request,
   // submit_investigation_report, get_investigation_reports) only when this is true AND mcp_allow_writes is false: with
   // both on, the investigation tools stay off and Lite logs one Critical line. With it off a call to one fails as an
-  // unknown tool. Change it, then restart Lite. There is no token: with this on, ANY program on this computer that can
-  // reach the port can list, claim and report on investigation requests.
+  // unknown tool. Change it, then restart Lite. They also need the MCP token: with mcp_allow_tokenless_loopback on they stay off
+  // and Lite logs one Critical line. Import Settings never brings this value in.
   "mcp_allow_investigations": false,
   // NO UI. How much collected data the MCP answers hand out: "full" (the default), "maskLiterals" (statement text keeps
   // its shape with every literal replaced) or "metadataOnly" (statement text, plans and input buffers are withheld, logins

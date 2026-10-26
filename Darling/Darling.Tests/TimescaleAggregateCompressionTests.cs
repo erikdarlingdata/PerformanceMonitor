@@ -352,15 +352,17 @@ public sealed class TimescaleAggregateCompressionTests
         Assert.Contains("($3::int * INTERVAL '1 hour') + ($4::int * INTERVAL '1 minute')", converge, StringComparison.Ordinal);
         Assert.DoesNotContain("scheduled =>", converge, StringComparison.Ordinal);
 
-        /* The state read joins the job on EITHER identity (view or materialization), counts chunks on the
-           materialization at BOTH tiers' delays, and is scoped to collect. */
+        /* The state read joins the job on EITHER identity (view or materialization) and is scoped to collect. It no longer
+           reads the size or a chunk count (#6648): those cost a read that grows with the chunk count, for all 29 collect
+           aggregates every hour (the 22 targets plus the 6 frozen rollups and the off-grid one), to feed a decision only an
+           aggregate without a policy makes. */
         var state = TimescaleSupport.AggregateCompressionStateSql;
         Assert.Contains("j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name", state, StringComparison.Ordinal);
         Assert.Contains("j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name", state, StringComparison.Ordinal);
-        Assert.Contains("c.hypertable_name = ca.materialization_hypertable_name", state, StringComparison.Ordinal);
-        Assert.Contains("now() - INTERVAL '2 days'", state, StringComparison.Ordinal);
-        Assert.Contains("now() - INTERVAL '4 days'", state, StringComparison.Ordinal);
         Assert.Contains("WHERE ca.view_schema = 'collect'", state, StringComparison.Ordinal);
+        Assert.DoesNotContain("hypertable_size", state, StringComparison.Ordinal);
+        Assert.DoesNotContain("timescaledb_information.chunks", state, StringComparison.Ordinal);
+
         Assert.Contains("proc_name LIKE '%compression%'", state, StringComparison.Ordinal);
         Assert.Contains("proc_name LIKE '%columnstore%'", state, StringComparison.Ordinal);
 
@@ -418,6 +420,42 @@ public sealed class TimescaleAggregateCompressionTests
         Assert.Contains("d.hypertable_name = ca.materialization_hypertable_name", state, StringComparison.Ordinal);
         Assert.Contains("d.dimension_type = 'Time'", state, StringComparison.Ordinal);
         Assert.Contains("WHERE ca.view_schema = 'collect'", state, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #6648: applying the size rows to the aggregates about to be staged. The tier picks the chunk count (an hourly
+    /// target takes EligibleHourly, a daily one EligibleDaily), and a view the rows do not name is reported unread and is
+    /// kept out of the sized list, so it never reaches the staging as 0 bytes and nothing eligible.
+    /// </summary>
+    [Fact]
+    public void ApplyAggregateCompressionSizes_PicksTheTierCount_AndReportsAMissingViewUnread()
+    {
+        static TimescaleSupport.AggregateCompressionState State(string view) =>
+            new(view, CompressionEnabled: true, JobId: null, CompressAfterSeconds: null, ScheduleIntervalSeconds: null,
+                FixedSchedule: false, PhaseHour: null, PhaseMinute: null, MaterializationBytes: 0, EligibleChunksNow: 0);
+
+        var hourly = TimescaleSupport.AggregateCompressionTargets.First(t => t.Hourly).View;
+        var daily = TimescaleSupport.AggregateCompressionTargets.First(t => !t.Hourly).View;
+        var missing = TimescaleSupport.AggregateCompressionTargets.First(t => t.View != hourly && t.View != daily).View;
+
+        var rows = new Dictionary<string, (long Bytes, long EligibleHourly, long EligibleDaily)>(StringComparer.Ordinal)
+        {
+            [hourly] = (1000, 7, 3),
+            [daily] = (2000, 9, 5),
+        };
+
+        var (sized, unread) = TimescaleSupport.ApplyAggregateCompressionSizes(
+            new[] { State(hourly), State(missing), State(daily) }, rows);
+
+        Assert.Equal(new[] { hourly, daily }, sized.Select(s => s.View));
+        Assert.Equal((1000L, 7L), (sized[0].MaterializationBytes, sized[0].EligibleChunksNow));
+        Assert.Equal((2000L, 5L), (sized[1].MaterializationBytes, sized[1].EligibleChunksNow));
+        Assert.Equal(new[] { missing }, unread);
+
+        var (none, allUnread) = TimescaleSupport.ApplyAggregateCompressionSizes(
+            new[] { State(hourly) }, new Dictionary<string, (long Bytes, long EligibleHourly, long EligibleDaily)>());
+        Assert.Empty(none);
+        Assert.Equal(new[] { hourly }, allUnread);
     }
 
     /// <summary>
@@ -595,6 +633,13 @@ public sealed class TimescaleAggregateCompressionTests
             var firstLog = new CapturingTestLogger();
             var first = await TimescaleSupport.EnsureAggregateCompressionAsync(connection, firstLog, ct);
             Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Count, first);
+
+            /* #6648: the second statement sizes only the views it is given, one row each, with a real size. */
+            var someViews = TimescaleSupport.AggregateCompressionTargets.Take(2).Select(t => t.View).ToArray();
+            var sized = await TimescaleSupport.ReadAggregateCompressionSizesAsync(connection, someViews, ct);
+            Assert.Equal(someViews.OrderBy(v => v, StringComparer.Ordinal), sized.Keys.OrderBy(v => v, StringComparer.Ordinal));
+            Assert.All(sized.Values, v => Assert.True(v.Bytes > 0 && v.EligibleHourly >= 0 && v.EligibleDaily >= 0));
+            Assert.Empty(await TimescaleSupport.ReadAggregateCompressionSizesAsync(connection, Array.Empty<string>(), ct));
 
             /* THE WIDTH (#3620): every registered materialization's time dimension reads one raw chunk after the
                ensure, from the catalog; the summary line says how many the start changed, and it is the number

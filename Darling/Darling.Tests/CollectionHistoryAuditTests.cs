@@ -400,6 +400,22 @@ public sealed class CollectionHistoryAuditTests
     }
 
     [Fact]
+    public void TheSourceCount_AgreesWithTheWord_ForOneSourceAndForMore()
+    {
+        /* #6700: "in 1 source," not "in 1 source(s),". */
+        var shared = new[] { new CollectionHistoryAudit.FlaggedRange(18, 21, 0, 40, 0, 0) };
+        var a = new Rollup("collect.query_store_stats_hourly", false);
+        var b = new Rollup("collect.query_store_stats_corrected_hourly", false);
+
+        var one = CollectionHistoryAudit.Render(AuditDay, new (Rollup, IReadOnlyList<CollectionHistoryAudit.FlaggedRange>)[] { (a, shared) });
+        Assert.Contains("for that hour in 1 source, where usual", one, StringComparison.Ordinal);
+
+        var two = CollectionHistoryAudit.Render(AuditDay, new (Rollup, IReadOnlyList<CollectionHistoryAudit.FlaggedRange>)[] { (a, shared), (b, shared) });
+        Assert.Contains("for that hour in 2 sources, where usual", two, StringComparison.Ordinal);
+        Assert.DoesNotContain("(s)", two, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void SourcesWithIdenticalFlaggedRanges_ShareOneLine_AndUnreadSourcesAreNamed()
     {
         var shared = new[] { new CollectionHistoryAudit.FlaggedRange(18, 21, 0, 40, 0, 0) };

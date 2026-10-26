@@ -413,6 +413,94 @@ public static class CollectorRuntimePrecondition
     }
 
     /// <summary>
+    /// <see cref="GatedOffMessage"/> as a person reading a desktop panel or the web page should see it (#6764): the same
+    /// classification, so the panel and the MCP tool decide from the same facts, but worded for the reader. The MCP answer is
+    /// about 1200 characters and ends in a closing sentence that labels itself a runtime PRECONDITION and says to retry the read,
+    /// which only an MCP client can use. The two "not being invoked" arms (never ran, gone dark) become one line saying which
+    /// data is missing, then <paramref name="gateCandidates"/> as written, then the two reconnect sentences that
+    /// <see cref="ConnectScopedEpilogue"/> carries in the MCP answer. The gone-dark line drops the two observed instants,
+    /// deliberately, the same as the web page. The first-run sentence is already short and is returned as
+    /// <see cref="GatedOffMessage"/> gives it. The words match the web page's (<c>runtimePreconditionText</c> in plain-text.js,
+    /// PR #6760), so all three human surfaces read the same. Null where <see cref="GatedOffMessage"/> is null.
+    /// <see cref="GatedOffMessage"/> itself is unchanged: it is the MCP answer.
+    /// </summary>
+    public static string? GatedOffReaderMessage(
+        string serverName,
+        string collectorName,
+        string gateCandidates,
+        DateTime? collectorLastRunUtc,
+        DateTime? serverLastCollectedUtc,
+        DateTime? serverFirstCollectedUtc)
+    {
+        var causes = gateCandidates.Trim();
+        var tail = (causes.Length == 0 ? "" : " " + causes) + ReconnectStep;
+        switch (ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc))
+        {
+            case GatedOffCase.GoneDark:
+                return $"The {CollectorWords(collectorName)} collector has not run for this server for over " +
+                       $"{GoneDarkHours.ToString("0", CultureInfo.InvariantCulture)} hours, so there is nothing current to show." +
+                       tail;
+
+            case GatedOffCase.NeverRan:
+                return $"The {CollectorWords(collectorName)} collector has never run for this server, so there is nothing to show." +
+                       tail;
+
+            default:
+                return GatedOffMessage(
+                    serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
+        }
+    }
+
+    /// <summary>What <see cref="ConnectScopedEpilogue"/> tells a reader to do, in the words the web page uses.</summary>
+    private const string ReconnectStep =
+        " After you fix the cause, the service must reconnect to this server before collection starts again. " +
+        "Restart the service, or change this server's settings.";
+
+    /// <summary>A collector's name the way a panel says it: <c>running_jobs</c> is "Running Jobs".</summary>
+    private static string CollectorWords(string collectorName) =>
+        string.Join(
+            " ",
+            collectorName.Split('_').Select(w => w.Length == 0 ? w : char.ToUpperInvariant(w[0]) + w[1..]));
+
+    /// <summary>
+    /// #6453: the sentence for a read that found no stored rows while the collector serving it is HEALTHY, or null when it is
+    /// not. Healthy here is the newest <c>collection_log</c> run being <c>SUCCESS</c> with no note: the monitored server
+    /// answered and had nothing for the collector, which <c>get_collection_health</c> reports as "every run completed and its
+    /// source returned no rows". The caller answers it with <c>empty</c>, a true negative; a read that said <c>unavailable</c>
+    /// beside that health verdict sent the reader in a circle. Null for no run, a fault, a denial, a missing session, or a
+    /// run whose note may explain the zero, so the caller keeps its own text. Shared by Lite and Darling so the two cannot
+    /// drift.
+    /// </summary>
+    /// <param name="serverName">The server as the caller named it.</param>
+    /// <param name="collectorName">The collector serving the read.</param>
+    /// <param name="what">What the read found none of, as a plural noun phrase.</param>
+    /// <param name="status">The <c>collection_log</c> status of that collector's most recent run.</param>
+    /// <param name="errorMessage">That run's stored note, if any.</param>
+    /// <param name="observedUtc">When that run happened.</param>
+    public static string? HealthyEmptyMessage(
+        string serverName,
+        string collectorName,
+        string what,
+        string? status,
+        string? errorMessage,
+        DateTime? observedUtc)
+    {
+        if (observedUtc is not DateTime at
+            || !string.Equals(status, "SUCCESS", StringComparison.OrdinalIgnoreCase)
+            || !string.IsNullOrWhiteSpace(errorMessage))
+        {
+            return null;
+        }
+
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            "No {0} are stored for {1}, and that is a true negative rather than missing data: the {2} collector's newest run "
+            + "({3:yyyy-MM-dd HH:mm:ss} UTC) completed without a fault or a note and its source returned no rows. "
+            + "get_collection_health shows the run history.",
+            what, serverName, collectorName, at);
+    }
+
+    /// <summary>
     /// The status word for the sentence <see cref="GatedOffMessage"/> gives inside a collector's first-run grace. Nothing is
     /// in the way of a collector that is not due yet: this server could have the data and does not have it right now.
     /// </summary>
@@ -697,6 +785,66 @@ public static class CollectorRuntimePrecondition
                "DATABASE [name] SET QUERY_STORE = ON (OPERATION_MODE = READ_WRITE), and the query_store " +
                "collector starts storing runtime statistics on its next cycle. " +
                PreconditionEpilogue;
+    }
+
+    /// <summary>The engine's readable-secondary bit in <c>readonly_reason</c> (the same bit the collectors gate on, #1558).</summary>
+    public const int ReadableSecondaryReadonlyBit = 8;
+
+    /// <summary>The <c>status</c> word of <see cref="QueryStoreReadableSecondaryMessage"/>: the data is not collected here, and the reason is not a fault to repair.</summary>
+    public const string NotCollectedStatusWord = "not_collected";
+
+    /// <summary>
+    /// #6554: the one-line reason a Query Store read on a readable secondary is empty, or <c>null</c> when the evidence does not
+    /// say the server is one. The collectors skip every database whose <c>readonly_reason</c> has bit 8 (Query Store, its
+    /// forced-plan and plan-correction fan-outs, and since #6252 its health row), so a registered secondary has no Query Store
+    /// rows to read, and the older answers ("empty", "Query Store is READ_ONLY") sent the reader to look for a fault in what is a
+    /// secondary's normal state. The server is a secondary when every database in its newest health capture that Query Store is read
+    /// for carries the bit (an RDS read replica reads <c>Standalone</c> in the role, and captures from before #6252 still carry the bit).
+    /// A capture with any such database not flagged secondary says the server still collects Query Store for it, so the answer is null
+    /// whatever the role says (an instance whose role reads <c>Secondary</c> can host databases outside any availability group).
+    /// The databases counted are the ones the collector reads Query Store for: the on-prem health capture always holds tempdb (its
+    /// database list is <c>database_id &gt; 4 OR database_id = 2</c>) with Query Store OFF, and a database whose Query Store is OFF has
+    /// nothing to read, so neither counts. Only when no such database is left does the collected <c>ag_replica_role</c> decide: <c>Secondary</c> is a secondary. Null when <paramref name="replicaConfigured"/> is true: then the Query Store
+    /// is read from a replica and an empty read has some other cause.
+    /// </summary>
+    /// <param name="healthDatabases">Databases in the newest <c>query_store_health</c> capture, leaving out tempdb and any database whose Query Store is OFF.</param>
+    /// <param name="healthSecondaryDatabases">Of those, how many carry <see cref="ReadableSecondaryReadonlyBit"/>.</param>
+    /// <param name="settingClause">Why the product does not read it, and the setting that changes that (product specific).</param>
+    public static string? QueryStoreReadableSecondaryMessage(
+        string serverName,
+        string? agReplicaRole,
+        int healthDatabases,
+        int healthSecondaryDatabases,
+        bool replicaConfigured,
+        string settingClause)
+    {
+        if (replicaConfigured)
+        {
+            return null;
+        }
+
+        // The newest health capture decides when it has rows: the collectors skip a secondary's databases, so a database
+        // in the capture that is not flagged secondary is one Query Store is still read for (an instance whose role reads
+        // Secondary can host databases outside any availability group), and an empty read there is not "nothing can be read".
+        // The role decides only when the capture has no database Query Store is read for (tempdb and OFF databases do not count).
+        bool secondary;
+        if (healthDatabases > 0)
+        {
+            secondary = healthSecondaryDatabases == healthDatabases;
+        }
+        else
+        {
+            secondary = string.Equals(agReplicaRole?.Trim(), "Secondary", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (!secondary)
+        {
+            return null;
+        }
+
+        return $"Query Store is not collected for {serverName}: it is a readable secondary, and {settingClause} " +
+               "READ_ONLY is a secondary's normal state, not a fault, and its Query Store is the primary's, replicated. " +
+               "An empty read here means nothing was collected, not that nothing ran.";
     }
 
     /// <summary>

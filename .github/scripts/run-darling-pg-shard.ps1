@@ -21,6 +21,10 @@
                          classes it names; FULL, unreadable or empty means every class this leg was cut runs.
   -ScopeFilter           extra runner arguments for the class listing, for a caller that runs part of the suite
                          (the build job's Lite-reads pass: '-trait Stage=Guard -trait Reads=Lite'). Empty: all.
+  -OnlyClasses           comma list of simple class names (#6734): keep only those classes of the listing, before the
+                         cut. Empty: no narrowing. With names, a shard the cut gave none of them passes without running a
+                         test (the plan has fewer classes than legs, or the hash cut left it empty, and the other legs run
+                         every named class). Without names, a shard that selects zero classes is an error.
   -RunAttempt            the workflow's run attempt, in the timing file name.
 #>
 param(
@@ -31,7 +35,8 @@ param(
     [string] $ResultPrefix = 'darling-pr',
     [string] $RunAttempt = '1',
     [string] $SelectionFile = '',
-    [string] $ScopeFilter = ''
+    [string] $ScopeFilter = '',
+    [string] $OnlyClasses = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -74,6 +79,10 @@ if ($readsLite) {
 else {
     $classes = @(Get-DarlingClasses $scopeArgs)
 }
+if ($OnlyClasses) {
+    $only = @($OnlyClasses -split ',' | Where-Object { $_ })
+    $classes = @($classes | Where-Object { $only -contains ($_ -split '[.+/]')[-1] })
+}
 if ($classes.Count -eq 0) { throw 'the class listing returned no classes - the shard would silently run nothing' }
 
 # #5669: the cut balances the shards by recorded class duration (.github/scripts/darling-shard-pack.py, from the committed
@@ -92,6 +101,13 @@ if ($ShardCount -le 1) {
     $mine = @($packed | Where-Object { $_ -and $_ -notlike '#*' })
 }
 Write-Host "shard ${Shard}: $($mine.Count) of $($classes.Count) classes"
+if ($mine.Count -eq 0 -and $OnlyClasses) {
+    # #6734: the classes plan names a few classes, and the cut may give some shard none of them (the hash cut does, when the
+    # weight table knows under 80 percent of them). pack() proves every class lands in exactly one shard, so the other
+    # shards run all of them. This is not the runner-with-no-class case below: nothing is started here.
+    Write-Host "shard ${Shard}: none of the $($classes.Count) named classes is in this shard, so it runs no test. The other legs run them."
+    exit 0
+}
 if ($mine.Count -eq 0) { throw "shard ${Shard} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
 
 # The key a class is selected by: its own simple name, split on the same [.+/] as test-map.py's simple_name and

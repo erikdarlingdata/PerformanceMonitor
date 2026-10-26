@@ -298,7 +298,7 @@ public sealed class DarlingMcpIncidentActionTools
                 ["agent_changes_enabled"] = read.Enabled,
                 ["count"] = shown.Count,
                 ["changes"] = new JsonArray(shown.Select(c => (JsonNode?)c.DeepClone()).ToArray()),
-                ["note"] = "A plan force or unforce with can_undo true is undone with undo_plan_change(called_id), which shows the statement first and writes only after a confirm.",
+                ["note"] = "A plan force, unforce, plan guide create or plan guide drop with can_undo true is undone with undo_plan_change(called_id), which shows the statement first and writes only after a confirm. Any other change with can_undo true (a mute, custom rule, threshold override or signature merge) is undone with undo_agent_change(called_id) when mcp.allowWrites is on.",
             };
             if (shown.Count == 0)
             {

@@ -808,7 +808,7 @@ public sealed class ServerPageTabsTests
            arrive leaves a painted page alone, because a failed fleet read is not evidence the engine changed. */
         Assert.Contains("const remembered = lastCard.get(server);", ServerJs, StringComparison.Ordinal);
         Assert.Contains("painted = paintTabsKeeping(keep, tabsSlot, server, tabId, remembered.card);", ServerJs, StringComparison.Ordinal);
-        Assert.Contains("if (!painted || (card && serverTabsFor(card) !== painted)) {", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("if (!painted || (card && serverTabsFor(card) !== painted) ||", ServerJs, StringComparison.Ordinal);
         Assert.DoesNotContain("card.is_postgres", ServerJs, StringComparison.Ordinal);
         Assert.DoesNotContain("card.engine_kind", ServerJs, StringComparison.Ordinal);
         Assert.DoesNotContain("\"aurora-postgres\"", ServerJs, StringComparison.Ordinal);

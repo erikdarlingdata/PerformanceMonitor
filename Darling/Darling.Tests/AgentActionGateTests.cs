@@ -49,6 +49,14 @@ public sealed class AgentActionPolicyTests
     [InlineData("mute_analysis_finding")]
     [InlineData("unmute_analysis_finding")]
     [InlineData("undo_plan_change")]
+    [InlineData("set_database_state_expected")]
+    [InlineData("write_investigation_note")]
+    [InlineData("approve_investigation_note")]
+    [InlineData("reject_investigation_note")]
+    [InlineData("close_investigation_request")]
+    [InlineData("start_practice_request")]
+    [InlineData("save_environment_profile")]
+    [InlineData("record_investigation_feedback")]
     [InlineData("delete_notification_route")]
     [InlineData("set_notification_route_enabled")]
     [InlineData("set_notification_route_fallback")]
@@ -289,8 +297,8 @@ public sealed class AgentActionGateLiveTests
 
             /* The next hour journals the refusal again, once. */
             _now = T0.AddMinutes(61);
-            await store.RecordAgentActionRefusalAsync(request, "agent-a", "create_mute_rule", AgentActionCodes.Invalid, ct);
-            await store.RecordAgentActionRefusalAsync(request, "agent-a", "create_mute_rule", AgentActionCodes.Invalid, ct);
+            await store.RecordAgentActionRefusalAsync(request, "agent-a", "create_mute_rule", AgentActionCodes.Invalid, null, ct);
+            await store.RecordAgentActionRefusalAsync(request, "agent-a", "create_mute_rule", AgentActionCodes.Invalid, null, ct);
             Assert.Equal("1", await ScalarAsync(connection,
                 $"SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = '{AgentActionCodes.Invalid}'", ct));
         });

@@ -96,7 +96,7 @@ WITH bpr AS (
         CAST(COALESCE(MAX(wait_time_ms), 0) AS BIGINT) AS max_duration_ms,
         CAST(COALESCE(AVG(wait_time_ms), 0) AS DOUBLE) AS avg_duration_ms,
         'blocked-process-report' AS source
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause) + @" AS ev
     GROUP BY DATE_TRUNC('minute', event_time)
 ),
 dmv AS (
@@ -108,7 +108,7 @@ dmv AS (
         CAST(COALESCE(AVG(wait_time_ms), 0) AS DOUBLE) AS avg_duration_ms,
         'DMV snapshot' AS source
     FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause + @"
+    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause + @"
     GROUP BY DATE_TRUNC('minute', event_time)
 )
 SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms, source FROM bpr

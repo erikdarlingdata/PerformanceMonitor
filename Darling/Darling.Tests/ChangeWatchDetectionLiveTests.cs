@@ -203,6 +203,84 @@ public sealed class ChangeWatchDetectionLiveTests
         });
     }
 
+    /// <summary>
+    /// #6550: a forced or unforced plan carries how it was forced, from the forced-plan capture it was seen in (the previous one for an unforce):
+    /// AUTO for automatic plan correction, MANUAL for a person, unknown where the capture holds no value.
+    /// </summary>
+    [Fact]
+    public async Task PlanForceChanges_SayHowThePlanWasForced()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var t1 = h.Now.AddMinutes(-40);
+            var t2 = t1.AddMinutes(10);
+            var t3 = t1.AddMinutes(20);
+
+            await ForcedPlanCaptureAsync(h.Connection, t1, "Sales", ct);
+            await ForcedPlanMarkerAsync(h.Connection, t2, "Sales", ct);
+            foreach (var (query, plan, type) in new (long, long, string?)[] { (1, 10, "AUTO"), (2, 20, "MANUAL"), (3, 30, null) })
+            {
+                var values = new Dictionary<string, object>
+                {
+                    ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(t2), ["database_name"] = "Sales",
+                    ["query_id"] = query, ["plan_id"] = plan,
+                };
+                if (type is not null)
+                {
+                    values["plan_forcing_type"] = type;
+                }
+
+                await SeedAsync(h.Connection, "query_store_forced_plans", values, ct);
+            }
+
+            await ForcedPlanCaptureAsync(h.Connection, t3, "Sales", ct);
+
+            var found = (await h.NewPass().ReadChangesAsync(ServerId, t1, h.Now, ct)).ToDictionary(c => c.Key);
+
+            Assert.Equal("AUTO", found["plan_force:snapshot:Sales:1:10:" + Stamp(t2)].PlanForcingType);
+            Assert.Equal("MANUAL", found["plan_force:snapshot:Sales:2:20:" + Stamp(t2)].PlanForcingType);
+            Assert.Equal("unknown", found["plan_force:snapshot:Sales:3:30:" + Stamp(t2)].PlanForcingType);
+            Assert.Equal("AUTO", found["plan_force:unforced:Sales:1:10:" + Stamp(t3)].PlanForcingType);
+            Assert.Equal("MANUAL", found["plan_force:unforced:Sales:2:20:" + Stamp(t3)].PlanForcingType);
+            Assert.Contains("[forcing type AUTO: automatic plan correction]", found["plan_force:snapshot:Sales:1:10:" + Stamp(t2)].Description, StringComparison.Ordinal);
+            Assert.Contains("[forcing type MANUAL]", found["plan_force:snapshot:Sales:2:20:" + Stamp(t2)].Description, StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>
+    /// #6566: log_reuse_wait_desc is a runtime status, not a configuration. A database whose only change after the mark is that column
+    /// reports nothing; recovery_model changing on another database in the same window is still reported.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseConfig_IgnoresLogReuseWaitStatus_ButStillReportsARealOption()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var mark = h.Now.AddMinutes(-30);
+            var before = mark.AddMinutes(-10);
+            var statusOnly = mark.AddMinutes(5);
+            var real = mark.AddMinutes(10);
+
+            static Task Seed(NpgsqlConnection c, DateTime at, string database, string recovery, string logReuse, CancellationToken ct) =>
+                SeedAsync(c, "database_config", new Dictionary<string, object>
+                {
+                    ["server_id"] = ServerId, ["server_name"] = ServerName, ["capture_time"] = Naive(at), ["database_name"] = database,
+                    ["compatibility_level"] = 150, ["recovery_model"] = recovery, ["log_reuse_wait_desc"] = logReuse,
+                }, ct);
+
+            await Seed(h.Connection, before, "Status", "FULL", "ACTIVE_TRANSACTION", ct);
+            await Seed(h.Connection, statusOnly, "Status", "FULL", "NOTHING", ct);
+            await Seed(h.Connection, real, "Status", "FULL", "NOTHING", ct);
+            await Seed(h.Connection, before, "Real", "FULL", "NOTHING", ct);
+            await Seed(h.Connection, statusOnly, "Real", "FULL", "LOG_BACKUP", ct);
+            await Seed(h.Connection, real, "Real", "SIMPLE", "LOG_BACKUP", ct);
+
+            var found = await h.NewPass().ReadChangesAsync(ServerId, mark, h.Now, ct);
+
+            Assert.Equal(new[] { "database_config:Real:recovery_model:" + Stamp(real) }, Keys(found));
+        });
+    }
+
     internal static string Stamp(DateTime time) => time.ToString("yyyyMMddTHHmmssfff", System.Globalization.CultureInfo.InvariantCulture);
 
     [Fact]
@@ -234,6 +312,80 @@ public sealed class ChangeWatchDetectionLiveTests
 
             /* Marked at the unforcing capture, it was seen already; and nothing reads Billing, which has no capture after its first. */
             Assert.DoesNotContain(await h.NewPass().ReadChangesAsync(ServerId, second, h.Now, ct), c => c.Kind == "plan_force");
+        });
+    }
+
+    /* #6551: a readable secondary's Query Store holds the primary's forced plans, so its plan-snapshot changes are the primary's and open no watch here. */
+    [Fact]
+    public async Task APlanChange_InADatabaseThisServerHoldsAsASecondary_IsNotRecorded_ButTheLedgerAndOtherDatabasesAre()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var first = h.Now.AddMinutes(-50);
+            var second = h.Now.AddMinutes(-40);
+            await ForcedPlanCaptureAsync(h.Connection, first, "Replicated", ct);
+            await ForcedPlanCaptureAsync(h.Connection, first, "Local", ct);
+            await ForcedPlanCaptureAsync(h.Connection, second, "Replicated", ct, (1, 10));
+            await ForcedPlanCaptureAsync(h.Connection, second, "Local", ct, (2, 20));
+            await LedgerAsync(h.Connection, h.Now.AddMinutes(-20), "Replicated", 3, 30, "force", ct);
+
+            static bool Snapshot(ChangeWatchChange c) => c.Key.StartsWith("plan_force:snapshot:", StringComparison.Ordinal);
+
+            /* Before any availability-group snapshot the server is not known to be a secondary: both databases' changes are read. */
+            Assert.Equal(2, (await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct)).Count(Snapshot));
+
+            await SeedAsync(h.Connection, "ag_replica_states", new Dictionary<string, object>
+            {
+                ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(h.Now.AddMinutes(-5)), ["ag_name"] = "AG1",
+                ["replica_server_name"] = ServerName, ["role_desc"] = "SECONDARY", ["is_local"] = true,
+            }, ct);
+            await SeedAsync(h.Connection, "ag_database_replica_states", new Dictionary<string, object>
+            {
+                ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(h.Now.AddMinutes(-5)), ["ag_name"] = "AG1",
+                ["database_name"] = "Replicated", ["replica_server_name"] = ServerName, ["is_local"] = true,
+            }, ct);
+
+            var found = await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct);
+            Assert.Equal(new[] { "plan_force:snapshot:Local:2:20:" + Stamp(second) }, Keys(found.Where(Snapshot)));
+            Assert.Contains(found, c => c.Key.StartsWith("plan_force:action:", StringComparison.Ordinal));
+
+            /* After a failover the newest snapshot says PRIMARY: nothing is left out. */
+            await SeedAsync(h.Connection, "ag_replica_states", new Dictionary<string, object>
+            {
+                ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(h.Now.AddMinutes(-1)), ["ag_name"] = "AG1",
+                ["replica_server_name"] = ServerName, ["role_desc"] = "PRIMARY", ["is_local"] = true,
+            }, ct);
+            Assert.Equal(2, (await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct)).Count(Snapshot));
+        });
+    }
+
+    /* #6551 review: the secondary rule is the shared one (an availability-group snapshot older than an hour is not trusted). The collectors can stop at or
+       before a failover, and a day-old SECONDARY row would then drop this node's own plan changes for a day. */
+    [Fact]
+    public async Task AStaleSecondarySnapshot_IsNotTrusted_AndDropsNoPlanChange()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var first = h.Now.AddMinutes(-50);
+            var second = h.Now.AddMinutes(-40);
+            await ForcedPlanCaptureAsync(h.Connection, first, "Replicated", ct);
+            await ForcedPlanCaptureAsync(h.Connection, second, "Replicated", ct, (1, 10));
+
+            static bool Snapshot(ChangeWatchChange c) => c.Key.StartsWith("plan_force:snapshot:", StringComparison.Ordinal);
+
+            /* The newest snapshots say SECONDARY, but they are three hours old: the collectors stopped. */
+            await SeedAsync(h.Connection, "ag_replica_states", new Dictionary<string, object>
+            {
+                ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(h.Now.AddHours(-3)), ["ag_name"] = "AG1",
+                ["replica_server_name"] = ServerName, ["role_desc"] = "SECONDARY", ["is_local"] = true,
+            }, ct);
+            await SeedAsync(h.Connection, "ag_database_replica_states", new Dictionary<string, object>
+            {
+                ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(h.Now.AddHours(-3)), ["ag_name"] = "AG1",
+                ["database_name"] = "Replicated", ["replica_server_name"] = ServerName, ["is_local"] = true,
+            }, ct);
+
+            Assert.Single(await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct), Snapshot);
         });
     }
 

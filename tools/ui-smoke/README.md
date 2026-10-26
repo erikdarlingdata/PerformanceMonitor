@@ -5,17 +5,16 @@ PostgreSQL store. It fails the job on a console error, a page error, a failed re
 error strip, or a panel or grid that the seed says must have data and does not. A screenshot and a trace are kept for a
 page that failed. Four pages are also compared with screenshot baselines (see "Screenshot baselines" below).
 
-It runs in `.github/workflows/darling-ui-smoke.yml` ("Darling web UI smoke") on a pull request that touches
-`Darling/PerformanceMonitor.Darling.Service/wwwroot/**`, `tools/ui-smoke/**` or the workflow (draft pull requests are
-skipped until ready), by manual dispatch, and in the nightly (`nightly.yml`, outside `publish`'s `needs`, so a red
-reports and does not stop publishing). It is not a required check: a path-filtered workflow never reports when skipped.
+It runs in `.github/workflows/darling-ui-smoke.yml` ("Darling web UI smoke") by manual dispatch and in the nightly
+(`nightly.yml`, outside `publish`'s `needs`, so a red reports and does not stop publishing). It no longer runs on pull
+requests (#6656), and it is not a required check.
 
 ## Files
 
 | File | What it is |
 | --- | --- |
 | `run-ui-smoke.ps1` | The entry, in CI and locally: builds the service, starts it on the store, waits for `/api/ping` and the config seed, applies `seed.sql`, runs `smoke.mjs`, stops the service. |
-| `darling.ui-smoke.json` | The service config. Two servers, `ui-sql` (SQL Server) and `ui-pg` (PostgreSQL), both at `127.0.0.1` port 1, so they fail to connect at once and the service never collects over the seeded rows. (`servers: []` is refused by config validation.) A loopback web host with no `web.network` block needs no sign-in. |
+| `darling.ui-smoke.json` | The service config. Two servers, `ui-sql` (SQL Server) and `ui-pg` (PostgreSQL), both at `127.0.0.1` port 1, so they fail to connect at once and the service never collects over the seeded rows. (`servers: []` is refused by config validation.) The web host asks for its token on loopback too, so `web.network` holds only a token. `run-ui-smoke.ps1` makes a fresh one per run, signs in once, and passes the session cookie to `smoke.mjs` and `shots.mjs`, so the pages render as a signed-in editor sees them. |
 | `seed.sql` | The rows. Every time is relative to the store's own clock and every count is fixed, so the assertions are exact. |
 | `pages.json` | The pages and what each must show. |
 | `smoke.mjs` | The browser walk (`playwright-core`, the installed Chrome or Edge). |

@@ -40,6 +40,13 @@ public sealed class ServerRuntime
     public required int ServerId { get; init; }
 
     /// <summary>
+    /// #6771: this server's own plan-capture setting (<see cref="MonitoredServer.CapturePlans"/>): null uses the service-wide
+    /// setting. Settable, unlike <see cref="Config"/>, because the worker refreshes it on every registry reload; a plan-capture edit
+    /// is not a connection change and must not reconnect the server, so it reaches the next cycle through this property.
+    /// </summary>
+    public bool? CapturePlans { get; set; }
+
+    /// <summary>
     /// The database this connection ACTUALLY landed in — <c>DB_NAME()</c>, or <c>current_database()</c> on
     /// PostgreSQL — or null when the probe did not return it (#2228).
     ///
@@ -524,6 +531,7 @@ SELECT
         return new ServerRuntime
         {
             Config = config,
+            CapturePlans = config.CapturePlans,
             ConnectionString = connectionString,
             Target = new CollectorTargetInfo
             {
@@ -652,6 +660,7 @@ SELECT
         return new ServerRuntime
         {
             Config = config,
+            CapturePlans = config.CapturePlans,
             ConnectionString = connectionString,
             Target = new CollectorTargetInfo
             {
@@ -736,7 +745,7 @@ FROM pg_catalog.pg_control_system() AS s";
     /// path + credentials) and the <c>--test-connection</c>/<c>--validate-config</c> CLI verb, so both
     /// classify a server identically. <see cref="OperationCanceledException"/> propagates (shutdown).
     /// </summary>
-    public static async Task<ConnectionProbeResult> ProbeAsync(MonitoredServer config, ILogger? logger, CancellationToken cancellationToken)
+    public static async Task<ConnectionProbeResult> ProbeAsync(MonitoredServer config, ILogger? logger, CancellationToken cancellationToken, bool runsAsConsoleUser = false)
     {
         if (config is null)
         {
@@ -750,6 +759,22 @@ FROM pg_catalog.pg_control_system() AS s";
             /* #6254: a server with a Query Store replica is tested on both connections, so a replica that cannot be reached shows now
                and not as a collection that quietly reads the primary. Its failure is a warning: the primary answered. */
             var (replicaHost, replicaError) = await ProbeQueryStoreReplicaAsync(config, runtime.Target.IsAzureSqlDb, logger, cancellationToken);
+            /* #6459: an Azure SQL Database has no readable-replica Query Store read, so the setting is saved and never used. The
+               replica is not opened (nothing to test), and the result says so, so the operator is told at save time and not left
+               to notice that read_source never fills in. */
+            var ignoredReplica = IgnoredQueryStoreReplica(config, runtime.Target.IsAzureSqlDb);
+            var replicaIgnored = ignoredReplica is not null;
+            replicaHost ??= ignoredReplica;
+
+            /* #6472: the base grants the connecting login lacks, each with the statement that adds it. A warning only: the connection worked. */
+            /* The CLI runs this in its own process: with Windows authentication the connecting login is the console user, not the account
+               the service collects as, so a grant check would name the wrong principal. It says nothing then; the service's own test
+               (test_connect) checks the right one. */
+            var checksTheWrongPrincipal = runsAsConsoleUser && !config.UsesSqlAuth && !config.UsesEntra;
+            var missingGrants = isPostgres || checksTheWrongPrincipal
+                ? null
+                : await ProbeMissingGrantsAsync(runtime.ConnectionString, runtime.Target.IsAzureSqlDb, logger, cancellationToken);
+
             return new ConnectionProbeResult(
                 Success: true,
                 MajorVersion: runtime.Target.SqlMajorVersion,
@@ -772,7 +797,9 @@ FROM pg_catalog.pg_control_system() AS s";
                 IsInRecovery: runtime.Target.IsInRecovery,
                 HasPgWaitSamplingExtension: runtime.Target.HasPgWaitSamplingExtension,
                 QueryStoreReplica: replicaHost,
-                QueryStoreReplicaError: replicaError);
+                QueryStoreReplicaError: replicaError,
+                QueryStoreReplicaIgnoredOnAzureSqlDb: replicaIgnored,
+                MissingGrantsNote: missingGrants);
         }
         catch (OperationCanceledException)
         {
@@ -793,6 +820,52 @@ FROM pg_catalog.pg_control_system() AS s";
                    threw an exception" and says nothing about why. One shared explanation, for every caller. */
                 Error: SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message,
                 SqlClientNativeLoadFailed: SqlClientNativeLoadFailure.IsMatch(ex));
+        }
+    }
+
+    /// <summary>
+    /// #6472: checks the required base grants of <see cref="PerformanceMonitor.Darling.Storage.MonitoringGrantScript"/> on the login the connection test connected with
+    /// (<c>HAS_PERMS_BY_NAME</c>: the server grants, or the database grants on an Azure SQL Database) and returns the sentence that
+    /// names each missing one with the statement that adds it, or null when none is missing. It never throws except for cancellation and
+    /// says nothing when it cannot read the answer (an old version that does not know a permission name answers NULL, which is no claim):
+    /// the connection worked, and a missing grant is a warning beside that result, not a failure of it.
+    /// <paramref name="createConnection"/> is a test seam; null opens a SqlConnection.
+    /// </summary>
+    internal static async Task<string?> ProbeMissingGrantsAsync(
+        string connectionString, bool isAzureSqlDatabase, ILogger? logger, CancellationToken cancellationToken,
+        Func<string, System.Data.Common.DbConnection>? createConnection = null)
+    {
+        var entries = isAzureSqlDatabase ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.RequiredAzureGrants : PerformanceMonitor.Darling.Storage.MonitoringGrantScript.RequiredServerGrants;
+        try
+        {
+            await using var connection = createConnection is null ? new SqlConnection(connectionString) : createConnection(connectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.BuildPermissionCheckSql(entries);
+            command.CommandTimeout = 15;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            var held = new List<int?>();
+            for (var i = 0; i < entries.Count; i++)
+            {
+                held.Add(reader.IsDBNull(i) ? null : Convert.ToInt32(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture));
+            }
+
+            var who = reader.IsDBNull(entries.Count) ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.PlaceholderLogin : reader.GetString(entries.Count);
+            return PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeMissingGrants(PerformanceMonitor.Darling.Storage.MonitoringGrantScript.MissingGrants(entries, held, who));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger?.LogDebug("The grant check did not run ({Message}); the connection result stands without it", ex.Message);
+            return null;
         }
     }
 
@@ -837,6 +910,17 @@ FROM pg_catalog.pg_control_system() AS s";
     }
 
     /// <summary>
+    /// #6459: the Query Store replica a SQL Server target has set and an Azure SQL Database will never read, or null (no replica set,
+    /// a PostgreSQL target, or a target that is not an Azure SQL Database). The one place the "set but unusable" rule is decided, so
+    /// the connection test and its callers cannot disagree about it (<see cref="ProbeQueryStoreReplicaAsync"/> is its twin: the
+    /// same targets, opened).
+    /// </summary>
+    internal static string? IgnoredQueryStoreReplica(MonitoredServer config, bool isAzureSqlDatabase) =>
+        isAzureSqlDatabase && !config.IsPostgres
+            ? PerformanceMonitor.Darling.Storage.QueryStoreReplicaSetting.Normalize(config.ConnectionIdentity.QueryStoreReplica)
+            : null;
+
+    /// <summary>
     /// #6254: the one line a connection test says about the Query Store replica, or null when the probed server has none.
     /// <paramref name="revealError"/> says whether the driver's text may be shown (the CLI and the Viewer, the operator's own
     /// surfaces, as for the primary); a caller that must not echo it (MCP and web replies) gets a fixed sentence and logs the text.
@@ -848,6 +932,12 @@ FROM pg_catalog.pg_control_system() AS s";
         if (string.IsNullOrEmpty(probe.QueryStoreReplica))
         {
             return null;
+        }
+
+        if (probe.QueryStoreReplicaIgnoredOnAzureSqlDb)
+        {
+            return $"Query Store replica {probe.QueryStoreReplica}: not used. Azure SQL Database has no readable-replica Query Store read, " +
+                   "so this setting has no effect and collection reads Query Store from the database itself. Remove query_store_replica.";
         }
 
         if (string.IsNullOrEmpty(probe.QueryStoreReplicaError))
@@ -965,7 +1055,13 @@ public sealed record ConnectionProbeResult(
        replica (or is a PostgreSQL target or an Azure SQL Database). A set error leaves Success alone, because collection reads
        the primary when the replica cannot be reached. Trailing and defaulted, like the fields above. */
     string? QueryStoreReplica = null,
-    string? QueryStoreReplicaError = null)
+    string? QueryStoreReplicaError = null,
+    /* #6459: the server has a Query Store replica set and is an Azure SQL Database, which has no readable-replica Query Store read:
+       the setting is saved and never used, the replica was not opened, and the note says so. Trailing and defaulted. */
+    bool QueryStoreReplicaIgnoredOnAzureSqlDb = false,
+    /* #6472: the sentence naming each missing base grant with the statement that adds it, or null when none is missing (or the check could
+       not read). A warning beside a successful connection. Trailing and defaulted, like the fields above. */
+    string? MissingGrantsNote = null)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually

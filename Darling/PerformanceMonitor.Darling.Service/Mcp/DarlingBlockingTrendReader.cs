@@ -50,6 +50,11 @@ internal static class DarlingBlockingTrendReader
     /// <para><b>The database predicate is the list form (#5244), on BOTH arms</b>, as the desktop's <c>BlockingTrendSql</c> has it.
     /// The DMV arm's <c>NOT EXISTS (SELECT 1 FROM bpr)</c> therefore asks whether the XE source has rows for the CHOSEN databases:
     /// a database with only DMV-captured blocking still charts, whatever other databases' XE reports hold.</para>
+    ///
+    /// <para><b>A parallel query waiting on itself is not blocking (#6645, #6705)</b>: both arms carry
+    /// <see cref="BlockingWaits.NotSelfWaitSql"/>, as <c>PgAnomalyDetector.BlockingWindowSql</c> does, so the bars (and the web
+    /// Overview strip drawn from this read) agree with the baseline band. The DMV arm is therefore drawn when the FILTERED XE
+    /// arm is empty, a window whose only XE reports are self-waits included.</para>
     /// </summary>
     public static readonly string BlockingTrendSql = $$"""
         WITH bpr AS (
@@ -58,6 +63,7 @@ internal static class DarlingBlockingTrendReader
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
             {{DatabaseFilter.All.Clause("database_name", 5)}}
+            AND   {{BlockingWaits.NotSelfWaitSql}}
             GROUP BY DATE_TRUNC('minute', event_time)
         ),
         dmv AS (
@@ -66,6 +72,7 @@ internal static class DarlingBlockingTrendReader
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
             {{DatabaseFilter.All.Clause("database_name", 5)}}
+            AND   {{BlockingWaits.NotSelfWaitSql}}
             GROUP BY DATE_TRUNC('minute', event_time)
         )
         SELECT bucket, incident_count, source FROM bpr

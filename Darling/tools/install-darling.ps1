@@ -8,8 +8,10 @@ Run from an ELEVATED PowerShell, from the folder you extracted the Darling zip i
 installs the service pointing at THAT folder - extract to the final location first, e.g.
 C:\Program Files\PerformanceMonitorDarling). What it does, in order:
 
-  1. Verifies elevation, the service exe, and darling.json (offers to copy darling.sample.json
-     and stops so you can edit it - the service is not installed with an unedited sample).
+  1. Verifies elevation, the service exe, and darling.json. When darling.json does not exist it writes a
+     minimal one (the bundled PostgreSQL store, no servers) and carries on: the service starts with no
+     monitored servers and you add the first one afterwards in the Viewer (#6468). darling.sample.json stays
+     beside it as the full reference.
   1a. REFUSES an install tree an ordinary local user can ALREADY write to, before anything - including
      the lock at 1b2 - has run (#4043): the usual case is Authenticated Users: Modify, inherited from
      C:\. A lock closes FURTHER writes; it cannot undo one made before it existed, so this recursively
@@ -24,12 +26,9 @@ C:\Program Files\PerformanceMonitorDarling). What it does, in order:
   1b2. Locks the install folder against ordinary users before anything runs from it (#4034): a folder made
      directly under C:\ otherwise lets any local user replace the service's binaries. Extract into a fresh
      folder and run this straight away; no lock can undo a file swapped before it.
-  1c. REFUSES an install when the base .NET Runtime 10 (Microsoft.NETCore.App) or the ASP.NET Core
-     Runtime 10 is missing, and WARNS when the .NET Desktop Runtime 10 is (#2479, #5407). Both shipped
-     binaries are framework-dependent; a stock Windows Server image has none of these runtimes, and the
-     failure is the .NET host's own "You must install .NET" error with nothing of ours on it. The
-     standalone ASP.NET Core Runtime installer does not include the base runtime; the Hosting Bundle
-     does. Part of the pre-flight, so -SkipPreflight skips it.
+  1c2. REFUSES a first install whose darling.json is an unedited copy of darling.sample.json, because the
+     copy still names the sample's example servers (#6475). Runs before the lock at 1b2, so a refusal leaves
+     the folder's permissions as they were.
   2. Optional pre-flight: runs `--test-connection` and shows the per-server PASS/FAIL lines
      (continue-or-abort prompt on failure; -SkipPreflight to skip). STOPS (exit 5) instead of prompting when
      the exe prints "doesn't fully support CET": Windows needs its updates (#5651).
@@ -43,6 +42,7 @@ C:\Program Files\PerformanceMonitorDarling). What it does, in order:
   4b. Restricts darling.json to SYSTEM / Administrators / the service account, plus read for the
      local group 'PerformanceMonitor Darling Operators' (the Viewer and the CLI, run without
      elevation). The group is created here, empty: you add each person who should have that access.
+     Step 7 offers to add the account signed in to this session (default No), or -AddOperator names one.
      darling.json holds encrypted SQL passwords and the MCP/web access tokens, and an install
      folder under C:\ otherwise inherits read access for BUILTIN\Users.
   4b2. Grants the service account read and execute on the locked install folder, and Modify only on the
@@ -55,15 +55,27 @@ C:\Program Files\PerformanceMonitorDarling). What it does, in order:
      --configure-firewall verb. This requires elevation, which is why it lives here: the service's
      own unprivileged account cannot create them, and only verifies them at runtime.
   5. Starts the service and confirms it reaches Running.
-  6. Creates 'Darling Viewer' shortcuts on the Desktop and in the Start Menu pointing at
+  6. Creates 'Darling Viewer' shortcuts on the public Desktop and in the all-users Start Menu (not the
+     Desktop of whichever account elevated, #6475) pointing at
      viewer\PerformanceMonitor.Darling.Viewer.exe. (Taskbar pinning is deliberately not
      attempted - Windows blocks programmatic pinning by design; pin from the Start Menu entry.)
+  7. Asks once whether to add the account signed in to this session to the operator group (default
+     No; -AddOperator <account> adds one without asking, -NoOperatorPrompt never asks, and a host that
+     cannot take an answer counts as No). A Yes also gives that account a direct grant of the group's
+     access (read on darling.json and the store's admin and viewer credential files, traverse on the
+     store folder) so the Viewer and the CLI work without a sign-out; the service drops that grant when
+     it rewrites those permissions at a start, and uninstall-darling.ps1 removes it.
 
 Uninstall with uninstall-darling.ps1 (same folder).
 
+The MSI package (#6480) runs this same script in two phases through -MsiPhase, around the service the package creates and
+starts itself: PreStart does steps 1-3 and 4b-4c, PostStart does 5a (an upgrade only) and step 7. The package owns steps 4, 5
+and 6, so neither phase runs them, and neither phase asks a question. A machine the MSI installed is refused here without
+-MsiPhase: update it with a newer MSI.
+
 .PARAMETER SkipPreflight
-Skip BOTH pre-flight gates: the .NET runtime check (1c) and the --test-connection probe (2). The runtime
-check is the escape hatch for a private or xcopy runtime layout this script cannot see.
+Skip the --test-connection probe (2). The service and the viewer\ folder are self-contained, so there is no
+.NET runtime check to skip (#6471).
 
 .PARAMETER NoShortcuts
 Do not create the viewer shortcuts.
@@ -81,13 +93,48 @@ was EVER writable by someone besides SYSTEM, Administrators, TrustedInstaller an
 swapped binary. Passing this accepts that risk. It exists for a dev loop that extracts into a folder you
 know is writable on purpose (a repo working copy, a shared build share) - not for a real install. Extract
 under C:\Program Files\<something>, or another folder only an administrator can write to, instead.
+
+.PARAMETER AddOperator
+Add this account (DOMAIN\user, or a local user's name) to the local group 'PerformanceMonitor Darling Operators' at the end of
+the install without asking (#6478), and give it a direct grant of the same access so the Viewer and the CLI work in the
+session that is already open. For a scripted install. Without this parameter and without -NoOperatorPrompt, an interactive
+install asks "Add <the signed-in account> to the group? [y/N]" and the answer defaults to No. Ignored on a domain controller,
+which has no local groups. Cannot be combined with -NoOperatorPrompt.
+
+.PARAMETER NoOperatorPrompt
+Never ask whether to add the signed-in account to the operator group (#6478). The install prints who to add, and that the
+person signs out and back in, as it did before the question existed. A host that cannot take an answer (input redirected, or
+started with -NonInteractive) is treated the same way without this switch.
+
+.PARAMETER MsiPhase
+PreStart or PostStart. For the MSI package's custom actions only (#6480); a person running this by hand does not pass it.
+PreStart runs after the package has installed the files and created the service, before it starts it: steps 1 to 3 and 4b to 4c
+(locks and permissions, the operator group, the store folder, the firewall rules). PostStart runs after the package has started
+the service: 5a (the firewall re-reconcile) on an upgrade only, then step 7. Neither phase creates, stops or starts the service,
+creates shortcuts, or asks a question: a question becomes "continue" (the CET refusal at step 2 still stops the install, exit 5).
+Under -MsiPhase the script does not treat an existing service as an upgrade, because the package creates the service first;
+-MsiUpgrade says which it is. Cannot be combined with -Network.
+
+.PARAMETER MsiUpgrade
+With -MsiPhase: the package is replacing an installed Darling (a major upgrade), so the store already exists. PostStart then
+re-applies the firewall rules at 5a. Without it a -MsiPhase run is a fresh install, even though the service record exists by then.
+
+.PARAMETER WebDashboard
+When this script writes the minimal darling.json (none existed), set web.enabled to true in it, so the web dashboard starts on its
+loopback address. Does nothing when darling.json already exists: that file is the operator's.
 #>
 [CmdletBinding()]
 param(
     [switch]$SkipPreflight,
     [switch]$NoShortcuts,
     [switch]$Network,
-    [switch]$AcceptWritableExtraction
+    [switch]$AcceptWritableExtraction,
+    [string]$AddOperator,
+    [switch]$NoOperatorPrompt,
+    [ValidateSet('PreStart', 'PostStart')]
+    [string]$MsiPhase,
+    [switch]$MsiUpgrade,
+    [switch]$WebDashboard
 )
 
 $ErrorActionPreference = 'Stop'
@@ -105,13 +152,9 @@ $samplePath = Join-Path $root 'darling.sample.json'
 # DarlingFileSecurity.OperatorGroupName in the service project.
 $operatorGroupName = 'PerformanceMonitor Darling Operators'
 
-# The .NET major both shipped binaries are built against, and the one page that offers every installer
-# for it. Kept beside the other script-scope facts so a framework bump is one edit, and deliberately the
-# SAME url the UAT onboarding prints - a tester who reads both should not be sent to two places.
-$dotnetMajor = 10
-$dotnetDownloadUrl = 'https://dotnet.microsoft.com/download/dotnet/10.0'
-
 function Fail([string]$message) { Write-Host "ERROR: $message" -ForegroundColor Red; exit 1 }
+
+if ($AddOperator -and $NoOperatorPrompt) { Fail '-AddOperator and -NoOperatorPrompt cannot be used together: one adds the account without asking, the other never asks.' }
 
 # Read-only counterpart to Lock-DarlingInstallTree, for #4043: is $path ALREADY writable by someone outside
 # $trusted, right now, before anything is locked or a service account even exists? #4038's lock only stops
@@ -936,6 +979,25 @@ Do NOT try to repair this folder's permissions in place.
 "@
 }
 
+# The one-line PowerShell command that extracts the zip this folder came from straight into Program Files (#6469), for the
+# refusal of a folder the service cannot use. The zip is the one beside the extract folder with the folder's name, which is
+# how Explorer's "Extract All" names its folder; with none there, a placeholder says what to put.
+function Get-DarlingExtractCommand([string]$extractedFolder) {
+    $destination = Join-Path $env:ProgramFiles 'PerformanceMonitorDarling'
+    $zipPath = '<path to the Darling zip you downloaded>'
+    try {
+        $trimmed = $extractedFolder.TrimEnd('\')
+        $parent = Split-Path -Parent $trimmed
+        $leaf = Split-Path -Leaf $trimmed
+        if ($parent -and $leaf) {
+            $candidate = Join-Path $parent ($leaf + '.zip')
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $zipPath = $candidate }
+        }
+    }
+    catch { $null = $_ }
+    return "Expand-Archive -LiteralPath '" + $zipPath.Replace("'", "''") + "' -DestinationPath '" + $destination.Replace("'", "''") + "'"
+}
+
 # The refusal's advice when the service is NOT registered, or runs from some other folder, so this folder is not
 # an install to keep (#5627): a fresh folder. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingFreshFolderAdvice([string]$folder) {
@@ -1217,96 +1279,6 @@ function Get-NetworkPathKind([string]$path) {
     if ($psDrive -and -not [string]::IsNullOrWhiteSpace($psDrive.DisplayRoot)) { return 'mapped drive' }
 
     return $null
-}
-
-# Every place the .NET host looks for a shared framework, in the order it looks. Used by the runtime gate
-# at 1c, which has to answer "can these binaries start at all" on a box where dotnet.exe may not exist.
-function Get-DotnetRootCandidates {
-    $roots = New-Object 'System.Collections.Generic.List[string]'
-
-    # DOTNET_ROOT wins here because it wins for the host: an operator who redirected the runtime is not
-    # someone whose install should be refused for looking in the wrong place.
-    foreach ($fromEnv in @($env:DOTNET_ROOT, ${env:DOTNET_ROOT_X64})) {
-        if (-not [string]::IsNullOrWhiteSpace($fromEnv)) { $roots.Add($fromEnv) }
-    }
-
-    # Where the official installers record themselves. The key is HKLM:\SOFTWARE\dotnet - NOT under
-    # Microsoft\ - and reading it is what finds an install that was pointed somewhere other than
-    # Program Files. Its absence proves nothing, so the default location below is checked regardless.
-    try {
-        $recorded = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\dotnet\Setup\InstalledVersions\x64' -Name 'InstallLocation' -ErrorAction Stop).InstallLocation
-        if (-not [string]::IsNullOrWhiteSpace($recorded)) { $roots.Add($recorded) }
-    }
-    catch {
-        # No registry entry, or an unreadable one. Fall through.
-    }
-
-    foreach ($programFiles in @($env:ProgramW6432, $env:ProgramFiles)) {
-        if (-not [string]::IsNullOrWhiteSpace($programFiles)) { $roots.Add((Join-Path $programFiles 'dotnet')) }
-    }
-
-    return $roots
-}
-
-# The version folder names present for one shared framework, e.g. '10.0.11' for Microsoft.AspNetCore.App.
-# Returns an empty list when the framework is not installed anywhere this can see.
-function Get-InstalledFrameworkVersions([string]$frameworkName) {
-    $versions = New-Object 'System.Collections.Generic.List[string]'
-
-    foreach ($dotnetRoot in (Get-DotnetRootCandidates)) {
-        $frameworkDir = Join-Path (Join-Path $dotnetRoot 'shared') $frameworkName
-        if (-not (Test-Path -LiteralPath $frameworkDir)) { continue }
-        foreach ($child in @(Get-ChildItem -LiteralPath $frameworkDir -Directory -ErrorAction SilentlyContinue)) {
-            $versions.Add($child.Name)
-        }
-    }
-
-    # `dotnet --list-runtimes` is the authoritative answer and sees layouts the three guesses above do
-    # not, but it is a SUPPLEMENT rather than the primary check: a box with neither runtime installed
-    # frequently has no dotnet.exe on it at all, and that is precisely the box this gate exists for.
-    $muxer = Get-Command 'dotnet' -CommandType Application -ErrorAction SilentlyContinue
-    if ($muxer) {
-        try {
-            foreach ($line in @(& $muxer.Source --list-runtimes 2>$null)) {
-                if ($line -match ('^' + [Regex]::Escape($frameworkName) + '\s+(\S+)\s')) { $versions.Add($Matches[1]) }
-            }
-        }
-        catch {
-            # A dotnet.exe that cannot list its own runtimes tells us nothing the directory scan did not.
-        }
-    }
-
-    return $versions
-}
-
-# True when at least one of $versions is a build of major version $major.
-#
-# The test is on the PARSED leading integer, never a text prefix. '1.10.0' and '110.0.0' both contain the
-# characters '10.' and neither one is .NET 10, so a -like '10.*' or a bare -match '10\.' waves a box
-# through with no runtime on it and hands the operator back the raw host error this gate exists to
-# replace - the worse of the two failures, because it looks like the check ran.
-#
-# MAJOR is the right granularity because it is the granularity the host rolls forward at: a net10.0 app
-# rolls forward across patch and minor by default but never across major, so any 10.x satisfies these
-# binaries and an 11.x does not.
-function Test-FrameworkMajorPresent([string[]]$versions, [int]$major) {
-    if ($null -eq $versions) { return $false }
-
-    foreach ($version in $versions) {
-        if ([string]::IsNullOrWhiteSpace($version)) { continue }
-        if ($version -match '^\s*(\d+)(?:\.|$)') {
-            if ([int]$Matches[1] -eq $major) { return $true }
-        }
-    }
-
-    return $false
-}
-
-# What the gate says it found. 'nothing' rather than an empty string, because a blank there reads as a
-# formatting bug and sends the operator looking in the wrong place.
-function Format-FrameworkVersionList([string[]]$versions) {
-    if ($null -eq $versions -or $versions.Count -eq 0) { return 'nothing' }
-    return (($versions | Sort-Object -Unique) -join ', ')
 }
 
 # The logon account the Darling service is registered to run as, exactly as Windows reports it (LocalSystem,
@@ -1678,9 +1650,120 @@ function Invoke-InstallTreeLock([string]$account, [switch]$StopOnOpen) {
 }
 
 # -- 1. Environment checks ------------------------------------------------------------------------
+# Can this session answer a question? Not when PowerShell was started -NonInteractive (any abbreviation of it),
+# when its input is redirected, or when the process is not interactive: a Read-Host there throws or hangs, so
+# those runs keep the plain stop below (#6469). The three facts are parameters so a test can stand in for them.
+function Test-DarlingInteractiveSession(
+    [string[]]$commandLine = [Environment]::GetCommandLineArgs(),
+    [bool]$userInteractive = [Environment]::UserInteractive,
+    [bool]$inputRedirected = [Console]::IsInputRedirected) {
+    if (-not $userInteractive -or $inputRedirected) { return $false }
+    foreach ($argument in $commandLine) {
+        if ($argument -match '^[-/]non') { return $false }
+    }
+    return $true
+}
+
+# What to do about elevation: carry on, offer to restart elevated, or stop with the message (#6469).
+function Get-DarlingElevationAction([bool]$isAdministrator, [bool]$interactive) {
+    if ($isAdministrator) { return 'Continue' }
+    if ($interactive) { return 'Offer' }
+    return 'Stop'
+}
+
+# The arguments for the elevated restart: this script, with the execution policy bypassed for that one process
+# (never Set-ExecutionPolicy), and every switch and valued parameter the person passed. -NoExit keeps the new window open so its output
+# can be read once the script ends.
+function Get-DarlingElevatedArguments([string]$scriptPath, [hashtable]$boundParameters) {
+    $list = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', ('"' + $scriptPath + '"'))
+    foreach ($name in @($boundParameters.Keys | Sort-Object)) {
+        $value = $boundParameters[$name]
+        if ($value -is [System.Management.Automation.SwitchParameter]) {
+            if ($value.IsPresent) { $list += "-$name" }
+        }
+        elseif ($null -ne $value) {
+            # A valued parameter (-AddOperator, #6478): without it the elevated run would never add that account.
+            $list += "-$name"
+            $list += ('"' + [string]$value + '"')
+        }
+    }
+    return $list
+}
+
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Fail 'Run this script from an ELEVATED PowerShell (service creation and Event Log registration require it).'
+$elevationAction = Get-DarlingElevationAction ($identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) (Test-DarlingInteractiveSession)
+if ($elevationAction -eq 'Stop') {
+    Fail 'Run this script from an ELEVATED PowerShell (service creation and Event Log registration require it). To skip that step, double-click Install-Darling.cmd beside this script instead: it asks Windows for administrator rights and runs this script for you.'
+}
+if ($elevationAction -eq 'Offer') {
+    Write-Host 'This installer needs administrator rights (service creation and Event Log registration), and this PowerShell is not elevated.' -ForegroundColor Yellow
+    $answer = Read-Host 'Restart it elevated now? Windows will ask you to approve. [Y/n]'
+    if ($answer -match '^[Nn]') {
+        Fail 'Not restarted. Run this script from an ELEVATED PowerShell, or double-click Install-Darling.cmd beside it.'
+    }
+    try {
+        $powerShellExe = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        Start-Process -FilePath $powerShellExe -Verb RunAs -ArgumentList (Get-DarlingElevatedArguments $PSCommandPath $PSBoundParameters)
+    }
+    catch {
+        Fail "Could not restart elevated: $($_.Exception.Message) Run this script from an ELEVATED PowerShell, or double-click Install-Darling.cmd beside it."
+    }
+    Write-Host 'The installer is running in the elevated window that just opened. Carry on there; this window has nothing more to do.' -ForegroundColor Green
+    exit 0
+}
+
+# The MSI package (#6480) writes HKLM\SOFTWARE\PerformanceMonitor Darling, value InstalledBy = msi, and removes it at uninstall. A
+# machine that holds it belongs to Windows Installer: a script install over it would leave two owners for one service. Returns the
+# refusal text, or $null when the marker is absent. The registry read is a parameter so a test can stand in for the machine; the
+# default reads the 64-bit view, so a 32-bit PowerShell is not sent to WOW6432Node and does not miss the marker. Kept byte-identical
+# in install-darling.ps1, upgrade-darling.ps1 and uninstall-darling.ps1.
+function Get-DarlingMsiInstallRefusal([string]$ScriptName, [scriptblock]$ReadMarker = $null) {
+    if (-not $ReadMarker) {
+        $ReadMarker = {
+            $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+            try {
+                $key = $base.OpenSubKey('SOFTWARE\PerformanceMonitor Darling')
+                if ($key) { try { $key.GetValue('InstalledBy') } finally { $key.Dispose() } }
+            }
+            finally { $base.Dispose() }
+        }
+    }
+    if ("$(& $ReadMarker)" -ne 'msi') { return $null }
+    return @"
+PerformanceMonitor Darling on this machine was installed by the MSI package, so $ScriptName will not change it: two installers
+would then own one service.
+  To update it: run the newer MSI. Windows Installer replaces the files in place and keeps darling.json and the store.
+  To remove it: Settings > Apps > Installed apps > PerformanceMonitor Darling > Uninstall. That keeps the store unless you tick
+  the box to remove it.
+  To go back to script installs: uninstall the MSI as above, extract the zip into a fresh folder, and run install-darling.ps1 there.
+Nothing was installed or changed.
+"@
+}
+
+# Fresh install or upgrade. By hand it is whether the service exists. Under -MsiPhase the package created the service before this
+# script ran, so $Existing is set on a fresh MSI install too and would read as an upgrade: the package says which it is with
+# -MsiUpgrade (#6480). Takes the facts as arguments so a test can stand in for the machine.
+function Test-DarlingIsUpgrade([string]$MsiPhase, [bool]$MsiUpgrade, $Existing) {
+    if ($MsiPhase) { return $MsiUpgrade }
+    return ($null -ne $Existing)
+}
+
+# The one place a question is asked of a person at steps 1b and 2. Under -MsiPhase nobody can answer (a custom action has no console), so
+# the answer is "continue" and nothing is read (#6480). The reader is a parameter so a test can see that it is not called.
+function Read-DarlingAnswer([string]$MsiPhase, [string]$Prompt, [scriptblock]$Ask = $null) {
+    if ($MsiPhase) {
+        Write-Host "Continuing: a -MsiPhase run asks no questions ($Prompt)" -ForegroundColor Yellow
+        return 'y'
+    }
+    if (-not $Ask) { $Ask = { param($text) Read-Host $text } }
+    return (& $Ask $Prompt)
+}
+
+if ($MsiUpgrade -and -not $MsiPhase) { Fail '-MsiUpgrade is only for the MSI package: it goes with -MsiPhase.' }
+if ($MsiPhase -and $Network) { Fail '-Network opens an interactive wizard, which -MsiPhase never does. Run install-darling.ps1 -Network by hand afterwards, or edit darling.json.' }
+if (-not $MsiPhase) {
+    $msiRefusal = Get-DarlingMsiInstallRefusal 'install-darling.ps1'
+    if ($msiRefusal) { Fail $msiRefusal }
 }
 
 if (-not (Test-Path -LiteralPath $serviceExe)) {
@@ -1691,6 +1774,13 @@ if (-not (Test-Path -LiteralPath $serviceExe)) {
 # needed it: 1a's pre-lock check (below) must also know fresh-versus-upgrade, so a re-run over a tree #4038
 # already locked does not read that lock's own grant back as a stranger's (round-1 review, #4043).
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+
+# Fresh install or upgrade, for 1b, 1c2 and 5a (see Test-DarlingIsUpgrade for why $existing alone is not enough under -MsiPhase).
+$isUpgrade = Test-DarlingIsUpgrade $MsiPhase ([bool]$MsiUpgrade) $existing
+
+# PostStart has nothing to check or lock: PreStart did all of it before the service started. The body below is not re-indented,
+# to keep the diff of this long block readable.
+if ($MsiPhase -ne 'PostStart') {
 
 # -- 1a. Refuse an install tree an ordinary user can ALREADY write to (#4043) -----------------------
 # #4038's lock at 1b2 closes the tree against writes from here on. It cannot undo one made before it ran:
@@ -1779,12 +1869,10 @@ else {
 # This runs BEFORE the pre-flight, the Event Log source, and service creation, so a doomed location costs
 # nothing and leaves nothing behind.
 
-# The same fact as a boolean, for the post-start firewall reconcile at 5a (#2436). $existing itself was
-# already resolved at 1a, before this point and before sc.exe create ever runs, because the pre-lock check
-# there needs fresh-versus-upgrade too. Named rather than reusing $existing at the far end of the script
-# because what 5a actually depends on is not "a service object was found" but "a STORE already exists to be
-# asked" - which is what an existing service implies.
-$isUpgrade = $null -ne $existing
+# $isUpgrade (set right after $existing, above) is the same fact as a boolean, for the post-start firewall reconcile at 5a
+# (#2436). Named rather than reusing $existing at the far end of the script because what 5a actually depends on is not "a
+# service object was found" but "a STORE already exists to be asked" - which is what an existing service implies by hand, and
+# what -MsiUpgrade says under -MsiPhase.
 # Classify the NORMALIZED spelling, but keep installing to $root exactly as given (#2348). The \\?\ prefix
 # instructs the path parser and is not part of where the install lives, so stripping it for the decision
 # changes which rules see the path and nothing about where files land.
@@ -1831,6 +1919,7 @@ at all. Either way the service installs cleanly and then cannot read its own pro
 "@
     }
 
+    $extractCommand = Get-DarlingExtractCommand $root
     $fix = @"
 Extract the zip again, from an elevated session, into a machine-scoped local folder that only
 administrators can write, and run this script from there:
@@ -1840,9 +1929,15 @@ administrators can write, and run this script from there:
 That is the documented location. A folder created there inherits read + execute for BUILTIN\Users,
 which the service's virtual account is a member of, and ordinary users can't write to it (#4043).
 Copy your darling.json across if you have one.
+
+To extract the zip straight into place, paste this into an ELEVATED PowerShell:
+
+  $extractCommand
+
+Then run install-darling.ps1 (or double-click Install-Darling.cmd) from that folder.
 "@
 
-    if (-not $existing) {
+    if (-not $isUpgrade) {
         Fail @"
 $why
 
@@ -1867,8 +1962,37 @@ Nothing was installed or changed.
     Write-Host "Service '$serviceName' already exists, so this is an upgrade, and this folder may have been made" -ForegroundColor Yellow
     Write-Host 'to work by hand (granting the service account read + execute on the tree). That is the only reason' -ForegroundColor Yellow
     Write-Host 'this is a question. If it has NOT been, the service will stop working the moment it restarts.' -ForegroundColor Yellow
-    $answer = Read-Host 'Point the service at this folder anyway? [y/N]'
+    $answer = Read-DarlingAnswer $MsiPhase 'Point the service at this folder anyway? [y/N]'
     if ($answer -notmatch '^[Yy]') { exit 4 }
+}
+
+# -- 1c2. Refuse a first install on an unedited sample (#6475) ----------------------------------------
+# darling.sample.json is a reference, and its two example servers would be registered on the first start if the
+# file were copied over unchanged (the sample's own first line tells a person to copy it). Since #6468 a missing
+# darling.json is not a problem, because the installer writes a minimal one with no servers; an UNEDITED COPY of
+# the sample is, because it still names servers that do not exist. Compared as text, ignoring line endings and
+# trailing blanks, so a copy saved by an editor that changed them is still caught. Only a first install is held:
+# an existing service has a store that is authoritative for its servers, and the file only matters to it as a
+# fallback, so an upgrade through this script is never blocked by it. Before the lock, so a refusal leaves the folder's permissions as they were.
+function Test-DarlingConfigIsUnchangedSample([string]$configPath, [string]$samplePath) {
+    if (-not (Test-Path -LiteralPath $configPath)) { return $false }
+    if (-not (Test-Path -LiteralPath $samplePath)) { return $false }
+    $normalize = { param([string]$text) ((($text -replace "`r`n", "`n") -split "`n" | ForEach-Object { $_.TrimEnd() }) -join "`n").Trim() }
+    $config = & $normalize ([System.IO.File]::ReadAllText($configPath))
+    $sample = & $normalize ([System.IO.File]::ReadAllText($samplePath))
+    return ($config -ceq $sample)
+}
+
+if (-not $isUpgrade -and (Test-DarlingConfigIsUnchangedSample $configPath $samplePath)) {
+    Fail @"
+darling.json is an unedited copy of darling.sample.json, so it still names the sample's example servers, which do not exist.
+The service would register them on its first start.
+
+  Either delete darling.json and run this script again (it writes a minimal darling.json with no servers, and you
+  add your first server in the Viewer afterwards), or edit darling.json so it names your own servers.
+
+Nothing was installed or changed.
+"@
 }
 
 # -- 1b2. Lock the install tree before anything runs from it (#4034) ---------------------------------------
@@ -1891,117 +2015,106 @@ if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
 }
 Invoke-InstallTreeLock $lockAccount -StopOnOpen
 
-# -- 1c. Refuse an install the .NET runtimes on this box cannot run (#2479) ------------------------
-# The first thing a new operator hits and the least self-explanatory. Both shipped binaries are
-# FRAMEWORK-DEPENDENT publishes, so both name a shared framework in their runtimeconfig.json and neither
-# carries one:
-#
-#   PerformanceMonitor.Darling.Service.exe -> Microsoft.NETCore.App + Microsoft.AspNetCore.App
-#   viewer\PerformanceMonitor.Darling.Viewer.exe -> Microsoft.NETCore.App + Microsoft.WindowsDesktop.App
-#
-# Microsoft.NETCore.App is required by both and is NOT part of the standalone ASP.NET Core Runtime
-# installer (the Hosting Bundle and the .NET Runtime installer carry it), so it is checked on its own (#5407).
-#
-# ASP.NET Core is required UNCONDITIONALLY, which is the part nobody expects: the MCP tools reference
-# ModelContextProtocol.AspNetCore, which brings the Microsoft.AspNetCore.App framework reference in
-# transitively, so the framework is named in the runtimeconfig whether or not mcp.enabled and
-# web.enabled are ever turned on. Setting them false does not make the requirement go away.
-#
-# A stock Windows Server image has neither runtime. Without this gate the operator's first signal is the
-# .NET host's own error - "You must install .NET to run this application" - printed BY THE PRE-FLIGHT AT
-# STEP 2, which then reports "the config is invalid or a server is unreachable" and offers to install
-# anyway. That diagnosis is not merely unhelpful, it is wrong, and it points at the config file. So this
-# has to run before step 2 touches the exe at all.
-#
-# Governed by -SkipPreflight rather than a switch of its own, because it is the same kind of gate: a
-# question asked before anything is created, answered from the operator's machine, and worth bypassing
-# only when the operator knows something this script cannot see.
-if (-not $SkipPreflight) {
-    $netCoreVersions = @(Get-InstalledFrameworkVersions 'Microsoft.NETCore.App')
-    $aspNetVersions = @(Get-InstalledFrameworkVersions 'Microsoft.AspNetCore.App')
-    $desktopVersions = @(Get-InstalledFrameworkVersions 'Microsoft.WindowsDesktop.App')
+# A first install needs no hand-edited darling.json (#6468). The service starts with no monitored servers, so a
+# missing darling.json is answered with a minimal one (the bundled store only) and the install carries on. The
+# first server is added afterwards in the Viewer. The full sample is left beside it as the reference.
 
-    # The base runtime is checked FIRST, and on its own it is a refusal for a reason that is easy to
-    # miss: the standalone ASP.NET Core Runtime installer does NOT include Microsoft.NETCore.App, so a box
-    # with only that installer passes the ASP.NET Core check below and then dies at service start with the
-    # host's own "You must install .NET" (#5407). Both shipped exes name Microsoft.NETCore.App. The message
-    # shows what was found for BOTH frameworks, so an operator missing both reads one message and fixes
-    # both in one pass (the Hosting Bundle installs both).
-    if (-not (Test-FrameworkMajorPresent $netCoreVersions $dotnetMajor)) {
-        Fail @"
-The .NET Runtime $dotnetMajor.0 is not installed, and the service cannot start without it.
-
-  Need:  The ASP.NET Core Hosting Bundle $dotnetMajor.0 (x64), which installs both runtimes below,
-         OR the .NET Runtime $dotnetMajor.0 (x64) together with the ASP.NET Core Runtime $dotnetMajor.0 (x64).
-  Found: .NET Runtime (Microsoft.NETCore.App):      $(Format-FrameworkVersionList $netCoreVersions)
-         ASP.NET Core (Microsoft.AspNetCore.App):   $(Format-FrameworkVersionList $aspNetVersions)
-  Get:   $dotnetDownloadUrl
-
-The standalone ASP.NET Core Runtime installer does NOT include the base .NET Runtime, so having only that
-one is not enough. The service also needs the ASP.NET Core Runtime whether or not you ever enable MCP or
-the web dashboard.
-
-Install it and run this script again. Nothing was installed or changed.
-
-If this machine DOES have it in a layout this check cannot see, re-run with -SkipPreflight, which skips
-this gate and the --test-connection probe together.
-"@
+# The web dashboard's access token for a new darling.json (#6480). The web host refuses to start without a token, so turning the
+# dashboard on with no token gives a dashboard that never starts. This makes 32 random letters and digits and returns them
+# DPAPI-protected at LocalMachine scope with the service's own entropy string, base64: the same blob DarlingSecrets.Protect makes
+# for --encrypt-password, so web.network.encryptedToken reads it back on this machine. The plain token is never written or shown
+# here: --print-web-token reprints it.
+function New-DarlingWebEncryptedToken {
+    Add-Type -AssemblyName System.Security
+    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $chars = New-Object System.Text.StringBuilder
+        $buffer = New-Object byte[] 1
+        while ($chars.Length -lt 32) {
+            $rng.GetBytes($buffer)
+            # 248 = 4 * 62: a byte at or above it is skipped so every letter and digit is equally likely.
+            if ($buffer[0] -lt 248) { [void]$chars.Append($alphabet[$buffer[0] % 62]) }
+        }
+        $entropy = [System.Text.Encoding]::UTF8.GetBytes('PerformanceMonitor.Darling.v1')
+        $blob = [System.Security.Cryptography.ProtectedData]::Protect(
+            [System.Text.Encoding]::UTF8.GetBytes($chars.ToString()), $entropy, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+        return [Convert]::ToBase64String($blob)
     }
-
-    if (-not (Test-FrameworkMajorPresent $aspNetVersions $dotnetMajor)) {
-        Fail @"
-The ASP.NET Core Runtime $dotnetMajor.0 is not installed, and the service cannot start without it.
-
-  Need:  ASP.NET Core Runtime $dotnetMajor.0 (x64). The Hosting Bundle contains it and also works.
-  Found: .NET Runtime (Microsoft.NETCore.App):      $(Format-FrameworkVersionList $netCoreVersions)
-         ASP.NET Core (Microsoft.AspNetCore.App):   $(Format-FrameworkVersionList $aspNetVersions)
-  Get:   $dotnetDownloadUrl
-
-This is required whether or not you ever enable MCP or the web dashboard - the MCP package brings the
-ASP.NET Core framework reference in transitively, so the service names it at startup either way.
-
-Install it and run this script again. Nothing was installed or changed.
-
-If this machine DOES have it in a layout this check cannot see, re-run with -SkipPreflight, which skips
-this gate and the --test-connection probe together.
-"@
-    }
-
-    # A WARNING and not a refusal, and the asymmetry is deliberate. A missing ASP.NET Core runtime means
-    # the thing being installed cannot run; a missing Desktop runtime means only that the viewer cannot,
-    # and a headless collector host that nobody ever opens a window on is a legitimate deployment. What
-    # it must not do is stay quiet, because this script creates Desktop and Start Menu shortcuts a few
-    # steps from here and a tester will double-click one.
-    #
-    # Scoped to the co-located viewer\ folder on purpose: the remote-seat viewer installed from the
-    # Velopack Setup.exe is a SELF-CONTAINED publish and needs no Desktop runtime at all, so this is a
-    # statement about this box, not about every seat.
-    if (-not (Test-FrameworkMajorPresent $desktopVersions $dotnetMajor)) {
-        Write-Host ''
-        Write-Host "WARNING: the .NET Desktop Runtime $dotnetMajor.0 is not installed." -ForegroundColor Yellow
-        Write-Host "  Found: $(Format-FrameworkVersionList $desktopVersions)" -ForegroundColor Yellow
-        Write-Host "  Get:   $dotnetDownloadUrl" -ForegroundColor Yellow
-        Write-Host ''
-        Write-Host 'The SERVICE does not need it and this install continues. The bundled viewer does: the Desktop and' -ForegroundColor Yellow
-        Write-Host 'Start Menu shortcuts this script creates will fail with the .NET host error until it is installed.' -ForegroundColor Yellow
-        Write-Host ''
-    }
-    else {
-        Write-Host "Runtime check passed (.NET Runtime $dotnetMajor, ASP.NET Core $dotnetMajor and .NET Desktop $dotnetMajor present)." -ForegroundColor Green
+    finally {
+        $rng.Dispose()
     }
 }
 
-if (-not (Test-Path -LiteralPath $configPath)) {
-    if (Test-Path -LiteralPath $samplePath) {
-        Copy-Item -LiteralPath $samplePath -Destination $configPath
-        Write-Host ''
-        Write-Host 'darling.json did not exist, so darling.sample.json was copied to darling.json.' -ForegroundColor Yellow
-        Write-Host 'EDIT IT NOW (servers to monitor, auth) and re-run this script. The sample is heavily commented.' -ForegroundColor Yellow
-        Write-Host "  notepad `"$configPath`"" -ForegroundColor Yellow
-        exit 2
+function New-DarlingMinimalConfigText([bool]$EnableWebDashboard = $false, [string]$WebEncryptedToken = '') {
+    $text = @'
+{
+  // Written by install-darling.ps1. The service keeps everything else in its own PostgreSQL store.
+  // darling.sample.json beside this file is the full, commented reference for every setting.
+  //
+  // No server is named here on purpose: the service starts with none. Add the first one in the Viewer
+  // (Add Server). Once the service has started, the store is authoritative for the server list, so adding
+  // servers to this file later changes nothing.
+  "postgres": {
+    "managed": true,
+    "port": 5641
+  },
+  "servers": []
+}
+'@
+    # The "web" block goes ahead of "servers". allowAdminWrites is written true in every NEW file: a darling.json without the key keeps the
+    # web admin writes off (so an upgrade from 3.11 changes nothing), and a new install keeps them on, as before.
+    # -WebDashboard (the MSI's WEBDASHBOARD=1, #6480): the dashboard also starts on its loopback address and asks for the token below.
+    # Tokenless loopback stays off: it would let every local user read the collected data.
+    $webBlock = '  "web": {' + "`r`n"
+    if ($EnableWebDashboard) { $webBlock += '    "enabled": true,' + "`r`n" }
+    $webBlock += '    "allowAdminWrites": true'
+    if ($EnableWebDashboard -and $WebEncryptedToken) {
+        $webBlock += ',' + "`r`n" + '    "network": {' + "`r`n" + '      "encryptedToken": "' + $WebEncryptedToken + '"' + "`r`n" + '    }'
     }
+    $webBlock += "`r`n" + '  },' + "`r`n"
+    $text = $text -replace '(?m)^  "servers": \[\]', ($webBlock.Replace('$', '$$') + '  "servers": []')
+    return $text
+}
 
-    Fail 'Neither darling.json nor darling.sample.json found beside this script - the zip looks incomplete.'
+# Writes the minimal file as UTF-8 without a byte-order mark, so every reader (the service's, this script's
+# regexes, Windows PowerShell 5.1) sees the same bytes. The file is created with a protected DACL (SYSTEM and Administrators
+# only) instead of inheriting the install tree's, because the -WebDashboard file holds the encrypted web token and step 4b only
+# restricts it much later: a run that stopped before then would leave a file the Users group can read, and the next run reuses it.
+# Step 4b rebuilds the DACL to add the service account and the operator group.
+function Write-DarlingMinimalConfig([string]$path, [bool]$EnableWebDashboard = $false) {
+    $token = ''
+    if ($EnableWebDashboard) { $token = New-DarlingWebEncryptedToken }
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes((New-DarlingMinimalConfigText $EnableWebDashboard $token))
+    $wk = [System.Security.Principal.WellKnownSidType]
+    $acl = New-Object System.Security.AccessControl.FileSecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($kind in @($wk::LocalSystemSid, $wk::BuiltinAdministratorsSid)) {
+        $sid = New-Object System.Security.Principal.SecurityIdentifier($kind, $null)
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow)))
+    }
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        $stream = [System.IO.FileSystemAclExtensions]::Create((New-Object System.IO.FileInfo($path)), [System.IO.FileMode]::CreateNew, [System.Security.AccessControl.FileSystemRights]::Write, [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::None, $acl)
+    }
+    else {
+        $stream = [System.IO.File]::Create($path, 4096, [System.IO.FileOptions]::None, $acl)
+    }
+    try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+}
+
+# Only a missing darling.json is written. An existing one (an upgrade or a re-run) is left exactly as it is, web token included.
+# Returns $true when it wrote the file.
+function Initialize-DarlingMinimalConfig([string]$path, [bool]$EnableWebDashboard = $false) {
+    if (Test-Path -LiteralPath $path) { return $false }
+    Write-DarlingMinimalConfig $path $EnableWebDashboard
+    return $true
+}
+
+if (Initialize-DarlingMinimalConfig $configPath ([bool]$WebDashboard)) {
+    Write-Host ''
+    Write-Host 'darling.json did not exist, so a minimal one was written: the bundled PostgreSQL store and no servers.' -ForegroundColor Yellow
+    Write-Host 'Nothing needs editing before the install. Add your first server afterwards, in the Viewer (Add Server).' -ForegroundColor Yellow
+    Write-Host 'darling.sample.json beside it is the full reference for every other setting.' -ForegroundColor Yellow
 }
 
 # -- 2. Pre-flight --------------------------------------------------------------------------------
@@ -2033,7 +2146,7 @@ if (-not $SkipPreflight) {
         Write-Host ''
         Write-Host 'ERROR: Windows on this machine is missing updates that .NET 10 needs, so the service cannot start.' -ForegroundColor Red
         Write-Host 'The service exe printed the CET start error (Your Windows doesn''t fully support CET).' -ForegroundColor Red
-        Write-Host 'Install all available Windows updates, restart, and run this script again. Nothing was installed.' -ForegroundColor Yellow
+        Write-Host 'Install all available Windows updates, restart, and run this script again. The service was not installed. The install folder''s permissions were already locked, and stay that way.' -ForegroundColor Yellow
         Write-Host 'If the updates cannot go on yet, the README (Prerequisites) has a workaround. It turns off one' -ForegroundColor Yellow
         Write-Host 'protection (UserShadowStack) for the Darling exes, and shows the command that undoes it.' -ForegroundColor Yellow
         exit 5
@@ -2041,7 +2154,7 @@ if (-not $SkipPreflight) {
     if ($preflightExit -ne 0) {
         Write-Host ''
         Write-Host "Pre-flight FAILED (exit $preflightExit) - the config is invalid or a server is unreachable." -ForegroundColor Yellow
-        $answer = Read-Host 'Install anyway? A monitoring service may legitimately be installed while a target is down. [y/N]'
+        $answer = Read-DarlingAnswer $MsiPhase 'Install anyway? A monitoring service may legitimately be installed while a target is down. [y/N]'
         if ($answer -notmatch '^[Yy]') { exit 3 }
     }
     else {
@@ -2058,6 +2171,8 @@ catch [System.InvalidOperationException] {
     Write-Host "Event Log source '$serviceName' already registered."
 }
 
+}  # end of the PreStart-and-by-hand block that starts at 1a
+
 # The Windows product type: 1 workstation, 2 domain controller, 3 server (Win32_OperatingSystem.ProductType), or 0 when it
 # cannot be read. Its own function so a test can stand in for the machine. Kept byte-identical in install-darling.ps1 and
 # upgrade-darling.ps1.
@@ -2073,6 +2188,212 @@ function Test-DarlingDomainController {
     return ((Get-DarlingProductType) -eq 2)
 }
 
+# -- Adding the installing person to the operator group (#6478) ------------------------------------------
+# At the end of the install the script offers to add the person who is signed in to the operator group, so the Viewer and the
+# CLI work for them without a sign-out. Who gets the group's access is still the administrator's decision: the answer defaults
+# to No, -NoOperatorPrompt never asks, and -AddOperator names the account for a scripted install. Each function below is small
+# so a test can stand in for the machine.
+
+# True for a PowerShell remoting session (WinRM, Enter-PSSession, Invoke-Command). Such a session can report
+# [Environment]::UserInteractive as true yet has no console to answer on, so a Read-Host there would hang. Its host is
+# named ServerRemoteHost and $PSSenderInfo is set. Takes both as arguments so a test can stand in for the session.
+function Test-DarlingRemoteSession([string]$HostName, $SenderInfo) {
+    return ($HostName -eq 'ServerRemoteHost' -or $null -ne $SenderInfo)
+}
+
+# True only when a person can answer a prompt: an interactive window station, input that is not redirected, a host not
+# started with -NonInteractive, and not a remoting session. Anything else is treated as No by the caller, never waited on.
+function Test-DarlingInteractiveHost {
+    if (-not [Environment]::UserInteractive) { return $false }
+    if (Test-DarlingRemoteSession $Host.Name $PSSenderInfo) { return $false }
+    try { if ([Console]::IsInputRedirected) { return $false } }
+    catch { return $false }
+    foreach ($argument in [Environment]::GetCommandLineArgs()) {
+        if ($argument -match '^[-/]NonI') { return $false }
+    }
+    return $true
+}
+
+# DOMAIN\user of the person signed in to THIS session: the owner of the session's explorer.exe. That is not always the
+# account the script runs as (a person who elevates with another administrator account is signed in as themselves, and the
+# script runs as the administrator). $null when no desktop shell runs in this session (a remote or service session).
+function Get-DarlingInteractiveUser {
+    try {
+        $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+        foreach ($shell in @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'explorer.exe' AND SessionId = $sessionId" -ErrorAction Stop)) {
+            $owner = Invoke-CimMethod -InputObject $shell -MethodName GetOwner -ErrorAction Stop
+            if ($owner.ReturnValue -eq 0 -and $owner.User) { return "$($owner.Domain)\$($owner.User)" }
+        }
+    }
+    catch { }
+    return $null
+}
+
+# The SID of an account named by -AddOperator or offered at the prompt. Throws with the reason when the name does not resolve
+# or is not a user or group account (Everyone, Authenticated Users and BUILTIN\Users are not: a name like those would put
+# every user inside the boundary the group exists to draw).
+function Resolve-DarlingOperatorAccount([string]$account) {
+    try { $sid = (New-Object System.Security.Principal.NTAccount($account)).Translate([System.Security.Principal.SecurityIdentifier]) }
+    catch { throw "'$account' is not an account this machine can resolve." }
+    if (-not $sid.IsAccountSid()) { throw "'$account' is a built-in or well-known account, not a user or group account." }
+    return $sid
+}
+
+# Adds the account to the local operator group with net.exe, for the reason Initialize-DarlingOperatorGroup gives. Error 1378
+# (already a member) is success: a re-run leaves the group exactly as it is.
+function Add-DarlingOperatorToGroup([string]$groupName, [string]$account) {
+    $ErrorActionPreference = 'Continue'
+    $output = & net.exe localgroup $groupName $account /add 2>&1
+    if ($LASTEXITCODE -ne 0 -and -not ((Get-DarlingNativeText $output) -match '\b1378\b')) {
+        throw "net localgroup `"$groupName`" $account /add failed with exit code $LASTEXITCODE`: $(Get-DarlingNativeText $output)"
+    }
+}
+
+# What the group itself holds, as a path and an icacls rights string: read on darling.json, Traverse on the store folder (this
+# folder only), and read on the store's admin and viewer credential files. It mirrors DarlingFileSecurity and the grants made
+# at 4b and 4b3 above; a store that is not managed has no store folder and no credential files.
+function Get-DarlingOperatorGrantTargets([string]$configPath, [string]$storeFolder) {
+    $targets = @([pscustomobject]@{ Path = $configPath; Rights = '(R)'; IsFolder = $false })
+    if ($storeFolder) {
+        $targets += [pscustomobject]@{ Path = $storeFolder; Rights = '(S,X)'; IsFolder = $true }
+        foreach ($name in @('pg-admin-credential.dpapi', 'pg-viewer-credential.dpapi')) {
+            $targets += [pscustomobject]@{ Path = (Join-Path $storeFolder $name); Rights = '(R)'; IsFolder = $false }
+        }
+    }
+    return $targets
+}
+
+# True when the target exists and is what it should be: a plain file with one name, or a plain folder, not a link. icacls follows
+# a link, so a target that is one is never granted through.
+function Test-DarlingGrantTargetPlain($target) {
+    $item = Get-Item -LiteralPath $target.Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return $false }
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return $false }
+    if (-not $target.IsFolder -and (Get-DarlingFileNameCount $target.Path) -ne 1) { return $false }
+    return $true
+}
+
+# True when the target carries a direct (not inherited) Allow entry for the account.
+function Test-DarlingDirectGrant([string]$path, $sid) {
+    try {
+        foreach ($rule in (Get-Acl -LiteralPath $path).Access) {
+            if ($rule.IsInherited -or $rule.AccessControlType -ne 'Allow') { continue }
+            try { $ruleSid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) } catch { continue }
+            if ($ruleSid -eq $sid) { return $true }
+        }
+    }
+    catch { }
+    return $false
+}
+
+# Gives the account directly the access the group has, so the Viewer and the CLI work in the session that is already open: a
+# group membership only reaches a person at their next sign-in. icacls /grant ADDS one entry and leaves the rest of the
+# protected ACL as it is. The service rewrites these ACLs from scratch at every start, which drops the entry (by then the group
+# covers the account); uninstall-darling.ps1 removes it for an install that is taken off. The credential files are written by the
+# service's first start, so on a fresh install they are waited for (a bounded wait), and the grant is applied again after a
+# settle pause, because the first start can rewrite an ACL after it was granted. Returns the paths that do NOT hold the grant.
+function Grant-DarlingOperatorDirect($sid, [string]$configPath, [string]$storeFolder, [int]$waitSeconds = 180) {
+    $ErrorActionPreference = 'Continue'
+    $targets = @(Get-DarlingOperatorGrantTargets $configPath $storeFolder)
+    $deadline = (Get-Date).AddSeconds($waitSeconds)
+    $announced = $false
+    while ((Get-Date) -lt $deadline -and @($targets | Where-Object { -not (Test-Path -LiteralPath $_.Path) }).Count -gt 0) {
+        if (-not $announced) {
+            Write-Host 'Waiting for the service to write the store credential files (its first start does this) so the grant can include them...'
+            $announced = $true
+        }
+        Start-Sleep -Seconds 5
+    }
+    $apply = {
+        foreach ($target in $targets) {
+            if (-not (Test-DarlingGrantTargetPlain $target)) { continue }
+            if (Test-DarlingDirectGrant $target.Path $sid) { continue }
+            $null = & icacls.exe $target.Path /grant "*$($sid.Value):$($target.Rights)" 2>&1
+        }
+    }
+    & $apply
+    Start-Sleep -Seconds 10
+    & $apply
+    return @($targets | Where-Object { -not ((Test-DarlingGrantTargetPlain $_) -and (Test-DarlingDirectGrant $_.Path $sid)) } | ForEach-Object { $_.Path })
+}
+
+# The closing guidance. For a No it is who to add and that the person has to sign out and back in. After a Yes the person who was
+# added does not need the sign-out sentence, so it is left out; the rest is for everyone else who runs the Viewer or the CLI.
+function Write-DarlingOperatorGuidance([string]$groupName, [bool]$added) {
+    Write-Host ''
+    if ($added) {
+        Write-Host "Add anyone else who runs the Viewer or the CLI without elevation to the local group '$groupName' (Computer Management > Local Users and Groups, or net localgroup `"$groupName`" DOMAIN\user /add); each has to sign out and back in before the membership takes effect."
+    }
+    else {
+        Write-Host "Local group '$groupName' is in place. No one was added to it."
+        Write-Host "Add each person who runs the Viewer or the CLI without elevation to the local group '$groupName' (Computer Management > Local Users and Groups, or net localgroup `"$groupName`" DOMAIN\user /add)."
+        Write-Host "Members can read darling.json and the store's admin and viewer credentials, which decrypt every stored password; give it only to people you would give the passwords to."
+        Write-Host 'A person added to the group has to sign out and back in before the membership takes effect.'
+    }
+    Write-Host ''
+}
+
+# Step 7. Asks once, at the end of the install, whether to add the signed-in person to the operator group; returns $true when
+# the account was added. The answer defaults to No in every case. -AddOperator adds the named account without asking,
+# -NoOperatorPrompt never asks, and a host nobody can answer on (redirected input, -NonInteractive) is treated as No.
+# Anything that goes wrong is a warning and the closing guidance, never a failed install: the install itself is done.
+function Invoke-DarlingOperatorStep([string]$groupName, [string]$addOperator, [bool]$noPrompt, [string]$configPath, [string]$storeFolder) {
+    $account = $null
+    if ($addOperator) {
+        $account = $addOperator
+    }
+    elseif ($noPrompt) {
+        Write-DarlingOperatorGuidance $groupName $false
+        return $false
+    }
+    elseif (-not (Test-DarlingInteractiveHost)) {
+        Write-Host ''
+        Write-Host "Not asking whether to add anyone to '$groupName': this host cannot take an answer, so the answer is No."
+        Write-DarlingOperatorGuidance $groupName $false
+        return $false
+    }
+    else {
+        $runAs = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $account = Get-DarlingInteractiveUser
+        if (-not $account) { $account = $runAs }
+        Write-Host ''
+        try { $differs = (Resolve-DarlingOperatorAccount $account) -ne (Resolve-DarlingOperatorAccount $runAs) }
+        catch { $differs = $false }
+        if ($differs) {
+            Write-Host "You are signed in as $account, but this script runs as $runAs (you elevated with another account), so adding $account is a separate decision from the one that elevated."
+        }
+        Write-Host "Members can read darling.json and the store's admin and viewer credentials, which decrypt every stored password, and the Viewer connects with the store's admin role; give it only to people you would give the passwords to."
+        try { $answer = Read-Host "Add $account to '$groupName'? [y/N]" }
+        catch { $answer = '' }
+        if ($answer -notmatch '^[Yy]') {
+            Write-DarlingOperatorGuidance $groupName $false
+            return $false
+        }
+    }
+
+    try {
+        $sid = Resolve-DarlingOperatorAccount $account
+        $name = $sid.Translate([System.Security.Principal.NTAccount]).Value
+        Add-DarlingOperatorToGroup $groupName $name
+    }
+    catch {
+        Write-Host "Could not add '$account' to '$groupName': $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-DarlingOperatorGuidance $groupName $false
+        return $false
+    }
+    Write-Host "Added $name to the local group '$groupName'."
+    try { $missing = @(Grant-DarlingOperatorDirect $sid $configPath $storeFolder) }
+    catch { $missing = @($configPath) }
+    if ($missing.Count -eq 0) {
+        Write-Host "$name also has a direct grant of the same access, so the Viewer and the CLI work in the session that is already open. The service drops it the next time it starts; from then on the group covers $name only after $name signs out and back in (a reboot does that, a service restart or an upgrade does not). uninstall-darling.ps1 removes it; to remove it now run icacls <darling.json, the store folder, each credential file> /remove *$($sid.Value)"
+    }
+    else {
+        Write-Host "$name is in the group, but the direct grant could not be confirmed on: $($missing -join ', '). $name has to sign out and back in before the Viewer and the CLI work without elevation." -ForegroundColor Yellow
+    }
+    Write-DarlingOperatorGuidance $groupName $true
+    return $true
+}
+
 # Decided before step 4 stops an existing service, so a refusal here can never leave it stopped. On a domain controller the
 # operator group is skipped (step 4b says so) and the install finishes; the Viewer and the CLI then run elevated.
 $onDomainController = Test-DarlingDomainController
@@ -2080,26 +2401,54 @@ if ($onDomainController) {
     Write-Host "WARNING: this machine is a domain controller, which has no local groups, so the local group '$operatorGroupName' is NOT created and nothing is granted to it. The install continues. The Viewer and the CLI must be run elevated here: darling.json and the store's credentials are readable by SYSTEM, Administrators and the service account only." -ForegroundColor Yellow
 }
 
+# -AddOperator is checked here, before anything is stopped or changed: a name that does not resolve is an install that would
+# otherwise run to its last step and only then fail to add anyone.
+if ($AddOperator) {
+    if ($onDomainController) {
+        Write-Host "WARNING: -AddOperator is ignored: this machine is a domain controller, which has no local group to add '$AddOperator' to." -ForegroundColor Yellow
+        $AddOperator = ''
+    }
+    else {
+        try { $null = Resolve-DarlingOperatorAccount $AddOperator }
+        catch { Fail "-AddOperator: $($_.Exception.Message) Nothing was installed." }
+    }
+}
+
 # -- 4. Create or upgrade the service -------------------------------------------------------------
 # $existing was resolved back at 1b, which needs to know fresh-versus-upgrade before it decides whether a
 # bad install location is a refusal or a question. Nothing between there and here creates or removes the
 # service, so it is the same answer.
-if ($existing) {
+# The registered path carries its quotes, as the MSI registers it (#6597). sc.exe strips a plain pair of quotes as it
+# parses its command line, which is why "`"$serviceExe`"" registered the path bare, so the value has to go in as
+# "\"path\"" (the outer pair is stripped, the \" pair is kept). How PowerShell turns a quoted native argument into a
+# command line differs between Windows PowerShell 5.1 and PowerShell 7.x (and by $PSNativeCommandArgumentPassing), so
+# the command line is handed over verbatim as ONE string through Start-Process, which behaves the same in all of them.
+function Invoke-ScWithQuotedBinPath([string]$verb, [string]$restOfLine) {
+    $argLine = "$verb `"$serviceName`" binPath= `"\`"$serviceExe\`"`" $restOfLine".TrimEnd()
+    $p = Start-Process -FilePath "$env:SystemRoot\System32\sc.exe" -ArgumentList $argLine -Wait -PassThru -NoNewWindow
+    return $p.ExitCode
+}
+
+if ($MsiPhase) {
+    # The package created the service (its ServiceInstall row) and starts and stops it; this script never touches the service itself (#6480).
+    Write-Host "Service '$serviceName' is managed by the MSI package - not created, stopped or started here."
+}
+elseif ($existing) {
     Write-Host "Service already exists - upgrading its binPath in place (config, store data, and credentials untouched)."
     if ($existing.Status -ne 'Stopped') {
         Stop-Service -Name $serviceName -Force
         (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(60))
     }
 
-    & sc.exe config $serviceName binPath= "`"$serviceExe`"" | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "sc config failed ($LASTEXITCODE)." }
+    $scExit = Invoke-ScWithQuotedBinPath 'config' ''
+    if ($scExit -ne 0) { Fail "sc config failed ($scExit)." }
 }
 else {
     # The space after binPath=/start=/obj= is sc.exe syntax. The virtual service account is
     # password-less, per-service, unprivileged - and mandatory-in-practice for the bundled
     # PostgreSQL, which refuses to run with administrative privileges (LocalSystem bricks it).
-    & sc.exe create $serviceName binPath= "`"$serviceExe`"" start= auto obj= "NT SERVICE\$serviceName" | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "sc create failed ($LASTEXITCODE)." }
+    $scExit = Invoke-ScWithQuotedBinPath 'create' "start= auto obj= `"NT SERVICE\$serviceName`""
+    if ($scExit -ne 0) { Fail "sc create failed ($scExit)." }
     Write-Host "Created service '$serviceName' (NT SERVICE virtual account, automatic start)."
 }
 
@@ -2221,6 +2570,9 @@ if (-not $onDomainController) {
     catch { $operatorGroupProblem = $_.Exception.Message }
 }
 
+# 4b to 4b2 and the TLS key verb ran in PreStart. The body is not re-indented, for the reason given at the start of the block at 1a.
+if ($MsiPhase -ne 'PostStart') {
+
 # Every path here is named with -LiteralPath (#4745). PowerShell reads [ and ] in a -Path value as wildcard
 # characters, so under an install folder named with either, -Path finds no .bak files at all, and Get-Acl or
 # Set-Acl -Path can resolve to a same-named file in a sibling folder (a[bc]d to abd) and harden that instead.
@@ -2326,21 +2678,13 @@ if ($failed.Count -gt 0) {
     Write-Host ''
 }
 
-# Who gets the operator group's access is the administrator's decision, so this script never adds a member. It
-# says who to add and what that person is being trusted with. A group that could not be created stops the
-# install, but at the end of step 4b2, not here.
-if ($operatorSid) {
-    Write-Host ''
-    Write-Host "Local group '$operatorGroupName' is in place. This script never adds members to it."
-    Write-Host "Add each person who runs the Viewer or the CLI without elevation to the local group '$operatorGroupName' (Computer Management > Local Users and Groups, or net localgroup `"$operatorGroupName`" DOMAIN\user /add)."
-    Write-Host "Members can read darling.json and the store's admin and viewer credentials, which decrypt every stored password; give it only to people you would give the passwords to."
-    Write-Host 'A person added to the group has to sign out and back in before the membership takes effect.'
-    Write-Host ''
-}
-elseif ($onDomainController) {
+# Who gets the operator group's access is the administrator's decision: the script adds a member only when the administrator
+# says so, at the end of the install (step 7: the answer to the question, or -AddOperator). Who to add, and the sign-out, are
+# printed there. A group that could not be created stops the install, but at the end of step 4b2, not here.
+if ($onDomainController) {
     Write-Host "Domain controller: the local group '$operatorGroupName' was not created and nothing was granted to it (see the warning above). Run the Viewer and the CLI elevated." -ForegroundColor Yellow
 }
-else {
+elseif (-not $operatorSid) {
     Write-Host "The local group '$operatorGroupName' could not be created: $operatorGroupProblem" -ForegroundColor Yellow
 }
 
@@ -2375,6 +2719,8 @@ the service starts. Create the group from an elevated prompt, then re-run this s
 # that could not run is a warning with the command to run by hand, and the install carries on.
 $tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening $serviceExe $configPath
 if ($tlsKeyWarning) { Write-Host "WARNING: $tlsKeyWarning" -ForegroundColor Yellow }
+
+}  # end of the PreStart-and-by-hand block that starts at 4b
 
 # -- 4b3. Create the store folder before the service does -------------------------------------------------
 # The store folder is the parent of postgres.dataDirectory: %ProgramData%\PerformanceMonitorDarling unless
@@ -2823,7 +3169,10 @@ function Initialize-DarlingStoreFolder([string]$folder, [string]$serviceAccount,
 }
 
 $storeFolder = Get-DarlingStoreFolder $configPath
-if ($storeFolder) {
+if ($MsiPhase -eq 'PostStart') {
+    # PreStart secured it before the service started; step 7 only needs to know where it is.
+}
+elseif ($storeFolder) {
     try { Initialize-DarlingStoreFolder $storeFolder $serviceAccount $operatorSid (Get-DarlingDataDirectory $configPath) $serviceName }
     catch {
         Fail @"
@@ -2869,13 +3218,226 @@ function Invoke-FirewallReconcile {
     }
 }
 
-Invoke-FirewallReconcile
+if ($MsiPhase -ne 'PostStart') { Invoke-FirewallReconcile }
 
-# -- 5. Start + confirm ---------------------------------------------------------------------------
-Start-Service -Name $serviceName
-(Get-Service -Name $serviceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
-Write-Host "Service is Running. First start does real work (unpack pg-runtime, initdb, store migration, first collection cycle) - give it ~2 minutes." -ForegroundColor Green
-Write-Host "Primary log: %ProgramData%\PerformanceMonitorDarling\logs\darling-service_yyyyMMdd.log"
+# PreStart ends here: the package starts the service next, and PostStart is the run after that (#6480).
+if ($MsiPhase -eq 'PreStart') {
+    Write-Host 'PreStart done: permissions, operator group, store folder and firewall rules are in place. The package starts the service next.' -ForegroundColor Green
+    exit 0
+}
+
+# -- 5. Start + wait until the service is ready (#6470) -------------------------------------------
+# "Running" only means the process is up. The first start still unpacks the bundled Postgres, runs initdb (its own timeout is
+# 180 seconds), migrates the store and provisions the roles before the collection loop starts, and a failure in any of those
+# leaves the service Running with nothing collected. So the install waits for the service's own words: its log, which is the
+# one place every service surface already writes. The service logs "Postgres store ready" when the store is created and
+# migrated, and "collection loop started" when collection begins; a startup it cannot get past logs a CRITICAL line instead.
+# The collection loop starting is the ready signal, not a row in collection_log: a fresh install may list no servers yet, and
+# then no collection would ever be written. The log is read by timestamp, so an upgrade does not mistake the previous run's
+# lines for this one's.
+$readyTimeoutSeconds = 420
+$serviceLogDirectory = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'PerformanceMonitorDarling\logs'
+
+# The service's log entries written at or after $since, oldest first. A line is "yyyy-MM-dd HH:mm:ss.fff [LEVEL] [category]
+# message"; a line that does not start that way continues the entry above it. The files are read with sharing, because the
+# service has today's open for append. Nothing here throws: a log that cannot be read yet is no entries. Callers wrap the call
+# in @() so zero or one entry is still an array.
+function Get-DarlingServiceLogEntries([string]$logDirectory, [datetime]$since) {
+    $entries = New-Object System.Collections.Generic.List[object]
+    if (-not (Test-Path -LiteralPath $logDirectory -PathType Container)) { return @() }
+    $files = @(Get-ChildItem -LiteralPath $logDirectory -Filter 'darling-service_*.log' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -ge $since } | Sort-Object Name)
+    foreach ($file in $files) {
+        try {
+            $stream = [System.IO.File]::Open($file.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            try { $text = (New-Object System.IO.StreamReader($stream)).ReadToEnd() } finally { $stream.Dispose() }
+        }
+        catch { continue }
+        $current = $null
+        foreach ($line in ($text -split "`r?`n")) {
+            if ($line -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[([A-Z? ]{5})\] \[[^\]]*\] (.*)$') {
+                $time = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss.fff', [System.Globalization.CultureInfo]::InvariantCulture)
+                if ($time -ge $since) {
+                    $current = [pscustomobject]@{ Time = $time; Level = $Matches[2].Trim(); Text = $Matches[3] }
+                    $entries.Add($current)
+                }
+                else { $current = $null }
+            }
+            elseif ($current -and $line.Trim()) { $current.Text += "`n" + $line.TrimEnd() }
+        }
+    }
+    return $entries.ToArray()
+}
+
+# What the entries say about the start: 'Ready' once the collection loop has started (whatever failed and retried before it),
+# 'Failed' when the service logged a startup failure it will not get past without help, otherwise 'Waiting'. The failure lines
+# are the service's CRITICAL startup lines only: a CRITICAL line about a file's permissions is a warning to read, not a start
+# that failed, so it does not stop the wait. The sustained-retry criticals (#4508: "...within the Ns retry budget ...; this is
+# still a recoverable failure, so it keeps retrying") are logged at ~120 seconds while the service keeps trying every minute, so
+# they are not terminal either: a store that comes up at 180 seconds still reaches the collection loop inside the wait.
+function Get-DarlingStartupVerdict($entries) {
+    $failurePattern = '^(Cannot load configuration|Configuration problem|Managed Postgres bootstrap|Cannot reach or migrate the Postgres store|postgres\.managed = true requires)'
+    foreach ($entry in $entries) {
+        if ($entry.Text -match '^PerformanceMonitor Darling collection loop started') { return [pscustomobject]@{ State = 'Ready'; Lines = @() } }
+    }
+    $failures = @($entries | Where-Object { $_.Level -eq 'CRIT' -and $_.Text -match $failurePattern -and $_.Text -notmatch 'still a recoverable failure' })
+    if ($failures.Count -gt 0) { return [pscustomobject]@{ State = 'Failed'; Lines = $failures } }
+    return [pscustomobject]@{ State = 'Waiting'; Lines = @() }
+}
+
+# The log lines that explain a start that did not finish: the warnings, errors and critical lines since the start, newest last.
+function Get-DarlingStartupProblemLines($entries, [int]$last = 12) {
+    $problems = @($entries | Where-Object { $_.Level -in @('WARN', 'ERROR', 'CRIT') })
+    if ($problems.Count -gt $last) { $problems = @($problems | Select-Object -Last $last) }
+    return @($problems | ForEach-Object {
+        $first = ($_.Text -split "`n")[0]
+        if ($first.Length -gt 400) { $first = $first.Substring(0, 400) + '...' }
+        '{0} [{1}] {2}' -f $_.Time.ToString('HH:mm:ss'), $_.Level, $first
+    })
+}
+
+# The one sentence that says what to do about a start that did not finish, true for the state it ended in: a logged failure and a
+# stopped service are not retrying anything, and a wait that merely ran out of time may be a store that is still being tried.
+function Get-DarlingStartupRemedy([string]$state, [int]$problemLineCount, [string]$serviceName) {
+    $restart = "'Restart-Service -Name `"$serviceName`"'"
+    switch ($state) {
+        'Failed' { return "The service logged a startup failure it will not get past without help. Fix what the lines above say, then restart it ($restart), or re-run this script." }
+        'Stopped' { return "The service is not running. Read the log lines above if there are any, fix what they say, then start it ('Start-Service -Name `"$serviceName`"'), or re-run this script." }
+    }
+    if ($problemLineCount -gt 0) { return "The service may still be retrying a store it cannot reach. Fix what the lines above say, then restart it ($restart), or re-run this script." }
+    return "The service may only be slow. Check the log again in a minute; if it stays quiet, restart it ($restart) or re-run this script."
+}
+
+# What the end of the run says about a start that did not finish, and the exit code it ends with. By hand the install failed, so the
+# exit is 1. Under -MsiPhase a nonzero exit rolls the whole package back, and by PostStart the store may already have migrated: the
+# old binaries would go back on a newer store. So the package keeps its install, the same problem and remedy are written as a warning
+# into the MSI log, and the exit is 0 (#6480).
+function Write-DarlingNotReadyVerdict([string]$startupProblem, [string]$startupRemedy, [string]$msiPhase) {
+    if ($msiPhase) {
+        Write-Host "WARNING: installed, but not ready: $startupProblem" -ForegroundColor Yellow
+        Write-Host $startupRemedy -ForegroundColor Yellow
+        return 0
+    }
+    Write-Host "Installed, but not ready: $startupProblem" -ForegroundColor Red
+    Write-Host $startupRemedy -ForegroundColor Yellow
+    return 1
+}
+
+# Waits until the service is ready, has logged a startup failure, has stopped, or $timeoutSeconds have passed, and says which:
+# State is Ready, Failed, Stopped or TimedOut, with the entries read last. Progress goes to the console: each step the service
+# logs once, and a line every 30 seconds with its latest log line, so a long initdb does not look like a hang. The log, the
+# service state and the sleep are parameters so a test can stand in for the machine; the elapsed time is the sum of the sleeps.
+function Wait-DarlingServiceReady([string]$serviceName, [string]$logDirectory, [datetime]$since, [int]$timeoutSeconds,
+    [int]$pollSeconds = 3, [scriptblock]$getEntries = $null, [scriptblock]$getStatus = $null, [scriptblock]$sleep = $null) {
+    if (-not $getEntries) { $getEntries = { param($dir, $from) Get-DarlingServiceLogEntries $dir $from } }
+    if (-not $getStatus) { $getStatus = { param($name) (Get-Service -Name $name -ErrorAction SilentlyContinue).Status } }
+    if (-not $sleep) { $sleep = { param($seconds) Start-Sleep -Seconds $seconds } }
+    $elapsed = 0
+    $reported = @{}
+    $lastBeat = 0
+    while ($true) {
+        $entries = @(& $getEntries $logDirectory $since)
+        $verdict = Get-DarlingStartupVerdict $entries
+        foreach ($step in @(
+                @{ Pattern = '^Loaded configuration from'; Text = 'darling.json read' },
+                @{ Pattern = '^Postgres store ready'; Text = 'store created and migrated' })) {
+            if (-not $reported.ContainsKey($step.Text) -and @($entries | Where-Object { $_.Text -match $step.Pattern }).Count -gt 0) {
+                $reported[$step.Text] = $true
+                Write-Host ("  [{0,3}s] {1}" -f $elapsed, $step.Text)
+            }
+        }
+        if ($verdict.State -ne 'Waiting') {
+            return [pscustomobject]@{ State = $verdict.State; Seconds = $elapsed; Entries = $entries }
+        }
+        $status = & $getStatus $serviceName
+        if ($status -ne 'Running' -and $status -ne 'StartPending') {
+            return [pscustomobject]@{ State = 'Stopped'; Seconds = $elapsed; Entries = $entries }
+        }
+        if ($elapsed -ge $timeoutSeconds) {
+            return [pscustomobject]@{ State = 'TimedOut'; Seconds = $elapsed; Entries = $entries }
+        }
+        if ($elapsed - $lastBeat -ge 30) {
+            $lastBeat = $elapsed
+            $latest = if ($entries.Count -gt 0) { (($entries[$entries.Count - 1].Text -split "`n")[0]) } else { 'nothing logged yet' }
+            if ($latest.Length -gt 100) { $latest = $latest.Substring(0, 100) + '...' }
+            Write-Host ("  [{0,3}s] still starting - latest log line: {1}" -f $elapsed, $latest)
+        }
+        & $sleep $pollSeconds
+        $elapsed += $pollSeconds
+    }
+}
+
+# The web dashboard address the service logged for this start ("Starting web dashboard on http://localhost:5153 ..."), or $null.
+# A LAN-exposed dashboard logs the address it LISTENS on, and a wildcard listen (0.0.0.0 or ::) is not an address a browser can
+# open, so the machine's name stands in for it.
+function Get-DarlingWebAddress($entries, [string]$machineName = $env:COMPUTERNAME) {
+    $address = $null
+    foreach ($entry in $entries) {
+        if ($entry.Text -match '^Starting web dashboard on (https?://\S+)') { $address = $Matches[1] }
+    }
+    if ($address -and $machineName) {
+        $address = $address -replace '^(https?://)(0\.0\.0\.0|\[::\]|::)(?=:\d+)', ('${1}' + $machineName)
+    }
+    return $address
+}
+
+# How many servers darling.json listed when the service loaded it, or $null when it did not log that yet.
+function Get-DarlingConfiguredServerCount($entries) {
+    $count = $null
+    foreach ($entry in $entries) {
+        if ($entry.Text -match '^Loaded configuration from .*: (\d+) server\(s\)') { $count = [int]$Matches[1] }
+    }
+    return $count
+}
+
+# Under -MsiPhase the package has already started the service (StartServices runs before PostStart), so this script does not start
+# it, and "now" is not when it started: on a warm upgrade the store can be ready within seconds, before this script got here, and a
+# wait that began later would never see the line. The start is the service process's own (#6480). If that cannot be read, two
+# minutes back is close enough, and the verdict only reads this start's lines or the ones just before it.
+function Get-DarlingServiceStartedAt([string]$serviceName) {
+    try {
+        $servicePid = [int](Get-CimInstance -ClassName Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop).ProcessId
+        if ($servicePid -gt 0) { return (Get-Process -Id $servicePid -ErrorAction Stop).StartTime }
+    }
+    catch { $null = $_ }
+    return (Get-Date).AddMinutes(-2)
+}
+
+if ($MsiPhase) {
+    $startedAt = Get-DarlingServiceStartedAt $serviceName
+}
+else {
+    $startedAt = Get-Date
+    Start-Service -Name $serviceName
+    (Get-Service -Name $serviceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
+}
+Write-Host "Service is Running. Its first start unpacks the bundled Postgres, runs initdb (up to 3 minutes), migrates the store and starts collection." -ForegroundColor Green
+Write-Host "Waiting for it to be ready (up to $([int]($readyTimeoutSeconds / 60)) minutes). It has not hung; do not stop it..." -ForegroundColor Cyan
+$ready = Wait-DarlingServiceReady $serviceName $serviceLogDirectory $startedAt $readyTimeoutSeconds
+$startupProblem = $null
+if ($ready.State -eq 'Ready') {
+    Write-Host "Service is ready: the store is created and collection has started ($($ready.Seconds) seconds)." -ForegroundColor Green
+}
+else {
+    $startupProblem = switch ($ready.State) {
+        'Failed' { 'The service logged a startup failure and is not collecting.' }
+        'Stopped' { 'The service stopped while starting.' }
+        default { "The service was not ready after $($ready.Seconds) seconds." }
+    }
+    Write-Host ''
+    Write-Host "WARNING: $startupProblem" -ForegroundColor Red
+    $problemLines = @(Get-DarlingStartupProblemLines $ready.Entries)
+    if ($problemLines.Count -gt 0) {
+        Write-Host 'The log lines that explain it (newest last):' -ForegroundColor Yellow
+        foreach ($problemLine in $problemLines) { Write-Host "  $problemLine" -ForegroundColor Yellow }
+    }
+    else {
+        Write-Host 'The service has logged no warning or error since it started, so it may only be slow. Check again in a minute.' -ForegroundColor Yellow
+    }
+    $startupRemedy = Get-DarlingStartupRemedy $ready.State $problemLines.Count $serviceName
+    Write-Host ''
+}
+Write-Host "Primary log: $serviceLogDirectory\darling-service_yyyyMMdd.log"
 
 # -- 5a. Re-reconcile the firewall on an UPGRADE (#2436) -------------------------------------------
 # The 4c call ran with the service stopped, which on a managed install means the store was down too - it is
@@ -2916,17 +3478,29 @@ if ($Network) {
     Invoke-FirewallReconcile
 }
 
+# The 'Darling Viewer' shortcut paths under the named special folders (#6475). A folder that does not resolve (GetFolderPath
+# returns '' when there is no such folder for the account) is left out. The folder lookup is a parameter so a test can stand in
+# for the machine. Kept byte-identical in install-darling.ps1 and uninstall-darling.ps1.
+function Get-DarlingShortcutPaths([string[]]$Folders, [scriptblock]$GetFolder = $null) {
+    if (-not $GetFolder) { $GetFolder = { param($name) [Environment]::GetFolderPath($name) } }
+    $paths = @()
+    foreach ($folder in $Folders) {
+        $base = & $GetFolder $folder
+        if ($base) { $paths += (Join-Path $base 'Darling Viewer.lnk') }
+    }
+    return $paths
+}
+
 # -- 6. Viewer shortcuts --------------------------------------------------------------------------
-if (-not $NoShortcuts) {
+if (-not $NoShortcuts -and -not $MsiPhase) {
     if (Test-Path -LiteralPath $viewerExe) {
         # GetFolderPath returns '' for Desktop/StartMenu whenever there is no loaded user profile - a
         # Windows service, a scheduled task, a CI runner, a remote/SSM session - and Join-Path then
         # throws. Guard it: keep only the targets whose folder resolves, and skip cleanly otherwise.
-        $desktop   = [Environment]::GetFolderPath('Desktop')
-        $startMenu = [Environment]::GetFolderPath('StartMenu')
-        $targets = @()
-        if ($desktop)   { $targets += (Join-Path $desktop 'Darling Viewer.lnk') }
-        if ($startMenu) { $targets += (Join-Path $startMenu 'Programs\Darling Viewer.lnk') }
+        # The all-users folders, not the running account's: this script runs elevated, often as an administrator
+        # account that is not the person who will open the Viewer, and that account's own Desktop is not theirs
+        # (#6475). The public Desktop and the all-users Start Menu show the shortcut to everyone on the machine.
+        $targets = @(Get-DarlingShortcutPaths @('CommonDesktopDirectory', 'CommonPrograms'))
         if ($targets.Count -gt 0) {
             $shell = New-Object -ComObject WScript.Shell
             foreach ($lnkPath in $targets) {
@@ -2947,5 +3521,55 @@ if (-not $NoShortcuts) {
     }
 }
 
+# -- 7. Offer to add the signed-in person to the operator group (#6478) -----------------------------------
+# No group on a domain controller, so no question there. The group exists by now on any other machine: a group that could not
+# be made stopped the install at 4b2.
+if ($operatorSid) {
+    # Under -MsiPhase nobody can answer (a custom action has no console), so the question is never asked: the MSI's OPERATORACCOUNT
+    # arrives as -AddOperator, and without it the closing guidance says who to add (#6480).
+    $null = Invoke-DarlingOperatorStep $operatorGroupName $AddOperator ([bool]($NoOperatorPrompt -or $MsiPhase)) $configPath $storeFolder
+}
+
+# True when darling.json's "web" block turns the dashboard on. The match stays inside that block (nested braces one level deep, such as
+# network, are skipped over; the braces are hex escapes so a brace counter reading this function stays balanced), so a later block's "enabled": true (alerts, analysis, mcp) cannot answer for a web block that says false.
+function Test-DarlingWebEnabledText([string]$configText) {
+    return [bool]($configText -match '(?s)"web"\s*:\s*\x7B(?:[^\x7B\x7D]|\x7B[^\x7B\x7D]*\x7D)*?"enabled"\s*:\s*true')
+}
+
+# -- 8. Next steps (#6470) --------------------------------------------------------------------------
+# What the web dashboard's address is comes from the service's own log line for this start. The web host starts a few seconds
+# after the store is ready, so when darling.json turns the dashboard on, wait for that line briefly.
+$entriesNow = @(Get-DarlingServiceLogEntries $serviceLogDirectory $startedAt)
+$webAddress = Get-DarlingWebAddress $entriesNow
+$webEnabledInConfig = $false
+if (-not $startupProblem -and -not $webAddress -and (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+    $configText = Get-Content -LiteralPath $configPath -Raw -ErrorAction SilentlyContinue
+    if (Test-DarlingWebEnabledText $configText) {
+        $webEnabledInConfig = $true
+        for ($waited = 0; $waited -lt 15 -and -not $webAddress; $waited += 3) {
+            Start-Sleep -Seconds 3
+            $webAddress = Get-DarlingWebAddress @(Get-DarlingServiceLogEntries $serviceLogDirectory $startedAt)
+        }
+    }
+}
+$serverCount = Get-DarlingConfiguredServerCount $entriesNow
+
 Write-Host ''
-Write-Host 'Done.' -ForegroundColor Green
+if ($startupProblem) {
+    exit (Write-DarlingNotReadyVerdict $startupProblem $startupRemedy $MsiPhase)
+}
+Write-Host 'Done. Next steps:' -ForegroundColor Green
+Write-Host "  1. Open the Viewer: the 'Darling Viewer' shortcut on the Desktop or in the Start Menu, or $viewerExe"
+if ($serverCount -gt 0) {
+    Write-Host "  2. darling.json already lists $serverCount server(s), so collection for them has started and their first data appears within a few minutes. Add more with 'Add Server' in the Viewer."
+}
+else {
+    Write-Host "  2. Add your first SQL Server: click 'Add Server' in the Viewer's sidebar, or run:  & `"$serviceExe`" --add-server --help"
+}
+if ($webAddress) {
+    Write-Host "  3. The web dashboard is on: $webAddress   (sign in with the token from:  & `"$serviceExe`" --print-web-token )"
+}
+elseif ($webEnabledInConfig) {
+    # Turned on in darling.json but no address was logged during the wait above: say so, and where to look, instead of leaving the line out.
+    Write-Host "  3. The web dashboard is turned on in darling.json, but the service did not report its address within 15 seconds. It may still be starting, or it did not start: its log is in $serviceLogDirectory (look for 'web dashboard')."
+}

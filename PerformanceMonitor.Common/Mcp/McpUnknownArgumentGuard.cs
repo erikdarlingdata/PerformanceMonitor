@@ -44,8 +44,9 @@ namespace PerformanceMonitor.Common;
 /// drift into refusing differently, and a tool added tomorrow is covered the day it is registered.</para>
 ///
 /// <para><b>What it refuses, and what it deliberately does not.</b> Only a key that is NOT a property of the
-/// tool's advertised schema. An OMITTED optional parameter is not an unknown key and never was — the guard
-/// reads the keys that arrived, never the ones that did not, so optionality and null handling are untouched.
+/// tool's advertised schema. An OMITTED optional parameter is not an unknown key and never was — the unknown-key
+/// check reads the keys that arrived, so optionality and null handling are untouched. (An omitted REQUIRED
+/// parameter is a separate arm, <c>RefuseMissingRequired</c>, which names it; see below.)
 /// A declared parameter that some code path ignores is likewise not unknown: the schema is the contract, not
 /// the reachability of a branch. Protocol metadata (<c>_meta</c>, the progress token) travels in
 /// <c>CallToolRequestParams</c> SIBLINGS of <c>Arguments</c>, not inside it, so this reads only the
@@ -103,6 +104,7 @@ public static class McpUnknownArgumentGuard
     public static McpRequestFilter<CallToolRequestParams, CallToolResult> Instance =>
         next => async (request, cancellationToken) =>
             Refuse(request.Params, FindTool(request), RecordOf(request))
+            ?? RefuseMissingRequired(request.Params, FindTool(request))
             ?? await next(request, cancellationToken);
 
     /// <summary>
@@ -255,6 +257,69 @@ public static class McpUnknownArgumentGuard
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// #6455: the refusal for a call that left out a required argument, or null. The binder throws on a missing required
+    /// argument before the tool runs and the SDK answers "An error occurred invoking ..." with no field named. This reads the tool's
+    /// advertised <c>required</c> list, and a call with no arguments at all is read too. It runs after <see cref="Refuse"/>, so an
+    /// unknown key or a value the tool cannot read is named first.
+    /// </summary>
+    public static CallToolResult? RefuseMissingRequired(CallToolRequestParams? parameters, McpServerTool? tool)
+    {
+        if (tool is null || !TryReadParameters(tool, out var parameterSchemas))
+        {
+            return null;
+        }
+
+        var arguments = parameters?.Arguments;
+        var missing = RequiredParameters(tool)
+            .Where(name => arguments is null || !arguments.ContainsKey(name))
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToList();
+
+        return missing.Count == 0
+            ? null
+            : MissingEnvelope(tool.ProtocolTool.Name, missing, new HashSet<string>(parameterSchemas.Keys, StringComparer.Ordinal));
+    }
+
+    /// <summary>The parameter names the tool's advertised input schema lists under <c>required</c> (#6455); none when it lists none.</summary>
+    private static List<string> RequiredParameters(McpServerTool tool)
+    {
+        var schema = tool.ProtocolTool.InputSchema;
+        if (schema.ValueKind != JsonValueKind.Object
+            || !schema.TryGetProperty("required", out var required)
+            || required.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        return required.EnumerateArray()
+            .Where(entry => entry.ValueKind == JsonValueKind.String)
+            .Select(entry => entry.GetString()!)
+            .ToList();
+    }
+
+    /// <summary>The refusal for a call that left out required arguments (#6455): names each one and lists the accepted parameters.
+    /// <c>hints.parameter</c> is the first missing argument, the one the caller must add.</summary>
+    private static CallToolResult MissingEnvelope(string toolName, List<string> missing, HashSet<string> accepted)
+    {
+        var named = string.Join(", ", missing.Select(name => $"'{name}'"));
+        var message = (missing.Count == 1
+                ? $"Missing required argument {named} for tool '{toolName}'."
+                : $"Missing required arguments {named} for tool '{toolName}'.")
+            + $" Accepted parameters: {string.Join(", ", accepted.OrderBy(name => name, StringComparer.Ordinal))}."
+            + " The call was refused before it ran, because the tool cannot run without "
+            + (missing.Count == 1 ? "it." : "them.");
+
+        return new CallToolResult
+        {
+            Content = new List<ContentBlock>
+            {
+                new TextContentBlock { Text = McpHelpers.Refusal(missing[0], message) }
+            },
+            IsError = true,
+        };
     }
 
     /// <summary>

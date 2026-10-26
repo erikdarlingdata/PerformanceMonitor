@@ -175,9 +175,30 @@ VALUES (1, '{Ts(T0)}', '{Ts(T0.AddSeconds(-20))}', {Server}, 'srv', 'AppDb', 60,
 
     private int _reportId;
 
-    private void BlockedReportRow(DateTime eventAt, DateTime collectedAt) =>
+    private void BlockedReportRow(DateTime eventAt, DateTime collectedAt, int blockedSpid = 60, int blockingSpid = 55) =>
         Exec($@"INSERT INTO blocked_process_reports (blocked_report_id, collection_time, event_time, server_id, server_name, database_name, blocked_spid, blocking_spid, wait_time_ms, blocked_process_report_xml)
-VALUES ({++_reportId}, '{Ts(collectedAt)}', '{Ts(eventAt)}', {Server}, 'srv', 'AppDb', 60, 55, 9000, '{BlockedReportXml}')");
+VALUES ({++_reportId}, '{Ts(collectedAt)}', '{Ts(eventAt)}', {Server}, 'srv', 'AppDb', {blockedSpid}, {blockingSpid}, 9000, '{BlockedReportXml}')");
+
+    /// <summary>A parallel query's thread waiting on its own session (blocked spid = blocking spid) is not blocking
+    /// (BlockingWaits.NotSelfWaitSql): a newer self-wait report for the blocked session must not make it its own head.</summary>
+    [Fact]
+    public async Task BlockingSections_LeaveAParallelSelfWaitOut_SoTheRealHeadStaysTheHead()
+    {
+        var opened = await Open("Blocking Detected", "blocking");
+        BlockedReportRow(T0.AddSeconds(-20), T0);
+        BlockedReportRow(T0.AddSeconds(-5), T0, blockedSpid: 60, blockingSpid: 60);
+        CollectorRan("blocked_process_report", T0.AddMinutes(2));
+        _now = T0.AddMinutes(3);
+        await Capture().CaptureOnceAsync(Ct);
+
+        var sections = (await _store.ReadEvidenceAsync(opened.RequestId, Ct)).ToDictionary(r => r.Section);
+        var chain = Assert.Single(JsonNode.Parse(sections["blocking_chains"].ContentJson!)!["rows"]!.AsArray())!;
+        Assert.Equal(60, chain["blocked_spid"]!.GetValue<int>());
+        Assert.Equal(55, chain["blocking_spid"]!.GetValue<int>());
+        Assert.Equal(55, chain["head_blocker_spid"]!.GetValue<int>());
+        var head = Assert.Single(JsonNode.Parse(sections["head_blocker"].ContentJson!)!["rows"]!.AsArray())!;
+        Assert.Equal(55, head["spid"]!.GetValue<int>());
+    }
 
     [Fact]
     public async Task DeadlockSection_ListsADeadlockStoredInTwoBatchesOnce()
@@ -271,6 +292,70 @@ VALUES (4, '{Ts(at)}', {Server}, 'srv', 'AppDb', 'READ_ONLY', 'READ_WRITE', 8, 0
         Assert.Equal(5000000L, queryStore["window_cpu_us"]!.GetValue<long>());
     }
 
+    private int _attentionId;
+
+    private void AttentionRow(DateTime at, string kind, int count, string? app, string? host, string? fingerprint, string? text) =>
+        Exec($@"INSERT INTO attention_events (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, client_hostname, statement_fingerprint, statement_text)
+VALUES ({++_attentionId}, '{Ts(at)}', {Server}, 'srv', '{kind}', {count}, {(app is null ? "NULL" : "'AppDb'")}, {(app is null ? "NULL" : $"'{app}'")}, {(host is null ? "NULL" : $"'{host}'")}, {(fingerprint is null ? "NULL" : $"'{fingerprint}'")}, {(text is null ? "NULL" : $"'{text}'")})");
+
+    /// <summary>#6579: a Client Timeouts request freezes the exact count and the top apps, hosts and statements of the window, the statement
+    /// text under a statement-class field (so metadataOnly masks it), cut at a text-element boundary; a row outside the window does not count.</summary>
+    [Fact]
+    public async Task ClientTimeoutsSection_FreezesTheCountTopAppsHostsAndStatements_TheTextIsMaskedAtMetadataOnly_AndTheCutKeepsSurrogatePairsWhole()
+    {
+        var opened = await Open("Client Timeouts", "query_performance");
+        var longText = new string('a', LiteInvestigationEvidenceCapture.ClientTimeoutStatementMaxChars - 1) + "😀 tail";
+        AttentionRow(T0.AddMinutes(-2), "count", 4, null, null, null, null);
+        AttentionRow(T0.AddMinutes(-2), "sample", 0, "SSMS", "WS-ERIK", "fp-a", "SELECT ''CANARYTEXT'' FROM t");
+        AttentionRow(T0.AddMinutes(-2), "sample", 0, "SSMS", "WS-ERIK", "fp-a", "SELECT ''CANARYTEXT'' FROM t");
+        AttentionRow(T0.AddMinutes(-2), "sample", 0, "SSMS", "WS-ERIK", "fp-a", "SELECT ''CANARYTEXT'' FROM t");
+        AttentionRow(T0.AddMinutes(-2), "sample", 0, "web", "APP01", "fp-b", longText);
+        AttentionRow(T0.AddHours(-3), "sample", 0, "old-app", "OLD01", "fp-old", "SELECT 3");
+        CollectorRan("attention", T0.AddMinutes(2));
+        _now = T0.AddMinutes(3);
+        await Capture().CaptureOnceAsync(Ct);
+
+        var section = Assert.Single(await _store.ReadEvidenceAsync(opened.RequestId, Ct), r => r.Section == "client_timeouts");
+        Assert.Equal("ready", section.State);
+        var row = OnlyRow(JsonNode.Parse(section.ContentJson!)!);
+        Assert.Equal(4L, row["count"]!.GetValue<long>());
+        var hosts = row["top_hosts"]!.AsArray();
+        Assert.Equal(new[] { "WS-ERIK", "APP01" }, hosts.Select(h => h!["client_hostname"]!.GetValue<string>()).ToArray());
+        Assert.Equal(3L, hosts[0]!["sampled_events"]!.GetValue<long>());
+        Assert.Equal(new[] { "SSMS", "web" }, row["top_client_apps"]!.AsArray().Select(a => a!["client_app_name"]!.GetValue<string>()).ToArray());
+        var statements = row["top_statements"]!.AsArray();
+        Assert.Equal(new[] { "fp-a", "fp-b" }, statements.Select(st => st!["statement_fingerprint"]!.GetValue<string>()).ToArray());
+
+        /* Every field that carries the statement text is masked at metadataOnly. */
+        var first = statements[0]!.AsObject();
+        var carriers = first.Where(p => p.Value is JsonValue v && v.TryGetValue<string>(out var t) && t.Contains("CANARYTEXT", StringComparison.Ordinal)).ToList();
+        Assert.NotEmpty(carriers);
+        foreach (var carrier in carriers)
+        {
+            var text = carrier.Value!.GetValue<string>();
+            Assert.DoesNotContain("CANARYTEXT", McpDataDetailMasker.MaskField(carrier.Key, text, McpDataDetail.MetadataOnly), StringComparison.Ordinal);
+            Assert.Equal(text, McpDataDetailMasker.MaskField(carrier.Key, text, McpDataDetail.Full));
+        }
+
+        var cut = statements[1]!["sql_text"]!.GetValue<string>();
+        Assert.False(char.IsHighSurrogate(cut[^1]), "the cut left a lone high surrogate");
+        Assert.True(cut.Length <= LiteInvestigationEvidenceCapture.ClientTimeoutStatementMaxChars);
+    }
+
+    /// <summary>#6579: no timeouts in the window freezes a ready section with no rows (a true negative).</summary>
+    [Fact]
+    public async Task ClientTimeoutsSection_WithNoTimeoutsInTheWindow_FreezesEmpty()
+    {
+        var opened = await Open("Client Timeouts", "query_performance");
+        CollectorRan("attention", T0.AddMinutes(2));
+        _now = T0.AddMinutes(3);
+        await Capture().CaptureOnceAsync(Ct);
+
+        var section = Assert.Single(await _store.ReadEvidenceAsync(opened.RequestId, Ct), r => r.Section == "client_timeouts");
+        Assert.Equal("ready", section.State);
+        Assert.Empty(JsonNode.Parse(section.ContentJson!)!["rows"]!.AsArray());
+    }
+
     [Fact]
     public async Task RegressionTargetsSection_FreezesTheRegressedQueryWithItsGoodAndBadPlan()
     {
@@ -293,6 +378,43 @@ VALUES ({id}, '{Ts(seen)}', {Server}, 'srv', 'AppDb', 7, {plan}, 'Regular', '{Ts
         Assert.Equal(2L, target["bad_plan_id"]!.GetValue<long>());
         Assert.Equal(10.0, target["regression_factor"]!.GetValue<double>(), 3);
     }
+
+    [Fact]
+    public async Task RegressionTargetsSection_LeavesOutSqlServerOwnHousekeepingStatements_SoTheApplicationQueryLeads()
+    {
+        // #6548: the change tracking cleanup regressed 100 times over, the application query 10 times over.
+        var opened = await Open("Query Slow", InvestigationFamily.QueryPerformance);
+        var seen = T0.AddMinutes(-5);
+        void Plan(int id, int queryId, int plan, long avgCpu, long executions, string text) =>
+            Exec($@"INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time, execution_count, avg_cpu_time_us, avg_duration_us, query_plan_hash, runtime_stats_interval_id, query_text)
+VALUES ({id}, '{Ts(seen)}', {Server}, 'srv', 'AppDb', {queryId}, {plan}, 'Regular', '{Ts(seen.AddHours(-1))}', '{Ts(seen.AddMinutes(plan))}', {executions}, {avgCpu}, {avgCpu}, '0xHASH{plan}', {plan}, '{text}')");
+        Plan(1, 7, 1, 100, 50, "SELECT * FROM dbo.Orders");
+        Plan(2, 7, 2, 1000, 40, "SELECT * FROM dbo.Orders");
+        const string cleanup = "delete top(@batch_size) from sys.[change_tracking_1228027148] where sys_change_xdes_id < @cutoff";
+        Plan(3, 8, 3, 100, 50, cleanup);
+        Plan(4, 8, 4, 10000, 40, cleanup);
+        CollectorRan("query_store", T0.AddMinutes(2));
+        _now = T0.AddMinutes(3);
+        await Capture().CaptureOnceAsync(Ct);
+
+        var ready = Assert.Single(await _store.ReadEvidenceAsync(opened.RequestId, Ct));
+        var target = OnlyRow(JsonNode.Parse(ready.ContentJson!)!);
+        Assert.Equal(7L, target["query_id"]!.GetValue<long>());
+    }
+
+    [Theory]
+    [InlineData("delete top(@batch_size) from sys.change_tracking_1234567 where x < @y", true)]
+    [InlineData("(@csn bigint,@batch_size int)delete top(@batch_size) from sys.[change_tracking_1228027148] where sys_change_xdes_id < @csn", true)]
+    [InlineData("DELETE TOP (@batch_size)\r\n FROM SYS.[CHANGE_TRACKING_1228027148]", true)]
+    [InlineData("DELETE TOP (@batch_size)\r\n FROM sys.change_tracking_99", true)]
+    [InlineData("EXEC sys.sp_flush_commit_table_on_demand 1000", true)]
+    [InlineData("EXEC sys.sp_cdc_cleanup_change_table @capture_instance = N'dbo_Orders'", true)]
+    [InlineData("SELECT * FROM sys.[change_tracking_tables]", false)]
+    [InlineData("SELECT * FROM sys.change_tracking_tables", false)]
+    [InlineData("SELECT * FROM dbo.Orders", false)]
+    [InlineData(null, false)]
+    public void InternalStatements_RecognizesTheEnginesOwnCleanup_AndNothingElse(string? text, bool expected) =>
+        Assert.Equal(expected, PerformanceMonitor.Common.InternalStatements.IsInternal(text));
 
     [Fact]
     public async Task SectionWithNoCollectorRun_BecomesNotCollected_AfterItsGrace()

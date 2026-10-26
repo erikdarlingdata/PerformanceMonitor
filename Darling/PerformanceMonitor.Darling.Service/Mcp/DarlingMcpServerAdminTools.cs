@@ -101,7 +101,9 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static string ConnectFailureReply(
         MonitoredServer server, ConnectionProbeResult probe, ILogger? logger, bool revealConnectError, params string?[] secrets)
     {
-        var target = server.Port > 0 ? $"{server.Host},{server.Port}" : server.Host;
+        /* #6583: the target that was tried. A SQL Server connection uses the host alone (its port rides in the host as host,port), so a
+           stored SQL Server port was never dialled and is not named; only a PostgreSQL target connects on its port. */
+        var target = server.IsPostgres && server.Port > 0 ? $"{server.Host},{server.Port}" : server.Host;
         var driverText = string.IsNullOrWhiteSpace(probe.Error) ? "(no driver text)" : RedactEditSecret(probe.Error, secrets);
         /* The logged copy is one line of bounded length: the driver text and the target both come from the server the
            caller named, so each goes through the refusal log's sanitizer. The --add-server reply below keeps the
@@ -166,7 +168,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "stored, and is never returned. password is the password itself: a value that starts with env: or file: is " +
         "rejected as \"invalid\", because references are set in the configuration file. " +
         "Returns {requested:N, added:N, skipped:N, collided:N, failed:N, results:[{server, " +
-        "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"not_saved\"|\"invalid\", detail}]}. requested is " +
+        "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"not_saved\"|\"invalid\", detail, undo}]}. An added entry's undo is the remove_server call for it; every other entry has undo null. requested is " +
         "the number of entries you sent and the four counters SUM to it — every entry lands in exactly one: " +
         "\"added\" → added, \"duplicate\" → skipped, \"collides\" → collided, \"connection_failed\", " +
         "\"not_saved\" and \"invalid\" → failed. Only added servers are monitored; read the other three counters before treating " +
@@ -187,8 +189,8 @@ public sealed partial class DarlingMcpServerAdminTools
 
     /// <summary>The same onboarding core for a caller that is not an MCP client (the signed-in web dashboard's add
     /// route): no MCP caller policy, and a failed connection keeps the generic reply with the driver text in the log.</summary>
-    internal static Task<string> AddServers(NpgsqlDataSource postgres, string servers_json, ILogger? logger) =>
-        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, logger: logger);
+    internal static Task<string> AddServers(NpgsqlDataSource postgres, string servers_json, ILogger? logger, DarlingUnverifiedWindowsAuthScreen? webScreen = null) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, logger: logger, webScreen: webScreen);
 
     /// <summary>The testable core of <c>add_servers</c>: validates + dedupes + probes (through the injected
     /// <paramref name="probe"/> seam) + encrypts + INSERTs, aggregating a per-server result. Structural validation
@@ -207,15 +209,21 @@ public sealed partial class DarlingMcpServerAdminTools
     /// the only way to register a server whose password cannot be encrypted. A reference to Darling's own configuration
     /// or secrets is still refused (<see cref="ValidateSecret"/>).
     /// </summary>
-    internal static Task<string> AddServersFromHostCommandLineAsync(NpgsqlDataSource postgres, string servers_json, IPasswordKeyRing? ring = null) =>
-        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, allowSecretReferences: true, ring: ring, revealConnectError: true);
+    internal static Task<string> AddServersFromHostCommandLineAsync(
+        NpgsqlDataSource postgres, string servers_json, IPasswordKeyRing? ring = null, ServerProbe? probe = null) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe ?? DefaultProbeAsync, CancellationToken.None, allowSecretReferences: true, ring: ring, revealConnectError: true);
+
+    /// <summary>The in-process connection probe, for the command line to wrap (#6476): it runs as the person at the console.</summary>
+    internal static Task<ConnectionProbeResult> ProbeAsConsoleUserAsync(MonitoredServer server, CancellationToken cancellationToken) =>
+        DefaultProbeAsync(server, cancellationToken);
 
     /// <summary>The same flow over an injected <see cref="IServerDefinitions"/>, so a test can stand in a
     /// definitions table that faults on a chosen write or swallows one without a live database.</summary>
     internal static async Task<string> AddServersAsync(
         IServerDefinitions definitions, string servers_json, ServerProbe probe, CancellationToken cancellationToken,
         bool allowSecretReferences = false, IPasswordKeyRing? ring = null, AwsRoleAllowlist? awsRoleAllowlist = null,
-        ILogger? logger = null, bool revealConnectError = false, DarlingMcpAddServersPolicy? policy = null)
+        ILogger? logger = null, bool revealConnectError = false, DarlingMcpAddServersPolicy? policy = null,
+        DarlingUnverifiedWindowsAuthScreen? webScreen = null)
     {
         ring ??= DarlingPasswordKey.Current;
         try
@@ -230,6 +238,9 @@ public sealed partial class DarlingMcpServerAdminTools
 
             /* The MCP caller's policy refuses entries here, before any store access or probe. */
             entries = DarlingMcpAddServersPolicy.Screen(policy, entries, results);
+
+            /* The web route's one rule, with no other part of the MCP policy: the same Windows-sign-in check, naming the web setting. */
+            entries = DarlingUnverifiedWindowsAuthScreen.Screen(webScreen, entries, results);
 
             /* No structurally-valid candidate → never open the store (validate-before-write); the aggregate below
                reports only the per-entry invalids. */
@@ -352,7 +363,7 @@ public sealed partial class DarlingMcpServerAdminTools
                     {
                         results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Added,
                             DescribeProbe(probeResult, QueryStoreReplicaReply(entry.ProbeConfig, probeResult, logger, revealConnectError,
-                                entry.PlaintextPassword, entry.ProbeConfig.AwsExternalId))));
+                                entry.PlaintextPassword, entry.ProbeConfig.AwsExternalId)), entry.StorageKey));
                     }
                     else if (rowsWritten == InsertKeyClaimed)
                     {
@@ -419,7 +430,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "definition from the central monitoring store; the running service drops it from its collection set within " +
         "one sweep and drops this install's own Extended Events sessions on the server, leaving the shared ones and " +
         "any session another registration of this install keeps. Already-collected historical data is NOT deleted. Returns {status:\"removed\", server, " +
-        "display_name, matched_by:\"exact\"|\"partial\", matched_in:\"config_monitored_servers\", ever_connected} on " +
+        "display_name, matched_by:\"exact\"|\"partial\", matched_in:\"config_monitored_servers\", ever_connected, previous (the removed definition in the keys add_servers takes; the stored password cannot be read back, so a SQL or service-principal row carries the placeholder <password> in its place, and the AWS external ID is left out), undo (the add_servers call that re-adds it, with that same password placeholder), undo_note (what a re-add does not bring back)} on " +
         "success — ever_connected says whether the connected-servers registry (populated on a server's first " +
         "successful connection) also had a row for it, i.e. whether any history exists under its id; " +
         "{status:\"ambiguous\", ...} as above; or {status:\"not_found\", ...} when no definition matches the name. A " +
@@ -516,6 +527,9 @@ public sealed partial class DarlingMcpServerAdminTools
             var resolved = target.Candidates[0];
             var resolvedDefinition = definitions.First(d => d.Server.ServerId == resolved.ServerId);
 
+            /* #6403: the definition as it stood, read before the delete, for the answer's previous and undo. */
+            var removedRow = await new PostgresServerEditStore(postgres).ReadRowAsync(resolved.ServerId, CancellationToken.None);
+
             /* The server's tag assignments go in the same transaction as its definition: server_id is a fixed hash
                of the connection, so a re-added server would otherwise get its old tags back and rejoin
                tag-scoped alert rules. */
@@ -568,6 +582,17 @@ public sealed partial class DarlingMcpServerAdminTools
                         await queryTagClear.ExecuteNonQueryAsync();
                     }
 
+                    /* #6454: the server's collector overrides and run times go too, same transaction and same reason: set-and-clear
+                       left an all-null override row behind, and a set one would come back when the server is re-added. Only this
+                       server's rows; the fleet-wide rows (server_id NULL) stay. */
+                    foreach (var scheduleSql in CollectorScheduleSql.ClearForServerSqls)
+                    {
+                        await using var scheduleClear = new NpgsqlCommand(scheduleSql, connection) { Transaction = transaction };
+                        scheduleClear.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                        scheduleClear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
+                        await scheduleClear.ExecuteNonQueryAsync();
+                    }
+
                     await transaction.CommitAsync();
                 }
             }
@@ -578,7 +603,7 @@ public sealed partial class DarlingMcpServerAdminTools
             }
 
             return affected > 0
-                ? RemovedAnswer(resolvedDefinition, target.MatchedBy)
+                ? RemovedAnswer(resolvedDefinition, target.MatchedBy, removedRow)
                 : Outcome("not_found",
                     $"'{resolved.DisplayName}' was defined when this call resolved it but its definition was gone by the time the delete ran (a concurrent remove); nothing was changed.");
         }
@@ -601,7 +626,7 @@ public sealed partial class DarlingMcpServerAdminTools
 
     /// <summary>One per-server outcome (a <see cref="AddStatus"/> value) with a human-readable <see cref="Detail"/>;
     /// <see cref="Order"/> restores input order in the aggregate.</summary>
-    internal sealed record ServerResult(int Order, string Server, string Status, string Detail);
+    internal sealed record ServerResult(int Order, string Server, string Status, string Detail, string? UndoServer = null);
 
     /// <summary>
     /// The per-row <c>status</c> vocabulary of <c>add_servers</c> — the five outcomes an entry can have, as
@@ -660,19 +685,13 @@ public sealed partial class DarlingMcpServerAdminTools
     };
 
     /// <summary>
-    /// The outcome of matching a <c>remove_server</c> name against the definitions: the rows it matched and HOW.
-    /// Zero candidates is a miss, one is the row to delete, more than one is a refusal.
-    /// </summary>
-    internal sealed record RemovalTarget(IReadOnlyList<DarlingServerResolver.RegisteredServer> Candidates, string MatchedBy);
-
-    /// <summary>
     /// One <c>config_monitored_servers</c> row as <c>remove_server</c> resolves it (#3653 A15/A16): projected onto
-    /// the read tools' <see cref="DarlingServerResolver.RegisteredServer"/> identity — the storage name rebuilt
+    /// the read tools' <see cref="RegisteredServer"/> identity — the storage name rebuilt
     /// from the definition's identity columns through the SAME <see cref="ServerIdHelper.BuildStorageName"/> the
     /// worker uses when it registers the server on first connect, so a definition and its registry row carry one
     /// name and one id — plus whether that registry row exists at all.
     /// </summary>
-    internal sealed record ServerDefinition(DarlingServerResolver.RegisteredServer Server, bool EverConnected, string Kind);
+    internal sealed record ServerDefinition(RegisteredServer Server, bool EverConnected, string Kind);
 
     /// <summary>
     /// One definition row projected onto <see cref="ServerDefinition"/> (#4734): the storage name is rebuilt from the
@@ -685,7 +704,7 @@ public sealed partial class DarlingMcpServerAdminTools
     {
         var storageName = ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port);
         return new ServerDefinition(
-            new DarlingServerResolver.RegisteredServer(serverId, storageName, displayName),
+            new RegisteredServer(serverId, storageName, displayName),
             everConnected,
             ServerIdHelper.DescribeKind(database, readOnlyIntent));
     }
@@ -695,7 +714,7 @@ public sealed partial class DarlingMcpServerAdminTools
     /// storage name and <c>kind</c> says which of a machine's registrations it was (plain, read-only, per-database), so
     /// a wrong pick shows at once (#4734). Pure, so the shape unit-tests without a store.
     /// </summary>
-    internal static string RemovedAnswer(ServerDefinition resolved, string matchedBy) =>
+    internal static string RemovedAnswer(ServerDefinition resolved, string matchedBy, ServerEditRow? row = null) =>
         JsonSerializer.Serialize(new
         {
             status = "removed",
@@ -712,7 +731,69 @@ public sealed partial class DarlingMcpServerAdminTools
                     + "For a server nothing else monitors, an operator runs PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql, which prints the DROP statements, and runs them on that server. "
                     + "The named form (--drop-xe-sessions <server>) works only for a server this service still monitors, so it had to run before this removal."
                 : "The definition is deleted. This server had never connected (no connected-servers registry row), so no history exists under its id and nothing else references it.",
+            previous = row is null ? null : RemovedPreviousOf(row),
+            undo = row is null ? null : DarlingMcpUndoShape.Call("add_servers", new JsonObject
+            {
+                ["servers_json"] = new JsonArray(RemovedPreviousOf(row)).ToJsonString(),
+            }),
+            undo_note = row is null ? null : RemoveUndoNote,
         }, McpHelpers.JsonOptions);
+
+    /// <summary>The password placeholder the undo's add_servers entry carries: the stored password cannot be read back.</summary>
+    internal const string PasswordPlaceholder = "<password>";
+
+    internal const string RemoveUndoNote =
+        "The undo re-adds the definition, but its password is a placeholder (the stored one cannot be read back) and the add probes the connection first, so replace the placeholder before running it. " +
+        "A re-add does not bring back this server's tag assignments, query-tag assignments and rules, collector schedule overrides and run times, " +
+        "monthly cost, excluded databases, plan-capture and alert-delivery settings, or an AWS external ID; the server comes back enabled. " +
+        "Collected history and the connected-servers registry row were never deleted and reattach by the server id.";
+
+    /// <summary>The removed definition without its password and AWS external ID, in the keys add_servers takes, so it is also the undo's one entry.</summary>
+    private static JsonObject RemovedPreviousOf(ServerEditRow row)
+    {
+        var entry = new JsonObject
+        {
+            ["host"] = row.Host,
+            ["display_name"] = row.Name,
+            ["engine"] = row.Engine,
+            ["auth"] = AuthWord(row.Auth),
+        };
+        if (row.Database is not null)
+        {
+            entry["database"] = row.Database;
+        }
+
+        if (row.Username is not null)
+        {
+            entry["username"] = row.Username;
+        }
+
+        if (IsSecretAuth(row.Auth))
+        {
+            entry["password"] = PasswordPlaceholder;
+        }
+
+        if (PerformanceMonitor.Collectors.MonitoredEngineKind.ParseConfiguredEngine(row.Engine) == PerformanceMonitor.Collectors.CollectorTargetEngine.PostgreSql)
+        {
+            entry["port"] = row.Port;
+        }
+
+        entry["encrypt_mode"] = row.EncryptMode;
+        entry["trust_server_certificate"] = row.TrustServerCertificate;
+        entry["read_only_intent"] = row.ReadOnlyIntent;
+        entry["multi_subnet_failover"] = row.MultiSubnetFailover;
+        if (!string.IsNullOrEmpty(row.QueryStoreReplica))
+        {
+            entry["query_store_replica"] = row.QueryStoreReplica;
+        }
+
+        if (row.AwsRoleArn is not null)
+        {
+            entry["aws_role_arn"] = row.AwsRoleArn;
+        }
+
+        return entry;
+    }
 
     /// <summary>
     /// The definitions read behind <c>remove_server</c>: every row of the table the DELETE targets, with its
@@ -750,116 +831,14 @@ ORDER BY d.host, d.database";
     }
 
     /// <summary>
-    /// The matching rule for a name over the registry rows: the one registration whose
-    /// storage name equals the name exactly (case-sensitive, trimmed), if there is one (#4734); otherwise every exact
-    /// match on the storage name OR display name (case-insensitive), if there are any; otherwise every partial
-    /// (<c>Contains</c>) match. The CALLER decides what a count other than one means — this only refuses to
-    /// choose among equals. Every read tool (through <see cref="DarlingServerResolver"/>), <c>remove_server</c>
-    /// and <c>mute_analysis_finding</c> match with it, and each refuses a count other than one. Only the read tools
-    /// pass <paramref name="storageNameIgnoresCase"/>: they also take the storage name in another letter case.
-    ///
-    /// <para><b>Why one rule for reads and writes.</b> The read resolver used to take the FIRST partial match,
-    /// ordered by storage name. Several databases on one Azure SQL Database server are separate servers whose
-    /// storage names (<c>host:database</c>) all contain the host name, so the bare host name answered for whichever
-    /// database sorted first, and a delete removed <c>-01</c> when the caller typed a fragment that <c>-01</c> and
-    /// <c>-02</c> both contain — a coin the caller did not know was being flipped. A read that picks the wrong
-    /// sibling is only a wrong answer, but it is still a wrong answer the caller may not notice.</para>
-    ///
-    /// <para><b>Why partial matching survives at all.</b> The description has promised it since the tool shipped
-    /// ("resolved the same way the read tools resolve server_name"), display names are what an operator knows a
-    /// server by, and a unique partial is unambiguous — refusing it would be refusing something the tool CAN
-    /// honor. The rule the contract asks for is "refuse what you cannot honor", and what cannot be honored here is
-    /// a choice, not a fragment.</para>
-    ///
-    /// <para><b>Exact matches are collected, not first-taken.</b> <c>display_name</c> is not unique in the registry,
-    /// so two registrations can share one display name exactly; picking the first would be the same coin under a
-    /// better-looking name. Two rows matching exactly is reported as ambiguous with <c>matched_by: "exact"</c>, and
-    /// the caller disambiguates on the storage name, which IS unique.</para>
-    ///
-    /// <para><b>An exact storage name breaks the tie, and only that (#4734).</b> The plain registration's storage
-    /// name is the machine name, and the display name defaults to the machine name, so its read-only and per-database
-    /// siblings show that same text as THEIR display name. Without a tier for the storage name, the plain
-    /// registration's own <c>server</c> value — the one an <c>ambiguous</c> answer lists for it, and tells the caller
-    /// to pass back — tied with its siblings, so no name could pick it. A storage name is unique (it is what
-    /// <c>server_id</c> is derived from), so an exact match on it names one registration by construction. The tier is
-    /// deliberately narrow, because this rule also chooses what a delete removes: the match is case-SENSITIVE, so the
-    /// same name in another case, a display-name match and a partial all keep the old behavior and still answer
-    /// ambiguous when they name several registrations. And a tier that finds anything other than exactly one
-    /// registration falls through to the matching above unchanged.</para>
-    ///
-    /// <para><b>A storage name that is also another server's display name (#6230) is the caller's choice,
-    /// <paramref name="nameClash"/>.</b> <see cref="NameClash.Refuse"/> (the default, and the mode every caller that changes
-    /// state passes) answers ambiguous with both registrations listed when that single storage-name match is also the display
-    /// name of a different registration that is not of the same host (a colon-suffixed sibling, or the same name in another
-    /// case), so a write never silently picks one of two servers its name matches. <see cref="NameClash.StoredNameWins"/> is
-    /// for a read: the exact stored name keeps winning over another server's display name (#5633), so a saved Custom View
-    /// scope and a read tool that named the stored name keep working.</para>
+    /// The matching rule for a name over the registry rows, which moved to Storage so the Viewer applies the same one
+    /// (#6390): see <see cref="ServerNameMatcher.Match"/>. Kept here as the call every state-changing tool and the read
+    /// resolver's callers name; the default <see cref="NameClash.Refuse"/> is the write mode.
     /// </summary>
-    internal static RemovalTarget ResolveForRemoval(
-        IReadOnlyList<DarlingServerResolver.RegisteredServer> servers, string serverName, bool storageNameIgnoresCase = false,
-        NameClash nameClash = NameClash.Refuse)
-    {
-        var name = (serverName ?? string.Empty).Trim();
-        if (name.Length == 0)
-        {
-            return new RemovalTarget(Array.Empty<DarlingServerResolver.RegisteredServer>(), "none");
-        }
-
-        /* The storage name is the one key that is unique, so a single match on it picks that registration: exact case
-           first (a candidate's own `server` value picks it even beside a registration whose name differs only in
-           case), then, for a read only, ignoring case. Anything other than one match falls through to the tiers
-           below. */
-        var comparisons = storageNameIgnoresCase
-            ? new[] { StringComparison.Ordinal, StringComparison.OrdinalIgnoreCase }
-            : new[] { StringComparison.Ordinal };
-        foreach (var comparison in comparisons)
-        {
-            var byStorageName = servers
-                .Where(s => string.Equals(s.ServerName, name, comparison))
-                .ToList();
-            if (byStorageName.Count == 1)
-            {
-                /* A name that is this registration's storage name AND a different, unrelated registration's display
-                   name names two servers, so it answers with both and the caller picks one by storage name. A registration
-                   of the same host does not count: its storage name continues with a colon (the read-only and per-database
-                   registrations that share the machine name as their display name, #4734) or differs only in case (its
-                   display name is its own storage name). */
-                var only = byStorageName[0];
-                var sharedDisplayName = nameClash == NameClash.StoredNameWins
-                    ? new List<DarlingServerResolver.RegisteredServer>()
-                    : servers
-                    .Where(s => !ReferenceEquals(s, only)
-                             && s.ServerId != only.ServerId
-                             && string.Equals(s.DisplayName, name, StringComparison.OrdinalIgnoreCase)
-                             && !string.Equals(s.ServerName, only.ServerName, StringComparison.OrdinalIgnoreCase)
-                             && !s.ServerName.StartsWith(only.ServerName + ":", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-                if (sharedDisplayName.Count > 0)
-                {
-                    sharedDisplayName.Insert(0, only);
-                    return new RemovalTarget(sharedDisplayName, "exact");
-                }
-
-                return new RemovalTarget(byStorageName, "exact");
-            }
-        }
-
-        var exact = servers
-            .Where(s => string.Equals(s.ServerName, name, StringComparison.OrdinalIgnoreCase)
-                     || string.Equals(s.DisplayName, name, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        if (exact.Count > 0)
-        {
-            return new RemovalTarget(exact, "exact");
-        }
-
-        var partial = servers
-            .Where(s => s.ServerName.Contains(name, StringComparison.OrdinalIgnoreCase)
-                     || (s.DisplayName?.Contains(name, StringComparison.OrdinalIgnoreCase) ?? false))
-            .ToList();
-
-        return new RemovalTarget(partial, partial.Count == 0 ? "none" : "partial");
-    }
+    internal static ServerNameMatch ResolveForRemoval(
+        IReadOnlyList<RegisteredServer> servers, string serverName, bool storageNameIgnoresCase = false,
+        NameClash nameClash = NameClash.Refuse) =>
+        ServerNameMatcher.Match(servers, serverName, storageNameIgnoresCase, nameClash);
 
     /// <summary>
     /// PURE structural validation of the <c>servers_json</c> request — no store, no probe, no crypto — so the
@@ -1055,6 +1034,13 @@ ORDER BY d.host, d.database";
         if (portError != null)
         {
             return (null, Invalid(portError));
+        }
+
+        /* #6583: a SQL Server connection never uses the port (it rides in the host as host,port), so a non-zero one is refused
+           rather than stored and silently ignored. Zero is the omitted value and stays accepted. */
+        if (engine == EngineSqlServer && port != 0)
+        {
+            return (null, Invalid(SqlServerPortAdvice.Refusal));
         }
 
         /* #5452: the AWS role for an RDS or Aurora target, and its external ID. Blank is "not set"; the formats and the
@@ -1734,7 +1720,14 @@ ON CONFLICT (server_id) DO NOTHING";
             skipped = counters["skipped"],
             collided = counters["collided"],
             failed = counters["failed"],
-            results = ordered.Select(r => new { server = r.Server, status = r.Status, detail = r.Detail }),
+            /* #6403: an added server's undo is the remove_server call for its storage name; a skipped, refused or failed entry changed nothing and has none. */
+            results = ordered.Select(r => new
+            {
+                server = r.Server,
+                status = r.Status,
+                detail = r.Detail,
+                undo = r.UndoServer is null ? null : DarlingMcpUndoShape.Call("remove_server", new JsonObject { ["server_name"] = r.UndoServer }),
+            }),
         }, McpHelpers.JsonOptions);
     }
 
@@ -1742,7 +1735,9 @@ ON CONFLICT (server_id) DO NOTHING";
     /// <c>--test-connection</c> CLI line uses (<see cref="DarlingServerConnector.DescribeProbeFacts"/>), so the
     /// two cannot drift and a PostgreSQL target reads as one here too.</summary>
     private static string DescribeProbe(ConnectionProbeResult probe, string? replicaLine = null) =>
-        $"Connected — {DarlingServerConnector.DescribeProbeFacts(probe)}." + (replicaLine is null ? "" : " " + replicaLine);
+        $"Connected — {DarlingServerConnector.DescribeProbeFacts(probe)}." + (replicaLine is null ? "" : " " + replicaLine)
+        /* #6472: the base grants the connecting login lacks, each with the statement that adds it. A note, never a refusal. */
+        + (string.IsNullOrEmpty(probe.MissingGrantsNote) ? "" : " " + probe.MissingGrantsNote);
 
     /// <summary>
     /// #6254: what an add or an edit says about the Query Store replica its connection test also opened, or null when the server has
@@ -1800,7 +1795,7 @@ ON CONFLICT (server_id) DO NOTHING";
 
     /// <summary>
     /// Validates the optional <c>port</c>; absent or 0 → the driver's default. Consumed only by the PostgreSQL
-    /// connection builder (a SQL Server target carries its port in the host string), and range-checked here to
+    /// connection builder (a SQL Server target carries its port in the host string, and a non-zero one is refused, #6583), and range-checked here to
     /// match <c>DarlingConfig.Validate</c> rather than failing later inside Npgsql.
     /// </summary>
     internal static (int Port, string? Error) ResolvePort(JsonObject obj)

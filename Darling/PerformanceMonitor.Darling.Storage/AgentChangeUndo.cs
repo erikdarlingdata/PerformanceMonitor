@@ -50,8 +50,8 @@ public sealed record AgentChangeRow(
     private string? ReadString(string key) =>
         JsonNode.Parse(DetailJson) is JsonObject o && o[key] is JsonValue v && v.TryGetValue(out string? s) ? s : null;
 
-    /// <summary>True for a plan force or unforce (#5632, step 9): the server's state decides its undo, not the journal's result.</summary>
-    public bool IsPlanChange => Kind is AgentChangeKinds.PlanForce or AgentChangeKinds.PlanUnforce;
+    /// <summary>True for a plan force or unforce (#5632, step 9) or a plan guide create or drop (#6569): the server's state decides its undo, not the journal's result.</summary>
+    public bool IsPlanChange => Kind is AgentChangeKinds.PlanForce or AgentChangeKinds.PlanUnforce or AgentChangeKinds.PlanGuideCreate or AgentChangeKinds.PlanGuideDrop;
 
     /// <summary>True when an undo can be tried: nobody undid it, it is inside the window, and the kind has an undo. A store kind needs a done
     /// change. A plan force or unforce may be done, failed or unknown, because the undo reads the server first and decides from what it finds.</summary>
@@ -386,25 +386,36 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
     public const string SwitchWaitTimedOutMessage =
         "Waiting for an agent change in progress to finish took longer than 60 seconds, so the switch was not changed. Try again.";
 
+    /// <summary>What a person is told when the switch finds no service row to update (#6401): the service creates the row when it copies
+    /// darling.json into the store, and a switch must not create it first, or the service takes the store as set up and skips that copy.</summary>
+    public const string SwitchStoreNotSetUpMessage =
+        "The store is not set up yet; nothing changed. Try again after the service has started once.";
+
     /// <summary>Turns every agent change on or off at once and journals <c>agent_actions_switched</c> by <c>person:&lt;login&gt;</c>, in one
-    /// transaction. Off makes the gate refuse <c>actions_off</c>; nothing in flight is undone.</summary>
-    public async Task SetEnabledAsync(bool enabled, string login, CancellationToken cancellationToken = default)
+    /// transaction. Off makes the gate refuse <c>actions_off</c>; nothing in flight is undone. False when the store has no service row yet:
+    /// nothing was written (<see cref="SwitchStoreNotSetUpMessage"/>).</summary>
+    public Task<bool> SetEnabledAsync(bool enabled, string login, CancellationToken cancellationToken = default) =>
+        SetEnabledAsActorAsync(enabled, PersonActor(login), cancellationToken);
+
+    /// <summary><see cref="SetEnabledAsync"/> for a caller that is not a person (#6401): the MCP switch tool journals <c>mcp:</c> and the
+    /// token and client it came in on, so a person is never credited with what a tool did. <paramref name="actor"/> is written as is.
+    /// The write updates the service row and never creates it: false, with nothing written or journaled, when there is no row.</summary>
+    public async Task<bool> SetEnabledAsActorAsync(bool enabled, string actor, CancellationToken cancellationToken = default)
     {
-        var actor = PersonActor(login);
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        int updated;
         await using (var command = Command(connection, transaction, @"
-INSERT INTO config.config_service (id, agent_actions_enabled, updated_at, updated_by)
-VALUES (1, $1, now() AT TIME ZONE 'UTC', $2)
-ON CONFLICT (id) DO UPDATE SET agent_actions_enabled = EXCLUDED.agent_actions_enabled,
-    updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by", P(enabled), PText(actor)))
+UPDATE config.config_service
+   SET agent_actions_enabled = $1, updated_at = now() AT TIME ZONE 'UTC', updated_by = $2
+ WHERE id = 1", P(enabled), PText(actor)))
         {
             /* An agent change in progress holds the service row until its remote work ends (at most AgentActionRemoteWorkSeconds), and this
                write waits for it. The wait must outlast that work, or the switch gives up exactly when a slow server makes it matter (#5632). */
             command.CommandTimeout = Math.Max(_commandTimeoutSeconds, InvestigationRequestStore.AgentOffSwitchWaitSeconds);
             try
             {
-                await command.ExecuteNonQueryAsync(cancellationToken);
+                updated = await command.ExecuteNonQueryAsync(cancellationToken);
             }
             catch (Exception ex) when (ex is NpgsqlException { InnerException: TimeoutException } || ex is PostgresException { SqlState: PostgresErrorCodes.QueryCanceled })
             {
@@ -412,9 +423,15 @@ ON CONFLICT (id) DO UPDATE SET agent_actions_enabled = EXCLUDED.agent_actions_en
             }
         }
 
+        if (updated == 0)
+        {
+            return false;
+        }
+
         await JournalAsync(connection, transaction, "agent_actions_switched", actor, null, null,
             new JsonObject { ["enabled"] = enabled }.ToJsonString(), cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        return true;
     }
 
     /// <summary>
@@ -422,9 +439,13 @@ ON CONFLICT (id) DO UPDATE SET agent_actions_enabled = EXCLUDED.agent_actions_en
     /// that takes an advisory lock on the call (a second click waits, then sees <c>already_undone</c>), reads the target
     /// <c>FOR UPDATE</c>, compares and restores. Never throws for a refusal.
     /// </summary>
-    public async Task<AgentUndoResult> UndoAsync(long calledId, string login, CancellationToken cancellationToken = default)
+    public Task<AgentUndoResult> UndoAsync(long calledId, string login, CancellationToken cancellationToken = default) =>
+        UndoAsActorAsync(calledId, PersonActor(login), cancellationToken);
+
+    /// <summary><see cref="UndoAsync"/> for a caller that is not a person (#6401): the MCP undo tool journals <c>mcp:</c> and the token and
+    /// client it came in on. <paramref name="actor"/> is written as is. The web route and the tool share this one copy of the undo.</summary>
+    public async Task<AgentUndoResult> UndoAsActorAsync(long calledId, string actor, CancellationToken cancellationToken = default)
     {
-        var actor = PersonActor(login);
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 

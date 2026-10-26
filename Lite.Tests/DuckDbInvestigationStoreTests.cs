@@ -197,7 +197,7 @@ FROM investigation_requests WHERE request_id = '{first.RequestId}'"));
     }
 
     [Fact]
-    public async Task AClaimedRequest_JoinsAt29Minutes_AndAnAlert31MinutesAfterThatOpensANewOne_AndAReportedOneIsFinal()
+    public async Task AClaimedRequest_JoinsAt29Minutes_AndAnAlert31MinutesAfterThatOpensANewOne_AndAReportedOneTakesAQuietReFire()
     {
         const string Fallback = "7:Blocking";
         var first = (await _store.OpenOrJoinAsync(Alert(T0, keys: new[] { Fallback }), Ct)).RequestId!.Value;
@@ -214,13 +214,109 @@ FROM investigation_requests WHERE request_id = '{first.RequestId}'"));
         Assert.NotEqual(first, opened.RequestId);
         Assert.Equal("claimed", Scalar($"SELECT state FROM investigation_requests WHERE request_id = '{first}'"));
 
+        /* Report the second; an alert two minutes later, inside its window, joins it quietly (#6778). */
         var second = opened.RequestId!.Value;
         var secondClaim = await _store.ClaimAsync(second, "agent-a", Ct);
         Assert.Equal(InvestigationSubmitOutcome.Reported, await _store.SubmitAsync(Report(second, secondClaim.ClaimId!.Value), Ct));
         _now = T0.AddMinutes(62);
         var third = await _store.OpenOrJoinAsync(Alert(_now, keys: new[] { Fallback }), Ct);
-        Assert.Equal(InvestigationOpenOutcome.Opened, third.Outcome);
-        Assert.NotEqual(second, third.RequestId);
+        Assert.Equal(InvestigationOpenOutcome.Joined, third.Outcome);
+        Assert.Equal(second, third.RequestId);
+        Assert.False(third.Evented);
+    }
+
+    /// <summary>Opens a request on <paramref name="serverId"/> at <see cref="T0"/> and reports it (#6778). Each case uses its own
+    /// server, so the request one case opens is not the one the next case finds.</summary>
+    private async Task<Guid> OpenReportedAsync(int serverId)
+    {
+        var id = (await _store.OpenOrJoinAsync(Alert(T0, serverId: serverId) with { Severity = "warning" }, Ct)).RequestId!.Value;
+        var claim = await _store.ClaimAsync(id, "agent-a", Ct);
+        Assert.Equal(InvestigationSubmitOutcome.Reported, await _store.SubmitAsync(Report(id, claim.ClaimId!.Value), Ct));
+        return id;
+    }
+
+    [Fact]
+    public async Task AReportedRequest_TakesTheSameMetricAtTheSameSeverity_AsAQuietJoin()
+    {
+        var id = await OpenReportedAsync(7);
+        var requestsBefore = Scalar("SELECT count(*) FROM investigation_requests");
+
+        _now = T0.AddMinutes(5);
+        var again = await _store.OpenOrJoinAsync(Alert(_now) with { Severity = "warning" }, Ct);
+        Assert.Equal(InvestigationOpenOutcome.Joined, again.Outcome);
+        Assert.Equal(id, again.RequestId);
+        Assert.False(again.Evented);
+        Assert.Equal("2|reported", Scalar($"SELECT alert_count || '|' || state FROM investigation_requests WHERE request_id = '{id}'"));
+        Assert.Equal("1", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{id}' AND event = 'joined_quiet'"));
+        Assert.Equal(requestsBefore, Scalar("SELECT count(*) FROM investigation_requests"));
+
+        /* The window slides: 25 minutes after the join it joins again. */
+        _now = T0.AddMinutes(30);
+        Assert.Equal(id, (await _store.OpenOrJoinAsync(Alert(_now) with { Severity = "warning" }, Ct)).RequestId);
+    }
+
+    [Fact]
+    public async Task AReportedRequest_IsNotJoined_ByAHigherSeverity_ANewMetric_OrAnotherServer()
+    {
+        var higherId = await OpenReportedAsync(1);
+        var metricId = await OpenReportedAsync(2);
+        var serverId = await OpenReportedAsync(3);
+
+        _now = T0.AddMinutes(5);
+        var higher = await _store.OpenOrJoinAsync(Alert(_now, serverId: 1) with { Severity = "critical" }, Ct);
+        Assert.Equal(InvestigationOpenOutcome.Opened, higher.Outcome);
+        Assert.NotEqual(higherId, higher.RequestId);
+
+        var newMetric = await _store.OpenOrJoinAsync(Alert(_now, serverId: 2) with { MetricName = "Deadlocks", Severity = "warning" }, Ct);
+        Assert.Equal(InvestigationOpenOutcome.Opened, newMetric.Outcome);
+        Assert.NotEqual(metricId, newMetric.RequestId);
+
+        /* Server 3 has a reported request; the same family, metric and severity on server 4 opens its own. */
+        var otherServer = await _store.OpenOrJoinAsync(Alert(_now, serverId: 4) with { Severity = "warning" }, Ct);
+        Assert.Equal(InvestigationOpenOutcome.Opened, otherServer.Outcome);
+        Assert.NotEqual(serverId, otherServer.RequestId);
+        Assert.Equal("1", Scalar($"SELECT alert_count FROM investigation_requests WHERE request_id = '{serverId}'"));
+    }
+
+    [Fact]
+    public async Task AReportedRequest_IsNotJoined_AfterItResolved_AfterTheWindow_AfterTheCap_OrWhenClosed()
+    {
+        var resolved = await OpenReportedAsync(1);
+        var windowed = await OpenReportedAsync(2);
+        var capped = await OpenReportedAsync(3);
+        var closed = await OpenReportedAsync(4);
+
+        /* The sweep's D7 event: a resolved journal row. */
+        Exec($@"INSERT INTO investigation_journal (journal_id, event_time, request_id, route_id, server_id, event, actor, once_key)
+SELECT (SELECT coalesce(max(journal_id), 0) FROM investigation_journal) + 1, TIMESTAMP '2026-10-14 12:01:00', request_id, route_id, server_id, 'resolved', 'service', 'resolved:' || request_id::VARCHAR
+FROM investigation_requests WHERE request_id = '{resolved}'");
+        Exec($"UPDATE investigation_requests SET state = 'closed', closed_at = TIMESTAMP '2026-10-14 12:01:00' WHERE request_id = '{closed}'");
+
+        _now = T0.AddMinutes(5);
+        var afterResolve = await _store.OpenOrJoinAsync(Alert(_now, serverId: 1), Ct);
+        Assert.Equal(InvestigationOpenOutcome.Opened, afterResolve.Outcome);
+        Assert.NotEqual(resolved, afterResolve.RequestId);
+
+        var afterClose = await _store.OpenOrJoinAsync(Alert(_now, serverId: 4), Ct);
+        Assert.Equal(InvestigationOpenOutcome.Opened, afterClose.Outcome);
+        Assert.NotEqual(closed, afterClose.RequestId);
+
+        /* Server 3 joins every 29 minutes up to 232, which slides its window to the 4-hour cap. */
+        for (var minute = 29; minute <= 232; minute += 29)
+        {
+            _now = T0.AddMinutes(minute);
+            Assert.Equal(capped, (await _store.OpenOrJoinAsync(Alert(_now, serverId: 3), Ct)).RequestId);
+        }
+
+        /* 31 minutes after server 2's only alert; 241 minutes after server 3's first. */
+        _now = T0.AddMinutes(241);
+        var pastCap = await _store.OpenOrJoinAsync(Alert(_now, serverId: 3), Ct);
+        Assert.Equal(InvestigationOpenOutcome.Opened, pastCap.Outcome);
+        Assert.NotEqual(capped, pastCap.RequestId);
+
+        var late = await _store.OpenOrJoinAsync(Alert(_now, serverId: 2), Ct);
+        Assert.Equal(InvestigationOpenOutcome.Opened, late.Outcome);
+        Assert.NotEqual(windowed, late.RequestId);
     }
 
     [Fact]

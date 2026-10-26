@@ -157,8 +157,8 @@ a:hover { text-decoration: underline; }
 
 /* #6315: the phone-width shell. The top bar, backdrop and menu button are hidden above 768 px, so nothing at 769 px and wider
    changes. At 768 px and below the sidebar leaves the flow: a fixed overlay under the top bar, closed until the button opens it
-   (js/narrow-nav.js sets #app.nav-open). The content takes the full width with a 16 px gutter; a wide table, chart or tab bar
-   scrolls inside its own container (.table-wrap, .subtabs, ...), never the page. */
+   (js/narrow-nav.js sets #app.nav-open). The content takes the full width with a 16 px gutter; a wide table or chart
+   scrolls inside its own container (.table-wrap, ...), never the page. */
 #topbar, #nav-backdrop { display: none; }
 @media (max-width: 768px) {
   #app { display: block; }
@@ -1304,33 +1304,29 @@ pre.code {
 /* ─────────────────────────── server page: sub-tabs + range ─────────────────────────── */
 
 /* The web port of ViewerServerTab.xaml's per-server TabControl. Real <a href> links (the tab id rides in the
-   hash), so a tab is bookmarkable and middle-clickable; the strip scrolls horizontally on a narrow window
-   rather than wrapping into a block that pushes the panels off-screen. */
+   hash), so a tab is bookmarkable and middle-clickable. The strip wraps onto a second row on a narrow window, so every
+   tab stays readable: a scrolling strip showed the last tab cut off with nothing to say it scrolls (#6310 for the
+   Admin bar's ten tabs; the server and FinOps strips use the same rule). */
 .subtabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.15rem;
-  overflow-x: auto;
   border-bottom: 1px solid var(--border);
   margin-bottom: 1rem;
-  scrollbar-width: thin;
 }
 .subtab {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   padding: 0.45rem 0.8rem;
   font-size: 0.85rem;
   color: var(--muted);
   text-decoration: none;
   border-bottom: 2px solid transparent;
-  white-space: nowrap;
+  white-space: normal;
+  max-width: 100%;
 }
 .subtab:hover { color: var(--fg); background: rgba(127, 127, 127, 0.08); }
 .subtab.active { color: var(--fg); font-weight: 600; border-bottom-color: var(--accent); }
 .subtab:focus-visible { outline: 2px solid var(--muted); outline-offset: -2px; }
-
-/* #6310: the Admin bar has ten tabs, wider than a 1280 px window, and a scrolling strip showed the last one cut to "Enviro" with
-   nothing to say it scrolls. The Admin bar wraps onto a second row instead, so every tab is readable at any width. */
-.subtabs.wrap { flex-wrap: wrap; overflow-x: visible; }
-.subtabs.wrap .subtab { flex: 0 1 auto; white-space: normal; max-width: 100%; }
 
 /* The tab's honesty note sits between the tab strip and the panels — it describes what this tab does NOT do,
    so it belongs above the panels it qualifies rather than buried under them. */
@@ -1415,9 +1411,10 @@ pre.code {
 .liveness-notes li { margin: 0.2rem 0; }
 
 /* FinOps page (#4843): tab strip and panel body shared by the sub-tabs. */
-.finops-tabs { flex-wrap: wrap; overflow-x: visible; }
 .finops-body { display: block; }
 .finops-panel { min-width: 0; }
+/* FinOps > Recommendations: the Finding and Detail prose cells keep a readable width; the grid's .table-wrap scrolls sideways, as Job History's message column does. */
+table.data td.rec-text { min-width: 16rem; }
 
 /* Locking & Contention index detail pane (#5311): opens above the table on a row click. */
 .locking-detail:empty { display: none; }

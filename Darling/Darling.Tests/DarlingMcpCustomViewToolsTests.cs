@@ -634,9 +634,9 @@ public sealed class ComposeUnknownServerMessageTests
     [Fact]
     public void AnUnregisteredNameOverNothing_IsUnknown_AndNamesTheServer()
     {
-        var message = DarlingWebEndpoints.UnknownServerMessage(new[] { "h4-walk-throwaway" }, new[] { "h4-walk-throwaway" }, NullRow);
+        var message = ComposePanelRunner.UnknownServerMessage(new[] { "h4-walk-throwaway" }, new[] { "h4-walk-throwaway" }, NullRow);
         Assert.Equal("No server named 'h4-walk-throwaway' is registered, and nothing is stored under that name in this time range.", message);
-        Assert.NotNull(DarlingWebEndpoints.UnknownServerMessage(new[] { "a", "b" }, new[] { "a", "b" }, new System.Text.Json.Nodes.JsonArray()));
+        Assert.NotNull(ComposePanelRunner.UnknownServerMessage(new[] { "a", "b" }, new[] { "a", "b" }, new System.Text.Json.Nodes.JsonArray()));
     }
 
     /// <summary>W13: a registry lookup that FAULTED answers every name as unregistered (the old-read fallback), which is not a finding.
@@ -644,8 +644,8 @@ public sealed class ComposeUnknownServerMessageTests
     [Fact]
     public void AFailedRegistryLookup_NeverMakesARegisteredServerUnknown()
     {
-        Assert.Null(DarlingWebEndpoints.UnknownServerMessage(new[] { "a" }, new[] { "a" }, NullRow, lookupFailed: true));
-        Assert.NotNull(DarlingWebEndpoints.UnknownServerMessage(new[] { "a" }, new[] { "a" }, NullRow, lookupFailed: false));
+        Assert.Null(ComposePanelRunner.UnknownServerMessage(new[] { "a" }, new[] { "a" }, NullRow, lookupFailed: true));
+        Assert.NotNull(ComposePanelRunner.UnknownServerMessage(new[] { "a" }, new[] { "a" }, NullRow, lookupFailed: false));
     }
 
     /// <summary>The lookup reports its own fault to the caller (a store nobody listens on is the fault), and still answers every name.</summary>
@@ -668,16 +668,16 @@ public sealed class ComposeUnknownServerMessageTests
     public void ARemovedServersRetainedRows_ARegisteredServer_AndTheWholeFleet_AreNeverUnknown()
     {
         var rows = new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject { ["value"] = 12.5 });
-        Assert.Null(DarlingWebEndpoints.UnknownServerMessage(new[] { "gone" }, new[] { "gone" }, rows));
-        Assert.Null(DarlingWebEndpoints.UnknownServerMessage(new[] { "a" }, null, NullRow));
-        Assert.Null(DarlingWebEndpoints.UnknownServerMessage(new[] { "a", "b" }, new[] { "b" }, NullRow));
-        Assert.Null(DarlingWebEndpoints.UnknownServerMessage(null, null, NullRow));
+        Assert.Null(ComposePanelRunner.UnknownServerMessage(new[] { "gone" }, new[] { "gone" }, rows));
+        Assert.Null(ComposePanelRunner.UnknownServerMessage(new[] { "a" }, null, NullRow));
+        Assert.Null(ComposePanelRunner.UnknownServerMessage(new[] { "a", "b" }, new[] { "b" }, NullRow));
+        Assert.Null(ComposePanelRunner.UnknownServerMessage(null, null, NullRow));
     }
 
     [Fact]
     public void TheWebRoute_AnswersAnUnknownServerAs404WithItsMessage()
     {
-        var outcome = DarlingWebEndpoints.ComposeRunOutcome.NotFound("No server named 'x' is registered, and nothing is stored under that name in this time range.");
+        var outcome = ComposeRunOutcome.NotFound("No server named 'x' is registered, and nothing is stored under that name in this time range.");
         Assert.True(outcome.IsNotFound);
         var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, 1, System.Threading.CancellationToken.None);
         Assert.Equal(404, (result as Microsoft.AspNetCore.Http.IStatusCodeHttpResult)?.StatusCode);

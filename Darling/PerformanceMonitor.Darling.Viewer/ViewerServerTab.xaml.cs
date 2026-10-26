@@ -71,9 +71,9 @@ public partial class ViewerServerTab : UserControl
     internal const int LongQueriesInnerTabIndex = 18;
 
     /* ── The PostgreSQL run (#2530) ───────────────────────────────────────────────────────────────
-       Indices 19-24 CONTINUE the same TabControl rather than living in a second one, and every index
+       Indices 19-25 CONTINUE the same TabControl rather than living in a second one, and every index
        above stays exactly where it was. That is the whole reason for the layout: for a PostgreSQL server
-       the nineteen SQL Server TabItems are collapsed and these six are shown, so the two sets never
+       the nineteen SQL Server TabItems are collapsed and these seven are shown, so the two sets never
        renumber each other and no drill-down that keys on a constant above can be broken by this feature.
 
        ViewerPostgresTabs is the registry these belong to — headers, panel-to-collector mapping and the
@@ -118,6 +118,10 @@ public partial class ViewerServerTab : UserControl
     public ViewerServerTab(ViewerDataService dataService, DarlingServer server, ViewerPreferences? preferences = null, ViewerServerStore? serverStore = null)
     {
         _dataService = dataService;
+        _scheduleOverrides = new ViewerScheduleOverridesCache(
+            async () => await dataService.GetCollectorSchedulesAsync(),
+            () => DateTime.UtcNow,
+            ex => ViewerLogger.Warn("ViewerServerTab", $"collector schedule read failed, notes use the shipped cadence | {ex.GetType().Name}: {ex.Message}"));
         _server = server;
         _serverStore = serverStore;
         /* #1319: seed the per-server database filter from the viewer registry (viewer-servers.json). */
@@ -129,6 +133,11 @@ public partial class ViewerServerTab : UserControl
             }
         }
         InitializeComponent();
+        // #6652: the stacked-chart tabs scroll at small sizes; the wheel over a chart stays that chart's zoom.
+        PerformanceMonitor.Ui.ChartLayout.KeepWheelOnPlot(
+            QueryDurationTrendChart, ProcDurationTrendChart, QueryStoreDurationTrendChart, ExecutionCountTrendChart,
+            FileIoReadChart, FileIoWriteChart, TempDbChart, TempDbSizeChart, TempDbFileIoChart,
+            LockWaitTrendChart, BlockingTrendChart, DeadlockTrendChart);
         /* #5565: every filtered grid below this tab keeps its column filters across a restart under this server. */
         ColumnFilterScope.SetServer(this, _server.ServerName);
 
@@ -371,7 +380,7 @@ public partial class ViewerServerTab : UserControl
             var freshness = await _dataService.GetServerFreshnessAsync();
             ServerFreshnessText.Text = FreshnessLabel(
                 freshness.TryGetValue(_server.ServerId, out var lastUtc) ? lastUtc : null,
-                _server.RegisteredAt, DateTime.UtcNow);
+                _server.RegisteredAt, DateTime.UtcNow, TabDisplayZone);
         }
         catch
         {
@@ -383,8 +392,10 @@ public partial class ViewerServerTab : UserControl
     /// The toolbar's freshness text (#6135): when the newest collection landed, and for a server the Overview card
     /// calls Offline the same <see cref="FleetRollup.OfflineNote"/> sentence, so a red dot and an old time are not
     /// all the header says. The offline rule is the card's own, <see cref="ServerSummaryItem.ClassifyFreshness(DateTime?, DateTime?, DateTime)"/>.
+    /// The time is written in <paramref name="zone"/>, the tab's own server clock, because the process-wide clock may belong to
+    /// another server's tab by the time this awaited read returns.
     /// </summary>
-    internal static string FreshnessLabel(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc)
+    internal static string FreshnessLabel(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, TimeZoneInfo? zone = null)
     {
         var offline = ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, registeredAtUtc, nowUtc) == ServerFreshness.Offline;
         if (lastCollectionUtc is null)
@@ -392,7 +403,7 @@ public partial class ViewerServerTab : UserControl
             return offline ? "no collection retained" : "no data collected yet";
         }
 
-        var collected = $"collected {ViewerTimeHelper.FormatForDisplay(lastCollectionUtc.Value, "yyyy-MM-dd HH:mm")}";
+        var collected = $"collected {ViewerTimeHelper.FormatForDisplay(lastCollectionUtc.Value, zone ?? ViewerTimeHelper.CurrentDisplayZone(), "yyyy-MM-dd HH:mm")}";
         return offline ? $"{collected}. {FleetRollup.OfflineNote}" : collected;
     }
 

@@ -33,7 +33,7 @@ public class StoryNamedHopsTests
     {
         /* A key joins by a one-row edit in FactIdentity that says what it names; this pin is the reviewer's
            prompt to read that row. Exact set, exact prefix. */
-        Assert.Equal(["BLOCKING_CHAIN", "RUNNING_JOBS", "ANOMALY_OBJECT_GROWTH", "ANOMALY_OBJECT_CONTENTION"], FactIdentity.SqlServerKeys);
+        Assert.Equal(["BLOCKING_CHAIN", "RUNNING_JOBS", "ANOMALY_OBJECT_GROWTH", "ANOMALY_OBJECT_CONTENTION", "QUERY_SPILLS", "PARAMETER_SENSITIVITY"], FactIdentity.SqlServerKeys);
         Assert.Equal("BAD_ACTOR_", FactIdentity.SqlServerBadActorPrefix);
         Assert.All(FactIdentity.SqlServerKeys, k => Assert.True(FactIdentity.IsIdentityBearingKey(k)));
         Assert.True(FactIdentity.IsIdentityBearingKey("BAD_ACTOR_0x1234"));
@@ -56,6 +56,12 @@ public class StoryNamedHopsTests
             FactIdentity.Describe(new Fact { Key = "ANOMALY_OBJECT_GROWTH", ObjectName = "dbo.Orders", DatabaseName = "Sales" }));
         Assert.Equal("table `dbo.Orders`",
             FactIdentity.Describe(new Fact { Key = "ANOMALY_OBJECT_CONTENTION", ObjectName = "dbo.Orders" }));
+        /* #6640: the two query facts name the query they rank first, so a hop that consumes them still says which. */
+        Assert.Equal("most spilled query `Sales/0xAB`",
+            FactIdentity.Describe(new Fact { Key = "QUERY_SPILLS", ObjectName = "Sales/0xAB" }));
+        Assert.Equal("most sensitive plan `Sales/0xAB/0xCD`",
+            FactIdentity.Describe(new Fact { Key = "PARAMETER_SENSITIVITY", ObjectName = "Sales/0xAB/0xCD" }));
+        Assert.Null(FactIdentity.Describe(new Fact { Key = "QUERY_SPILLS" }));
         Assert.Equal("query hash `0xABCD` in `Sales`",
             FactIdentity.Describe(new Fact { Key = "BAD_ACTOR_0xABCD", DatabaseName = "Sales" }));
     }
@@ -213,6 +219,28 @@ public class StoryNamedHopsTests
     /* ── the real SQL Server shape, through the real scorer and graph ── */
 
     /// <summary>
+    /// #6640: QUERY_SPILLS is a hop of MEMORY_GRANT_PENDING in today's graph, so the roster entry puts the spilling query's
+    /// name on the root card of a grant-pressure story. Without the entry the story is the same and the card names nothing.
+    /// </summary>
+    [Fact]
+    public void MemoryGrantPendingRootConsumingQuerySpills_NamesTheSpillingQueryOnTheRootCard()
+    {
+        var facts = new List<Fact>
+        {
+            Scored("MEMORY_GRANT_PENDING", 1.0),
+            new() { Source = "queries", Key = "QUERY_SPILLS", Value = 1100, BaseSeverity = 0.4, Severity = 0.4, ObjectName = "Sales/0xAB",
+                    Metadata = new() { ["total_spills"] = 1100, ["spilling_query_count"] = 2 },
+                    Ranked = [new("Sales/0xAB", "Sales", 800), new("Sales/0xCD", "Sales", 300)] },
+        };
+        var story = Assert.Single(new InferenceEngine(new RelationshipGraph()).BuildStories(facts));
+        Assert.Equal(["MEMORY_GRANT_PENDING", "QUERY_SPILLS"], story.Path);
+
+        FactAdvice.PopulateStoryText([story], facts);
+
+        Assert.Contains($" {FactIdentity.SentenceMarker} `QUERY_SPILLS` (severity 0.40) — most spilled query `Sales/0xAB`: ", Investigation(story), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The SQL Server twin of the exit check's PostgreSQL defect: LCK at 1.0 (a tenth of the window in lock waits)
     /// walks to BLOCKING_CHAIN at 0.7 (depth 3, sleeping apex ×1.4) and consumes it — before this change the only
     /// card said "lock waits" and the session at the head of the chain was named nowhere. Now the LCK card's
@@ -227,7 +255,8 @@ public class StoryNamedHopsTests
             new() { Source = "blocking", Key = "BLOCKING_CHAIN", Value = 3, ServerId = 1, Metadata = new()
                 {
                     ["worst_chain_depth"] = 3, ["worst_chain_victim_count"] = 2, ["worst_apex_spid"] = 57, ["worst_apex_sleeping"] = 1,
-                    ["worst_chain_max_wait_ms"] = 45_000, ["total_reconstructed_chains"] = 1, ["deepest_chain_overall"] = 3,
+                    // Under the 30 s duration mark, so the depth-3 structure (0.5, x1.4 for the sleeping head) is what grades.
+                    ["worst_chain_max_wait_ms"] = 20_000, ["total_reconstructed_chains"] = 1, ["deepest_chain_overall"] = 3,
                     ["max_victim_count_overall"] = 2, ["depth_capped"] = 0, ["traversal_truncated"] = 0, ["cycle_detected"] = 0,
                 } },
         };

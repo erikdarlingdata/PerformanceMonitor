@@ -138,7 +138,6 @@ public sealed class QueryStoreBackfill
     private readonly DarlingCollectorRunner _runner;
     private readonly CollectorDeltaCalculator _deltas;
     private readonly ILogger? _logger;
-    private readonly Func<bool> _capturePlans;
 
     /* Whether this store has TimescaleDB continuous aggregates, read LIVE rather than captured: the worker
        sets its flag during startup detection and this class is constructed after that, but reading it through
@@ -154,7 +153,7 @@ public sealed class QueryStoreBackfill
     /// no cache: every tick reads the list, as before.</summary>
     private readonly QueryStoreWriteFence? _writeFence;
 
-    /* #2164: the per-database text budget override in MB, read live like _capturePlans. Backfill slices
+    /* #2164: the per-database text budget override in MB, read live. Backfill slices
        carry the SAME nvarchar(max) query-text/plan-XML payload over the same link as a live tick, so the
        operator knob has to reach here too — a knob that only bounds the tick would leave the heavier of
        the two paths at the compile-time 64 MB, which is precisely the drain the knob exists to shorten. */
@@ -165,7 +164,6 @@ public sealed class QueryStoreBackfill
         DarlingCollectorRunner runner,
         CollectorDeltaCalculator deltas,
         ILogger? logger,
-        Func<bool>? capturePlans = null,
         Func<int>? textBudgetMb = null,
         Func<bool>? hasContinuousAggregates = null,
         Func<int, int>? databaseStatesIntervalMinutes = null,
@@ -176,7 +174,6 @@ public sealed class QueryStoreBackfill
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
         _logger = logger;
-        _capturePlans = capturePlans ?? (() => true);
         /* Null provider = keep the collector's compile-time budget (tests and any non-Darling host). */
         _textBudgetMb = textBudgetMb ?? (() => 0);
         _hasContinuousAggregates = hasContinuousAggregates ?? (() => true);
@@ -385,6 +382,11 @@ public sealed class QueryStoreBackfill
         }
     }
 
+    /// <summary>#6771: whether a slice for this server fetches plan XML: the server's own <c>capture_plans</c> when it has one, else the
+    /// service-wide setting, read live. Aliases <see cref="DarlingCollectorRunner.CapturePlansFor"/> rather than re-spelling it, so the
+    /// two cannot drift (#3684).</summary>
+    internal bool CapturePlanXmlFor(ServerRuntime server) => _runner.CapturePlansFor(server.CapturePlans);
+
     /// <summary>
     /// One byte-budgeted, newest-first slice for one database: probe PRODUCTVERSION (the same
     /// version gates as the live path, so the reader ordinals cannot differ), run the backfill
@@ -421,7 +423,7 @@ public sealed class QueryStoreBackfill
             Deltas = _deltas,
             Target = server.Target,
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
-            CapturePlanXml = _capturePlans(),
+            CapturePlanXml = CapturePlanXmlFor(server),
             /* #2164: 0 from the default provider means "no override" — the collector keeps its constant. */
             TextByteBudgetOverride = _textBudgetMb() > 0 ? _textBudgetMb() * 1024 * 1024 : null,
         };

@@ -10,6 +10,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -79,9 +80,11 @@ public sealed class McpConfigReadAvoidsSecretColumnsTests
                    than filtered by line prefix: a block comment's continuation lines in this codebase carry
                    no asterisk, so a prefix filter reads the second line of an explanatory block as code and
                    reports the prose as a use. Both needles are property accesses, so blanking literal text
-                   along with the comments costs nothing here. */
+                   along with the comments costs nothing here. A member whose name only starts with them (the #6392
+                   tool's own `SmtpPort` and `SmtpUser`) is not a use of the config sections, so the needle matches
+                   a whole member name, not a prefix. */
                 var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(f));
-                return code.Contains(".Smtp", StringComparison.Ordinal) || code.Contains(".Webhooks", StringComparison.Ordinal);
+                return Regex.IsMatch(code, @"\.(Smtp|Webhooks)\b", RegexOptions.CultureInvariant);
             })
             .Select(Path.GetFileName)
             .ToArray();

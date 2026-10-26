@@ -53,6 +53,12 @@ public sealed class LiteInvestigationEvidenceCapture
     public const int MaxSectionBytes = InvestigationToolCore.MaxEvidenceBytes;
     public const string HighCpuMetric = AlertEngine.CpuPersistenceMetric;
     public const string DeadlockMetric = AlertEngine.DeadlockWatermarkMetric;
+
+    /// <summary>The Client Timeouts alert's metric (#6553): a request opened on it gets the <c>client_timeouts</c> section.</summary>
+    public const string ClientTimeoutsMetric = AttentionEvaluator.MetricName;
+
+    /// <summary>Characters of a top statement's sample text kept in <c>client_timeouts</c>.</summary>
+    public const int ClientTimeoutStatementMaxChars = 1000;
     public static readonly TimeSpan BreachLeadIn = TimeSpan.FromMinutes(15);
     public static readonly TimeSpan BreachTail = TimeSpan.FromMinutes(1);
     public static readonly TimeSpan PendingGrace = TimeSpan.FromMinutes(20);
@@ -88,6 +94,7 @@ public sealed class LiteInvestigationEvidenceCapture
         {
             [HighCpuMetric] = Sections,
             [DeadlockMetric] = new[] { "deadlocks" },
+            [ClientTimeoutsMetric] = new[] { "client_timeouts" },
             ["family:" + InvestigationFamily.QueryPerformance] = new[] { "regression_targets" },
         };
         foreach (var metric in BlockingMetrics)
@@ -107,6 +114,7 @@ public sealed class LiteInvestigationEvidenceCapture
         ["blocking_chains"] = "blocked_process_report",
         ["head_blocker"] = "blocked_process_report",
         ["regression_targets"] = "query_store",
+        ["client_timeouts"] = AttentionWindowSql.CollectorName,
     };
 
     internal const string CollectorRunsSql = @"
@@ -223,7 +231,7 @@ LIMIT 10";
 SELECT event_time, database_name, blocked_spid, blocked_ecid, blocking_spid, blocking_ecid, wait_time_ms, wait_resource, lock_mode,
        contentious_object, blocked_sql_text, blocking_sql_text, blocked_login_name, blocking_login_name, blocked_host_name,
        blocking_host_name, blocking_client_app, blocking_status, blocked_process_report_xml
-FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev
+FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql) + @" AS ev
 ORDER BY event_time DESC, wait_time_ms DESC
 LIMIT 500";
 
@@ -288,6 +296,14 @@ WHERE b.newest = 1
   AND g.plan_id <> b.plan_id
   AND g.cpu_per_exec_us > 0
   AND b.cpu_per_exec_us >= $5 * g.cpu_per_exec_us
+  -- #6548: SQL Server own housekeeping statements (change tracking cleanup and the like) are not application code. Left
+  -- out BEFORE the row cap, so they cannot use up its rows. Any row of the query carrying the text is enough.
+  AND NOT EXISTS (SELECT 1 FROM v_query_store_stats AS x
+                  WHERE x.server_id = $1
+                    AND x.database_name = b.database_name
+                    AND x.query_id = b.query_id
+                    AND x.last_execution_time >= $2
+                    AND regexp_matches(lower(x.query_text), '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"'))
 ORDER BY b.cpu_per_exec_us / g.cpu_per_exec_us DESC, b.database_name, b.query_id
 LIMIT $6";
 
@@ -509,6 +525,7 @@ ORDER BY collection_time DESC";
             "deadlocks" => new SectionRead(await ReadDeadlocksAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             "blocking_chains" => await ReadBlockingChainsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false),
             "head_blocker" => new SectionRead(await ReadHeadBlockersAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
+            "client_timeouts" => new SectionRead(await ReadClientTimeoutsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             "regression_targets" => new SectionRead(await ReadRegressionTargetsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             _ => new SectionRead(new List<JsonObject>()),
         };
@@ -1130,8 +1147,60 @@ ORDER BY collection_time DESC";
         return array;
     }
 
+    /// <summary>
+    /// <c>client_timeouts</c> (#6553), the twin of Darling's section: the count of the window's event_counter rows (exact), and the
+    /// <c>top_client_apps</c>, <c>top_hosts</c>, <c>top_databases</c> and <c>top_statements</c> (a sample text each, cut to
+    /// <see cref="ClientTimeoutStatementMaxChars"/>, field <c>sql_text</c> so the statement-class masking covers it) from the shared
+    /// <see cref="AttentionWindowSql"/> statements over <c>v_attention_events</c>. One row; a window with no count and no sampled
+    /// event is a true negative: an empty list.
+    /// </summary>
+    private Task<List<JsonObject>> ReadClientTimeoutsAsync(int serverId, DateTime from, DateTime to, CancellationToken cancellationToken) =>
+        WithConnectionAsync(async connection =>
+        {
+            async Task<List<T>> Query<T>(string sql, Func<DuckDBDataReader, T> map)
+            {
+                using var command = Command(connection, sql, serverId, from, to);
+                var result = new List<T>();
+                using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                    result.Add(map((DuckDBDataReader)reader));
+                return result;
+            }
+
+            var count = (await Query(AttentionWindowSql.Counts("v_attention_events", bounded: true), r => r.GetInt64(1)).ConfigureAwait(false)).Sum();
+            var apps = await Query(AttentionWindowSql.TopBy("v_attention_events", "client_app_name", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
+            var hosts = await Query(AttentionWindowSql.TopBy("v_attention_events", "client_hostname", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
+            var databases = await Query(AttentionWindowSql.TopBy("v_attention_events", "database_name", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
+            var statements = await Query(AttentionWindowSql.TopStatements("v_attention_events", bounded: true),
+                r => (Fingerprint: r.GetString(0), Events: r.GetInt64(1), Text: r.IsDBNull(2) ? null : r.GetString(2))).ConfigureAwait(false);
+            if (count == 0 && apps.Count == 0 && hosts.Count == 0 && databases.Count == 0 && statements.Count == 0)
+                return new List<JsonObject>();
+
+            static JsonArray Named(IEnumerable<(string Name, long Events)> items, string key) =>
+                new(items.Select(i => (JsonNode?)new JsonObject { [key] = i.Name, ["sampled_events"] = i.Events }).ToArray());
+
+            return new List<JsonObject>
+            {
+                new()
+                {
+                    ["count"] = count,
+                    ["top_client_apps"] = Named(apps, "client_app_name"),
+                    ["top_hosts"] = Named(hosts, "client_hostname"),
+                    ["top_databases"] = Named(databases, "database_name"),
+                    ["top_statements"] = new JsonArray(statements.Select(st => (JsonNode?)new JsonObject
+                    {
+                        ["statement_fingerprint"] = st.Fingerprint,
+                        ["sampled_events"] = st.Events,
+                        ["sql_text"] = Cut(st.Text, ClientTimeoutStatementMaxChars),
+                    }).ToArray()),
+                    ["note"] = "count is exact (the session's event_counter). The lists come from sampled ring-buffer events, a subset: they show who and what was timing out, never how many.",
+                },
+            };
+        }, cancellationToken);
+
+    /* #6579: cut at a text-element boundary, like ClientTimeoutsRead, so a surrogate pair or combining sequence is never split. */
     private static string? Cut(string? text, int max) =>
-        string.IsNullOrEmpty(text) ? null : text.Length <= max ? text : text[..max];
+        string.IsNullOrEmpty(text) ? null : text.Length <= max ? text : text[..McpHelpers.TextElementCutLength(text, max)];
 
     /// <summary>Parses collected XML with DTDs refused; null for none or XML that does not parse.</summary>
     private static XElement? ParseXml(string? xml)

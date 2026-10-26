@@ -45,6 +45,9 @@ public enum MuteRegistration
 /// </summary>
 public sealed record MuteWriteResult(MuteRegistration Registration, string? StoryPath);
 
+/// <summary>A mute row an unmute removed (#6403): what the unmute answer reports as <c>previous</c> and what its undo mute carries.</summary>
+public sealed record RemovedMute(long MuteId, string StoryPath, DateTime MutedDate, string? Reason);
+
 /// <summary>
 /// Persists analysis findings to DuckDB and checks for muted story hashes.
 /// Handles the write side of the analysis pipeline — after the engine produces
@@ -614,11 +617,11 @@ RETURNING story_path";
 DELETE FROM analysis_muted
 WHERE story_path_hash = $1
   AND COALESCE(server_id, 0) = COALESCE($2, 0)
-RETURNING mute_id";
+RETURNING mute_id, story_path, muted_date, reason";
 
     /// <summary>
     /// Removes the mute registered for <paramref name="storyPathHash"/> in one scope, so the pattern appears in
-    /// analysis runs again, and returns how many registry rows it removed (0 when the scope held none, which is
+    /// analysis runs again, and returns the registry rows it removed (none when the scope held none, which is
     /// not an error). <paramref name="serverId"/> 0 is the all-servers scope, as it is for
     /// <see cref="MuteStoryAsync"/>. Findings the muted pattern would have produced while it was muted were never
     /// stored, so nothing comes back until the next analysis pass finds the pattern again.
@@ -634,7 +637,7 @@ RETURNING mute_id";
     /// does: the MCP passes none, but a method written like every tokened read here needs no exemption from the
     /// pass-token census.</para>
     /// </summary>
-    public async Task<int> UnmuteStoryAsync(int serverId, string storyPathHash, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<RemovedMute>> UnmuteStoryAsync(int serverId, string storyPathHash, CancellationToken cancellationToken = default)
     {
         using var writeLock = _duckDb.AcquireWriteLock();
         using var connection = _duckDb.CreateConnection();
@@ -645,11 +648,15 @@ RETURNING mute_id";
         cmd.Parameters.Add(new DuckDBParameter { Value = storyPathHash });
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId == 0 ? (object)DBNull.Value : serverId });
 
-        var removed = 0;
+        var removed = new List<RemovedMute>();
         using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            removed++;
+            removed.Add(new RemovedMute(
+                reader.GetInt64(0),
+                reader.GetString(1),
+                reader.GetDateTime(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3)));
         }
 
         return removed;

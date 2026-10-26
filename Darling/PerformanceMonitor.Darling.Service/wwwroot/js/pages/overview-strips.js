@@ -132,7 +132,8 @@ export function buildStrips(reads) {
   };
 
   const waits = {
-    key: "waits", title: "Waits", unit: "ms/sec",
+    /* From 0 like the other four strips: an axis zoomed to 292-500 made a small swing in wait time look like a spike. */
+    key: "waits", title: "Waits", unit: "ms/sec", min: 0,
     series: [{ label: "Wait time", color: "#ffb74d", points: toTimed(rowsOf(reads.waits, "trend"), "time", (r) => r.wait_time_ms_per_second) }],
     note: note(reads.waits, "No wait samples in this window."),
   };

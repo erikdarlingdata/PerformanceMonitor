@@ -318,6 +318,7 @@ public sealed partial class PgFactCollector : IFactCollector
         TempDbSql,
         MemoryGrantSql,
         QueryStatsSql,
+        QuerySpillsRankedSql,
         ParameterSensitivitySql,
         PlanRegressionSql,
         PlanRegressionTableSql,

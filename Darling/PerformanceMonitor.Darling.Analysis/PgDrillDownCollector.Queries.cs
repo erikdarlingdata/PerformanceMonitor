@@ -987,6 +987,14 @@ SELECT
 FROM scored
 WHERE regression_factor >= 2
 AND   latest_total_cpu_us >= 10000000
+-- #6548: SQL Server own housekeeping statements are not application code; left out before the LIMIT, as the PLAN_REGRESSION fact does.
+AND   NOT EXISTS (SELECT 1 FROM query_store_text AS x
+                      WHERE x.server_id = $1
+                        AND x.database_name = scored.database_name
+                        AND x.query_id = scored.query_id
+                        AND (lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"'
+                          -- #6665: or the monitor's own statement (its collector-side drop never fires on Darling)
+                          OR " + PerformanceMonitor.Darling.Storage.QueryStoreSelfStatement.SelfOfStoredText + @"))
 ORDER BY regression_factor DESC
 LIMIT 5";
 
@@ -1154,6 +1162,14 @@ top_five AS
     FROM scored
     WHERE regression_factor >= 2
     AND   latest_total_cpu_us >= 10000000
+    -- #6548: as in the table read above.
+    AND   NOT EXISTS (SELECT 1 FROM query_store_text AS x
+                          WHERE x.server_id = $1
+                            AND x.database_name = scored.database_name
+                            AND x.query_id = scored.query_id
+                            AND (lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"'
+                          -- #6665: or the monitor's own statement (its collector-side drop never fires on Darling)
+                          OR " + PerformanceMonitor.Darling.Storage.QueryStoreSelfStatement.SelfOfStoredText + @"))
     ORDER BY regression_factor DESC
     LIMIT 5
 )

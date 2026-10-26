@@ -116,21 +116,43 @@ public partial class LocalDataService
     /// and take at most <c>maxRows / FailureShareDivisor</c> slots (more only when the cost rows leave room).
     /// </summary>
     public async Task<List<QueryStoreRegressionRow>> GetQueryStoreRegressionsAsync(
-        int serverId, int hoursBack = 24, int maxRows = 50, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+        int serverId, int hoursBack = 24, int maxRows = 50, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null,
+        IReadOnlyList<string>? excludedDatabases = null, DateTime? dataStartUtc = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
+
+        /* #6750: where the server's Query Store data starts, the instant the tool's window notice reports as effective_start
+           (McpQueryTools.EffectiveWindowStart over GetQueryWindowFloorAsync). The tool already probes it for that notice, so it
+           passes the answer in (dataStartUtc) and the read makes no second probe. A caller that passes none gets the same probe
+           here: one MIN over the rows from the baseline's start, and one more only when that row sits after the start. It is
+           read before this read's own connection opens, as the probe opens one of its own. It only DIVIDES: the row filters
+           below keep the baseline's start. */
+        var dataStart = dataStartUtc
+            ?? Mcp.McpQueryTools.EffectiveWindowStart(
+                await GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, serverId, baselineStartTime, endTime), baselineStartTime);
+
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
-        var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var baselineParamIndex = 4 + dbValues.Count;
         var limitIndex = baselineParamIndex + 1;
+        /* #6654: the databases the server dropped, left out of the candidates before the rank and the cap (the exclusion binds after the limit). */
+        var excludeClause = BuildDbExcludeClause(excludedDatabases, "f.database_name", limitIndex + 1, out var excludeValues);
 
-        /* The per-hour rates divide by each window's own length: the baseline is [baseline start, window start), the recent
-           window [window start, window end]. Both are numbers computed here, written as invariant literals. */
-        var baseHours = (startTime - baselineStartTime).TotalHours.ToString("R", CultureInfo.InvariantCulture);
-        var recentHours = (endTime - startTime).TotalHours.ToString("R", CultureInfo.InvariantCulture);
+        /* The per-hour rates divide by the hours each side HOLDS (#6750), not the hours its window names: the baseline is
+           [baseline start, window start) and the store holds it from the data start, the recent window [window start, window end]
+           and the store holds it from the later of the two. Both are numbers computed here, written as invariant literals. A side
+           that holds no hour divides by NULL, so its per-hour rate is NULL as Darling's NULLIF gives (a zero literal would depend
+           on the engine's division by zero). When the store holds the whole baseline the two equal the old whole windows.
+           Darling's gates count a baseline that holds no hours as empty, because there a baseline row can have runs while it holds
+           none (its rows are filtered on last_execution_time). Here they need no such arm: the baseline rows are filtered on
+           collection_time < $2, and the data start is at or before the first row's collection_time (GetQueryWindowFloorAsync), so
+           a baseline with any row holds a positive number of hours (#6750). */
+        static string Hours(TimeSpan held) => held > TimeSpan.Zero ? held.TotalHours.ToString("R", CultureInfo.InvariantCulture) : "CAST(NULL AS DOUBLE)";
+        var baseHours = Hours(startTime - (dataStart > baselineStartTime ? dataStart : baselineStartTime));
+        var recentHours = Hours(endTime - (dataStart > startTime ? dataStart : startTime));
         var limit = "CAST($" + limitIndex + " AS INTEGER)";
 
         command.CommandText = @"
@@ -312,7 +334,7 @@ qualified AS (
                  ELSE 2 END) AS failure_rank,
         (f.recent_dur_ms - f.base_dur_ms) * f.recent_execs AS additional_duration_ms
     FROM flagged AS f
-    WHERE f.is_cost OR f.is_timeouts OR f.is_errors
+    WHERE (f.is_cost OR f.is_timeouts OR f.is_errors)" + excludeClause + @"
 ),
 ranked AS (
     SELECT
@@ -403,6 +425,8 @@ LIMIT " + limit;
             command.Parameters.Add(new DuckDBParameter { Value = db });
         command.Parameters.Add(new DuckDBParameter { Value = baselineStartTime });
         command.Parameters.Add(new DuckDBParameter { Value = maxRows });
+        foreach (var excluded in excludeValues)
+            command.Parameters.Add(new DuckDBParameter { Value = excluded });
 
         var rows = new List<QueryStoreRegressionRow>();
         var textKeys = new List<(long? Id, DateTime? Time)>();

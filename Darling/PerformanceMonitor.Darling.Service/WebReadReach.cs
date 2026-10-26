@@ -145,6 +145,7 @@ internal static class WebReadReach
         ["get_query_store_query_history"] = List("query_store"),
         ["get_plan_force_precheck"] = List("query_store"),
         ["get_forced_plans"] = List("query_store_forced_plans"),
+        ["get_query_store_hints"] = List("query_store_hints"),
         ["get_query_store_aborts"] = List("query_store"),
         ["get_resource_use_by_tag"] = List("query_stats"),
         ["get_long_query_completions"] = List("long_query_completions"),

@@ -2604,12 +2604,13 @@ public sealed class PgLogEventsRungTests
         Assert.Contains("return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";", viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 
-    /// <summary>The runbook carries the product's worker formula for the current hypertable count; the CI cluster workflows keep their own (smaller) floor, held by CiClusterWorkerSizingTests.</summary>
+    /// <summary>The managed RAM rule gives 128 / 139 on an 8 GB host at the current hypertable count, and the runbook and README carry the log-events rows; the CI cluster workflows keep their own (smaller) floor, held by CiClusterWorkerSizingTests.</summary>
     [Fact]
-    public void TheWorkflowsAndTheRunbook_CarryTheNewHypertableCount()
+    public void TheWorkerExample_AndTheLogEventsRows_Hold()
     {
-        /* The runbook and README state the MANAGED RAM rule (#5633 item 14) through an 8 GB example, not the CI
-           workflows' floor: 128 / 139 at 72 hypertables and 29 aggregates (74 / 85 at 4 GB, 177 / 188 at 12 GB). */
+        /* The runbook and README state the MANAGED RAM rule (#5633 item 14) through an 8 GB example whose inputs they
+           name, and tell the reader to count their own store, so no doc pins the live hypertable count (Erik 10-24:
+           no exact counts in descriptive text; a pin made every collector PR edit two docs). */
         var example = DarlingManagedPostgres.DeriveWorkerSettings(
             TimescaleSupport.HypertableCount, 8L * 1024 * 1024 * 1024);
         var workers = example.MaxBackgroundWorkers;
@@ -2618,14 +2619,9 @@ public sealed class PgLogEventsRungTests
         Assert.Equal(139, processes);
 
         var runbook = RepoFile.ReadRepoFile("docs", "postgres-first-target-runbook.md");
-        Assert.Contains($"for an 8 GB host the numbers are {workers} and {processes} for {TimescaleSupport.HypertableCount} hypertables", runbook, StringComparison.Ordinal);
-        Assert.Contains($"all {TimescaleSupport.HypertableTables.Count} of them, {CollectorCatalog.All.Count(c => c.TargetEngine == CollectorTargetEngine.PostgreSql)} PostgreSQL", runbook, StringComparison.Ordinal);
         Assert.Contains("| `get_pg_log_events` |", runbook, StringComparison.Ordinal);
         Assert.Contains("| `pg_log_events` | 5 min | 5 min |", runbook, StringComparison.Ordinal);
-
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
-        Assert.Contains($"For an 8 GB host that is **{workers}** and **{processes}** for {TimescaleSupport.HypertableCount} hypertables", readme, StringComparison.Ordinal);
-        Assert.Contains("| **V129** — PostgreSQL log events |", readme, StringComparison.Ordinal);
+        /* #6416: the README's hand-kept migration table is gone; the ladder fixtures are the source of truth for the rungs. */
     }
 }
 

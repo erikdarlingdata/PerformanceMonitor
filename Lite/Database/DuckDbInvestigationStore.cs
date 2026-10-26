@@ -46,6 +46,7 @@ public sealed partial class DuckDbInvestigationStore : IInvestigationRequestStor
     private static readonly string GroupingWindowCapSql = string.Create(CultureInfo.InvariantCulture,
         $"INTERVAL {(int)InvestigationRules.GroupingWindowCap.TotalMinutes} MINUTE");
 
+    /* #6778: a reported request takes a quiet re-fire (same metric, severity not above max_severity, no resolved journal row, inside the window and cap); the claim deadline applies to open and claimed rows only. */
     /* #5632: the window slides (Darling's twin): window_until is the latest alert + 30 minutes, held to the first alert + 4 hours, and
        the alert-time test ($4 <= window_until) is the sliding bound. The wall-clock test stays on the open time ($3 is now), widened to
        the 4-hour cap, so an alert stamped more than 30 minutes before it reached the store still joins. */
@@ -57,8 +58,11 @@ SELECT r.request_id,
 FROM investigation_requests AS r
 WHERE r.server_id = $1
   AND r.family = $2
-  AND r.state IN ('open', 'claimed')
-  AND r.expires_at > $3
+  AND (r.state IN ('open', 'claimed') AND r.expires_at > $3
+       OR r.state = 'reported'
+          AND EXISTS (SELECT 1 FROM investigation_request_alerts AS a2 WHERE a2.request_id = r.request_id AND a2.metric_name = $5)
+          AND (CASE WHEN $6 = 'critical' THEN 1 ELSE 0 END) <= (CASE WHEN r.max_severity = 'critical' THEN 1 ELSE 0 END)
+          AND NOT EXISTS (SELECT 1 FROM investigation_journal AS j WHERE j.request_id = r.request_id AND j.event = 'resolved'))
   AND r.opened_at >= $3 - " + GroupingWindowCapSql + @"
   AND $4 <= r.window_until
 ORDER BY r.opened_at DESC
@@ -457,7 +461,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         Guid? joinId = null;
         string? maxSeverity = null;
         var newMetric = false;
-        using (var find = Command(connection, FindJoinSql, alert.ServerId, alert.Family, now, alertTime, alert.MetricName))
+        using (var find = Command(connection, FindJoinSql, alert.ServerId, alert.Family, now, alertTime, alert.MetricName, severity))
         using (var found = await find.ExecuteReaderAsync(cancellationToken))
         {
             if (await found.ReadAsync(cancellationToken))
@@ -794,6 +798,24 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         return use;
     }
 
+    /// <summary>
+    /// #6596: journals an alert on an agent route that opened no request because its story is recurring at this hour
+    /// (<see cref="InvestigationEvents.RecurringSkipped"/>). Darling's <c>InvestigationRequestStore.RecordRecurringSkipAsync</c>:
+    /// no request id, the metric as the reason, once per route, server, metric and alert hour.
+    /// </summary>
+    public async Task RecordRecurringSkipAsync(InvestigationAlert alert, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(alert);
+        var alertTime = Micro(alert.AlertTimeUtc);
+        using var writeLock = _db.AcquireWriteLock(_lockBudget);
+        using var connection = await OpenAsync(cancellationToken);
+        using var transaction = connection.BeginTransaction();
+        await JournalAsync(connection, Now(), null, alert.RouteId, alert.ServerId, InvestigationEvents.RecurringSkipped,
+            "service", alert.MetricName, InvestigationEvents.RecurringSkippedDetail(alert.StoryPathHash, alertTime),
+            InvestigationEvents.RecurringSkippedOnceKey(alert.RouteId, alert.ServerId, alert.MetricName, alertTime), cancellationToken);
+        transaction.Commit();
+    }
+
     /// <inheritdoc />
     public async Task RecordRefusalAsync(Guid requestId, string agentId, string operation, string reason, string? detailJson,
         CancellationToken cancellationToken = default)
@@ -1051,19 +1073,27 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
        metric's last alert on the same server. A resolution row's context_json names the metric it resolves in its top-level
        Resolves member; the candidate rows come back and C# parses each context (a text match would miss the escapings).
        A metric with no candidate comes back once with a NULL context, so a request with an uncleared metric is unresolved.
-       Read through v_config_alert_log (live plus archive) so an archived resolution still counts. */
+       Read through v_config_alert_log (live plus archive) so an archived resolution still counts.
+       The bound on h.alert_time is the oldest last alert among the candidates. It saves the per-row work (the Resolves test
+       and the join) on every older row, live or archived; the rows are still read, and the saving was measured on Darling's
+       PostgreSQL store only. A live follow-up can pull the oldest last alert back by up to 30 days, so the saving is smaller
+       while one is open. It drops no candidate: a resolution row a candidate can use is after that candidate's last alert,
+       so after the oldest one. It is not the clock minus a fixed window, because a follow-up opens now but copies its
+       source's alert rows with their original times, so its last alert can be weeks old. */
     internal const string ResolveCandidatesSql = @"
+WITH m AS (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS last_alert
+           FROM investigation_request_alerts AS a
+           WHERE a.request_id IN (SELECT r.request_id
+                                  FROM investigation_requests AS r
+                                  WHERE r.state IN ('open', 'claimed', 'reported')
+                                    AND r.opened_at > $1 - INTERVAL 2 DAY)
+           GROUP BY a.request_id, a.server_id, a.metric_name)
 SELECT m.request_id, m.metric_name, h.context_json
-FROM (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS last_alert
-      FROM investigation_request_alerts AS a
-      WHERE a.request_id IN (SELECT r.request_id
-                             FROM investigation_requests AS r
-                             WHERE r.state IN ('open', 'claimed', 'reported')
-                               AND r.opened_at > $1 - INTERVAL 2 DAY)
-      GROUP BY a.request_id, a.server_id, a.metric_name) AS m
+FROM m
 LEFT JOIN v_config_alert_log AS h
        ON h.server_id = m.server_id
       AND h.alert_time > m.last_alert
+      AND h.alert_time > (SELECT min(last_alert) FROM m)
       AND strpos(h.context_json, 'Resolves') > 0";
 
     /* Journals resolved once per request (once key resolved:<request_id>); the state is checked again under the write lock. */

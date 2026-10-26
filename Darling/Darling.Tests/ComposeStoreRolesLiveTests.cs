@@ -182,8 +182,8 @@ public sealed class ComposeStoreRolesLiveTests
             {
                 postgres = new { managed = false, connectionString = owner },
                 servers = new[] { new { name = "sql-3914", host = "127.0.0.1,1", auth = "integrated" } },
-                web = new { enabled = true, port = webPort },
-                mcp = new { enabled = true, port = mcpPort },
+                web = new { enabled = true, port = webPort, allowTokenlessLoopback = true },
+                mcp = new { enabled = true, port = mcpPort, allowTokenlessLoopback = true },
             }));
             Environment.SetEnvironmentVariable("DARLING_CONFIG", configPath);
             Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", "true");
@@ -1536,8 +1536,8 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), 60, 
                 await seed.ExecuteNonQueryAsync(ct);
             }
 
-            var rules = new CustomAlertRuleStore(ownerSource);
-            var state = new CustomAlertStateStore(ownerSource);
+            var rules = new CustomAlertRuleStore(ownerSource, StorageCommandDeadlines.McpReadSeconds);
+            var state = new CustomAlertStateStore(ownerSource, StorageCommandDeadlines.McpReadSeconds);
             var created = Assert.IsType<CustomAlertRuleResult.Ok>(
                 await rules.CreateAsync(ruleName, null, definition, true, "test", ct));
             var ruleId = created.Rule!.Id;
@@ -1548,7 +1548,7 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), 60, 
             await using var viewerSource = NpgsqlDataSource.Create(viewerLogin!);
             var evaluator = new CustomAlertEvaluator(
                 rules, state, viewerSource, new NoopDeliverer(), isAlertMuted: null, alertsEnabled: static () => true,
-                new PgAlertHistoryStore(ownerSource), defaultIntervalSeconds: 0, cacheTtl: TimeSpan.Zero, NullLogger.Instance);
+                new PgAlertHistoryStore(ownerSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds), defaultIntervalSeconds: 0, cacheTtl: TimeSpan.Zero, NullLogger.Instance);
 
             await evaluator.EvaluateServerAsync(serverId, storage, storage, ct);
 
@@ -1893,7 +1893,7 @@ WHERE r.rolname IN ('admin', 'viewer', 'mcp')";
         return (T)(await command.ExecuteScalarAsync(ct))!;
     }
 
-    /// <summary>The hosts take a typed logger; this one forwards to a capture so a failed start says why.</summary>
+    /// <summary>The hosts take a typed logger; this one records its lines so a failed start says why.</summary>
     private sealed class TypedLogger<T> : ILogger<T>
     {
         private readonly CapturingTestLogger _inner;

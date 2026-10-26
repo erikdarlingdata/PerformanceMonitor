@@ -43,7 +43,7 @@ public sealed class DarlingMcpSignatureMergeTools
         "or signature has signatures merged into it, as already_merged when signature is already merged, and as unknown_signature when " +
         "either was not counted in the last 30 days. The reason is the agent_action reason (writes arm: the reason argument, required). " +
         "A merge is journaled and undone from Agent changes, which keeps the row and splits the counts again. Answers status merged " +
-        "with merge_id, refused with a reason, or precondition (the store role lacks the grant).")]
+        "with merge_id, previous (the signature was counted as itself), undo null and an undo_note naming where the undo is (no tool call undoes a merge), refused with a reason, or precondition (the store role lacks the grant).")]
     public static Task<string> MergeDeadlockSignatures(
         NpgsqlDataSource postgres,
         [Description("Server name, or the start of it.")] string server_name,
@@ -88,7 +88,7 @@ public sealed class DarlingMcpSignatureMergeTools
             }
 
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
-            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: seat!.Owner?.Read());
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, signature, null);
             long mergeId = 0;
             try
@@ -109,7 +109,7 @@ public sealed class DarlingMcpSignatureMergeTools
                         mergeId = await DeadlockSignatureStore.InsertMergeAsync(connection, transaction, resolved.ServerId, signature, merged_into,
                             action.Reason, by.Length > 64 ? by[..64] : by, token);
                         return JsonSerializer.Serialize(new SignatureMergeImage(mergeId, signature, merged_into));
-                    }, ct);
+                    }, ct, seat.NamedAgentNames);
                 if (outcome.Refusal is { } refusal)
                     return DarlingAgentActionGate.RefusalAnswer(refusal);
                 return Answer(resolved.DisplayName, resolved.ServerId, signature, merged_into, mergeId);
@@ -138,6 +138,9 @@ public sealed class DarlingMcpSignatureMergeTools
             signature,
             merged_into = mergedInto,
             merge_id = mergeId,
+            previous = new { signature, counted_as = signature, merged_into = (string?)null },
+            undo = (string?)null,
+            undo_note = "No MCP tool call undoes a merge: undo it from Agent changes (the merge is journaled there), which keeps the row and splits the counts again.",
             message = "The signature is counted as merged_into from now on. Undo it from Agent changes to split the counts again.",
         }, McpHelpers.JsonOptions);
 }

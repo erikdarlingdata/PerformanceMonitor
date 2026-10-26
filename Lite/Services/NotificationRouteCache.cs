@@ -54,6 +54,11 @@ public static class NotificationRouteCache
     /// <summary>Installs the loader (null removes it, and the cache serves no routes). Resets the held routes.</summary>
     public static void Configure(Func<IReadOnlyList<NotificationRoute>>? loader) => s_core.Configure(loader);
 
+    /// <summary>Runs <paramref name="initializeStore"/> (the one that creates <c>notification_routes</c>), then installs the loader
+    /// and primes the first load. See <see cref="NotificationRouteCacheCore.InitializeStoreThenConfigureAsync"/> (#6458).</summary>
+    public static Task InitializeStoreThenConfigureAsync(Func<Task> initializeStore, Func<IReadOnlyList<NotificationRoute>>? loader) =>
+        s_core.InitializeStoreThenConfigureAsync(initializeStore, loader);
+
     /// <summary>Marks the held routes stale and starts one background reload (none when one is already running: that one
     /// loads again when it finishes). No I/O on the calling thread and no lock of ours.</summary>
     public static void Invalidate() => s_core.Invalidate();
@@ -119,6 +124,24 @@ internal sealed class NotificationRouteCacheCore
         StartBackgroundReload();
     }
 
+    /// <summary>Creates the store's tables, and only then installs the loader. <see cref="Configure"/> primes the first load at once, so
+    /// calling it before the store exists made a first start on an empty data root read a <c>notification_routes</c> table that was
+    /// not there yet, and log a WARN that read like a fault (#6458). Until this returns no loader is installed: the cache serves no
+    /// routes and nothing waits on a first load. A table that is missing AFTER this returns is a real fault, and the loader's own
+    /// failure path still logs it.</summary>
+    public async Task InitializeStoreThenConfigureAsync(Func<Task> initializeStore, Func<IReadOnlyList<NotificationRoute>>? loader)
+    {
+        try
+        {
+            await initializeStore().ConfigureAwait(false);
+        }
+        finally
+        {
+            /* Installed even when the store failed to initialize: that is a real fault, and the loader's failure path logs it. */
+            Configure(loader);
+        }
+    }
+
     /// <summary>Completes once the first load attempt since <see cref="Configure"/> has finished, or after the timeout; at once when no
     /// loader is installed or the routes are already loaded. Starts the background load if it is not running. No thread blocks.</summary>
     public async Task WaitForFirstLoadAsync(TimeSpan timeout)
@@ -167,19 +190,30 @@ internal sealed class NotificationRouteCacheCore
     {
         do
         {
-            /* Current reloads when stale and logs a failed load itself, so nothing here can throw past a loader's catch. */
-            _ = Current;
-            Volatile.Write(ref _backgroundRunning, 0);
+            /* Current reloads when stale and logs a failed load itself, so nothing here can throw past a loader's catch. The flag
+               stays set while an Invalidate during a load still needs one more: clearing it between loads let a reader see the
+               reload as finished with that load still to come. */
+            do
+            {
+                _ = Current;
+            }
+            while (MoreToLoad());
 
-            /* Look again after clearing the flag: an Invalidate that landed during the load saw the flag set and started
-               nothing, so this pass loads once more (or that Invalidate won the race and started its own loop). Stop while the
-               30 second retry window is open, or a broken store would spin. */
+            /* A full fence, not a release store: the look below must not be read before the clear is seen, or an Invalidate in
+               between would start nothing and this loop would stop with its change unloaded. */
+            Interlocked.Exchange(ref _backgroundRunning, 0);
+
+            /* Look again after clearing the flag: an Invalidate that landed between the last look and the clear saw the flag set
+               and started nothing, so this loop goes on (or that Invalidate won the race and started its own loop). */
         }
-        while (Volatile.Read(ref _loader) is not null
-               && Volatile.Read(ref _loadedVersion) != Volatile.Read(ref _version)
-               && DateTime.UtcNow.Ticks >= Volatile.Read(ref _retryAfterTicks)
-               && Interlocked.CompareExchange(ref _backgroundRunning, 1, 0) == 0);
+        while (MoreToLoad() && Interlocked.CompareExchange(ref _backgroundRunning, 1, 0) == 0);
     }
+
+    /* Stale with a loader set, and not inside the 30 second retry window, or a broken store would spin. */
+    private bool MoreToLoad() =>
+        Volatile.Read(ref _loader) is not null
+        && Volatile.Read(ref _loadedVersion) != Volatile.Read(ref _version)
+        && DateTime.UtcNow.Ticks >= Volatile.Read(ref _retryAfterTicks);
 
     /// <summary>Whether a background reload is running; tests wait for it to finish.</summary>
     internal bool BackgroundReloadRunning => Volatile.Read(ref _backgroundRunning) != 0;

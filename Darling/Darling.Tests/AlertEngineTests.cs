@@ -14,6 +14,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -1364,6 +1366,9 @@ public sealed class AlertEngineTests
 
         Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
         Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+        /* #6703: a count of one reads in the singular. */
+        Assert.Equal("1 blocking session", Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected").ShortMessage);
+        Assert.Equal("1 deadlock in the last hour", Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected").ShortMessage);
     }
 
     [Fact]
@@ -1380,7 +1385,7 @@ public sealed class AlertEngineTests
 
         var outcome = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
         Assert.Equal("2", outcome.CurrentValue);
-        Assert.Equal("2 blocking session(s)", outcome.ShortMessage);
+        Assert.Equal("2 blocking sessions", outcome.ShortMessage);
         Assert.Equal(2, h.StateStore.EdgeWatermarks[(Key, AlertEngine.BlockingWatermarkMetric)]);
     }
 
@@ -1398,7 +1403,7 @@ public sealed class AlertEngineTests
 
         var outcome = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
         Assert.Equal("2", outcome.CurrentValue);
-        Assert.Equal("2 deadlock(s) in the last hour", outcome.ShortMessage);
+        Assert.Equal("2 deadlocks in the last hour", outcome.ShortMessage);
         Assert.Equal(2, h.StateStore.EdgeWatermarks[(Key, AlertEngine.DeadlockWatermarkMetric)]);
     }
 
@@ -1496,7 +1501,7 @@ public sealed class AlertEngineTests
         await DriveBlockingWaitAsync(engine, h, 600_000, samples: AlertEngine.BlockingWaitBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
-        Assert.Equal("600s across 3 blocked session(s)", fired.CurrentValue);
+        Assert.Equal("600s across 3 blocked sessions", fired.CurrentValue);
         Assert.Equal("600s", fired.ThresholdValue);
         /* #1830: the numerics must carry the real values — the display text is prose no parser recovers. */
         Assert.Equal(600d, fired.NumericCurrentValue);
@@ -1542,7 +1547,7 @@ public sealed class AlertEngineTests
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Blocking Wait Time", fired.MetricName);
-        Assert.Equal("180s across 145 blocked session(s)", fired.CurrentValue);
+        Assert.Equal("180s across 145 blocked sessions", fired.CurrentValue);
         Assert.Equal(AlertEngine.BlockingWaitFiredBySingleSnapshot, FiredBy(fired));
         var gateItem = fired.Context!.Details[0];
         Assert.Equal("180s", Assert.Single(gateItem.Fields, f => f.Label == "Total Blocked Wait").Value);
@@ -2108,7 +2113,7 @@ public sealed class AlertEngineTests
     [Fact]
     public void TheDarlingReadmeStatesTheBlockingWaitGateItActuallyUses()
     {
-        var readme = ReadRepoFile("Darling", "README.md");
+        var readme = ReadRepoFile("docs", "darling", "alerts-and-notifications.md"); // #6416: moved from Darling/README.md
 
         var row = readme
             .Split('\n')
@@ -2754,7 +2759,7 @@ public sealed class AlertEngineTests
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Long-Running Query", fired.MetricName);
-        Assert.Equal("1 query(s), longest 35m", fired.CurrentValue);          /* :385 */
+        Assert.Equal("1 query, longest 35m", fired.CurrentValue);          /* :385 */
         Assert.Equal("30m", fired.ThresholdValue);
         Assert.Equal(35d, fired.NumericCurrentValue);                         /* :389 */
 
@@ -2841,7 +2846,7 @@ public sealed class AlertEngineTests
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Long-Running Query", fired.MetricName);
-        Assert.Equal("2 query(s), longest 66m", fired.CurrentValue);
+        Assert.Equal("2 queries, longest 66m", fired.CurrentValue);
         Assert.StartsWith("Session #65 running 66m", fired.ShortMessage, StringComparison.Ordinal);
         /* The excluded sessions are not on the card as SESSIONS (the knob item lists the prefix itself, by design). */
         Assert.DoesNotContain("Job 0x", fired.DetailText, StringComparison.Ordinal);
@@ -2864,7 +2869,7 @@ public sealed class AlertEngineTests
     {
         /* Measured on one production store class: 191 distinct sessions over the 30-minute bar in 7 days, the p90
            seen in 6,192 snapshots — permanent background requests no gate can separate from a runaway query. With
-           the knob set, the permanent session is not read into the decision at all (not counted in "N query(s)",
+           the knob set, the permanent session is not read into the decision at all (not counted in "N queries",
            not the longest, not fingerprinted), and the card's knob item says how many the knob removed, by arm, so
            the operator can see it working. */
         var h = new Harness();
@@ -2881,7 +2886,7 @@ public sealed class AlertEngineTests
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Long-Running Query", fired.MetricName);
         /* One query, and the longest is the 35-minute one — the two permanent sessions never entered the count. */
-        Assert.Equal("1 query(s), longest 35m", fired.CurrentValue);
+        Assert.Equal("1 query, longest 35m", fired.CurrentValue);
         Assert.Equal(35d, fired.NumericCurrentValue);
         Assert.StartsWith("Session #73 running 35m", fired.ShortMessage, StringComparison.Ordinal);
 
@@ -2921,7 +2926,7 @@ public sealed class AlertEngineTests
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Equal("2 query(s), longest 150m", fired.CurrentValue);
+        Assert.Equal("2 queries, longest 150m", fired.CurrentValue);
         var knobItem = fired.Context!.Details[^1];
         Assert.Equal("0", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel).Value);
         Assert.Equal("SQLAgent - TSQL JobStep*", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Program Prefixes").Value);
@@ -3004,7 +3009,7 @@ public sealed class AlertEngineTests
            runs long; on a server where that ETL holds the SIX longest sessions and the cap is five, the old
            post-read filter returned an EMPTY page — five excluded rows read, five dropped — and the alert was off
            for every other database without a word. With the list applied in the read, the human's query is on
-           the page, the fire says "1 query(s)", and the card's new item says six sessions were in excluded
+           the page, the fire says "1 query", and the card's new item says six sessions were in excluded
            databases — so a short page is a page an operator can read. */
         var h = new Harness();
         h.Settings.LongRunningQueryEnabled = true;
@@ -3021,7 +3026,7 @@ public sealed class AlertEngineTests
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Long-Running Query", fired.MetricName);
-        Assert.Equal("1 query(s), longest 35m", fired.CurrentValue);
+        Assert.Equal("1 query, longest 35m", fired.CurrentValue);
         Assert.StartsWith("Session #73 running 35m", fired.ShortMessage, StringComparison.Ordinal);
         /* None of the six ETL sessions is on the card as a session — not their text, not their ids. */
         Assert.DoesNotContain("FactSales", fired.DetailText, StringComparison.Ordinal);
@@ -3083,7 +3088,7 @@ public sealed class AlertEngineTests
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Equal("1 query(s), longest 35m", fired.CurrentValue);
+        Assert.Equal("1 query, longest 35m", fired.CurrentValue);
 
         /* Knob item first (61 and 65 by prefix; 62 by login), database item last (63 and 64) — 2 + 1 + 2 = 5, the
            five sessions the page does not show, each counted exactly once. */
@@ -3277,7 +3282,7 @@ public sealed class AlertEngineTests
         var detail = Assert.Single(h.Deliverer.Outcomes).DetailText!;
         Assert.Equal(AlertContextBuilders.ActiveMaintenanceMaxLines,
             detail.Split('\n').Count(line => line.Contains("Active maintenance: BACKUP DATABASE", StringComparison.Ordinal)));
-        Assert.EndsWith("Active maintenance: 2 more maintenance session(s) not shown", detail, StringComparison.Ordinal);
+        Assert.EndsWith("Active maintenance: 2 more maintenance sessions not shown", detail, StringComparison.Ordinal);
         Assert.Contains("10m 0s elapsed", detail, StringComparison.Ordinal);
     }
 
@@ -4406,7 +4411,7 @@ public sealed class AlertEngineTests
         await engine.EvaluateServerAsync(Harness.Snapshot());
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Long-Running Job", fired.MetricName);
-        Assert.Equal("1 job(s) exceeding 3x average", fired.CurrentValue);    /* :606 */
+        Assert.Equal("1 job exceeding 3x average", fired.CurrentValue);    /* :606 */
         Assert.Equal(400d, fired.NumericCurrentValue);                        /* :610 */
         Assert.Equal(300d, fired.NumericThresholdValue);                      /* :611 multiplier*100 */
 
@@ -4458,6 +4463,29 @@ public sealed class AlertEngineTests
         Assert.Equal("Long-Running Jobs Cleared", Assert.Single(h.Resolutions).Title);
     }
 
+    [Fact]
+    public async Task AnomalousJob_TwoJobsReadInThePlural()
+    {
+        /* #6703: "2 jobs exceeding", where one job reads "1 job exceeding". */
+        var h = new Harness();
+        h.Settings.LongRunningJobEnabled = true;
+        var start = new DateTime(2026, 7, 1, 11, 0, 0);
+        h.Adapter.AnomalousJobs.Add(new AnomalousJobInfo
+        {
+            JobName = "Nightly ETL", JobId = "job-1", StartTime = start,
+            CurrentDurationSeconds = 3600, AvgDurationSeconds = 900, PercentOfAverage = 400
+        });
+        h.Adapter.AnomalousJobs.Add(new AnomalousJobInfo
+        {
+            JobName = "Index Rebuild", JobId = "job-2", StartTime = start,
+            CurrentDurationSeconds = 3600, AvgDurationSeconds = 900, PercentOfAverage = 400
+        });
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal("2 jobs exceeding 3x average", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
+    }
+
     /* ---------------- failed jobs ---------------- */
 
     [Fact]
@@ -4475,7 +4503,7 @@ public sealed class AlertEngineTests
         await engine.EvaluateServerAsync(Harness.Snapshot());
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Failed Agent Job", fired.MetricName);
-        Assert.Equal("1 job failure(s) in last 60m — Backup.Full", fired.CurrentValue); /* :701 */
+        Assert.Equal("1 job failure in last 60m — Backup.Full", fired.CurrentValue); /* :701 */
         Assert.Equal((Key, firstFailure), Assert.Single(h.StateStore.SavedFailedJob));
 
         /* The same failure lingering in the lookback window never re-fires (:667). */
@@ -4489,6 +4517,9 @@ public sealed class AlertEngineTests
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
         Assert.Equal(firstFailure.AddMinutes(30), h.StateStore.FailedJobWatermarks[Key]);
+        /* #6703: two failures in the window read "2 job failures", the one-failure fire above "1 job failure". */
+        Assert.StartsWith("2 job failures in last 60m", h.Deliverer.Outcomes[1].CurrentValue, StringComparison.Ordinal);
+        Assert.StartsWith("2 job failures", h.Deliverer.Outcomes[1].ShortMessage, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -5392,17 +5423,22 @@ public sealed class AlertEngineTests
            happen to open the editor mid-restore. Both sites interpolate the shared constant instead, and
            BOTH statements use it: the seed to refuse those states, the heal to un-write them (#2189). A copy
            that widened only one of the two would be the subtler half of the same bug. */
-        var viewer = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.DatabaseStates.cs"));
-        var service = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingAlertReadAdapter.cs"));
+        /* Asserted on the statements as built, not on the C# that builds them: the shared store the editor and the
+           MCP tools run (DatabaseStateExpectedStore) and the service's adapter each hold a seed and a heal. */
+        var seeds = new[] { DatabaseStateExpectedStore.SeedSql, DarlingAlertReadAdapter.SeedDatabaseStateExpectedSql };
+        var heals = new[] { DatabaseStateExpectedStore.HealToOnlineSql, DarlingAlertReadAdapter.HealDatabaseStateBaselineToOnlineSql };
 
-        foreach (var source in new[] { viewer, service })
+        foreach (var seed in seeds)
         {
-            Assert.Contains("NOT IN ({DatabaseStateTokens.NeverBaselinedSqlList})", source, StringComparison.Ordinal);
-            Assert.Contains("expected_state IN ({DatabaseStateTokens.NeverBaselinedSqlList})", source, StringComparison.Ordinal);
-            Assert.DoesNotContain($"NOT IN ('{DatabaseStateTokens.Suspect}'", source, StringComparison.Ordinal);
+            Assert.Contains($"NOT IN ({DatabaseStateTokens.NeverBaselinedSqlList})", seed, StringComparison.Ordinal);
+        }
+
+        foreach (var heal in heals)
+        {
+            Assert.Contains($"expected_state IN ({DatabaseStateTokens.NeverBaselinedSqlList})", heal, StringComparison.Ordinal);
 
             /* The heal must never be reachable for a state somebody DECLARED, in either copy. */
-            Assert.Contains("is_user_override = false", source, StringComparison.Ordinal);
+            Assert.Contains("is_user_override = false", heal, StringComparison.Ordinal);
         }
     }
 

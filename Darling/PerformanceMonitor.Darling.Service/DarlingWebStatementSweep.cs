@@ -34,14 +34,16 @@ internal static class DarlingWebStatementSweep
     internal readonly record struct Swept(string Text, bool Refused);
 
     /// <summary>Sweeps one tool string or JSON body. The same string instance comes back when nothing in it is
-    /// named. Never throws and never hands the input back after a failure.</summary>
-    internal static Swept Apply(string? output)
+    /// named. Never throws and never hands the input back after a failure. <paramref name="budget"/> is a test seam (#6341): production passes none and gets the
+    /// shared judge's own wall-clock budget; a test that is not about the filter hands in a budget over a fixed judge, so a CPU-starved
+    /// run cannot time the real judge out and change the text under it.</summary>
+    internal static Swept Apply(string? output, SensitiveStatements.JudgeBudget? budget = null)
     {
         if (string.IsNullOrEmpty(output)) return new Swept(output ?? "", false);
 
         try
         {
-            string judged = SensitiveStatements.Json(output);
+            string judged = budget is null ? SensitiveStatements.Json(output) : SensitiveStatements.Json(output, budget);
             bool refused = string.Equals(judged, SensitiveStatements.JsonRefusal, StringComparison.Ordinal)
                 && !string.Equals(output, SensitiveStatements.JsonRefusal, StringComparison.Ordinal);
             return refused ? new Swept(SensitiveStatements.JsonRefusal, true) : new Swept(judged, false);

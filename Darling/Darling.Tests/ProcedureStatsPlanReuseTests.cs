@@ -181,9 +181,9 @@ public sealed class ProcedureStatsPlanReuseTests
         var (runner, _) = RunnerWith(knob);
         var target = new CollectorTargetInfo();
 
-        Assert.Equal(expected, runner.ProcedureStatsPlanFetchModeFor("procedure_stats", target));
-        Assert.Equal(ProcedureStatsPlanFetchMode.Off, runner.ProcedureStatsPlanFetchModeFor("query_stats", target));
-        Assert.Equal(ProcedureStatsPlanFetchMode.Off, runner.ProcedureStatsPlanFetchModeFor("query_store", target));
+        Assert.Equal(expected, runner.ProcedureStatsPlanFetchModeFor("procedure_stats", target, serverCapturePlans: null));
+        Assert.Equal(ProcedureStatsPlanFetchMode.Off, runner.ProcedureStatsPlanFetchModeFor("query_stats", target, serverCapturePlans: null));
+        Assert.Equal(ProcedureStatsPlanFetchMode.Off, runner.ProcedureStatsPlanFetchModeFor("query_store", target, serverCapturePlans: null));
     }
 
     [Fact]
@@ -194,9 +194,9 @@ public sealed class ProcedureStatsPlanReuseTests
             NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=x;Password=x;Database=x"), new CollectorDeltaCalculator(), null,
             capturePlans: () => true);
 
-        Assert.Equal(ProcedureStatsPlanFetchMode.On, runner.ProcedureStatsPlanFetchModeFor("procedure_stats", new CollectorTargetInfo()));
-        Assert.Equal(ProcedureStatsPlanFetchMode.Off, runner.ProcedureStatsPlanFetchModeFor("procedure_stats", new CollectorTargetInfo { IsAzureSqlDb = true }));
-        Assert.Equal(ProcedureStatsPlanFetchMode.Off, RunnerWith("on", capturePlans: false).Runner.ProcedureStatsPlanFetchModeFor("procedure_stats", new CollectorTargetInfo()));
+        Assert.Equal(ProcedureStatsPlanFetchMode.On, runner.ProcedureStatsPlanFetchModeFor("procedure_stats", new CollectorTargetInfo(), serverCapturePlans: null));
+        Assert.Equal(ProcedureStatsPlanFetchMode.Off, runner.ProcedureStatsPlanFetchModeFor("procedure_stats", new CollectorTargetInfo { IsAzureSqlDb = true }, serverCapturePlans: null));
+        Assert.Equal(ProcedureStatsPlanFetchMode.Off, RunnerWith("on", capturePlans: false).Runner.ProcedureStatsPlanFetchModeFor("procedure_stats", new CollectorTargetInfo(), serverCapturePlans: null));
     }
 
     [Theory]
@@ -208,8 +208,8 @@ public sealed class ProcedureStatsPlanReuseTests
 
         Assert.Equal(
             ProcedureStatsPlanFetchMode.Off,
-            runner.ProcedureStatsPlanFetchModeFor("procedure_stats", new CollectorTargetInfo { IsAzureSqlDb = true }));
-        Assert.False(runner.ShouldDeferPlanFetchFor("procedure_stats", true, new CollectorTargetInfo { IsAzureSqlDb = true }));
+            runner.ProcedureStatsPlanFetchModeFor("procedure_stats", new CollectorTargetInfo { IsAzureSqlDb = true }, serverCapturePlans: null));
+        Assert.False(runner.ShouldDeferPlanFetchFor("procedure_stats", true, new CollectorTargetInfo { IsAzureSqlDb = true }, serverCapturePlans: null));
     }
 
     [Fact]
@@ -217,7 +217,7 @@ public sealed class ProcedureStatsPlanReuseTests
     {
         var (runner, _) = RunnerWith("on", capturePlans: false);
 
-        Assert.Equal(ProcedureStatsPlanFetchMode.Off, runner.ProcedureStatsPlanFetchModeFor("procedure_stats", new CollectorTargetInfo()));
+        Assert.Equal(ProcedureStatsPlanFetchMode.Off, runner.ProcedureStatsPlanFetchModeFor("procedure_stats", new CollectorTargetInfo(), serverCapturePlans: null));
     }
 
     [Fact]
@@ -226,8 +226,8 @@ public sealed class ProcedureStatsPlanReuseTests
         var (runner, log) = RunnerWith("maybe");
         var target = new CollectorTargetInfo();
 
-        Assert.Equal(ProcedureStatsPlanFetchMode.Off, runner.ProcedureStatsPlanFetchModeFor("procedure_stats", target));
-        Assert.Equal(ProcedureStatsPlanFetchMode.Off, runner.ProcedureStatsPlanFetchModeFor("procedure_stats", target));
+        Assert.Equal(ProcedureStatsPlanFetchMode.Off, runner.ProcedureStatsPlanFetchModeFor("procedure_stats", target, serverCapturePlans: null));
+        Assert.Equal(ProcedureStatsPlanFetchMode.Off, runner.ProcedureStatsPlanFetchModeFor("procedure_stats", target, serverCapturePlans: null));
 
         Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
         Assert.Contains("maybe", log.Joined, StringComparison.Ordinal);
@@ -242,7 +242,7 @@ public sealed class ProcedureStatsPlanReuseTests
     {
         var (runner, _) = RunnerWith(knob);
 
-        Assert.Equal(expected, runner.ShouldDeferPlanFetchFor("procedure_stats", capture, new CollectorTargetInfo()));
+        Assert.Equal(expected, runner.ShouldDeferPlanFetchFor("procedure_stats", capture, new CollectorTargetInfo(), serverCapturePlans: null));
     }
 
     // ---- one mode per run ----------------------------------------------------------------------
@@ -278,7 +278,7 @@ public sealed class ProcedureStatsPlanReuseTests
 
     private static CollectorContext StampedContext(DarlingCollectorRunner runner, bool capture)
     {
-        var flags = runner.StampPlanFetchFlags("procedure_stats", capture, new CollectorTargetInfo());
+        var flags = runner.StampPlanFetchFlags("procedure_stats", capture, new CollectorTargetInfo(), serverCapturePlans: null);
         return new CollectorContext
         {
             ServerId = 42,

@@ -21,6 +21,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -155,11 +156,19 @@ public sealed class McpPayloadContractCensusTests
     /// with a status word rather than an error (<c>precondition</c> when the store role lacks the table grant, and a refusal
     /// naming a server removed from the configuration), because a client that reads <c>status</c> must see "do this" and not
     /// a failed call. The same holds for <c>merge_deadlock_signatures</c> (#6006): <c>precondition</c> when the mcp role lacks the merge-table grant.
+    /// The four investigation admin tools (#6400) do likewise: <c>precondition</c> when a bring-your-own store's mcp role was never re-provisioned with their column grants.
     /// </summary>
     public static readonly (string File, string Tool)[] AdHocErrorReturns =
     [
         ("DarlingMcpThresholdOverrideTools.cs", "set_alert_threshold_override"),
         ("DarlingMcpSignatureMergeTools.cs", "merge_deadlock_signatures"),
+        ("DarlingMcpInvestigationAdminTools.cs", "write_investigation_note"),
+        ("DarlingMcpInvestigationAdminTools.cs", "approve_investigation_note"),
+        ("DarlingMcpInvestigationAdminTools.cs", "reject_investigation_note"),
+        ("DarlingMcpInvestigationAdminTools.cs", "close_investigation_request"),
+        ("DarlingMcpInvestigationFeedbackTools.cs", "start_practice_request"),
+        ("DarlingMcpInvestigationFeedbackTools.cs", "save_environment_profile"),
+        ("DarlingMcpInvestigationFeedbackTools.cs", "record_investigation_feedback"),
     ];
 
     /// <summary>
@@ -606,7 +615,7 @@ public sealed class McpPayloadContractCensusTests
         AssertRefusal(TrendBuckets.ValidateWidth(1441), "bucket_minutes", "Invalid bucket_minutes value '1441'. Must be between 1 and 1440 (one day), or omitted to size the points to the window.");
         AssertRefusal(TrendBuckets.Resolve(24, 1, 6, TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints), out _), "bucket_minutes", "bucket_minutes 1 over 24 hour(s) across 6 series is up to 8646 points, over this read's 1000-point cap. Use bucket_minutes 9 or wider, or narrow hours_back (as_of moves the window) for finer points.");
         AssertRefusal(TrendBuckets.RequireWholeHours(30, 4), "bucket_minutes", "bucket_minutes 30 cannot be served for this window: it reaches past the raw tier's 4-day retention, so the hourly rollup answers it, and that rollup's points are whole hours. Use a multiple of 60, or a window inside the last 4 days for finer points.");
-        var (_, miss) = DarlingServerResolver.ResolveOrError(new[] { new DarlingServerResolver.RegisteredServer(1, "box-a", null) }, "box-b", DarlingPeerDirectory.Snapshot.Empty);
+        var (_, miss) = DarlingServerResolver.ResolveOrError(new[] { new RegisteredServer(1, "box-a", null) }, "box-b", DarlingPeerDirectory.Snapshot.Empty);
         AssertRefusal(miss, "server_name", "Could not resolve server. Available servers:\nbox-a");
     }
 
@@ -1330,6 +1339,10 @@ public sealed class McpPayloadContractCensusTests
     /// top five, the store log's newest capture in a summary) and the rows it feeds are not a snapshot. The
     /// anchor's owning <c>SELECT</c> list is the last depth-zero <c>SELECT</c> before it up to the next
     /// depth-zero <c>FROM</c>. 15 anchored constants at the time of writing; the floor is 10.</para>
+    ///
+    /// <para>A write (<c>INSERT</c>, <c>UPDATE</c> or <c>DELETE</c>, after an optional leading <c>WITH</c> list) is out
+    /// of scope: the rule is about reads, where the tool stamps the snapshot time from a projected row, and a write
+    /// returns no snapshot row to stamp. Such a constant is skipped before it counts toward the floor.</para>
     /// </summary>
     [Fact]
     public void EveryLatestAnchoredRead_ProjectsItsAnchorColumn_OrIsRostered()
@@ -1340,6 +1353,11 @@ public sealed class McpPayloadContractCensusTests
         foreach (var (file, name, sql) in ReaderSqlConstants())
         {
             var clean = Regex.Replace(Regex.Replace(sql, @"/\*.*?\*/", string.Empty, RegexOptions.Singleline), @"--[^\n]*", string.Empty);
+            if (IsWriteStatement(clean))
+            {
+                continue;
+            }
+
             var anchor = LatestAnchor.Match(clean);
             if (!anchor.Success || Depth(clean, anchor.Index) != 0)
             {
@@ -1408,6 +1426,8 @@ public sealed class McpPayloadContractCensusTests
     public static readonly string[] GeneralTimestampParsesWithUtcStyles =
     [
         "DarlingMcpAlertTools.cs BuildMuteRuleUpdate",
+        /* #6400: save_environment_profile's expected_modified_at, parsed under invariant UTC styles like the web profile route's. */
+        "DarlingMcpInvestigationFeedbackTools.cs SaveEnvironmentProfile",
         /* #4734: create_mute_rule's body moved into CreateMuteRuleOver (the tool hands it the Postgres-backed
            store), so the expires_at parse, unchanged, is found under the new method name. */
         "DarlingMcpAlertTools.cs CreateMuteRuleOver",
@@ -1596,8 +1616,8 @@ public sealed class McpPayloadContractCensusTests
             "#4198: get_analysis_findings' advice.investigation / advice.remediation — free prose repeated on every finding — preview to 160 characters by default; full_text returns both whole. remediation_command is never previewed at any setting, so it carries no *_truncated key of its own"),
         ("deadlock_graph_xml_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
             "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
-        ("query_text_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpPgStatementTools.cs", "DarlingMcpPlanCorrectionTools.cs", "DarlingMcpQueryStoreAbortsTools.cs", "DarlingMcpQueryStoreRegressionTools.cs", "DarlingMcpSessionTools.cs", "DarlingMcpWhoDroveItTools.cs", "McpPlanCorrectionTools.cs", "McpQueryTools.cs", "McpSessionTools.cs", "McpWhoDroveItTools.cs"],
-            "#4198: query_text is previewed at read time by four tools: get_active_queries at 400 chars (500 until #4966's window-floor keys needed the room; full_text gets the whole text; a synthetic 50-row page measured 81,489 bytes), get_query_store_regressions at 240 chars (full_text opts back in; a busy production store measured 211 KB at default arguments), get_plan_corrections at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped), get_query_store_top at 400 chars (full_text gets the whole text; query_store_stats.query_text is not collector-capped either). get_query_store_top's MCP signature forwards to an internal previewLength overload so the web viewer can keep the OLD 2000-char cap that field already had, rather than switching to full text the way get_deadlock_detail's never-capped field does. get_pg_top_queries (#6131) previews at 400 chars too, full_text opts back in; it measured 59.6 KB at default arguments with every statement whole"),
+        ("query_text_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpForcedPlanTools.cs", "DarlingMcpPgStatementTools.cs", "DarlingMcpPlanCorrectionTools.cs", "DarlingMcpQueryStoreAbortsTools.cs", "DarlingMcpQueryStoreRegressionTools.cs", "DarlingMcpSessionTools.cs", "DarlingMcpWhoDroveItTools.cs", "McpPlanCorrectionTools.cs", "McpQueryTools.cs", "McpSessionTools.cs", "McpWhoDroveItTools.cs"],
+            "#4198: query_text is previewed at read time by four tools: get_active_queries at 400 chars (500 until #4966's window-floor keys needed the room; full_text gets the whole text; a synthetic 50-row page measured 81,489 bytes), get_query_store_regressions at 240 chars (full_text opts back in; a busy production store measured 211 KB at default arguments), get_plan_corrections at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped), get_query_store_top at 400 chars (full_text gets the whole text; query_store_stats.query_text is not collector-capped either). get_query_store_top's MCP signature forwards to an internal previewLength overload so the web viewer can keep the OLD 2000-char cap that field already had, rather than switching to full text the way get_deadlock_detail's never-capped field does. get_pg_top_queries (#6131) previews at 400 chars too, full_text opts back in; it measured 59.6 KB at default arguments with every statement whole. get_query_store_hints (#6581) shows the stored text of each hinted query cut to 1000 chars with query_text_truncated per row (the hint is the point of that read, the text only says which query it is; a bounded page of at most 200 hints, so the cut is a size bound, not a preview)"),
         ("error_message_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],
             "#4198: get_collection_log's own wide field — error_message is a 500-character preview by default (a seeded store measured 90,514 bytes for 200 rows at the old 200-row default), full_text opts back into the whole (up to 4000-character, DarlingObservability.LogCollectionAsync's own write-time ceiling) field"),
         ("last_error_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],
@@ -2243,11 +2263,11 @@ public sealed class McpPayloadContractCensusTests
     }
 
     /// <summary>Every named string constant holding SQL in the reader sources: raw (<c>"""</c>) or verbatim
-    /// (<c>@"</c>) literals declared <c>const string</c> or <c>static readonly string</c>.</summary>
+    /// (<c>@"</c>, <c>$@"</c>, <c>@$"</c>) literals declared <c>const string</c> or <c>static readonly string</c>.</summary>
     private static IEnumerable<(string File, string Name, string Sql)> ReaderSqlConstants()
     {
         var declaration = new Regex(
-            @"(?:public|internal|private)\s+(?:static\s+readonly\s+string|const\s+string)\s+(\w+)\s*=\s*(?:\$?""""""(.*?)""""""|@""((?:[^""]|"""")*)"")\s*;",
+            @"(?:public|internal|private)\s+(?:static\s+readonly\s+string|const\s+string)\s+(\w+)\s*=\s*(?:\$?""""""(.*?)""""""|(?:\$@|@\$|@)""((?:[^""]|"""")*)"")\s*;",
             RegexOptions.Singleline);
         foreach (var (file, source) in ReaderSources())
         {
@@ -2256,6 +2276,22 @@ public sealed class McpPayloadContractCensusTests
                 yield return (file, m.Groups[1].Value, m.Groups[2].Success ? m.Groups[2].Value : m.Groups[3].Value);
             }
         }
+    }
+
+    /// <summary>True when the statement's first depth-zero <c>SELECT</c> / <c>INSERT</c> / <c>UPDATE</c> /
+    /// <c>DELETE</c> keyword is a write verb. A leading <c>WITH</c> list is skipped because its CTE bodies sit at
+    /// depth one. <paramref name="clean"/> has its comments already stripped.</summary>
+    private static bool IsWriteStatement(string clean)
+    {
+        var depth = 0;
+        foreach (Match t in Regex.Matches(clean, @"\(|\)|\b(?:SELECT|INSERT|UPDATE|DELETE)\b", RegexOptions.IgnoreCase))
+        {
+            if (t.Value == "(") depth++;
+            else if (t.Value == ")") depth--;
+            else if (depth == 0) return !t.Value.Equals("SELECT", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return false;
     }
 
     /// <summary>Parenthesis depth of <paramref name="position"/> within <paramref name="sql"/>.</summary>

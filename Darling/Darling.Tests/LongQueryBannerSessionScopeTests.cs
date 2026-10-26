@@ -78,7 +78,7 @@ public sealed class LongQueryBannerSessionScopeTests
     [Fact]
     public void TheReadme_SaysTheSessionIsPerDatabase_OnAzureSqlDatabase()
     {
-        var readme = File.ReadAllText(RepoPath("Darling", "README.md"));
+        var readme = File.ReadAllText(RepoPath("docs", "darling", "collector-settings.md")); // #6416: moved from Darling/README.md
 
         Assert.Contains(
             "On Azure SQL Database the session is database-scoped. Enabling it creates the session in each monitored database and drops it from any other database that has it. Disabling it drops the session from every database that has it. Neither drop removes the session from a database where another registration of that database still has the trace on. A database that is also monitored as its own server is left to that registration.",

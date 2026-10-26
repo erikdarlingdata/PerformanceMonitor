@@ -189,14 +189,6 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding LastSuccessfulRunLocal}" Width="150" SortMemberPath="LastSuccessfulRunUtc">
-                        <DataGridTextColumn.Header>
-                            <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSuccessfulRunLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>
-                                <TextBlock Text="Last Success" FontWeight="Bold" VerticalAlignment="Center"/>
-                            </StackPanel>
-                        </DataGridTextColumn.Header>
-                    </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding Message}" Width="*" MinWidth="200">
                         <!-- #6086: the cell trims long text; the tooltip carries the whole message. -->
                         <DataGridTextColumn.ElementStyle>

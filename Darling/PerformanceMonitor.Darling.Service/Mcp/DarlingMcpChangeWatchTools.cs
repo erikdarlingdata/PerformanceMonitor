@@ -32,21 +32,24 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpChangeWatchTools
 {
+    /// <summary>The <c>state</c> value that means no filter: what the answer echoes when none was given (#6561).</summary>
+    internal const string AllStates = "all";
+
     /// <summary>What <c>state</c> accepts: a watch's state, or the result it closed with (the store matches either).</summary>
     internal static readonly string[] StateFilters =
     {
         "open", "evaluating", "closed", "failed",
         ChangeWatchStore.ResultFlat, ChangeWatchStore.ResultRequestOpened, ChangeWatchStore.ResultMovedNoRequest,
-        ChangeWatchStore.ResultAgentChange, ChangeWatchStore.ResultNoData,
+        ChangeWatchStore.ResultAgentChange, ChangeWatchStore.ResultAutoPlanCorrection, ChangeWatchStore.ResultNoData,
     };
 
     [McpServerTool(Name = "get_change_watches"), Description(
         "Lists a server's change watches, open and closed, newest first: a recorded change (a configuration, trace flag, plan or " +
         "extension change) opens a 60 minute watch, and at its end Darling compares wait time per second, average CPU and query " +
         "duration with the hour before and the same hour a week earlier. Each watch carries its changes, its measures and its result " +
-        "(flat, request_opened, moved_no_request, moved_agent_change, no_data), or its failed state. Stored read. <<GUIDE>> " +
+        "(flat, request_opened, moved_no_request, moved_agent_change, moved_auto_plan_correction, no_data), or its failed state. One watch: pass watch_id. From a request_id: state=request_opened, then match it. Stored read. <<GUIDE>> " +
         "Reads the change watch windows (config.change_watches) for SQL Server and PostgreSQL targets. A SQL Server change is a server, database or " +
-        "database-scoped setting, a trace flag, or a forced or unforced Query Store plan; a PostgreSQL change is a server setting, a per-database " +
+        "database-scoped setting, a trace flag, a forced or unforced Query Store plan, or a Query Store hint set, changed or cleared (kind query_store_hint, SQL Server 2022 and later); a PostgreSQL change is a server setting, a per-database " +
         "or per-role setting, or an extension install, drop or version change. Every change Darling records opens a watch of 60 " +
         "minutes for its server, or extends the open one; when the window ends, the watch is evaluated and closes. Darling looks for " +
         "changes once an hour per server, so a change may be recorded up to an hour after it happened. The window still runs from the " +
@@ -58,7 +61,8 @@ public sealed class DarlingMcpChangeWatchTools
         "request_opened (something moved and ONE investigation request opened, request_id names it), moved_no_request (something moved and " +
         "no investigation could open: investigations are off or no agent route matched), moved_agent_change (something moved, but every " +
         "change in the watch was the investigation agent's own plan force or unforce made while it handled a change watch request, so it " +
-        "is recorded and measured and opens no further request), or no_data (the before or after hour had no " +
+        "is recorded and measured and opens no further request), moved_auto_plan_correction (something moved, but every change was a plan that SQL Server's own " +
+        "automatic plan correction forced or unforced, so it is recorded and measured and opens no request), or no_data (the before or after hour had no " +
         "collected rows, so nothing was compared). state says where a watch is: open (still collecting its window), evaluating (its " +
         "window ended and a Darling pass is reading its measures or opening its request; a watch stuck here is retried), closed (done, " +
         "with a result) or failed (its evaluation or request failed repeatedly and Darling gave up; result_detail holds the last error). " +
@@ -69,36 +73,63 @@ public sealed class DarlingMcpChangeWatchTools
         "collector where that is its source, CPU from Performance Insights samples and statements from pg_stat_statements; a measure it has no source for is listed in not_measured with the reason " +
         "(for example no CPU source), never as flat. An open watch has no measures yet: it is still collecting its window. Pass state " +
         "open, evaluating, closed or failed to see only watches in that state, or a result (flat, request_opened, moved_no_request, " +
-        "moved_agent_change, no_data) to see only watches that closed with it. A read over the monitoring store; no monitored server is touched.")]
+        "moved_agent_change, moved_auto_plan_correction, no_data) to see only watches that closed with it. A closed watch that measured many queries can run to about 20 KB, " +
+        "so ask for a small limit (3 to 5), or pass watch_id to read one watch in any state. measures, not_measured and " +
+        "changes are sent once, at the top of the watch; result_detail holds the rest of the stored result (had_data, notes, window). " +
+        "A read over the monitoring store; no monitored server is touched.")]
     public static async Task<string> GetChangeWatches(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Only watches in this state (open, evaluating, closed, failed) or with this result (flat, request_opened, moved_no_request, moved_agent_change, no_data). Omit for all.")] string? state = null,
-        [Description("Most watches to return, newest first. Default 20 (1-1000).")] int limit = 20,
+        [Description("Only watches in this state (open, evaluating, closed, failed) or with this result (flat, request_opened, moved_no_request, moved_agent_change, moved_auto_plan_correction, no_data). Omit it, or pass all, for every state.")] string? state = null,
+        [Description("Most watches to return, newest first. Default 20 (1-1000). A small limit gives the newest, not a chosen watch: use watch_id.")] int limit = 20,
+        [Description("Read one watch by its watch_id, in any state; state still applies if you give it. A watch_id that is not on this server answers not_found.")] string? watch_id = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
+        /* #6561: the answer says "state": "all" when no filter was given, so a caller that copies that value back means no filter. */
+        if (string.Equals(state, AllStates, StringComparison.OrdinalIgnoreCase))
+        {
+            state = null;
+        }
+
         if (state is not null && Array.IndexOf(StateFilters, state) < 0)
         {
-            return McpHelpers.Refusal("state", $"Invalid state '{state}'. Use {string.Join(", ", StateFilters)}, or omit it for all.");
+            return McpHelpers.Refusal("state", $"Invalid state '{state}'. Use {string.Join(", ", StateFilters)}, {AllStates}, or omit it for all.");
         }
 
         var limitError = McpHelpers.ValidateTop(limit);
         if (limitError != null) return limitError;
 
+        /* #6591: a watch_id that is not a GUID cannot match a watch; it answers like an id nobody holds. */
+        Guid? watchId = null;
+        if (!string.IsNullOrWhiteSpace(watch_id))
+        {
+            if (!Guid.TryParse(watch_id, out var parsed))
+            {
+                return McpHelpers.Status("not_found", $"watch_id '{watch_id}' is not a change watch id.");
+            }
+
+            watchId = parsed;
+        }
+
         try
         {
             var store = new ChangeWatchStore(postgres, McpCommandDeadlines.ReadSeconds);
-            var watches = await store.ListAsync(resolved.ServerId, state, limit, cancellationToken);
+            var watches = await store.ListAsync(resolved.ServerId, state, limit, watchId, cancellationToken);
+            if (watches.Count == 0 && watchId is not null)
+            {
+                return McpHelpers.Status("not_found", $"No change watch{(state is null ? "" : $" matching {state}")} with that watch_id is recorded for {resolved.DisplayName}.");
+            }
+
             if (watches.Count == 0)
             {
                 /* The change kinds belong to the target's engine: a PostgreSQL target records settings and extensions, never trace flags or plans. */
                 var (_, engineKind) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, resolved.ServerId, cancellationToken);
                 var kinds = MonitoredEngineKind.IsPostgres(engineKind)
                     ? "a server setting, a per-database or per-role setting, or an extension install, drop or version change"
-                    : "a server, database or database-scoped configuration change, a trace flag change or a Query Store plan force or unforce";
+                    : "a server, database or database-scoped configuration change, a trace flag change, a Query Store plan force or unforce or a Query Store hint change";
                 return McpHelpers.Status(
                     "empty",
                     $"No change watch{(state is null ? "" : $" matching {state}")} is recorded for {resolved.DisplayName}. A watch opens when {kinds} " +
@@ -129,11 +160,12 @@ public sealed class DarlingMcpChangeWatchTools
                             kind = c.Kind,
                             database = c.DatabaseName,
                             query_id = c.QueryId,
+                            plan_forcing_type = c.PlanForcingType,
                             what = c.Description,
                         }),
                         measures = detail?["measures"],
                         not_measured = detail?["not_measured"],
-                        result_detail = detail,
+                        result_detail = WithoutRepeats(detail),
                     };
                 }),
             });
@@ -142,6 +174,29 @@ public sealed class DarlingMcpChangeWatchTools
         {
             return McpHelpers.FormatError("get_change_watches", ex);
         }
+    }
+
+    /// <summary>
+    /// #6591: the stored result minus the keys the watch already carries at its top (<c>measures</c>, <c>not_measured</c>, <c>changes</c>), so
+    /// each fact is sent once. What is left (<c>had_data</c>, <c>notes</c>, <c>window</c>, or a failed watch's <c>error</c>) is only here.
+    /// </summary>
+    private static JsonNode? WithoutRepeats(JsonNode? detail)
+    {
+        if (detail is JsonObject stored)
+        {
+            var rest = new JsonObject();
+            foreach (var (key, value) in stored)
+            {
+                if (key is not ("measures" or "not_measured" or "changes"))
+                {
+                    rest[key] = value?.DeepClone();
+                }
+            }
+
+            return rest;
+        }
+
+        return detail;
     }
 
     /// <summary>The stored result as a JSON node, or null when the watch is still open or its text is not JSON.</summary>

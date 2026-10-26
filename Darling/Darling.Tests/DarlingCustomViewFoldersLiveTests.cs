@@ -177,7 +177,7 @@ public sealed class DarlingCustomViewFoldersLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await MigratedScratchAsync(ct);
         await using var dataSource = DataSourceFor(scratch.ConnectionString);
-        var store = new CustomViewStore(dataSource);
+        var store = new CustomViewStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
         var bodySucceeded = false;
         try
         {
@@ -261,7 +261,7 @@ public sealed class DarlingCustomViewFoldersLiveTests
         }
 
         /// <summary>Builds the real custom-view routes behind a stand-in for the auth middleware: the request's seat comes from the
-        /// <c>X-Test-Subject</c> header (none = the shared-token seat) and the owner key from <c>X-Test-Key</c> (none = a seat with a
+        /// <c>X-Test-Subject</c> header (none = the shared-token seat, stored here) and the owner key from <c>X-Test-Key</c> (none = a seat with a
         /// name and no key, like a cookie from before owner keys existed).</summary>
         public static async Task<WebFixture> StartAsync(NpgsqlDataSource dataSource, CancellationToken ct)
         {
@@ -275,6 +275,11 @@ public sealed class DarlingCustomViewFoldersLiveTests
                 {
                     var key = context.Request.Headers.TryGetValue("X-Test-Key", out var k) && k.Count > 0 ? k[0] : null;
                     context.Items[DarlingWebSeat.HttpContextItemKey] = new DarlingWebSeat(subject[0], CanEdit: true, key);
+                }
+                else
+                {
+                    /* A request with no seat reads as reads-only, so the shared-token seat is stored the way the real gate stores it. */
+                    context.Items[DarlingWebSeat.HttpContextItemKey] = DarlingWebSeat.SharedToken;
                 }
 
                 await next();
@@ -691,7 +696,7 @@ public sealed class DarlingCustomViewFoldersLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await MigratedScratchAsync(ct);
         await using var dataSource = DataSourceFor(scratch.ConnectionString);
-        var store = new CustomViewStore(dataSource);
+        var store = new CustomViewStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
         var bodySucceeded = false;
         try
         {

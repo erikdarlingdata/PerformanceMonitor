@@ -31,7 +31,7 @@ export const AGENT_CHANGE_COLUMNS = [
   { key: "review", label: "Review" },
 ];
 
-const listOnly = (managed) => listOnlyNote(managed, "this page lists agent changes only", "To undo a change or switch agent changes off");
+const listOnly = (managed, adminWritesOff) => listOnlyNote(managed, "this page lists agent changes only", "To undo a change or switch agent changes off", adminWritesOff);
 const CAN_DECIDE =
   "Agent changes, newest first. Undo restores what the setting was before the agent's change, but only if nobody has changed it since; " +
   "otherwise it says so and leaves the setting alone. Undo works for 365 days. An evicted plan has no undo. The next run compiles a new plan. A killed session has no undo.";
@@ -42,6 +42,9 @@ export function agentKindText(kind) {
   if (kind === "plan_unforce") return "unforce plan";
   if (kind === "plan_evict") return "evict plan";
   if (kind === "session_kill") return "kill session"; // #6310: the Darling Viewer's word for it
+  if (kind === "module_recompile") return "recompile module"; // #6569
+  if (kind === "plan_guide_create") return "create plan guide"; // #6569
+  if (kind === "plan_guide_drop") return "drop plan guide"; // #6569
   return kind || null;
 }
 
@@ -124,7 +127,12 @@ export async function buildAgentChanges(body, generation, ctx) {
   if (bad) return mount(body, nodes.concat([bad]));
   const data = res.data || {};
   const canDecide = data.can_decide === true;
-  nodes.push(noticeStrip(canDecide ? CAN_DECIDE : listOnly((await ctx.getSession()).managed_store === true)));
+  let notice = canDecide ? CAN_DECIDE : null;
+  if (notice === null) {
+    const session = await ctx.getSession();
+    notice = listOnly(session.managed_store === true, session.admin_writes_off === true);
+  }
+  nodes.push(noticeStrip(notice));
   nodes.push(switchBar(data.enabled !== false, canDecide, ctx));
   const rows = agentChangeRows(data);
   const columns = AGENT_CHANGE_COLUMNS.concat(canDecide ? [{

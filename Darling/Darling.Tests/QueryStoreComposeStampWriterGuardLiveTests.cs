@@ -63,8 +63,10 @@ public sealed class QueryStoreComposeStampWriterGuardLiveTests
             await using var builder = await source.OpenConnectionAsync(ct);
             await using var open = await writer.BeginTransactionAsync(ct);
             await ExecAsync(writer, "CREATE TEMP TABLE scratch_5582 (i int); INSERT INTO scratch_5582 VALUES (1); UPDATE collect.servers SET is_enabled = is_enabled WHERE server_id = 1", ct);
-            /* It holds an xid, the whole of what the round-1 guard asked for. */
-            Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND backend_xid IS NOT NULL AND pid <> pg_backend_pid()", ct));
+            /* It holds an xid, the whole of what the round-1 guard asked for. Counted for this writer's own backend: a count of every
+               backend in the database also picks up a TimescaleDB job worker or autovacuum that holds an xid at that moment, and CI
+               read 2 here. */
+            Assert.Equal(1, await CountAsync(connection, $"SELECT count(*) FROM pg_stat_activity WHERE pid = {writer.ProcessID} AND backend_xid IS NOT NULL", ct));
 
             Assert.NotNull(await QueryStoreComposeStamp.BuildHourAsync(builder, hour, DateTime.UtcNow, ct));
             Assert.Equal(1, await HoursBuiltAsync(connection, hour, ct));
@@ -130,13 +132,13 @@ public sealed class QueryStoreComposeStampWriterGuardLiveTests
         var bodySucceeded = false;
         try
         {
-            Assert.NotEmpty((await QueryStoreComposeStamp.PlanAsync(connection, DateTime.UtcNow, RetentionDays, ct)).Builds);
+            Assert.NotEmpty((await QueryStoreComposeStamp.PlanAsync(connection, ClockWithin(hourNow), RetentionDays, ct, ClockWithin(hourNow))).Builds);
 
             await using (var other = await OpenWriterAsync(scratch, ct))
             await using (var open = await other.BeginTransactionAsync(ct))
             {
                 await ExecAsync(other, "CREATE TEMP TABLE scratch_5582 (i int); INSERT INTO scratch_5582 VALUES (1)", ct);
-                var plan = await QueryStoreComposeStamp.PlanAsync(connection, DateTime.UtcNow, RetentionDays, ct);
+                var plan = await QueryStoreComposeStamp.PlanAsync(connection, ClockWithin(hourNow), RetentionDays, ct, ClockWithin(hourNow));
                 Assert.NotEmpty(plan.Builds);
                 Assert.Equal(0, plan.HeldBack);
                 await open.RollbackAsync(ct);
@@ -149,13 +151,13 @@ public sealed class QueryStoreComposeStampWriterGuardLiveTests
                 Assert.Equal(1, await CountAsync(connection, $"SELECT count(*) FROM pg_stat_activity WHERE pid = {blind.ProcessID} AND xact_start IS NULL", ct));
 
                 /* No start time to compare: every hour the plan could pick might be one the writer holds an unmarked row of. */
-                var plan = await QueryStoreComposeStamp.PlanAsync(connection, DateTime.UtcNow, RetentionDays, ct);
+                var plan = await QueryStoreComposeStamp.PlanAsync(connection, ClockWithin(hourNow), RetentionDays, ct, ClockWithin(hourNow));
                 Assert.Empty(plan.Builds);
                 Assert.True(plan.HeldBack > 0);
                 await open.RollbackAsync(ct);
             }
 
-            Assert.NotEmpty((await QueryStoreComposeStamp.PlanAsync(connection, DateTime.UtcNow, RetentionDays, ct)).Builds);
+            Assert.NotEmpty((await QueryStoreComposeStamp.PlanAsync(connection, ClockWithin(hourNow), RetentionDays, ct, ClockWithin(hourNow))).Builds);
             bodySucceeded = true;
         }
         finally
@@ -214,9 +216,9 @@ public sealed class QueryStoreComposeStampWriterGuardLiveTests
             var logger = new CapturingTestLogger();
             var now = new DateTime(2026, 10, 8, 12, 0, 0, DateTimeKind.Utc);
             var watch = new QueryStoreComposeStamp.DeferralWatch(() => now);
-            var options = new QueryStoreComposeStamp.TickOptions(watch, DateTime.UtcNow.AddHours(8));
+            var options = new QueryStoreComposeStamp.TickOptions(watch, ClockWithin(hourNow).AddHours(8));
 
-            var first = await QueryStoreComposeStamp.RunTickAsync(source, DateTime.UtcNow, RetentionDays, logger, () => TimeSpan.Zero, ct, options);
+            var first = await QueryStoreComposeStamp.RunTickAsync(source, ClockWithin(hourNow), RetentionDays, logger, () => TimeSpan.Zero, ct, options);
             Assert.Equal(0, first.Failed);
             Assert.Equal(0, first.DeferredForWriters);
             Assert.True(first.HeldBack > 0, "the plan should report the hours the writer holds back");
@@ -230,7 +232,7 @@ public sealed class QueryStoreComposeStampWriterGuardLiveTests
             Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
 
             /* The second tick in a row that held hours back: the Warning, naming the writer, never its query. */
-            var second = await QueryStoreComposeStamp.RunTickAsync(source, DateTime.UtcNow, RetentionDays, logger, () => TimeSpan.Zero, ct, options);
+            var second = await QueryStoreComposeStamp.RunTickAsync(source, ClockWithin(hourNow), RetentionDays, logger, () => TimeSpan.Zero, ct, options);
             Assert.Equal(0, second.Failed);
             Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
             var line = Assert.Single(logger.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal));
@@ -243,7 +245,7 @@ public sealed class QueryStoreComposeStampWriterGuardLiveTests
 
             /* A third tick inside the ten minutes says nothing more at Warning. */
             now = now.AddMinutes(9);
-            await QueryStoreComposeStamp.RunTickAsync(source, DateTime.UtcNow, RetentionDays, logger, () => TimeSpan.Zero, ct, options);
+            await QueryStoreComposeStamp.RunTickAsync(source, ClockWithin(hourNow), RetentionDays, logger, () => TimeSpan.Zero, ct, options);
             Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
 
             await open.CommitAsync(ct);

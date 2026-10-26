@@ -168,4 +168,38 @@ ORDER BY database_name";
 
         return (states, observedUtc);
     }
+
+    /// <summary>
+    /// #6554: what <see cref="CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage"/> judges: the newest stored
+    /// <c>ag_replica_role</c>, and how many databases in the newest <c>query_store_health</c> capture carry the readable-secondary
+    /// bit (of how many, leaving out tempdb and databases whose Query Store is OFF: the on-prem capture always holds tempdb, and
+    /// neither has Query Store rows to read).
+    /// </summary>
+    public async Task<(string? AgReplicaRole, int HealthDatabases, int HealthSecondaryDatabases)> GetReadableSecondaryFactsAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT
+    (SELECT sp.ag_replica_role FROM v_server_properties AS sp WHERE sp.server_id = $1 ORDER BY sp.collection_time DESC LIMIT 1),
+    (SELECT COUNT(*) FROM v_query_store_health AS h
+      WHERE h.server_id = $1 AND h.capture_time = (SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1)
+        AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF'),
+    (SELECT COUNT(*) FROM v_query_store_health AS h
+      WHERE h.server_id = $1 AND (h.readonly_reason & 8) <> 0
+        AND h.capture_time = (SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1)
+        AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF')";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+        using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+        {
+            return (null, 0, 0);
+        }
+
+        return (
+            reader.IsDBNull(0) ? null : reader.GetString(0),
+            Convert.ToInt32(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture),
+            Convert.ToInt32(reader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture));
+    }
 }

@@ -25,6 +25,7 @@ using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -42,7 +43,7 @@ public sealed class ReadAdmissionCoverageCensusTests
     /// admission call beside it.</summary>
     private static readonly Dictionary<string, int> ScopeSites = new(StringComparer.Ordinal)
     {
-        ["DarlingWebEndpoints.cs"] = 9, // /api/investigation-export (#6236), /api/query-tag-rules/test (#5986), the /api/read/{name} loop, the composed panel (its run and its cache), /api/fleet, /api/alerts/test, /api/ag and /api/catalog (round 2, L5)
+        ["DarlingWebEndpoints.cs"] = 10, // /api/active-queries/live/{commandId} (#6386), /api/investigation-export (#6236), /api/query-tag-rules/test (#5986), the /api/read/{name} loop, the composed panel (its run and its cache), /api/fleet, /api/alerts/test, /api/ag and /api/catalog (round 2, L5)
         ["DarlingTriageEndpoint.cs"] = 1, // /api/triage (the dedicated routes record their own samples, #5506 part 3)
         ["AlertNotebookEndpoint.cs"] = 1, // /api/alert-notebook (round 1, M3)
         ["DarlingFleetSweepEndpoints.cs"] = 4, // /api/sweeps, /latest, /{id} and /watch-items (round 1, M3)
@@ -141,7 +142,7 @@ public sealed class ReadAdmissionCoverageCensusTests
 
         var web = File.ReadAllText(Path.Combine(ServiceDir, "DarlingWebEndpoints.cs"));
         var runner = web.IndexOf("internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(", StringComparison.Ordinal);
-        var core = web.IndexOf("RunComposedPanelCoreAsync(postgres, body,", runner, StringComparison.Ordinal);
+        var core = web.IndexOf("RunComposedPanelCoreAsync(ComposeHost, postgres, body,", runner, StringComparison.Ordinal);
         Assert.True(runner >= 0 && core > runner);
         Assert.Contains("ReadScope.AdmitAsync(admission, ReadSurface.Compose, composeRoute, composeBand, cancellationToken)", web[runner..core], StringComparison.Ordinal);
 
@@ -248,6 +249,13 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "DELETE \"/api/notification-routes/{id:int}\""] = "write",
         [WebFile + "POST \"/api/collectors/run\""] = "write",
         [WebFile + "GET \"/api/collectors/run/{commandId:long}\""] = "definition read: one command row's status and result (a single indexed row, #5941)",
+        [WebFile + "GET \"/api/active-queries/live/available\""] = "definition read: whether this seat and store login can queue a live read (one catalog lookup, #6386)",
+        [WebFile + "POST \"/api/active-queries/live\""] = "write",
+        [WebFile + "GET \"/api/analyze-now/available\""] = "definition read: whether this seat and store login can queue an analysis run (one catalog lookup, #6389)",
+        [WebFile + "POST \"/api/analyze-now\""] = "write",
+        [WebFile + "GET \"/api/analyze-now/{commandId:long}\""] = "one command row by id: its status words, no result payload (#6389)",
+        [WebFile + "GET \"/api/analysis/ask-ai-prompt\""] = "one server-clock row by server id, then a string (#6389)",
+        [WebFile + "GET \"/api/active-queries/live/{commandId:long}\""] = null, // #6386: the result read returns the stored plan XML of a live read, so it is admitted
         [WebFile + "POST \"/api/server-tags\""] = "write",
         [WebFile + "PATCH \"/api/server-tags/{id:int}\""] = "write",
         [WebFile + "DELETE \"/api/server-tags/{id:int}\""] = "write",

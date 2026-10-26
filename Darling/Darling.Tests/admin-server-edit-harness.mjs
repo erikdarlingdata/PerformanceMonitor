@@ -310,6 +310,8 @@ try {
   const page = await import(pathToFileURL(path.join(scratch, "pages", "admin.js")).href);
   const util = await import(pathToFileURL(path.join(scratch, "util.js")).href);
   const actionsPage = await import(pathToFileURL(path.join(scratch, "pages", "admin-server-actions.js")).href);
+  const agentSetupPage = await import(pathToFileURL(path.join(scratch, "pages", "admin-agent-setup.js")).href);
+  const writesPage = await import(pathToFileURL(path.join(scratch, "investigation-writes.js")).href);
   const main = body.appendChild(new FakeNode("main"));
   const mountPage = async (tab = "servers") => {
     page.renderAdmin(main, tab);
@@ -1136,6 +1138,8 @@ try {
        the person is told why). */
     feedback: async (kind) => {
       state.canEdit = kind !== "listonly";
+      /* #6600: "nostoreoff" is the managed store with web.allowAdminWrites off: the session says so, and the page's note names the switch. */
+      if (kind === "nostoreoff") state.sessionReply = () => ({ status: 200, body: { can_edit: true, signed_in_admin: true, managed_store: true, admin_writes_off: true } });
       const id = "11111111-1111-1111-1111-111111111111";
       let held = [];
       const report = () => ({
@@ -1151,7 +1155,7 @@ try {
       };
       state.responder = (method, url, sent) => {
         if (method === "GET" && url === "/api/investigation-feedback") {
-          return { status: 200, body: { hours_back: 168, can_record: kind !== "nostore", requests_returned: 1, truncated: false,
+          return { status: 200, body: { hours_back: 168, can_record: !kind.startsWith("nostore"), requests_returned: 1, truncated: false,
             families: [{ family: "blocking", reported: 1, with_feedback: held.length, marked_wrong: 0, agent_false_positives: 0, false_positives: 0 }], requests: [report()] } };
         }
         if (method === "PUT" && url === "/api/investigation-feedback/" + id) return (answers[kind] || answers.recorded)(sent);
@@ -1250,11 +1254,14 @@ try {
     pure: async () => {
       const request = JSON.parse(await readStdin());
       const call = ({ fn, args = [] }) => {
-        const source = fn in page ? page : fn in actionsPage ? actionsPage : null;
+        const source = [page, actionsPage, agentSetupPage, writesPage].find((m) => fn in m) || null;
         if (!source) throw new Error("admin.js exports no " + fn);
         return typeof source[fn] === "function" ? source[fn](...args) : source[fn];
       };
-      return Array.isArray(request.calls) ? { results: request.calls.map(call) } : { result: call(request) };
+      /* A call may be async (writeNote); `writes` counts the changes (not the reads) the calls sent. */
+      const out = Array.isArray(request.calls) ? { results: await Promise.all(request.calls.map(call)) } : { result: await call(request) };
+      out.writes = requests.filter((r) => r.method !== "GET").length;
+      return out;
     },
   };
   if (!(scenario in scenarios)) throw new Error("unknown scenario " + scenario);

@@ -119,6 +119,10 @@ internal sealed class ReconstructedChain
     public int VictimCount { get; init; }
     public long MaxWaitMs { get; init; }
     public double Magnitude { get; init; }
+    /// <summary>The BLOCKING_CHAIN grade for this chain (<see cref="FactScorer.ScoreBlockingChainShape"/>): structure
+    /// and the longest wait. <see cref="Magnitude"/> (structure only) keeps ordering <see cref="BlockingReconstruction.Chains"/>
+    /// and the viewer tree; the fact's worst-chain pick and both drill-downs rank by this, so they agree.</summary>
+    public double Grade { get; init; }
     public IReadOnlyList<ChainLevel> Levels { get; init; } = Array.Empty<ChainLevel>();
 }
 
@@ -212,6 +216,11 @@ internal static class BlockingChainReconstructor
 
         foreach (var row in pairs)
         {
+            // #6645: a parallel query's threads write reports with blocked spid = blocking spid (different ecid).
+            // That is the query waiting on itself, not blocking: make no node, so no edge or cycle either.
+            if (row.BlockingSpid == row.BlockedSpid)
+                continue;
+
             // The collector reconstructs cumulatively (loop = null) so an episode's per-scan re-fires merge into
             // one chain (preserves window-level depth/victims for the severity fact); the viewer scopes per scan.
             var loop = scopeByMonitorLoop ? row.MonitorLoop : null;
@@ -277,6 +286,7 @@ internal static class BlockingChainReconstructor
                 VictimCount = victimCount,
                 MaxWaitMs = maxWait,
                 Magnitude = magnitude,
+                Grade = FactScorer.ScoreBlockingChainShape(depth, victimCount, maxWait),
                 Levels = levels
             });
         }

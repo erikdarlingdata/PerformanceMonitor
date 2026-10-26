@@ -51,6 +51,8 @@ public sealed record AttentionTopItem(string Name, long Samples, string? SampleT
 /// <param name="TopsFromLookback">False (the default): the three top lists cover the samples inside the covered span
 /// (<see cref="AttentionEvaluator.SpanBoundary"/> onward), the alert card's reading. True: the span kept no samples, so the lists
 /// cover the whole lookback and the card says so in its headings (round 2 of #5714, L6).</param>
+/// <param name="TopHosts">The top 5 client hosts by sampled events (#6553), over the same range as the other top lists. Null on a window
+/// built without them; read it through <see cref="AttentionWindow.Hosts"/>.</param>
 public sealed record AttentionWindow(
     IReadOnlyList<DateTime> RunTimes,
     IReadOnlyList<AttentionCountRow> Counts,
@@ -58,8 +60,12 @@ public sealed record AttentionWindow(
     IReadOnlyList<AttentionTopItem> TopStatements,
     IReadOnlyList<AttentionTopItem> TopDatabases,
     IReadOnlyList<AttentionTopItem> TopApplications,
-    bool TopsFromLookback = false)
+    bool TopsFromLookback = false,
+    IReadOnlyList<AttentionTopItem>? TopHosts = null)
 {
+    /// <summary>The top client hosts (#6553), empty when the window carries none.</summary>
+    public IReadOnlyList<AttentionTopItem> Hosts => TopHosts ?? Array.Empty<AttentionTopItem>();
+
     /// <summary>No runs, no rows: what a read of a server that never ran the collector returns.</summary>
     public static AttentionWindow Empty { get; } = new(
         Array.Empty<DateTime>(), Array.Empty<AttentionCountRow>(), Array.Empty<AttentionSampleGroup>(),
@@ -87,6 +93,9 @@ public sealed record AttentionReading(
 {
     /// <summary>All sampled events in the span.</summary>
     public long SampleTotal => Groups.Sum(g => g.Samples);
+
+    /// <summary>Sampled events in the span from the application <see cref="AttentionEvaluator.IsExcludedApp"/> leaves out (#6552).</summary>
+    public long ExcludedSamples => Groups.Where(g => AttentionEvaluator.IsExcludedApp(g.ClientAppName)).Sum(g => g.Samples);
 }
 
 /// <summary>
@@ -126,7 +135,7 @@ public sealed record AttentionReading(
 /// the server's own p99.9 of its 3-minute average attention rate over the trailing <see cref="AttentionBaselineMath.LookbackDays"/> days
 /// (<see cref="AttentionBaselineMath"/>). The floors are the settings the alert shipped with, Warning 10 and Critical 60 per minute, and
 /// the multiples default to 3 and 10. A server with under a day of capture has no baseline and is graded on the floors alone, and the alert
-/// says so. OFF by default.</para>
+/// says so. ON by default (V216 on Darling).</para>
 /// </summary>
 public static class AttentionEvaluator
 {
@@ -136,6 +145,21 @@ public static class AttentionEvaluator
 
     /// <summary>The span the rate is averaged over, in minutes.</summary>
     public const int WindowMinutes = 3;
+
+    /// <summary>The client application SSMS IntelliSense runs its metadata queries under (#6552). It cancels them itself when the user keeps
+    /// typing, so each one is a cancel the client asked for, not a timeout an application user saw.</summary>
+    public const string IntelliSenseClientApp = "Microsoft SQL Server Management Studio - Transact-SQL IntelliSense";
+
+    /// <summary>
+    /// True for a sampled event whose client application is SSMS IntelliSense (#6552): the alert judges the count without it, and
+    /// <c>get_client_timeouts</c> marks it excluded. The filter lives at READ time (here and in <see cref="ClientTimeoutsRead"/>); the
+    /// collector still stores every event, so a mute rule, the sampled-event list and the history keep seeing them. Matches
+    /// "Microsoft SQL Server Management Studio" followed by anything and ending in "IntelliSense", so a renamed SSMS build still matches.
+    /// </summary>
+    public static bool IsExcludedApp(string? clientAppName) =>
+        clientAppName is not null
+        && clientAppName.StartsWith("Microsoft SQL Server Management Studio", StringComparison.OrdinalIgnoreCase)
+        && clientAppName.TrimEnd().EndsWith("IntelliSense", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>How far back the read looks, in minutes. Equal to <see cref="RunnableQueueEvaluator.ReadLookbackMinutes"/>
     /// (a test pins it): the shared freshness rule caps its window there.</summary>
@@ -372,6 +396,7 @@ public static class AttentionEvaluator
         }
 
         var sampleTotal = reading.SampleTotal;
+        var excludedSamples = reading.ExcludedSamples;
         var judgedCount = (double)reading.TotalCount;
         var estimated = false;
         if (sampleTotal == 0 && isGroupMuted is not null && isGroupMuted(null, null))
@@ -380,12 +405,15 @@ public static class AttentionEvaluator
                applies. A rule with a database or app pattern never matches a null database and app, so only a rule on the
                server and metric alone is asked here and can mute. The finding is Muted at the full count's grade. */
             return new Finding(fullSeverity, fullRate, fullBar, reading.TotalCount, judgedCount, reading.CoveredMinutes,
-                reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime, bars);
+                reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime, bars, excludedSamples);
         }
 
-        if (sampleTotal > 0 && isGroupMuted is not null)
+        if (sampleTotal > 0 && (isGroupMuted is not null || excludedSamples > 0))
         {
-            var unmuted = reading.Groups.Where(g => !isGroupMuted(g.DatabaseName, g.ClientAppName)).Sum(g => g.Samples);
+            /* #6552: SSMS IntelliSense's own cancels are left out the way a muted group is, by the same proportion of the sampled events. */
+            var unmuted = reading.Groups
+                .Where(g => !IsExcludedApp(g.ClientAppName) && (isGroupMuted is null || !isGroupMuted(g.DatabaseName, g.ClientAppName)))
+                .Sum(g => g.Samples);
             if (unmuted < sampleTotal)
             {
                 judgedCount = reading.TotalCount * (double)unmuted / sampleTotal;
@@ -397,12 +425,12 @@ public static class AttentionEvaluator
         if (Grade(judgedRate, warning, critical, out var judgedSeverity, out var judgedBar))
         {
             return new Finding(judgedSeverity, judgedRate, judgedBar, reading.TotalCount, judgedCount, reading.CoveredMinutes,
-                reading.RunCount, sampleTotal, estimated, Muted: false, reading.NewestRunTime, bars);
+                reading.RunCount, sampleTotal, estimated, Muted: false, reading.NewestRunTime, bars, excludedSamples);
         }
 
         /* The exact count crossed a bar, the unmuted share did not: the fire is recorded Muted at the exact count's grade. */
         return new Finding(fullSeverity, fullRate, fullBar, reading.TotalCount, judgedCount, reading.CoveredMinutes,
-            reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime, bars);
+            reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime, bars, excludedSamples);
     }
 
     private static bool Grade(double rate, int warning, int critical, out AlertSeverityLevel severity, out int bar)
@@ -439,6 +467,12 @@ public static class AttentionEvaluator
         {
             text += string.Create(CultureInfo.InvariantCulture,
                 $" Estimated from {finding.SampledEvents:N0} sampled events: {finding.JudgedCount / finding.CoveredMinutes:N1} per minute is not muted.");
+        }
+
+        if (finding.ExcludedSamples > 0)
+        {
+            text += string.Create(CultureInfo.InvariantCulture,
+                $" {finding.ExcludedSamples:N0} of the {finding.SampledEvents:N0} sampled events came from SSMS IntelliSense cancelling its own queries and are left out of the rate judged.");
         }
 
         if (finding.Bars is not null)
@@ -506,6 +540,7 @@ public static class AttentionEvaluator
     /// <param name="Muted">True when the exact count crossed a bar and the judged count did not: record the fire as Muted.</param>
     /// <param name="NewestRunTime">The newest run's time (naive UTC).</param>
     /// <param name="Bars">Where the bars came from (#5736), null when the grading used fixed bars only.</param>
+    /// <param name="ExcludedSamples">Sampled events in the span from SSMS IntelliSense (<see cref="IsExcludedApp"/>), left out of the judged count (#6552).</param>
     public sealed record Finding(
         AlertSeverityLevel Severity,
         double RatePerMinute,
@@ -518,7 +553,8 @@ public static class AttentionEvaluator
         bool Estimated,
         bool Muted,
         DateTime NewestRunTime,
-        BarBasis? Bars = null)
+        BarBasis? Bars = null,
+        long ExcludedSamples = 0)
     {
         /// <summary>The summary sentence for the alert.</summary>
         public string Summary => AttentionEvaluator.Summary(this);

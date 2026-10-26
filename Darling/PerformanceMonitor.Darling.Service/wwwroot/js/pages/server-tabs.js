@@ -43,6 +43,7 @@ import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStr
 import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
 import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP, SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "./active-snapshots.js";
+import { activeQueriesLiveBar } from "./active-live.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { statsHistoryColumn, historyTarget, procedurePoints } from "./stats-history.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
@@ -2005,7 +2006,7 @@ export const SERVER_TABS = [
     id: "queries",
     label: "Queries",
     note: "Plan analysis, cached-plan retrieval and actual-plan re-execution are in the desktop viewer, not on this page.",
-    noteInfo: "They need a plan renderer and a connection back to the monitored server. This page only shows collected data.",
+    noteInfo: "They need a plan renderer and a connection back to the monitored server. Apart from the Active Queries live read (Run live now, for accounts that can edit; otherwise use the viewer's Current Active Queries), this page only shows collected data.",
     build: (server, ctx) => [
       activeQueriesPanel(server, ctx),
       /* #2484: the viewer's Performance Trends tab is four charts over three reads. Duration and the
@@ -2134,7 +2135,8 @@ export const SERVER_TABS = [
         ctx.label,
         "No query regressed against its baseline in this window. A server with no earlier history has nothing to compare against.",
         2,
-        null,
+        /* #6654: the read leaves out databases the server dropped; the note names them (drawn on an empty answer too, panels.js). */
+        "databases_left_out_note",
         null,
         QUERY_STORE_REGRESSION_GROUPS
       ),
@@ -2359,7 +2361,15 @@ export const SERVER_TABS = [
         "jobs",
         JOB_COLUMNS,
         SNAPSHOT,
-        "No SQL Agent jobs were running at the last collection — the normal state for most servers."
+        runningJobsEmptyText(ctx),
+        2,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        ctx.offline === true
       ),
       table(
         "Job History",
@@ -2864,7 +2874,7 @@ export const POSTGRES_TABS = [
         "facets",
         PG_LOGGING_AUDIT_COLUMNS,
         "newest configuration snapshot; verdict describes the log lines each setting writes - partial means a threshold is filtering and is the recommended posture for log_min_duration_statement; the remedy is worded for this server's hosting flavour",
-        "No configuration snapshot to audit. pg_server_config runs hourly, so a server registered in the last hour has not reached its first collection - this is the absence of evidence, not a verdict about the server's logging."
+        "No configuration snapshot to audit. pg_server_config runs hourly unless its schedule was changed, so a server registered within the last collection interval has not reached its first collection - this is the absence of evidence, not a verdict about the server's logging."
       ),
       /* Directly UNDER the query shapes, because that is the question it answers (#2539). A statement whose
          time makes no sense from its row count usually spilled, and pg_stat_database's temp counters are the
@@ -2883,7 +2893,7 @@ export const POSTGRES_TABS = [
         },
         {
           title: "By Database",
-          subtitle: ctx.label + ", biggest spiller first",
+          subtitle: ctx.label + ", biggest temp-file spiller first, then by blocks read",
           viz: "table",
           rowsKey: "databases",
           columns: PG_DATABASE_COLUMNS,
@@ -2902,7 +2912,7 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours },
         "points",
         PG_DATABASE_TREND_COLUMNS,
-        ctx.label + ", the biggest temp-file spiller in this window; each row's hit ratio is its own intervals', not the lifetime average, and Worst Hit % is its worst single interval",
+        ctx.label + ", the biggest temp-file spiller in this window, or the busiest by block access when nothing spilled; each row's hit ratio is its own intervals', not the lifetime average, and Worst Hit % is its worst single interval",
         "No differenced intervals for this database in the window. A trend needs at least two snapshots, so a short window is legitimately empty here."
       ),
       /* #2629: sampled lock activity. On Activity rather than a Blocking tab because PostgreSQL has no
@@ -3398,7 +3408,7 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours },
         "changes",
         PG_CONFIG_CHANGE_COLUMNS,
-        ctx.label + ", newest first; the collector runs hourly, so a change happened in the hour before it was seen",
+        ctx.label + ", newest first; the collector runs hourly unless its schedule was changed, so a change happened in the collection interval before it was seen",
         "No configuration parameter changed value in this window. This compares consecutive snapshots, so an unchanged server is legitimately empty here - it is a finding, not missing data."
       ),
       table(
@@ -3408,7 +3418,7 @@ export const POSTGRES_TABS = [
         "settings",
         PG_SERVER_CONFIG_COLUMNS,
         "non-default first; pending restart means the file and the running server disagree",
-        "No configuration snapshot has been collected yet. This collector runs hourly, so a server registered within the last hour has not reached its first collection."
+        "No configuration snapshot has been collected yet. This collector runs hourly unless its schedule was changed, so a server registered within the last collection interval has not reached its first collection."
       ),
     ],
   },
@@ -3447,6 +3457,16 @@ export function isPostgresTarget(card) {
 export function findServerTab(id, tabs) {
   const registry = tabs || SERVER_TABS;
   return registry.find((t) => t.id === id) || registry[0];
+}
+
+/** What Running Jobs says when nothing is listed. "The normal state for most servers" is a claim about a server that is
+ *  collecting; a server whose collection is stale (the fleet card's is_online false, the same signal the page header's
+ *  Collectors chip reads) has no current reading, so it says so instead and the panel's sentence replaces the read's own
+ *  empty message (table()'s emptyWins). */
+export function runningJobsEmptyText(ctx) {
+  return ctx && ctx.offline === true
+    ? "No running jobs can be shown: collection for this server is stale, so the last snapshot is not a current reading. See Collection Health."
+    : "No SQL Agent jobs were running at the last collection — the normal state for most servers.";
 }
 
 /** The tab's note as a rendered strip, or null. Kept here so the shell has no opinion about its wording. A note can be
@@ -3803,11 +3823,15 @@ function activeQueriesPanel(server, ctx) {
   /* #6302: the snapshot picker (active-snapshots.js) reads the window's snapshot times, under the tag pick and the wait filter the grid
      uses, and draws the grid for the latest one, or the one picked; "All snapshots in window" draws it as it was. */
   /* #6301: under the time slicer. `w` is the page range or the slicer's selection; the snapshot list and the grid both read it. */
-  return slicedTagCard("active", { server, ctx }, (tagPicker, w) =>
+  const card = slicedTagCard("active", { server, ctx }, (tagPicker, w) =>
     activeQueriesSnapshotSlot(server, w, wait, withTagPick({}, "active"), (snapshotTime, snapPicker) =>
       activeQueriesGrid(server, w, wait, snapshotTime, snapPicker ? el("div", {}, [tagPicker, snapPicker]) : tagPicker)
     )
   );
+  /* #6386: the live read ("Run live now") sits above the stored snapshots, in the stored grid's columns. */
+  const wrap = el("div", {}, [activeQueriesLiveBar(server, ACTIVE_COLUMNS), card]);
+  wrap.style.display = "contents";
+  return wrap;
 }
 
 function activeQueriesGrid(server, ctx, wait, snapshotTime, control) {
@@ -5510,7 +5534,7 @@ const COLLECTION_LOG_COLUMNS = [
   { key: "sql_store_ms", label: "Store (in SQL)", format: "ms" },
   { key: "store_duration_ms", label: "On Store", format: "ms" },
   { key: "rows_collected", label: "Rows", format: "int" },
-  { key: "error_message", label: "Error", wrap: true, localizeText: true },
+  { key: "error_message", label: "Error", wrap: true, localizeText: true, plain: "counts" },
 ];
 
 /* #5227: the collector picked on the Collectors panel, keyed by server at MODULE scope so the 60 s rebuild of the tab

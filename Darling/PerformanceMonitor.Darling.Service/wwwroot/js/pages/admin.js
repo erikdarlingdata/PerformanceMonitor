@@ -334,7 +334,7 @@ export function serverRows(data) {
    network, so the form built on top of them can be tested rule by rule.
    They mirror the service's edit (PlanEdit and ParseEditChanges in Mcp/DarlingMcpServerAdminTools.Edit.cs):
      - only the fields the form changed are sent, plus the read's opaque modified_at text as expected_modified_at;
-     - a SQL Server edit never sends port (the service refuses it, even 0) and a PostgreSQL edit never sends auth;
+     - a SQL Server edit never sends port (the service refuses a non-zero one; the page has no way to clear a stored one) and a PostgreSQL edit never sends auth;
      - a password is required when the connection of a SQL or ServicePrincipal server changes, because the stored one
        cannot be read back; and the service probes the new connection on ANY connection change (Windows and managed
        identity included) or whenever a password is sent.
@@ -523,7 +523,7 @@ export function validateEdit(original, values, password, externalId) {
         ? "Switching to ServicePrincipal authentication needs the client secret as password."
         : "Switching to SQL authentication needs the password.";
     }
-    return "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+    return "Changing the host, port or any other connection setting of this server needs its password sent with the change, because a saved password is only ever sent to the server it was saved for. Send the password together with the new settings.";
   }
   if (!Number.isFinite(next.monthly_cost_usd)) return "Monthly cost must be a number, zero or more.";
   return null;
@@ -706,7 +706,7 @@ function findTab(id) {
 }
 
 function tabBar(active) {
-  return el("nav", { class: "subtabs wrap", "aria-label": "Admin sections" },
+  return el("nav", { class: "subtabs", "aria-label": "Admin sections" },
     TABS.map((t) => el("a", {
       class: "subtab" + (t.id === active.id ? " active" : ""),
       href: "#/admin/" + t.id,
@@ -1256,7 +1256,7 @@ async function buildRoutes(body, generation) {
   /* A failed signing read leaves the strip out; the routes below are the page. */
   const signingNodes = signing && signing.kind === "data" ? signingStatusLines(signing.data).map((t) => noticeStrip(t)) : [];
   mount(body, [
-    ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes(access.message, access.managed)),
+    ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes(access.message, access.managed, access.adminWritesOff)),
     noticeStrip(ROUTES_NOTE),
     ...signingNodes,
     VIZ.table({ routes: rows }, {
@@ -1331,7 +1331,7 @@ export const FEEDBACK_NOTE =
   "one that did. A second feedback from the same person replaces their first. Reports are listed newest first.";
 
 /* Shown instead of the form when the store says this dashboard's login may not record (can_record false). */
-export const feedbackListOnly = (managed) => listOnlyNote(managed, "this page is list-only", "To record feedback");
+export const feedbackListOnly = (managed, adminWritesOff) => listOnlyNote(managed, "this page is list-only", "To record feedback", adminWritesOff);
 
 /* What the counts and the list are taken over, in words: the answer's own window (hours_back). */
 export function feedbackWindowLabel(hours) {
@@ -1453,7 +1453,7 @@ async function buildFeedback(body, generation) {
   const rerender = () => buildFeedback(body, generation);
   const canRecord = session.can_edit === true && data.can_record === true;
   const nodes = [noticeStrip(FEEDBACK_NOTE)];
-  if (data.can_record !== true) nodes.push(noticeStrip(feedbackListOnly(session.managed_store === true)));
+  if (data.can_record !== true) nodes.push(noticeStrip(feedbackListOnly(session.managed_store === true, session.admin_writes_off === true)));
   nodes.push(el("h3", { class: "section-title", text: "False positives by alert family" }));
   nodes.push(el("p", { class: "mute-label", "data-fb-window": "1", text: feedbackWindowLabel(data.hours_back) }));
   nodes.push(VIZ.table({ families }, {
@@ -1815,9 +1815,9 @@ export const OVERRIDE_COLUMNS = [
 const OVERRIDES_NOTE_EDITING =
   "A threshold held for one server, or for one database on it, that differs from the global value. The alert engine uses it for that server only " +
   "and applies a change within its reload interval. To silence an alert, mute it.";
-const overridesNoteReadOnly = (managed) =>
+const overridesNoteReadOnly = (managed, adminWritesOff) =>
   "A threshold held for one server, or for one database on it, that differs from the global value. " +
-  listOnlyNote(managed, "this page lists them only", "To change an override");
+  listOnlyNote(managed, "this page lists them only", "To change an override", adminWritesOff);
 const OVERRIDE_DENIED = "Changing a threshold override needs";
 
 /** The rows of the overrides grid from the list read's body. `database` and `server_id` stay on the row for Edit and Remove. */
@@ -1969,7 +1969,7 @@ async function buildOverrides(body, generation) {
      the store login holds the write grant on this table. */
   const canEdit = session.can_edit === true && !!res.data && res.data.can_edit === true;
   const keys = Array.isArray(res.data && res.data.keys) ? res.data.keys : [];
-  nodes.push(noticeStrip(canEdit ? OVERRIDES_NOTE_EDITING : overridesNoteReadOnly(session.managed_store === true)));
+  nodes.push(noticeStrip(canEdit ? OVERRIDES_NOTE_EDITING : overridesNoteReadOnly(session.managed_store === true, session.admin_writes_off === true)));
   if (res.data && typeof res.data.note === "string" && res.data.note) nodes.push(noticeStrip(res.data.note));
   if (canEdit) nodes.push(overrideFormNode(Array.isArray(res.data.servers) ? res.data.servers : [], keys));
   nodes.push(VIZ.table({ overrides: overrideRows(res.data) }, {

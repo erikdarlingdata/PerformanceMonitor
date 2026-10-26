@@ -97,7 +97,7 @@
             <TextBlock x:Name="LastRefreshedIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
                        FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
             <TextBlock x:Name="ArchivalWarning" Text="" Margin="8,0,0,0" VerticalAlignment="Center"
-                       FontSize="11" Foreground="#FFCC6600" FontWeight="SemiBold" Visibility="Collapsed"/>
+                       FontSize="11" Foreground="{DynamicResource WarningTextBrush}" FontWeight="SemiBold" Visibility="Collapsed"/>
         </WrapPanel>
 
         <!-- #4966: "Showing since <time>" when the runs below start after the range does. Job history is an event surface: the
@@ -182,14 +182,6 @@
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RetriesDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
                                 <TextBlock Text="Retries" FontWeight="Bold" VerticalAlignment="Center"/>
-                            </StackPanel>
-                        </DataGridTextColumn.Header>
-                    </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding LastSuccessfulRunLocal}" Width="150" SortMemberPath="LastSuccessfulRunUtc">
-                        <DataGridTextColumn.Header>
-                            <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSuccessfulRunLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>
-                                <TextBlock Text="Last Success" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>

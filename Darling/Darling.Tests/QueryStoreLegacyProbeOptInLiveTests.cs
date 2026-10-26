@@ -177,6 +177,18 @@ FROM generate_series(@from, @to, INTERVAL '5 minutes') AS t",
         return new Rig { Scratch = scratch, Connection = connection, Postgres = postgres, End = end };
     }
 
+    /// <summary>
+    /// The end of a read window that is a literal end: <c>max(applied_through, rig.End)</c>. The gate refuses a literal end before
+    /// the server's <c>applied_through</c>, and the seed's writes can stamp it past <see cref="Rig.End"/> on a slow runner (#6479).
+    /// </summary>
+    private static async Task<DateTime> QueryEndAsync(Rig rig, CancellationToken ct)
+    {
+        var appliedThrough = (DateTime)(await new NpgsqlCommand(
+            "SELECT applied_through FROM collect.query_store_interval_wide_coverage WHERE server_id = " + ServerId.ToString(CultureInfo.InvariantCulture), rig.Connection)
+            .ExecuteScalarAsync(ct))!;
+        return appliedThrough > rig.End ? appliedThrough : rig.End;
+    }
+
     private static async Task<bool> HasLegacyRowAsync(NpgsqlConnection connection, DateTime start, DateTime end)
     {
         await using var command = new NpgsqlCommand(QueryStoreIntervalWide.HasLegacyRowSql, connection);
@@ -300,7 +312,7 @@ FROM generate_series(@from, @to, INTERVAL '5 minutes') AS t",
     }
 
     /// <summary>
-    /// The composed panels' fleet gate (<see cref="DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync"/>) over a server whose
+    /// The composed panels' fleet gate (<see cref="ComposePanelRunner.ResolveQueryStoreWideEligibleAsync"/>) over a server whose
     /// window holds legacy rows: it does not ask for clause 6, so the server stays on the interval table and is not sent raw.
     /// </summary>
     [Fact]
@@ -309,7 +321,10 @@ FROM generate_series(@from, @to, INTERVAL '5 minutes') AS t",
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await SeedAsync(ct);
 
-        var got = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(rig.Postgres, null, rig.End.AddDays(-6), rig.End, rig.End, ct);
+        /* The literal end must not fall before the server's applied_through (#6479): the seed stamps it from the clock at write
+           time, which on a slow runner is past rig.End, and the gate answers that with "not eligible", not an error. */
+        var queryEnd = await QueryEndAsync(rig, ct);
+        var got = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(rig.Postgres, null, rig.End.AddDays(-6), queryEnd, queryEnd, ct);
         Assert.True(got.Eligible);
         Assert.Null(got.RawServerIds);
     }
@@ -323,10 +338,7 @@ FROM generate_series(@from, @to, INTERVAL '5 minutes') AS t",
     {
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await SeedAsync(ct);
-        var appliedThrough = (DateTime)(await new NpgsqlCommand(
-            "SELECT applied_through FROM collect.query_store_interval_wide_coverage WHERE server_id = " + ServerId.ToString(CultureInfo.InvariantCulture), rig.Connection)
-            .ExecuteScalarAsync(ct))!;
-        var queryEnd = appliedThrough > rig.End ? appliedThrough : rig.End;
+        var queryEnd = await QueryEndAsync(rig, ct);
         var start = rig.End.AddDays(-6);
         const int top = 50;
 

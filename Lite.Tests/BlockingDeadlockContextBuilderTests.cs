@@ -125,7 +125,11 @@ public class BlockingDeadlockContextBuilderTests
         Assert.NotNull(context);
         /* 10 chain items + 1 trailer + 10 appended incident items. */
         Assert.Equal(21, context!.Details.Count);
-        Assert.Equal("+2 more distinct blocking incident(s)", context.Details[10].Heading);
+        Assert.Equal("+2 more distinct blocking incidents", context.Details[10].Heading);
+
+        /* #6703: one chain past the cap reads in the singular. */
+        var oneOver = AlertContextBuilders.BuildBlockingContext(Server, rows.Take(11).ToList(), NoExclusions);
+        Assert.Contains(oneOver!.Details, d => d.Heading == "+1 more distinct blocking incident");
         Assert.Empty(context.Details[10].Fields);
         Assert.Equal(10, context.Incidents!.Count);
     }
@@ -472,6 +476,34 @@ public class BlockingDeadlockContextBuilderTests
     }
 
     /* ---------------- the shared XE→DMV fallback merge ---------------- */
+
+    /// <summary>The report XML has no head-blocker session facts, so a DMV row dropped because a report row covers its pair and minute
+    /// hands them over; a report row with no covering DMV row keeps nulls.</summary>
+    [Fact]
+    public void BlockedProcessMerge_DroppedDmvRow_HandsItsHeadEvidenceToTheCoveringReportRow()
+    {
+        var t = new DateTime(2026, 6, 19, 12, 0, 10);
+        var covered = new BlockedProcessReportRow { EventTime = t, BlockedSpid = 55, BlockingSpid = 66 };
+        var alone = new BlockedProcessReportRow { EventTime = t.AddSeconds(3), BlockedSpid = 56, BlockingSpid = 67 };
+        var dmv = new BlockedProcessReportRow
+        {
+            EventTime = t.AddSeconds(30), BlockedSpid = 55, BlockingSpid = 66, Source = BlockedProcessAlertRow.DmvSnapshotSource,
+            BlockingLoginTime = t.AddHours(-3), BlockingLastRequestEndTime = t.AddMinutes(-9), BlockingOpenTransactionCount = 2, BlockingTranLogBytesUsed = 8192,
+        };
+        var items = new List<BlockedProcessReportRow> { covered, alone };
+
+        BlockedProcessReportMerge.AppendDmvFallbackRows(items, new List<BlockedProcessReportRow> { dmv });
+
+        Assert.Equal(2, items.Count);
+        Assert.Equal(t.AddHours(-3), covered.BlockingLoginTime);
+        Assert.Equal(t.AddMinutes(-9), covered.BlockingLastRequestEndTime);
+        Assert.Equal(2, covered.BlockingOpenTransactionCount);
+        Assert.Equal(8192, covered.BlockingTranLogBytesUsed);
+        Assert.Null(alone.BlockingLoginTime);
+        Assert.Null(alone.BlockingLastRequestEndTime);
+        Assert.Null(alone.BlockingOpenTransactionCount);
+        Assert.Null(alone.BlockingTranLogBytesUsed);
+    }
 
     [Fact]
     public void BlockedProcessMerge_DmvRowDropped_WhenBprCoversSameSpidPairInSameMinute()

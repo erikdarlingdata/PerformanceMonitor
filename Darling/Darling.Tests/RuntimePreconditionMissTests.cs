@@ -788,6 +788,57 @@ public sealed class CollectorRuntimePreconditionTests
         }
     }
 
+    /// <summary>The two reconnect sentences the reader form ends on, as the web page words them (#6764).</summary>
+    internal const string ReconnectSentences =
+        "After you fix the cause, the service must reconnect to this server before collection starts again. Restart the service, or change this server's settings.";
+
+    /// <summary>
+    /// #6764: the reader form of the two "not being invoked" answers is the line the web page shows, then the causes as passed,
+    /// and nothing of the MCP closing sentence. The MCP answer for the same facts is unchanged (it still carries the closing
+    /// sentence and the reconnect advice), the first-run sentence is the same in both, and a collector with nothing to say stays null.
+    /// </summary>
+    [Fact]
+    public void ReaderMessage_IsTheShortFormOfTheMcpAnswer_WhichStaysAsItWas()
+    {
+        var serverLastCollected = DateTime.UtcNow.AddMinutes(-3);
+        var darkRun = serverLastCollected.AddDays(-20);
+
+        var neverRan = CollectorRuntimePrecondition.GatedOffReaderMessage(
+            Server, "running_jobs", GateCandidates, null, serverLastCollected, null);
+        var goneDark = CollectorRuntimePrecondition.GatedOffReaderMessage(
+            Server, "running_jobs", GateCandidates, darkRun, serverLastCollected, null);
+
+        Assert.Equal(
+            "The Running Jobs collector has never run for this server, so there is nothing to show. " + GateCandidates + " " + ReconnectSentences,
+            neverRan);
+        Assert.Equal(
+            "The Running Jobs collector has not run for this server for over 24 hours, so there is nothing current to show. " + GateCandidates + " " + ReconnectSentences,
+            goneDark);
+        Assert.DoesNotContain("runtime PRECONDITION", neverRan, StringComparison.Ordinal);
+        Assert.DoesNotContain("runtime PRECONDITION", goneDark, StringComparison.Ordinal);
+
+        foreach (var mcp in new[]
+        {
+            CollectorRuntimePrecondition.GatedOffMessage(Server, "running_jobs", GateCandidates, null, serverLastCollected, null)!,
+            CollectorRuntimePrecondition.GatedOffMessage(Server, "running_jobs", GateCandidates, darkRun, serverLastCollected, null)!,
+        })
+        {
+            Assert.EndsWith("Retrying this read before that will return exactly this answer again.", mcp, StringComparison.Ordinal);
+            Assert.Contains("runtime PRECONDITION", mcp, StringComparison.Ordinal);
+        }
+
+        /* Inside the first-run grace the answer is the short not-yet sentence, the same in both. */
+        var first = serverLastCollected.AddMinutes(-5);
+        Assert.Equal(
+            CollectorRuntimePrecondition.GatedOffMessage(Server, "running_jobs", GateCandidates, null, serverLastCollected, first),
+            CollectorRuntimePrecondition.GatedOffReaderMessage(Server, "running_jobs", GateCandidates, null, serverLastCollected, first));
+
+        /* A collector that ran lately, and a server that collected nothing, have nothing to say. */
+        Assert.Null(CollectorRuntimePrecondition.GatedOffReaderMessage(
+            Server, "running_jobs", GateCandidates, serverLastCollected.AddMinutes(-5), serverLastCollected, null));
+        Assert.Null(CollectorRuntimePrecondition.GatedOffReaderMessage(Server, "running_jobs", GateCandidates, null, null, null));
+    }
+
     /// <summary>
     /// The SESSION_MISSING arm names the app's own recovery. The app creates its capture sessions when it
     /// connects and ensures them again at least once an hour, so a session that was dropped or stopped comes back within

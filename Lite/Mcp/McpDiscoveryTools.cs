@@ -42,7 +42,7 @@ public sealed class McpDiscoveryTools
                 return fleetNotCollected ?? McpHelpers.Status(
                     "empty",
                     searched.Count == 0
-                        ? $"No server has a database list in the last {days} days, so nothing was searched for '{requested}'. The database_states collector writes the list every 30 minutes on a SQL Server target (not on Azure SQL Database), and only while Lite is open."
+                        ? $"No server has a database list in the last {days} days, so nothing was searched for '{requested}'. The database_states collector writes the list every minute by default (every 5 minutes under the Low-Impact preset) on a SQL Server target (not on Azure SQL Database), and only while Lite is open."
                         : $"No monitored server's newest database list names '{requested}' (searched {searched.Count} server(s) that have a list in the last {days} days). A database that was dropped, renamed, or created since the last list looks the same; servers with no list in that time (Azure SQL Database targets, or a stopped collector) were not searched.");
             }
 

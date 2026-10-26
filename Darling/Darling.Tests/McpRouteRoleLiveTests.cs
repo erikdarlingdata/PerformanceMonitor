@@ -65,6 +65,80 @@ public sealed class McpRouteRoleLiveTests
         });
     }
 
+    /* A self-managed store upgraded from 3.11 without re-running provision-roles.sql holds the 3.11 update function (no actor argument), so
+       the 3.12 call finds no function of that shape (42883). The tool says what to do, in its own sentence, and raises nothing. */
+    [Fact]
+    public async Task AStoreStillHoldingTheOlderUpdateFunction_AnswersTheReRunSentence_NotAnException()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var created = await DarlingMcpAlertTools.CreateNotificationRoute(asMcp, "Blocking", send_resolutions: "never", cancellationToken: ct);
+            var routeId = JsonDocument.Parse(created).RootElement.GetProperty("route").GetProperty("route_id").GetInt32();
+
+            await ExecAsync(owner,
+                "DO $$ DECLARE f regprocedure; BEGIN FOR f IN SELECT p.oid::regprocedure FROM pg_proc p WHERE p.proname = 'update_notification_route' " +
+                "AND p.pronamespace = 'config'::regnamespace LOOP EXECUTE 'DROP FUNCTION ' || f; END LOOP; END $$", ct);
+            await ExecAsync(owner,
+                "CREATE FUNCTION config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) " +
+                "RETURNS void LANGUAGE sql AS 'SELECT'", ct);
+
+            var edited = await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, metric_match: "Deadlocks", cancellationToken: ct);
+
+            Assert.Equal("refused", Status(edited));
+            Assert.Equal(DarlingMcpAlertTools.RouteStoreNeedsRolesText, JsonDocument.Parse(edited).RootElement.GetProperty("message").GetString());
+            Assert.Contains("provision-roles.sql", DarlingMcpAlertTools.RouteStoreNeedsRolesText, StringComparison.Ordinal);
+            await using var read = owner.CreateCommand("SELECT metric_match FROM config.config_notification_routes WHERE route_id = $1");
+            read.Parameters.AddWithValue(routeId);
+            Assert.Equal("Blocking", await read.ExecuteScalarAsync(ct));
+        });
+    }
+
+    /* A role that may not run the update function gets a 42501. Only a self-managed store has an operator who runs provision-roles.sql, so
+       only there does the tool say to re-run it; a managed or compose store keeps the answer the tool gave before (no re-run advice). */
+    [Fact]
+    public async Task ARoleRefusedTheUpdateFunction_AnswersTheReRunSentenceOnASelfManagedStoreOnly()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var created = await DarlingMcpAlertTools.CreateNotificationRoute(asMcp, "Blocking", send_resolutions: "never", cancellationToken: ct);
+            var routeId = JsonDocument.Parse(created).RootElement.GetProperty("route").GetProperty("route_id").GetInt32();
+
+            string role;
+            await using (var whoAmI = asMcp.CreateCommand("SELECT current_user"))
+            {
+                role = (string)(await whoAmI.ExecuteScalarAsync(ct))!;
+            }
+
+            await ExecAsync(owner,
+                "DO $$ DECLARE f regprocedure; BEGIN FOR f IN SELECT p.oid::regprocedure FROM pg_proc p WHERE p.proname = 'update_notification_route' " +
+                "AND p.pronamespace = 'config'::regnamespace LOOP EXECUTE 'REVOKE EXECUTE ON FUNCTION ' || f || ' FROM ' || quote_ident('" + role + "'); END LOOP; END $$", ct);
+
+            var selfManaged = await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, metric_match: "Deadlocks", cancellationToken: ct);
+            Assert.Equal("refused", Status(selfManaged));
+            Assert.Equal(DarlingMcpAlertTools.RouteStoreNeedsRolesText, JsonDocument.Parse(selfManaged).RootElement.GetProperty("message").GetString());
+
+            var managed = await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, routeId, metric_match: "Deadlocks", cancellationToken: ct, postgresConfig: new PostgresConfig { Managed = true });
+            Assert.DoesNotContain("provision-roles.sql", managed, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"updated\"", managed, StringComparison.Ordinal);
+        });
+    }
+
+    /* The signing-key and default-channel functions are new in 3.12 and only provision-roles.sql creates them: the harness store has none,
+       as a self-managed store upgraded from 3.11 has none. */
+    [Fact]
+    public async Task AStoreWithoutTheSigningKeyFunctions_AnswersTheReRunSentence_NotAnException()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var removed = await DarlingMcpAlertTools.RemoveWebhookSigningKey(asMcp, null, cancellationToken: ct);
+
+            Assert.Equal("refused", Status(removed));
+            Assert.Equal(DarlingMcpAlertTools.RouteStoreNeedsRolesText, JsonDocument.Parse(removed).RootElement.GetProperty("message").GetString());
+            await Task.CompletedTask;
+        });
+    }
+
     [Theory]
     [InlineData("SELECT teams_url FROM config.config_notification_routes")]
     [InlineData("SELECT slack_url, generic_url FROM config.config_notification_routes")]
@@ -103,7 +177,7 @@ public sealed class McpRouteRoleLiveTests
             {
                 return await Assert.ThrowsAsync<PostgresException>(async () =>
                 {
-                    await using var call = asMcp.CreateCommand("SELECT config.update_notification_route($1, $2, 'x', true, NULL, NULL, NULL, NULL)");
+                    await using var call = asMcp.CreateCommand("SELECT config.update_notification_route($1, NULL, $2, 'x', true, NULL, NULL, NULL, NULL)");
                     call.Parameters.AddWithValue(routeId);
                     call.Parameters.AddWithValue(columns);
                     await call.ExecuteNonQueryAsync(ct);
@@ -116,7 +190,7 @@ public sealed class McpRouteRoleLiveTests
             Assert.Equal("DL404", (await CallAsync(99, ["metric_match"])).SqlState);
 
             /* The enabled flag is still open on a route with a destination of its own. */
-            await using (var call = asMcp.CreateCommand("SELECT config.update_notification_route(2, ARRAY['enabled'], 'x', false, NULL, NULL, NULL, NULL)"))
+            await using (var call = asMcp.CreateCommand("SELECT config.update_notification_route(2, NULL, ARRAY['enabled'], 'x', false, NULL, NULL, NULL, NULL)"))
             {
                 await call.ExecuteNonQueryAsync(ct);
             }
@@ -146,7 +220,7 @@ public sealed class McpRouteRoleLiveTests
             async Task CallAsync(int routeId, string columns, string match = "x", bool enabled = true, string tag = "NULL")
             {
                 await using var call = asMcp.CreateCommand(
-                    $"SELECT config.update_notification_route($1, ARRAY[{columns}]::text[], $2, $3, NULL, {tag}, NULL, NULL)");
+                    $"SELECT config.update_notification_route($1, NULL, ARRAY[{columns}]::text[], $2, $3, NULL, {tag}, NULL, NULL)");
                 call.Parameters.AddWithValue(routeId);
                 call.Parameters.AddWithValue(match);
                 call.Parameters.AddWithValue(enabled);
