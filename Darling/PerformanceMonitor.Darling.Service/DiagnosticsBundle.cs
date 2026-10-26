@@ -77,7 +77,7 @@ internal static class DiagnosticsBundle
     {
         "DarlingConfig.Postgres", "DarlingConfig.Servers", "DarlingConfig.Analyzer", "DarlingConfig.CapturePlans",
         "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.Reads", "ReadsConfig.MaxHeavyReads", "DarlingConfig.QueryStatsDeferredPlanFetch", "DarlingConfig.ProcedureStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
-        "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowInvestigations", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "McpConfig.DataDetail", "McpConfig.AllowTokenlessLoopback", "WebConfig.Enabled", "WebConfig.Network", "WebConfig.AllowTokenlessLoopback", "WebConfig.AllowAdminWrites",
+        "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowInvestigations", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "McpConfig.DataDetail", "McpConfig.AllowTokenlessLoopback", "WebConfig.Enabled", "WebConfig.Network", "WebConfig.AllowTokenlessLoopback", "WebConfig.AllowAdminWrites", "WebConfig.AllowWindowsAuthOverUnverifiedTls",
         "MonitoredServer.Engine", "MonitoredServer.AlertDeliveryModeOverride",
     };
 
@@ -189,6 +189,7 @@ internal static class DiagnosticsBundle
             ["web_network_exposed"] = WebNetworkExposed(config),
             ["web_allow_tokenless_loopback"] = config.Web?.AllowTokenlessLoopback ?? false,
             ["web_allow_admin_writes"] = config.Web?.AllowAdminWrites ?? false,
+            ["web_allow_windows_auth_over_unverified_tls"] = config.Web?.AllowWindowsAuthOverUnverifiedTls ?? false,
             ["analyzer_present"] = config.Analyzer is not null,
             /* #5506 part 3: the read-admission limit, a plain number; a busy answer is only readable beside it (0 means the limit is off). */
             ["reads_max_heavy_reads"] = config.Reads?.MaxHeavyReads,
