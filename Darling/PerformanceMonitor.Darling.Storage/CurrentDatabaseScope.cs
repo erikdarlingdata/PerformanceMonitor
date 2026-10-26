@@ -119,7 +119,7 @@ public static class CurrentDatabaseScope
     /// #5633 review: the databases the server DROPPED, for a ranking read that must leave them out: names an earlier
     /// <c>database_states</c> snapshot lists that the newest one does not. A name no snapshot ever lists (a database created after the
     /// newest snapshot, or one the snapshots never cover) is not in the set, so it is never left out; this replaces narrowing to the
-    /// newest snapshot's names, which hid a new database for up to 30 minutes. One grouped read of <c>database_states</c> over
+    /// newest snapshot's names, which hid a new database until the next snapshot listed it. One grouped read of <c>database_states</c> over
     /// <c>idx_database_states_time</c>, from the window's start (<paramref name="windowStartUtc"/>) back no further than
     /// <see cref="DropLookBack"/> and no nearer than <see cref="SnapshotHorizon"/>; no fact table is touched.
     /// Null is unknown (no snapshot, the newest older than <see cref="SnapshotHorizon"/>, a failed read); an empty set is "nothing

@@ -65,4 +65,51 @@ public sealed class DatabaseStateExpectationsEmptyLiveTests
         Assert.False(held.TryGetProperty("status", out _));
         Assert.Equal(1, held.GetProperty("databases").GetArrayLength());
     }
+
+    /// <summary>
+    /// A SQL Server target that is collecting normally but whose database_states collector never ran (switched off) is told so
+    /// (<c>precondition</c>), not sent to "check collection health" (<c>unavailable</c>). A server that has only just started
+    /// collecting is still inside the collector's first-run grace and does not get the switched-off answer.
+    /// </summary>
+    [Fact]
+    public async Task GetDatabaseStateExpectations_WithNoSnapshotAndTheCollectorSwitchedOff_SaysTheCollectorNeverRan()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the database state gated-off test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var (off, fresh) = (ServerIdHelper.GetDeterministicHashCode("dse-off"), ServerIdHelper.GetDeterministicHashCode("dse-fresh"));
+        await DarlingMcpTestData.RegisterServerAsync(connection, off, "dse-off", ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, fresh, "dse-fresh", ct);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET sql_engine_edition = 3 WHERE server_id IN ($1, $2)", off, fresh);
+
+        /* Other collectors have been running against dse-off for hours; database_states has no run of any kind. */
+        foreach (var minutesAgo in new[] { 180, 120, 60, 1 })
+        {
+            await SeedRunAsync(connection, ct, off, "dse-off", "wait_stats", minutesAgo);
+        }
+
+        /* dse-fresh began collecting a minute ago: nothing is wrong yet. */
+        await SeedRunAsync(connection, ct, fresh, "dse-fresh", "wait_stats", 1);
+
+        var switchedOff = JsonDocument.Parse(await DarlingMcpDatabaseStateTools.GetDatabaseStateExpectations(dataSource, "dse-off", cancellationToken: ct)).RootElement;
+        Assert.Equal("precondition", switchedOff.GetProperty("status").GetString());
+        var message = switchedOff.GetProperty("message").GetString();
+        Assert.Contains("The database_states collector has never run against dse-off", message, StringComparison.Ordinal);
+        Assert.Contains("get_collector_schedules", message, StringComparison.Ordinal);
+
+        var justStarted = JsonDocument.Parse(await DarlingMcpDatabaseStateTools.GetDatabaseStateExpectations(dataSource, "dse-fresh", cancellationToken: ct)).RootElement;
+        Assert.Equal("unavailable", justStarted.GetProperty("status").GetString());
+        Assert.Contains("has not run against dse-fresh yet", justStarted.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
+    private static Task SeedRunAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct, int serverId, string serverName, string collector, int minutesAgo) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status) VALUES ($1,$2,$3,$4,$5,'SUCCESS')",
+            CollectionIdGenerator.Next(), serverId, serverName, collector, DarlingMcpTestData.Naive(DateTime.UtcNow - TimeSpan.FromMinutes(minutesAgo)));
 }
