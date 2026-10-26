@@ -89,7 +89,7 @@ FROM config.investigation_requests WHERE request_id = '{first.RequestId}'", ct))
     /// <summary>The join is bounded by the window even for a request still claimed (#5632 review round 1, M2): the
     /// constant <c>{server}:{metric}</c> key every alert of a metric carries joins nothing on its own. An alert 29 minutes
     /// after the request opened joins it; one 31 minutes after opens a new request, though the first is still claimed.
-    /// A reported request is final: a later alert inside its window opens a new one.</summary>
+    /// A reported request takes a quiet re-fire of the same metric and severity (#6778); a closed one is final.</summary>
     /// <summary>#5821: the generic webhook's read-back of the request an alert opened or joined, with its stored brief.</summary>
     [Fact]
     public async Task ReadRequest_ReturnsTheRequestAndItsBrief_AndNullForAnUnknownId()
@@ -158,7 +158,7 @@ FROM config.investigation_requests WHERE request_id = '{first.RequestId}'", ct))
     }
 
     [Fact]
-    public async Task AClaimedRequest_JoinsAt29Minutes_AndAnAlert31MinutesAfterThatOpensANewOne_AndAReportedOneIsFinal()
+    public async Task AClaimedRequest_JoinsAt29Minutes_AndAnAlert31MinutesAfterThatOpensANewOne_AndAReportedOneTakesAQuietReFire()
     {
         await RunAsync(async (store, connection, ct) =>
         {
@@ -179,14 +179,136 @@ FROM config.investigation_requests WHERE request_id = '{first.RequestId}'", ct))
             Assert.Equal("claimed", await ScalarAsync(connection,
                 $"SELECT state FROM config.investigation_requests WHERE request_id = '{first}'", ct));
 
-            /* Report the second; an alert two minutes later, inside its window, opens a third. */
+            /* Report the second; an alert two minutes later, inside its window, joins it quietly (#6778). */
             var second = opened.RequestId!.Value;
             var secondClaim = await store.ClaimAsync(second, "agent-a", ct);
             Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(Report(second, secondClaim.ClaimId!.Value), ct));
             _now = T0.AddMinutes(62);
             var third = await store.OpenOrJoinAsync(Alert(_now, keys: new[] { Fallback }), ct);
-            Assert.Equal(InvestigationOpenOutcome.Opened, third.Outcome);
-            Assert.NotEqual(second, third.RequestId);
+            Assert.Equal(InvestigationOpenOutcome.Joined, third.Outcome);
+            Assert.Equal(second, third.RequestId);
+            Assert.False(third.Evented);
+        });
+    }
+
+    /// <summary>Opens a request at <see cref="T0"/> and reports it (#6778).</summary>
+    private async Task<Guid> OpenReportedAsync(InvestigationRequestStore store, InvestigationAlert alert, CancellationToken ct)
+    {
+        var id = (await store.OpenOrJoinAsync(alert, ct)).RequestId!.Value;
+        var claim = await store.ClaimAsync(id, "agent-a", ct);
+        Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(Report(id, claim.ClaimId!.Value), ct));
+        return id;
+    }
+
+    [Fact]
+    public async Task AReportedRequest_TakesTheSameMetricAtTheSameSeverity_AsAQuietJoin()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = await OpenReportedAsync(store, Alert(T0) with { Severity = "warning" }, ct);
+            var routeBefore = await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_requests", ct);
+
+            _now = T0.AddMinutes(5);
+            var again = await store.OpenOrJoinAsync(Alert(_now) with { Severity = "warning" }, ct);
+            Assert.Equal(InvestigationOpenOutcome.Joined, again.Outcome);
+            Assert.Equal(id, again.RequestId);
+            Assert.False(again.Evented);
+            Assert.Equal("2|reported", await ScalarAsync(connection,
+                $"SELECT alert_count || '|' || state FROM config.investigation_requests WHERE request_id = '{id}'", ct));
+            Assert.Equal("1", await ScalarAsync(connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE request_id = '{id}' AND event = 'joined_quiet'", ct));
+            Assert.Equal(routeBefore, await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_requests", ct));
+
+            /* The window slides: 25 minutes after the join it joins again. */
+            _now = T0.AddMinutes(30);
+            Assert.Equal(id, (await store.OpenOrJoinAsync(Alert(_now) with { Severity = "warning" }, ct)).RequestId);
+        });
+    }
+
+    [Fact]
+    public async Task AReportedRequest_IsNotJoined_ByAHigherSeverity_ANewMetric_OrAnotherServer()
+    {
+        /* Each case has its own store: the new request a case opens would otherwise be the one the next alert finds. */
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = await OpenReportedAsync(store, Alert(T0) with { Severity = "warning" }, ct);
+            _now = T0.AddMinutes(5);
+            var higher = await store.OpenOrJoinAsync(Alert(_now) with { Severity = "critical" }, ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, higher.Outcome);
+            Assert.NotEqual(id, higher.RequestId);
+        });
+
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = await OpenReportedAsync(store, Alert(T0) with { Severity = "warning" }, ct);
+            _now = T0.AddMinutes(5);
+            var newMetric = await store.OpenOrJoinAsync(Alert(_now) with { MetricName = "Deadlocks", Severity = "warning" }, ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, newMetric.Outcome);
+            Assert.NotEqual(id, newMetric.RequestId);
+        });
+
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = await OpenReportedAsync(store, Alert(T0) with { Severity = "warning" }, ct);
+            _now = T0.AddMinutes(5);
+            var otherServer = await store.OpenOrJoinAsync(Alert(_now, serverId: 8) with { Severity = "warning" }, ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, otherServer.Outcome);
+            Assert.NotEqual(id, otherServer.RequestId);
+            Assert.Equal("1", await ScalarAsync(connection,
+                $"SELECT alert_count FROM config.investigation_requests WHERE request_id = '{id}'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task AReportedRequest_IsNotJoined_AfterItResolved_AfterTheWindow_AfterTheCap_OrWhenClosed()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            /* A resolved journal row: the sweep's D7 event. */
+            var resolved = await OpenReportedAsync(store, Alert(T0), ct);
+            await ExecAsync(connection, $@"INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, once_key)
+SELECT now(), request_id, route_id, server_id, 'resolved', 'service', 'resolved:' || request_id::text FROM config.investigation_requests WHERE request_id = '{resolved}'", ct);
+            _now = T0.AddMinutes(5);
+            var afterResolve = await store.OpenOrJoinAsync(Alert(_now), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, afterResolve.Outcome);
+            Assert.NotEqual(resolved, afterResolve.RequestId);
+        });
+
+        await RunAsync(async (store, connection, ct) =>
+        {
+            /* 31 minutes after the last alert. */
+            var id = await OpenReportedAsync(store, Alert(T0), ct);
+            _now = T0.AddMinutes(31);
+            var late = await store.OpenOrJoinAsync(Alert(_now), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, late.Outcome);
+            Assert.NotEqual(id, late.RequestId);
+        });
+
+        await RunAsync(async (store, connection, ct) =>
+        {
+            /* Joins every 29 minutes slide the window to the 4-hour cap; the next alert is past it. */
+            var id = await OpenReportedAsync(store, Alert(T0), ct);
+            for (var minute = 29; minute <= 232; minute += 29)
+            {
+                _now = T0.AddMinutes(minute);
+                Assert.Equal(id, (await store.OpenOrJoinAsync(Alert(_now), ct)).RequestId);
+            }
+
+            _now = T0.AddMinutes(241);
+            var pastCap = await store.OpenOrJoinAsync(Alert(_now), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, pastCap.Outcome);
+            Assert.NotEqual(id, pastCap.RequestId);
+        });
+
+        await RunAsync(async (store, connection, ct) =>
+        {
+            /* A closed request stays final. */
+            var id = await OpenReportedAsync(store, Alert(T0), ct);
+            await ExecAsync(connection, $"UPDATE config.investigation_requests SET state = 'closed', closed_at = now() WHERE request_id = '{id}'", ct);
+            _now = T0.AddMinutes(5);
+            var afterClose = await store.OpenOrJoinAsync(Alert(_now), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, afterClose.Outcome);
+            Assert.NotEqual(id, afterClose.RequestId);
         });
     }
 
