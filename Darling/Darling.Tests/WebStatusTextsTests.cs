@@ -24,11 +24,12 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class WebStatusTextsTests
 {
-    private static JsonElement Run()
+    private static JsonElement Run(string seat = "edit")
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-status-texts-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
+        psi.ArgumentList.Add(seat);
 
         Process proc;
         try
@@ -82,6 +83,8 @@ public sealed class WebStatusTextsTests
         var r = Run();
         Assert.Equal("SQL CPU", r.GetProperty("tileLabel").GetString());
         Assert.Equal("SQL CPU", r.GetProperty("columnLabel").GetString());
+        /* The starter dashboard's Overview tile spreads the same stat list, so a dashboard made from it names the number the same way. */
+        Assert.Equal("SQL CPU", r.GetProperty("starterTileLabel").GetString());
     }
 
     [Fact]
@@ -105,6 +108,31 @@ public sealed class WebStatusTextsTests
         Assert.DoesNotContain("No running SQL Agent jobs found", pageStale, StringComparison.Ordinal);
         Assert.Contains("No running SQL Agent jobs found", pageOnline, StringComparison.Ordinal);
         Assert.DoesNotContain("stale", pageOnline, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunningJobs_OnThePollWhereAServerFirstGoesStale_IsRepaintedFromTheFreshCard()
+    {
+        /* The page already held an online card, painted from it, and the fresh card (is_online false) came after. */
+        var flip = Run().GetProperty("pageJobsFlip").GetString()!;
+        Assert.Contains("collection for this server is stale", flip, StringComparison.Ordinal);
+        Assert.DoesNotContain("No running SQL Agent jobs found", flip, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheActiveQueriesLiveBar_ShowsAReadOnlySeatTheListOnlyNoteAndNoButton_AndASeatThatCanEditItsButton()
+    {
+        var readOnly = Run("readonly").GetProperty("liveBar");
+        Assert.Equal(0, readOnly.GetProperty("buttons").GetArrayLength());
+        Assert.Equal("read-only", readOnly.GetProperty("status").GetString());
+        var text = readOnly.GetProperty("text").GetString()!;
+        Assert.Contains("To read the active queries live", text, StringComparison.Ordinal);
+        Assert.Contains("Viewer", text, StringComparison.Ordinal);
+
+        var edit = Run("edit").GetProperty("liveBar");
+        Assert.Equal("ready", edit.GetProperty("status").GetString());
+        Assert.Equal("Run live now", Assert.Single(edit.GetProperty("buttons").EnumerateArray()).GetString());
+        Assert.DoesNotContain("To read the active queries live", edit.GetProperty("text").GetString()!, StringComparison.Ordinal);
     }
 
     [Theory]

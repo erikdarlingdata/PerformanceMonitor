@@ -314,10 +314,13 @@ export function renderServer(main, server, tabId, opts) {
      like they did before the tab set had a question to answer. */
   const remembered = lastCard.get(server);
   let painted = null;
+  /* The offline state the painted panels were built with (ctx.offline), so a fresh card that flips it repaints them. */
+  let paintedOffline = false;
   if (remembered) {
     fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, remembered.card, remembered.reason);
     fillDatabaseFilter(dbSlot, server, remembered.card);
     painted = paintTabsKeeping(keep, tabsSlot, server, tabId, remembered.card);
+    paintedOffline = serverIsOffline(server);
   }
 
   /* /api/fleet is fetched again only to place a server this page has no card for yet, or on the poll's real
@@ -337,11 +340,14 @@ export function renderServer(main, server, tabId, opts) {
       fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason);
       fillDatabaseFilter(dbSlot, server, card);
 
-      /* Repaint only when there is nothing painted yet, or when the fresh card chooses a DIFFERENT registry —
-         the two registries are module constants, so that comparison is exact. A null card never repaints over a
-         painted page: a fleet read that failed says nothing about which engine this server runs. */
-      if (!painted || (card && serverTabsFor(card) !== painted)) {
+      /* Repaint only when there is nothing painted yet, when the fresh card chooses a DIFFERENT registry —
+         the two registries are module constants, so that comparison is exact — or when it flips the server's online
+         state, which the panels were built with (ctx.offline: the poll where a server first goes stale painted them
+         from the remembered, still-online card). A null card never repaints over a painted page: a fleet read that
+         failed says nothing about which engine this server runs, and it leaves lastCard, so the online state, as it was. */
+      if (!painted || (card && serverTabsFor(card) !== painted) || serverIsOffline(server) !== paintedOffline) {
         painted = paintTabsKeeping(keep && !painted, tabsSlot, server, tabId, card);
+        paintedOffline = serverIsOffline(server);
       }
     });
   }

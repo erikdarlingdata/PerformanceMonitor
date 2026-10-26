@@ -2,13 +2,15 @@
    active-live.js, read-fields.js) and prints, as one line of JSON: the Queries tab's note and the live-read notice (one
    banner each, no repeated advice), the Overview CPU tile's label, and the Running Jobs panel's empty text for a server
    collecting normally and for one whose collection is stale.
-       node web-status-texts-harness.mjs <path to wwwroot/js> */
+       node web-status-texts-harness.mjs <path to wwwroot/js> [edit|readonly]
+   The second argument is the signed-in seat the Active Queries live bar is drawn for (default edit). */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const jsDir = process.argv[2];
+const seat = process.argv[3] === "readonly" ? "readonly" : "edit";
 
 class FakeNode {
   constructor(tag, text) {
@@ -61,12 +63,17 @@ const FLEET = {
   cards: [
     { server_name: "page-stale", display_name: "page-stale", is_online: false },
     { server_name: "page-online", display_name: "page-online", is_online: true },
+    { server_name: "page-flip", display_name: "page-flip", is_online: true },
   ],
 };
 globalThis.fetch = async (url) => {
   const u = new URL(String(url), "http://viewer.test");
   const body = u.pathname === "/api/fleet"
     ? FLEET
+    : u.pathname === "/api/session"
+    ? { can_edit: seat === "edit", managed_store: false, admin_writes_off: false }
+    : u.pathname === "/api/active-queries/live/available"
+    ? { can_queue: true, can_edit: true, managed_store: false }
     : u.pathname.endsWith("/get_running_jobs")
     ? { status: "empty", message: "No running SQL Agent jobs found (or the running_jobs collector has not run yet)." }
     : {};
@@ -87,6 +94,7 @@ try {
   const tabs = await import(pathToFileURL(path.join(scratch, "pages", "server-tabs.js")).href);
   const live = await import(pathToFileURL(path.join(scratch, "pages", "active-live.js")).href);
   const fields = await import(pathToFileURL(path.join(scratch, "read-fields.js")).href);
+  const templates = await import(pathToFileURL(path.join(scratch, "view-templates.js")).href);
 
   const find = (node, pred) => (pred(node) ? node : node.children.map((c) => find(c, pred)).find(Boolean) || null);
 
@@ -109,6 +117,34 @@ try {
     return section ? section.textContent : null;
   };
 
+  /* The poll where a server first goes stale: the page already holds an online card for it, paints from that, and the fresh card
+     (is_online false) arrives afterwards. The Running Jobs panel has to end up built from the fresh card. */
+  const pageFlipText = async () => {
+    const first = new FakeNode("div");
+    pageSrv.renderServer(first, "page-flip", "activity", {});
+    await new Promise((r) => setTimeout(r, 300));
+    FLEET.cards.find((c) => c.server_name === "page-flip").is_online = false;
+    const second = new FakeNode("div");
+    pageSrv.renderServer(second, "page-flip", "activity", { poll: true });
+    await new Promise((r) => setTimeout(r, 300));
+    const section = find(second, (n) => n.children.some((c) => c.tag === "h3" && c.textContent.startsWith("Running Jobs")));
+    return section ? section.textContent : null;
+  };
+
+  /* The Active Queries live bar for the seat this run signed in as: what it says, and how many buttons it draws. */
+  const liveBarFor = async () => {
+    const bar = live.activeQueriesLiveBar("srv-bar", []);
+    await new Promise((r) => setTimeout(r, 50));
+    const buttons = [];
+    const walk = (n) => { if (n.tag === "button") buttons.push(n.textContent); n.children.forEach(walk); };
+    walk(bar);
+    return { text: bar.textContent, buttons, status: bar.dataset.status || null };
+  };
+
+  /* The starter dashboard "Server health at a glance": its Overview panel's CPU stat label, as a created view would save it. */
+  const starter = templates.DASHBOARD_TEMPLATES.find((t) => t.key === "server-health").make("srv");
+  const starterOverview = starter.definition.panels.find((p) => p.read === "get_server_summary");
+
   const queries = tabs.SERVER_TABS.find((t) => t.id === "queries");
   const summary = fields.READ_FIELDS.get_server_summary;
   const noteStrip = tabs.tabNote(queries, 24);
@@ -118,11 +154,14 @@ try {
       liveNotice: live.liveUnavailableNote(false),
       managedLiveNotice: live.liveUnavailableNote(true),
       tileLabel: summary.stat.stats.find((s) => s.key === "cpu_percent").label,
+      starterTileLabel: starterOverview.stats.find((x) => x.key === "cpu_percent").label,
       columnLabel: summary.table.columns.find((c) => c.key === "cpu_percent").label,
       jobsOnline: await runningJobsText(false, "srv-online"),
       jobsStale: await runningJobsText(true, "srv-stale"),
       pageJobsStale: await pageRunningJobsText("page-stale"),
       pageJobsOnline: await pageRunningJobsText("page-online"),
+      pageJobsFlip: await pageFlipText(),
+      liveBar: await liveBarFor(),
     })
   );
 } finally {

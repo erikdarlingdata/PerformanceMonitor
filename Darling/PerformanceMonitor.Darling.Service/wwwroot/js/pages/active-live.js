@@ -9,7 +9,7 @@
 /*
  * #6386: "Run live now" on the Active Queries panel. It queues the same fetch_active_queries command the desktop viewer's Current Active
  * Queries queues (POST /api/active-queries/live), polls the command (GET /api/active-queries/live/{id}) until the service has read the
- * running requests from the monitored server, and draws them in the stored snapshot's own columns. A read-only seat sees no control (the
+ * running requests from the monitored server, and draws them in the stored snapshot's own columns. A read-only seat sees the list-only note and no control (the
  * server answers 403 to it anyway, so this is the affordance layer, never the enforcement); a store login that cannot queue the command sees
  * the note that says where to read it instead.
  */
@@ -81,6 +81,12 @@ export function liveUnavailableNote(managedStore) {
       "To fix it, run provision-roles.sql (from the Darling/tools folder of the project's GitHub repository) against the store as its owner, then reload this page. Or use the Viewer's Current Active Queries.";
 }
 
+/** The note a read-only seat sees where the Run live now button would be: the same sentence every list-only page gives that seat
+ *  (util.js listOnlyNote), so the advice to use the Viewer's Current Active Queries is on the page, not only in the banner's hover text. */
+export function liveReadOnlyNote(session) {
+  return listOnlyNote(session.managed_store === true, "the live read cannot be queued from this page", "To read the active queries live", session.admin_writes_off === true);
+}
+
 /* #6386: what the page says for each server, kept here and not in the elements. The server page replaces its whole panel grid on every
    auto-refresh tick (every 60 s by default, 30 s if the operator picks it), which is shorter than a read may take (GIVE_UP_MS), so the
    read's last words and its lock must outlive the bar that started it: collector-run.js keeps the same state for the same reason. */
@@ -124,7 +130,7 @@ function say(server, text, rows) {
 }
 
 /**
- * The "Run live now" block for the Active Queries panel. `columns` are the stored grid's columns. Empty for a read-only seat.
+ * The "Run live now" block for the Active Queries panel. `columns` are the stored grid's columns. A read-only seat gets the list-only note and no button.
  */
 export function activeQueriesLiveBar(server, columns) {
   const slot = el("div", { class: "active-live" }, []);
@@ -133,7 +139,13 @@ export function activeQueriesLiveBar(server, columns) {
   const signal = getPanelSignal();
   (async () => {
     const session = await getSession();
-    if (!session || !session.can_edit) return;
+    if (!session || session.probe_failed === true) return;
+    /* A seat that cannot edit gets the note and never a button or the availability probe (the server answers 403 to a queue from it). */
+    if (!session.can_edit) {
+      mount(slot, [noticeStrip(liveReadOnlyNote(session))]);
+      slot.dataset.status = "read-only";
+      return;
+    }
     const avail = await apiGet("/api/active-queries/live/available", signal);
     if (avail.kind !== "data" || !avail.data) return;
     if (avail.data.can_queue !== true) {
