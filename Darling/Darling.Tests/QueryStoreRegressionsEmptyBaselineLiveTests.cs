@@ -185,10 +185,10 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         var current = DarlingQueryStoreRegressionReader.BuildSql(wide: true, useDailyTotals: false);
         var old = current
             .Replace(
-                "GREATEST(CAST(EXTRACT(EPOCH FROM (CAST($2 AS timestamp) - CAST($6 AS timestamp))) / 3600.0 AS double precision), 0) AS base_hours",
-                "CAST(EXTRACT(EPOCH FROM (CAST($2 AS timestamp) - CAST($6 AS timestamp))) / 3600.0 AS double precision) AS base_hours", StringComparison.Ordinal)
+                "GREATEST(CAST(EXTRACT(EPOCH FROM (CAST($2 AS timestamp) - CAST($11 AS timestamp))) / 3600.0 AS double precision), 0) AS base_hours",
+                "CAST(EXTRACT(EPOCH FROM (CAST($2 AS timestamp) - CAST($11 AS timestamp))) / 3600.0 AS double precision) AS base_hours", StringComparison.Ordinal)
             .Replace(
-                "(CAST($3 AS timestamp) - GREATEST(CAST($2 AS timestamp), CAST($6 AS timestamp)))",
+                "(CAST($3 AS timestamp) - GREATEST(CAST($2 AS timestamp), CAST($11 AS timestamp)))",
                 "(CAST($3 AS timestamp) - CAST($2 AS timestamp))", StringComparison.Ordinal);
         Assert.NotEqual(current, old);
 
@@ -218,6 +218,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.LowEnd });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.HighStart });
         command.Parameters.Add(DatabaseFilter.All.ExcludeParameter());
+        /* #6750: the start of the hours held, the row filters' start here. */
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
         var lines = new List<string>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))

@@ -119,10 +119,9 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken,
                 /* #6750: the closing sentence follows where the data starts. Before baseline_end the baseline holds part of its span,
                    at or after it the baseline is empty, and after recent_window_start the recent window is cut too. The table read
-                   starts at the raw floor and divides each per-hour rate by the hours its side holds, so its note says so. The raw read
-                   binds the baseline start, not the floor, and divides by the window asked for, so its note does not claim that. */
-                tailFor: effectiveStart => QueryStoreRegressionRules.TailFor(
-                    effectiveStart, start, ratesUseHoursHeld: historySource == ReadScope.SourceIntervalTable));
+                   starts at the raw floor, and the raw read's row filters keep the requested start, but both divide each per-hour rate
+                   by the hours their side holds (the windows CTE's hours-held start), so the note says so on either path. */
+                tailFor: effectiveStart => QueryStoreRegressionRules.TailFor(effectiveStart, start));
 
             if (rows.Count == 0)
                 return McpHelpers.WithDatabasesLeftOut(

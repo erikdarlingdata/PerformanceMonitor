@@ -41,8 +41,8 @@ public static class QueryStoreRegressionRules
     public const string RecentCutTail =
         "effective_start is also after recent_window_start, so the recent window holds only the part from effective_start.";
 
-    /// <summary>The sentence Darling adds after <see cref="RecentCutTail"/> (#6750): its read divides each recent per-hour rate by
-    /// the hours the recent window holds. Lite's read still divides by the window it was asked for, so Lite does not say this.</summary>
+    /// <summary>The sentence that follows <see cref="RecentCutTail"/> (#6750): both products divide each recent per-hour rate by the
+    /// hours the recent window holds, from the instant the store's data starts, on every read path.</summary>
     public const string RecentHoursHeldTail =
         "Its per-hour rates divide by the hours it holds.";
 
@@ -51,10 +51,9 @@ public static class QueryStoreRegressionRules
     /// <paramref name="effectiveStart"/> (#6750), by one comparison for Darling and Lite. <paramref name="baselineEnd"/> is the
     /// recent window's start, where the baseline ends. Before it, the baseline holds part of its span
     /// (<see cref="BaselineWindowTail"/>). At or after it the baseline is empty (<see cref="EmptyBaselineTail"/>), and strictly
-    /// after it the recent window is cut too (<see cref="RecentCutTail"/>, then <see cref="RecentHoursHeldTail"/> when
-    /// <paramref name="ratesUseHoursHeld"/>).
+    /// after it the recent window is cut too (<see cref="RecentCutTail"/>, then <see cref="RecentHoursHeldTail"/>).
     /// </summary>
-    public static string TailFor(DateTime effectiveStart, DateTime baselineEnd, bool ratesUseHoursHeld)
+    public static string TailFor(DateTime effectiveStart, DateTime baselineEnd)
     {
         if (effectiveStart < baselineEnd)
         {
@@ -66,7 +65,7 @@ public static class QueryStoreRegressionRules
             return EmptyBaselineTail;
         }
 
-        return EmptyBaselineTail + " " + RecentCutTail + (ratesUseHoursHeld ? " " + RecentHoursHeldTail : "");
+        return EmptyBaselineTail + " " + RecentCutTail + " " + RecentHoursHeldTail;
     }
 
     /// <summary>A rise in timeouts or errors qualifies when the recent per-hour rate is at least this many times the baseline's.

@@ -107,17 +107,17 @@ internal static class DarlingQueryStoreRegressionReader
     /// <see cref="QueryStoreRegressionBaseline.WideArmsSql"/>), the aggregates (<see cref="QueryStoreRegressionBaseline.AggregatesSql"/>)
     /// and <see cref="QueryStoreRegressionBaseline.SuffixSql"/>, bound to this read's parameters: $1 server_id, $2 window start, $3 window
     /// end, $4 database filter (text[] or NULL), $5 row cap, $6 baseline start, $7 the baseline's days read from the daily
-    /// totals (date[]), $8 and $9 the live half's <c>first_execution_time</c> bounds, $10 the databases left out (#6654, text[] or NULL). <paramref name="useDailyTotals"/> false
+    /// totals (date[]), $8 and $9 the live half's <c>first_execution_time</c> bounds, $10 the databases left out (#6654, text[] or NULL), $11 the start of the hours held (#6750, <see cref="QueryStoreRegressionBaseline.Plan.HoursHeldStart"/>, used only by the <c>windows</c> CTE). <paramref name="useDailyTotals"/> false
     /// names no daily table (no run day was found, or the store has none). <paramref name="regularFromLatest"/> (table arms only)
     /// reads the three Regular arms from <c>query_store_interval_latest</c> (<see cref="QueryStoreRegressionBaseline.Plan.RegularFromLatest"/>).
     /// <paramref name="recentFromDaily"/> (latest only) reads the recent window's whole days from the daily totals
-    /// (<see cref="QueryStoreRegressionBaseline.Plan.RecentDays"/>, #5506): $11 the days (date[]), $12 and $13 the recent arm's
+    /// (<see cref="QueryStoreRegressionBaseline.Plan.RecentDays"/>, #5506): $12 the days (date[]), $13 and $14 the recent arm's
     /// live <c>first_execution_time</c> bounds.
     /// </summary>
     internal static string BuildSql(bool wide, bool useDailyTotals, bool regularFromLatest = false, bool recentFromDaily = false) =>
         QueryStoreRegressionBaseline.Bind(
             QueryStoreRegressionBaseline.Statement(wide, useDailyTotals, regularFromLatest, recentFromDaily),
-            "$6", "$7", "$8", "$9", "$5", "$10", "$11", "$12", "$13");
+            "$6", "$7", "$8", "$9", "$5", "$10", "$11", "$12", "$13", "$14");
 
     /// <summary>
     /// The viewer's regression read over raw <c>query_store_stats</c>, with the baseline's closed days from the daily totals
@@ -361,10 +361,11 @@ internal static class DarlingQueryStoreRegressionReader
     /// <summary>Re-arms <see cref="LogTableFault"/>'s once-per-process Warning. Tests only.</summary>
     internal static void ResetTableFaultWarningForTests() => Interlocked.Exchange(ref s_tableFaultWarned, 0);
 
-    /// <summary>The ten parameters both forms of the read take, in their order: $1 server_id, $2 window start, $3 window
+    /// <summary>The eleven parameters both forms of the read take, in their order: $1 server_id, $2 window start, $3 window
     /// end, $4 database filter, $5 row cap, $6 baseline start, $7 the baseline days read from the daily totals (#5506), $8 the
     /// end of the live half's low <c>first_execution_time</c> range, $9 the start of its high range, $10 the databases left out
-    /// (<see cref="DatabaseFilter.ExcludeParameter"/>, #6654).</summary>
+    /// (<see cref="DatabaseFilter.ExcludeParameter"/>, #6654), $11 the start of the hours held (#6750): the plan's, which on the raw read is raw's
+    /// floor when it is after the requested start. The row filters ($6) keep the requested start on every path, so the rows read are the same.</summary>
     private static void AddParameters(
         NpgsqlCommand command, int serverId, DateTime startUtc, DateTime endUtc, DatabaseFilter databases, int limit, DateTime baselineStartUtc,
         QueryStoreRegressionBaseline.Plan plan)
@@ -377,9 +378,10 @@ internal static class DarlingQueryStoreRegressionReader
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.LowEnd, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.HighStart, DateTimeKind.Unspecified) });
         command.Parameters.Add(databases.ExcludeParameter());
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.HoursHeldStart ?? baselineStartUtc, DateTimeKind.Unspecified) });
         if (ReadsRecentDays(plan))
         {
-            /* #5506: $11 to $13, only on the recent-days form, the only text that names them. */
+            /* #5506: $12 to $14, only on the recent-days form, the only text that names them. */
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RecentDays });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentLowEnd, DateTimeKind.Unspecified) });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentHighStart, DateTimeKind.Unspecified) });

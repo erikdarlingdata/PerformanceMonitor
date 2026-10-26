@@ -176,8 +176,8 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
 
     /// <summary>
     /// #6750: a server whose first row comes after the 168-hour window's start has an empty baseline and a cut recent window, and the note
-    /// says so with the two shared sentences, not with the one for a baseline that holds part of its span. Lite's read still divides by the
-    /// window it was asked for, so the note does not claim hours held. A 24-hour read keeps the old sentence.
+    /// says so with the three shared sentences, not with the one for a baseline that holds part of its span. A 24-hour read keeps the old
+    /// sentence.
     /// </summary>
     [Fact]
     public async Task AServerWhoseFirstRowIsAfterTheWindowStart_SaysTheBaselineIsEmpty_AndTheRecentWindowIsCut()
@@ -192,7 +192,7 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
         Assert.True(hit.GetProperty("window_truncated").GetBoolean());
         var note = hit.GetProperty("truncation_note").GetString()!;
         Assert.EndsWith(
-            PerformanceMonitor.Common.QueryStoreRegressionRules.EmptyBaselineTail + " " + PerformanceMonitor.Common.QueryStoreRegressionRules.RecentCutTail,
+            PerformanceMonitor.Common.QueryStoreRegressionRules.EmptyBaselineTail + " " + PerformanceMonitor.Common.QueryStoreRegressionRules.RecentCutTail + " " + PerformanceMonitor.Common.QueryStoreRegressionRules.RecentHoursHeldTail,
             note, StringComparison.Ordinal);
         Assert.DoesNotContain(PerformanceMonitor.Common.QueryStoreRegressionRules.BaselineWindowTail, note, StringComparison.Ordinal);
         Assert.Equal("timeouts", Assert.Single(hit.GetProperty("regressions").EnumerateArray()).GetProperty("regression_reason").GetString());
@@ -200,6 +200,33 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
         await SeedAsync(baseNow.AddHours(-2), 3, 1000, 1000, intervalId: 5, queryId: 7, executionType: "Aborted");
         var day = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, 24));
         Assert.EndsWith(PerformanceMonitor.Common.QueryStoreRegressionRules.BaselineWindowTail, day.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #6750: the per-hour rates divide by the hours the store HOLDS, not by the 7 days and the window it was asked for. The store's
+    /// first row is 30 hours back, so a 24-hour read holds 6 hours of baseline. The steady query runs 2 timeouts an hour in both
+    /// (12 in the 6 hours held, 48 in the 24 hours), so it is not a rise: over the 168 hours asked for its baseline rate reads 0.07 an
+    /// hour and it would be flagged. The rising query's baseline rate is its count over the hours held.
+    /// </summary>
+    [Fact]
+    public async Task AStoreHoldingPartOfTheBaseline_DividesTheRatesByTheHoursHeld()
+    {
+        var service = new LocalDataService(_duckDb);
+        var baseNow = Truncate(DateTime.UtcNow);
+
+        await SeedAsync(baseNow.AddHours(-30), 12, 1000, 1000, intervalId: 3, queryId: 8, executionType: "Aborted");
+        await SeedAsync(baseNow.AddHours(-3), 48, 1000, 1000, intervalId: 4, queryId: 8, executionType: "Aborted");
+        await SeedAsync(baseNow.AddHours(-30), 6, 1000, 1000, intervalId: 5, queryId: 7, executionType: "Aborted");
+        await SeedAsync(baseNow.AddHours(-3), 120, 1000, 1000, intervalId: 6, queryId: 7, executionType: "Aborted");
+
+        var hit = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, 24));
+        var row = Assert.Single(hit.GetProperty("regressions").EnumerateArray());
+        Assert.Equal(7, row.GetProperty("query_id").GetInt64());
+        Assert.Equal("timeouts", row.GetProperty("regression_reason").GetString());
+
+        /* 6 runs over the 6 hours held (the 30 hours back to the window's start), not over 168. */
+        Assert.Equal(1.0, row.GetProperty("baseline_aborted_per_hour").GetDouble(), 1);
+        Assert.Equal(5.0, row.GetProperty("recent_aborted_per_hour").GetDouble(), 1);
     }
 
     /// <summary>

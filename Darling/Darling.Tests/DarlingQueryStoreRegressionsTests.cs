@@ -419,9 +419,8 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
 
     /// <summary>
     /// #6750: a raw-only store whose first row comes after the 168-hour window's start. The baseline is empty and the recent window is
-    /// cut, so the note ends with those two sentences, not with the sentence for a baseline that holds part of its span. A timeouts
-    /// row still comes back (cost cannot flag). The store is a plain table, so raw binds the baseline start itself and divides by the window
-    /// it was asked for, and the note does not claim hours held. A 24-hour read of the same store keeps the old
+    /// cut, so the note ends with those three sentences, not with the sentence for a baseline that holds part of its span. A timeouts
+    /// row still comes back (cost cannot flag). A 24-hour read of the same store keeps the old
     /// sentence, because there the store starts inside the baseline.
     /// </summary>
     [Fact]
@@ -438,7 +437,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.True(hit.GetProperty("window_truncated").GetBoolean());
             Assert.Equal(McpHelpers.FormatEffectiveStart(baseNow.AddHours(-30)), hit.GetProperty("effective_start").GetString());
             var note = hit.GetProperty("truncation_note").GetString()!;
-            Assert.EndsWith(PerformanceMonitor.Common.QueryStoreRegressionRules.EmptyBaselineTail + " " + PerformanceMonitor.Common.QueryStoreRegressionRules.RecentCutTail, note, StringComparison.Ordinal);
+            Assert.EndsWith(PerformanceMonitor.Common.QueryStoreRegressionRules.EmptyBaselineTail + " " + PerformanceMonitor.Common.QueryStoreRegressionRules.RecentCutTail + " " + PerformanceMonitor.Common.QueryStoreRegressionRules.RecentHoursHeldTail, note, StringComparison.Ordinal);
             Assert.DoesNotContain(BaselineTail, note, StringComparison.Ordinal);
 
             var row = Assert.Single(hit.GetProperty("regressions").EnumerateArray());

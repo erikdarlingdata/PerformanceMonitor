@@ -142,7 +142,7 @@ public sealed class WebPlainTextTests
         var o = Run(
         [
             QueryStoreRegressionRules.EmptyBaselineTail,
-            QueryStoreRegressionRules.TailFor(new DateTime(2026, 1, 5), new DateTime(2026, 1, 1), ratesUseHoursHeld: true),
+            QueryStoreRegressionRules.TailFor(new DateTime(2026, 1, 5), new DateTime(2026, 1, 1)),
         ], out _);
         Assert.Equal("Here the store starts at or after the end of the baseline period, so the baseline is empty: no query can be flagged for cost, and only timeouts and errors were tested.", o[0]);
         Assert.StartsWith(o[0], o[1], StringComparison.Ordinal);

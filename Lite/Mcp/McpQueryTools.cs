@@ -632,8 +632,12 @@ public sealed class McpQueryTools
                 ? await dataService.GetDroppedDatabasesAsync(resolved.ServerId, asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, windowStartUtc: baselineStart)
                 : null;
             var leftOut = DatabasesLeftOut.Distinct(droppedDatabases);
+            /* #6750: the store's data start, probed once. The window notice below reports it as effective_start, and the read divides
+               each per-hour rate by the hours from it, so the two cannot disagree. */
+            var floor = await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, baselineStart, windowEnd);
             var rows = await dataService.GetQueryStoreRegressionsAsync(
-                resolved.ServerId, hours_back, limit + 1, databases, asOfUtc: windowEnd, excludedDatabases: droppedDatabases?.ToList());
+                resolved.ServerId, hours_back, limit + 1, databases, asOfUtc: windowEnd, excludedDatabases: droppedDatabases?.ToList(),
+                dataStartUtc: EffectiveWindowStart(floor, baselineStart));
 
             /* #4966: where this server's query_store_stats start, checked against the EARLIER of the two windows this
                tool compares — the baseline's start, not the recent window's: a store that began inside the baseline
@@ -642,9 +646,9 @@ public sealed class McpQueryTools
                database_name (the floor is a property of the table). Read ahead of the empty answers, which carry it
                too: "no query regressed" over a baseline the store only partly holds is not a true negative. */
             var notice = await WindowNoticeAsync(
-                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, baselineStart, windowEnd),
+                () => Task.FromResult(floor),
                 baselineStart, windowEnd, "query_store_stats",
-                tailFor: effectiveStart => QueryStoreRegressionRules.TailFor(effectiveStart, windowStart, ratesUseHoursHeld: false),
+                tailFor: effectiveStart => QueryStoreRegressionRules.TailFor(effectiveStart, windowStart),
                 emptyAnswer: rows.Count == 0);
 
             if (rows.Count == 0)
