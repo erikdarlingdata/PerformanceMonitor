@@ -80,6 +80,7 @@ WHERE server_id = $1
   AND event_time >= $2
   AND event_time <= $3
   AND collection_time >= $4
+  AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + @"
 ORDER BY event_time DESC, wait_time_ms DESC
 LIMIT 500";
 

@@ -27,7 +27,8 @@ namespace PerformanceMonitor.Common;
 /// counts (<c>worker_thread_exhaustion_warning</c>, <c>runnable_tasks_warning</c>) are recomputed from the combined
 /// counts when a collection was split (a flag stored on a partial row says nothing about the whole server), and so is
 /// <c>physical_memory_pressure_warning</c>: it is recomputed from the available and total memory shown (one row's pair),
-/// by the collector's own rule (available below 10 % of total). The other flags (<c>blocked_tasks_warning</c>,
+/// by the collector's own rule (available below 10 % of total, and not while the engine's high-memory signal is set; the signal is read
+/// from the shown row's <c>system_memory_state_desc</c>, the only form the store keeps). The other flags (<c>blocked_tasks_warning</c>,
 /// <c>queued_requests_warning</c>, <c>offline_cpu_warning</c>) are OR-ed: each rises with the count it comes from, so
 /// the OR follows the MAX that the read shows.</para>
 ///
@@ -68,6 +69,14 @@ public static class CpuSchedulerCollectionSql
     /// </summary>
     private const string MemoryRowOrder =
         "ORDER BY available_physical_memory_kb ASC NULLS LAST, total_physical_memory_kb DESC NULLS LAST, collection_id DESC";
+
+    /// <summary>
+    /// The <c>system_memory_state_desc</c> the engine reports while <c>sys.dm_os_sys_memory.system_high_memory_signal_state</c> is 1,
+    /// as a SQL literal. The collector's pressure rule (available below 10 % of total) does not hold while that signal is set, and
+    /// the store keeps the description, not the bit (no migration), so a split collection's recompute reads the signal from the
+    /// description of the row it shows. A description in another wording leaves the flag as the 10 % rule alone gives it.
+    /// </summary>
+    private const string HighMemoryStateDesc = "'Available physical memory is high'";
 
     /// <summary>
     /// The select list of the per-collection combine, one output column per stored column the readers use, under the
@@ -115,6 +124,7 @@ public static class CpuSchedulerCollectionSql
             WHEN COUNT(*) = 1
             THEN BOOL_OR(physical_memory_pressure_warning)
             ELSE (ARRAY_AGG(available_physical_memory_kb {MemoryRowOrder}))[1] < (ARRAY_AGG(total_physical_memory_kb {MemoryRowOrder}))[1] * 0.10
+                 AND (ARRAY_AGG(system_memory_state_desc {MemoryRowOrder}))[1] IS DISTINCT FROM {HighMemoryStateDesc}
         END AS physical_memory_pressure_warning,
         MAX(total_node_count) AS total_node_count,
         MAX(nodes_online_count) AS nodes_online_count,

@@ -114,7 +114,7 @@ export function pinFinopsHash(server, tabId) {
 function tabBar(server, active) {
   return el(
     "nav",
-    { class: "subtabs finops-tabs", "aria-label": "FinOps sections" },
+    { class: "subtabs", "aria-label": "FinOps sections" },
     FINOPS_TABS.map((t) =>
       el("a", {
         class: "subtab" + (t.id === active.id ? " active" : ""),

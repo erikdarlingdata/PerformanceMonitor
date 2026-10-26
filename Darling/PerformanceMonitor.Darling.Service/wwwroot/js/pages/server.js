@@ -473,6 +473,8 @@ function fillDatabaseFilter(slot, server, card) {
 function subtabBar(server, active, tabs) {
   return el(
     "nav",
+    /* A SQL Server server has more tabs than fit at 1400 px; .subtabs wraps the strip onto a second row so every tab stays readable
+       (a scrolling strip showed the last one, "Recommendations", cut off with nothing to say it scrolls). */
     { class: "subtabs", role: "tablist", "aria-label": "Server sections" },
     tabs.map((t) =>
       el("a", {

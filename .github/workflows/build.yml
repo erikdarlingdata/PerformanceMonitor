@@ -110,6 +110,8 @@ jobs:
               # DmvResourceDatabaseSentinelTests reads install/56). A PR that edits only an install script fires `installer`
               # and `sql-validation`, neither of which runs Lite.Tests, so the nightly would be the first to catch drift.
               - 'install/**/!(*.md)'
+              # Lite.Tests.csproj compiles tools/ui-smoke-wpf/LiteSeedGuard.cs into its own assembly and tests it, so an edit to that tree has to reach the Lite suite.
+              - 'tools/ui-smoke-wpf/**/!(*.md)'
               # #5669: the Lite path gate the shard legs and lite-scope read; see that file's header.
               - '.github/lite-paths-filter.yml'
               # #2489, changed by Erik's 2026-09-24 ruling that docs-only changes skip CI:

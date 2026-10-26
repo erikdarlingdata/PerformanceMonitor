@@ -77,6 +77,8 @@
     <Compile Include="..\Darling\Darling.Tests\TestTimeHelpers.cs" Link="TestTimeHelpers.cs" />
     <!-- #5596: the test that proves this process runs with the WPF exit switch on (the switch itself is declared above), so both suites check their own process. -->
     <Compile Include="..\Darling\Darling.Tests\WpfExitSwitchTests.cs" Link="WpfExitSwitchTests.cs" />
+    <!-- The UI smoke walk's seed guard (tools/ui-smoke-wpf is not a test shard), compiled here so its tests run with this suite. -->
+    <Compile Include="..\tools\ui-smoke-wpf\LiteSeedGuard.cs" Link="LiteSeedGuard.cs" />
   </ItemGroup>
 
   <ItemGroup>
