@@ -458,7 +458,10 @@ public sealed class WebPlainTextTests
         var o = Run([real], out _);
         Assert.Equal(
             "The Running Jobs collector has never run for this server, so there is nothing to show. " +
-            PerformanceMonitor.Collectors.CollectorRuntimePrecondition.RunningJobsPossibleCauses, o[0]);
+            PerformanceMonitor.Collectors.CollectorRuntimePrecondition.RunningJobsPossibleCauses +
+            " After you fix the cause, the service must reconnect to this server before collection starts again. " +
+            "Restart the service, or change this server's settings.", o[0]);
+        Assert.Contains("must reconnect to this server", o[0]);
         Assert.DoesNotContain("PRECONDITION", o[0]);
         Assert.DoesNotContain("Retrying", o[0]);
     }
@@ -477,11 +480,35 @@ public sealed class WebPlainTextTests
         Assert.Contains("runtime PRECONDITION", session);
 
         var o = Run([dark, session], out _);
-        Assert.StartsWith("The Running Jobs collector has not run for this server for over 24 hours, so what is shown is out of date. Possible cause:", o[0]);
+        Assert.StartsWith("The Running Jobs collector has not run for this server for over 24 hours, so there is nothing current to show. Possible cause:", o[0]);
+        Assert.EndsWith("After you fix the cause, the service must reconnect to this server before collection starts again. " +
+            "Restart the service, or change this server's settings.", o[0]);
         Assert.DoesNotContain("PRECONDITION", o[0]);
         Assert.Contains("ALTER ANY EVENT SESSION", o[1]);
         Assert.DoesNotContain("PRECONDITION", o[1]);
         Assert.DoesNotContain("nothing to restart", o[1]);
+    }
+
+    /// <summary>The three Query Store answers (error, read-only, off) end on the shared precondition sentence, which the page drops. What
+    /// each one names that the reader needs (the ALTER statement, the consistency check) stays, built from the real builder.</summary>
+    [Theory]
+    [InlineData("ERROR", "sys.sp_query_store_consistency_check")]
+    [InlineData("READ_ONLY", "OPERATION_MODE = READ_WRITE")]
+    [InlineData("OFF", "SET QUERY_STORE = ON")]
+    public void TheQueryStoreAnswers_KeepTheStatementTheyName_AndDropThePreconditionSentence(string state, string named)
+    {
+        var real = PerformanceMonitor.Collectors.CollectorRuntimePrecondition.QueryStoreDisabledMessage(
+            "ui-sql", new[] { new PerformanceMonitor.Collectors.CollectorRuntimePrecondition.QueryStoreDatabaseState("AppDb", state) },
+            new DateTime(2026, 10, 25, 12, 0, 0, DateTimeKind.Utc))!;
+        Assert.Contains("runtime PRECONDITION", real);
+        Assert.Contains("ALTER DATABASE", real);
+        Assert.Contains(named, real);
+
+        var o = Run([real], out _)[0];
+        Assert.Contains("ALTER DATABASE", o);
+        Assert.Contains(named, o);
+        Assert.DoesNotContain("PRECONDITION", o);
+        Assert.DoesNotContain("nothing to restart", o);
     }
 
     /// <summary>Text without the precondition closing sentence is not touched by that rule.</summary>
