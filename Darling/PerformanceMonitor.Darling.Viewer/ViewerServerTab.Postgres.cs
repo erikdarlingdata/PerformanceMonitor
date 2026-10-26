@@ -109,6 +109,19 @@ public partial class ViewerServerTab
     // ─────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
+    /// How often a collector runs on this server, for the panel notes that say so: its schedule override, else the shipped
+    /// default, resolved from the rows this tab already holds (<see cref="_scheduleOverrides"/>, read at most every five
+    /// minutes) so a note costs no read of its own. <paramref name="fallbackMinutes"/> only answers for a collector name the
+    /// shipped schedule does not know, or one with no recurring cadence; a failed read of the overrides gives the shipped cadence.
+    /// </summary>
+    private async Task<int> EffectiveCollectorMinutesAsync(string collectorName, int fallbackMinutes)
+    {
+        var overrides = await _scheduleOverrides.GetAsync();
+        var interval = ViewerTimeRangeWindow.SampleIntervalFor(collectorName, _server.ServerId, overrides);
+        return interval is { } span ? (int)span.TotalMinutes : fallbackMinutes;
+    }
+
+    /// <summary>
     /// What a panel says when it has nothing to show. Three different answers, because they need three
     /// different responses from the person reading them: a collector this engine can never run (the shared
     /// capability sentence — nothing to do), a zero-row window for a collector where zero IS the answer
@@ -234,8 +247,9 @@ public partial class ViewerServerTab
 
         PgCpuGrid.ItemsSource = rows;
         UpdateTruncationBanner(PgCpuDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL CPU"), startUtc);
+        var cpuMinutes = await EffectiveCollectorMinutesAsync("pg_cpu_utilization", 5);
         PgCpuNote.Text = PanelNote("pg_cpu_utilization", rows.Count,
-            "This collector samples AWS Performance Insights on a 5-minute cadence, so a server added "
+            $"This collector samples AWS Performance Insights {CollectorCadenceText.Every(cpuMinutes)}, so a server added "
             + "recently may have nothing here yet.");
     }
 
@@ -267,8 +281,10 @@ public partial class ViewerServerTab
         var actionable = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "available", StringComparison.Ordinal));
         var outdated = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "outdated", StringComparison.Ordinal));
 
+        var extensionMinutes = await EffectiveCollectorMinutesAsync("pg_extension_availability", 1440);
         PgExtensionsNote.Text = PanelNote("pg_extension_availability", rows.Count,
-            "The extension collector runs daily, so a server added in the last day has nothing here yet.")
+            $"The extension collector runs {CollectorCadenceText.Every(extensionMinutes)}, so a server added in the last "
+            + $"{CollectorCadenceText.Span(extensionMinutes)} has nothing here yet.")
             + (rows.Count == 0
                 ? string.Empty
                 : $"  {actionable} extension(s) this product can use are available on this server and NOT "
@@ -329,13 +345,14 @@ public partial class ViewerServerTab
         await ShowEventDataStartAsync(PgConfigChangesDataStartBanner, dataStartTask, "PostgreSQL Configuration Changes", startUtc,
             rows.Select(r => (DateTime?)r.ChangedAtUtc), bannerRowCap);
 
+        var configMinutes = await EffectiveCollectorMinutesAsync("pg_server_config", 60);
         PgConfigChangesNote.Text = PanelNote("pg_server_config", rows.Count,
             "No configuration parameter changed value in this window. This compares consecutive snapshots, so an "
             + "unchanged server is legitimately empty here: it is a finding, not missing data.")
             + (rows.Count == 0
                 ? string.Empty
-                : "Configuration changes, newest first. The collector runs hourly, so a change happened in the hour "
-                  + "before it was seen."
+                : $"Configuration changes, newest first. The collector runs {CollectorCadenceText.Every(configMinutes)}, so a change happened in the "
+                  + $"{CollectorCadenceText.Span(configMinutes)} before it was seen."
                   + (truncated
                       ? $"  Showing the newest {ViewerDataService.PgConfigChangesRowCap}; narrow the window to see the rest."
                       : string.Empty));
@@ -375,9 +392,10 @@ public partial class ViewerServerTab
         if (audit is null)
         {
             PgLoggingAuditGrid.ItemsSource = null;
+            var auditMinutes = await EffectiveCollectorMinutesAsync("pg_server_config", 60);
             PgLoggingAuditNote.Text =
-                "No configuration snapshot to audit. pg_server_config runs hourly, so a server registered in the last "
-                + "hour has not reached its first collection. This is the absence of evidence, not a verdict about "
+                $"No configuration snapshot to audit. pg_server_config runs {CollectorCadenceText.Every(auditMinutes)}, so a server registered in the last "
+                + $"{CollectorCadenceText.Span(auditMinutes)} has not reached its first collection. This is the absence of evidence, not a verdict about "
                 + "the server's logging.";
             return;
         }
@@ -744,6 +762,7 @@ public partial class ViewerServerTab
         var instrument = await _dataService.GetPgWaitInstrumentAsync(_server.ServerId);
         var serviceTier = instrument is not null
             && string.Equals(instrument.Instrument, PgWaitInstrument.ServiceSampled, StringComparison.Ordinal);
+        var waitMinutes = await EffectiveCollectorMinutesAsync("pg_wait_sampling", 5);
 
         PgWaitSamplingGrid.ItemsSource = PgDisplay.WaitSamplingRows(rows);
         UpdateTruncationBanner(PgWaitSamplingDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL Wait Sampling"), startUtc);
@@ -765,8 +784,8 @@ public partial class ViewerServerTab
             : $"{rows.Count:N0} wait event(s), {attributed:N0} attributed to a query. "
               + (serviceTier
                   ? "Instrument: SERVICE SAMPLER — pg_wait_sampling is not installed, so this is the "
-                    + "service polling pg_stat_activity once a second for a 30-second window every five "
-                    + "minutes. A floor, not parity: waits shorter than a second are under-counted and "
+                    + $"service polling pg_stat_activity once a second for a 30-second window {CollectorCadenceText.Every(waitMinutes)}. "
+                    + "A floor, not parity: waits shorter than a second are under-counted and "
                     + "nothing between windows is seen. Installing the extension moves this server to "
                     + "the 10 ms tier. "
                   : instrument is not null

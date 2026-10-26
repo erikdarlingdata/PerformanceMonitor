@@ -123,7 +123,49 @@ public sealed class ViewerScreenReaderNamesTests
         Assert.DoesNotContain(names, n => n.Name.StartsWith("Item:", StringComparison.Ordinal) || n.Name.Contains("StackPanel", StringComparison.Ordinal));
     }
 
-    private static readonly Regex s_columnHeader = new(@"<(DataGrid\w*Column)\.Header>(?<body>.*?)</\1\.Header>", RegexOptions.Singleline | RegexOptions.Compiled);
+    [Theory]
+    [InlineData("DarkTheme.xaml")]
+    [InlineData("LightTheme.xaml")]
+    [InlineData("CoolBreezeTheme.xaml")]
+    public void AFilterButton_WearingTheRealThemesColumnFilterStyle_IsStillNamedForItsColumn(string themeFile)
+    {
+        var themePath = Path.Combine(ViewerDir(), "Themes", themeFile);
+        var names = StaTestThread.Run(() =>
+        {
+            AccessibleNames.Register();
+            ResourceDictionary theme;
+            using (var stream = File.OpenRead(themePath))
+            {
+                theme = (ResourceDictionary)System.Windows.Markup.XamlReader.Load(stream);
+            }
+
+            /* A style that sets AutomationProperties.Name makes SetAuto treat the name as hand-set and back off, so
+               every filter button would read the style's one generic string instead of "Filter <column title>". */
+            var style = (Style)theme["ColumnFilterButtonStyle"];
+            var grid = new DataGrid { AutoGenerateColumns = false, HeadersVisibility = DataGridHeadersVisibility.Column };
+            foreach (var title in new[] { "Wait Type", "Waiting Tasks" })
+            {
+                var panel = new StackPanel { Orientation = Orientation.Horizontal };
+                panel.Children.Add(new Button { Style = style, Tag = title, Content = new TextBlock { Text = "" } });
+                panel.Children.Add(new TextBlock { Text = title });
+                grid.Columns.Add(new DataGridTextColumn { Header = panel, Binding = new System.Windows.Data.Binding("Time") });
+            }
+
+            grid.ItemsSource = new[] { new Row { Time = "10:00" } };
+            var window = new Window { Content = grid, Width = 500, Height = 300 };
+            Settle(window);
+            var peers = new List<AutomationPeer>();
+            Walk(UIElementAutomationPeer.CreatePeerForElement(grid), peers);
+            window.Close();
+            return peers.Where(p => p is ButtonAutomationPeer).Select(p => p.GetName()).ToList();
+        });
+
+        Assert.Contains("Filter Wait Type", names);
+        Assert.Contains("Filter Waiting Tasks", names);
+        Assert.DoesNotContain("Filter this column", names);
+    }
+
+    private static readonly Regex s_columnHeader =new(@"<(DataGrid\w*Column)\.Header>(?<body>.*?)</\1\.Header>", RegexOptions.Singleline | RegexOptions.Compiled);
 
     private static string StripComments(string xaml) => Regex.Replace(xaml, "<!--.*?-->", "", RegexOptions.Singleline);
 

@@ -311,7 +311,7 @@ LIMIT 1";
     /// </summary>
     internal static async Task<string> EditServerByIdAsync(
         NpgsqlDataSource postgres, int serverId, string changesJson, ILogger? logger, CancellationToken cancellationToken,
-        ILogger? probeLogger = null)
+        ILogger? probeLogger = null, DarlingUnverifiedWindowsAuthScreen? webScreen = null)
     {
         string?[] submittedSecrets = [];
         try
@@ -324,7 +324,7 @@ LIMIT 1";
 
             submittedSecrets = [changes!.Password, changes.AwsExternalId];
             return await EditServerCoreAsync(
-                new PostgresServerEditStore(postgres), serverId, changes, DefaultProbeAsync, DarlingPasswordKey.Current, logger, cancellationToken, probeLogger);
+                new PostgresServerEditStore(postgres), serverId, changes, DefaultProbeAsync, DarlingPasswordKey.Current, logger, cancellationToken, probeLogger, webScreen: webScreen);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -337,12 +337,12 @@ LIMIT 1";
     /// An unparseable body is <c>invalid</c> without a store read.</summary>
     internal static async Task<string> EditServerCoreAsync(
         IServerEditStore store, int serverId, string changesJson, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
-        ILogger? probeLogger = null, DarlingMcpAddServersPolicy? policy = null)
+        ILogger? probeLogger = null, DarlingMcpAddServersPolicy? policy = null, DarlingUnverifiedWindowsAuthScreen? webScreen = null)
     {
         var (changes, error) = ParseEditChanges(changesJson);
         return error != null
             ? Outcome(EditStatus.Invalid, error)
-            : await EditServerCoreAsync(store, serverId, changes!, probe, ring, logger, cancellationToken, probeLogger, policy);
+            : await EditServerCoreAsync(store, serverId, changes!, probe, ring, logger, cancellationToken, probeLogger, policy, webScreen: webScreen);
     }
 
     /// <summary>
@@ -353,7 +353,8 @@ LIMIT 1";
         IServerEditStore store, int serverId, ServerEditChanges changes, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
         ILogger? probeLogger = null, DarlingMcpAddServersPolicy? policy = null,
         Func<int, CancellationToken, Task<int?>>? agentRouteCovering = null,
-        Func<CancellationToken, Task<List<RegisteredTarget>>>? loadTargets = null)
+        Func<CancellationToken, Task<List<RegisteredTarget>>>? loadTargets = null,
+        DarlingUnverifiedWindowsAuthScreen? webScreen = null)
     {
         var row = await store.ReadRowAsync(serverId, cancellationToken);
         if (row is null)
@@ -384,6 +385,19 @@ LIMIT 1";
                 modified_at = ModifiedAtToken(row.ModifiedAt),
                 message = "The request equals the stored values; nothing was written.",
             }, McpHelpers.JsonOptions);
+        }
+
+        /* The web route's one rule (web.allowWindowsAuthOverUnverifiedTls), on the server as it would be saved. It runs only when the edit
+           changes the machine the entry names or its sign-in and certificate settings: the host, the port, the auth type,
+           trust_server_certificate, encrypt_mode or the Query Store replica (the replica is reached with the primary's Windows sign-in
+           and certificate settings). read_only_intent and multi_subnet_failover are not in the list: read-only routing goes to a replica
+           the availability group's own routing list picks, and multi-subnet failover keeps the same host name.
+           An edit of anything else (display name, thresholds, tags, enabled) is never refused, even on a server that already has the
+           combination. It runs before any further store read or probe. */
+        if (webScreen is not null && (plan.ReplicaChanged || plan.ChangedFields.Exists(f => f is "host" or "port" or "auth" or "trust_server_certificate" or "encrypt_mode"))
+            && webScreen.Refusal(plan.ProbeConfig) is { } webRefusal)
+        {
+            return Outcome(EditStatus.Invalid, RedactEditSecret(webRefusal.Replace("Not added:", "Not saved:", StringComparison.Ordinal), plan.PlaintextSecret, plan.PlaintextExternalId));
         }
 
         /* #6281: over MCP, where a registration connects is not changed while a route with an agent setting applies to the

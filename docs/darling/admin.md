@@ -16,6 +16,8 @@ To change the list, use one of these:
 
 The web Admin page can edit a server that already exists. It cannot add, remove, enable or disable one. The page says so itself. For the full list of what the file still controls, see [`darling.json` is only a seed](install.md#darlingjson-is-only-a-seed).
 
+The Admin page's edit and the `POST /api/servers` route save a server that uses Windows authentication only over a verified certificate. The route adds a server and has no page of its own. A verified certificate means `trust_server_certificate` false and `encrypt_mode` `Mandatory` or `Strict`. Setting `web.allowWindowsAuthOverUnverifiedTls` to true lifts this (default off), as `mcp.allowWindowsAuthOverUnverifiedTls` does for the MCP tools.
+
 Run the command line verbs on the service host, from the folder that holds `PerformanceMonitor.Darling.Service.exe`. If a verb reads a credential or a token, run it from an elevated PowerShell.
 
 ## Add a server
