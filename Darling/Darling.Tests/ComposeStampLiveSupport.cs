@@ -172,13 +172,24 @@ FROM collect.query_store_interval_wide WHERE module_name = 'modT' GROUP BY colle
         Assert.True(await CountAsync(connection, $"SELECT count(*) FROM ({Ties}) AS g", ct) > 0, "no rounding-tie groups");
     }
 
+    /// <summary>
+    /// One builder tick. With <paramref name="nowUtc"/> (the arrange step's <see cref="ClockWithin"/>) the tick plans, and records a
+    /// failure, on that store clock instead of the real one: the plan's due hours read the STORE's clock (<c>PlanSql</c>'s $3), so a test
+    /// that crosses the top of the hour between its arrange step and this call must not make one more hour due (#6769). Without it the
+    /// tick runs as the service does.
+    /// </summary>
+    internal static Task<QueryStoreComposeStamp.TickResult> TickAtAsync(NpgsqlDataSource source, DateTime? nowUtc, CancellationToken ct) =>
+        nowUtc is { } at
+            ? QueryStoreComposeStamp.RunTickAsync(source, at, RetentionDays, NullLogger.Instance, () => TimeSpan.Zero, ct, new QueryStoreComposeStamp.TickOptions(StoreNow: at))
+            : QueryStoreComposeStamp.RunTickAsync(source, DateTime.UtcNow, RetentionDays, NullLogger.Instance, ct);
+
     /// <summary>Builds every hour that is due, tick by tick, and returns how many hours were built.</summary>
     internal static async Task<int> BuildAllAsync(NpgsqlDataSource source, CancellationToken ct, DateTime? nowUtc = null)
     {
         var total = 0;
         for (var guard = 0; guard < 20; guard++)
         {
-            var result = await QueryStoreComposeStamp.RunTickAsync(source, nowUtc ?? DateTime.UtcNow, RetentionDays, NullLogger.Instance, ct);
+            var result = await TickAtAsync(source, nowUtc, ct);
             Assert.Equal(0, result.Failed);
             if (result.Built == 0)
             {
