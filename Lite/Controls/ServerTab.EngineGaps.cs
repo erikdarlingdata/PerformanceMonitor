@@ -82,13 +82,13 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// The running_jobs skipped-collector sentence: the shared wording, with the same possible cause and the same first-run grace
-    /// the MCP tool uses, so the tab and the tool say the same thing. Null while the collector has run lately, or while the server
+    /// The running_jobs skipped-collector sentence: the shared reader wording (#6764), which is the MCP tool's answer for the same
+    /// facts without its closing sentence for an MCP client, with the same possible cause and the same first-run grace. Null while the collector has run lately, or while the server
     /// has collected nothing.
     /// </summary>
     internal static string? RunningJobsSkippedNote(
         string serverName, DateTime? collectorLastRunUtc, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc) =>
-        CollectorRuntimePrecondition.GatedOffMessage(
+        CollectorRuntimePrecondition.GatedOffReaderMessage(
             serverName, "running_jobs", CollectorRuntimePrecondition.RunningJobsPossibleCauses,
             collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
 

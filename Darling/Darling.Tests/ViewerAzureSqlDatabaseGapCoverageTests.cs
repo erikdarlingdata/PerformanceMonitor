@@ -350,11 +350,11 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
 
     /// <summary>
     /// On AWS RDS the Agent job collectors never run, and RDS is not an engine edition. The Running Jobs note is then the sentence
-    /// the Darling MCP service gives for the same facts, so both name AWS RDS. A collector that ran a moment ago, or a server
+    /// the Darling MCP service gives for the same facts, worded for a reader without its closing sentence (#6764), so both name AWS RDS. A collector that ran a moment ago, or a server
     /// that has collected nothing, shows no note.
     /// </summary>
     [Fact]
-    public void RunningJobs_NeverRan_ShowsTheSentenceTheMcpAnswerGives()
+    public void RunningJobs_NeverRan_ShowsTheShortFormOfTheMcpAnswer()
     {
         var state = ViewerServerTab.EngineGapStateFromRuns(
             ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, ServerLastCollected, null);
@@ -364,7 +364,12 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
 
         Assert.NotNull(mcp);
         Assert.Equal(Visibility.Visible, state.Visibility);
-        Assert.Equal(mcp, state.Text);
+        Assert.Equal(
+            "The Running Jobs collector has never run for this server, so there is nothing to show. "
+            + CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            state.Text);
+        Assert.DoesNotContain("runtime PRECONDITION", state.Text, StringComparison.Ordinal);
+        Assert.Contains("runtime PRECONDITION", mcp, StringComparison.Ordinal);
         Assert.Contains("AWS RDS", state.Text, StringComparison.Ordinal);
         Assert.NotEqual(ViewerServerTab.NeverRanNote(ServerName, "running_jobs"), state.Text);
 
@@ -376,6 +381,30 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         var nothingCollected = ViewerServerTab.EngineGapStateFromRuns(
             ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, null, null);
         Assert.Equal(Visibility.Collapsed, nothingCollected.Visibility);
+    }
+
+    /// <summary>
+    /// A running_jobs collector that went dark shows the short "out of date" line (#6764), the same words the web page uses, then the
+    /// possible causes, with no closing sentence meant for an MCP client. The MCP answer for the same facts still has it.
+    /// </summary>
+    [Fact]
+    public void RunningJobs_GoneDark_ShowsTheShortOutOfDateLine()
+    {
+        var state = ViewerServerTab.EngineGapStateFromRuns(
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0,
+            ServerLastCollected.AddDays(-3), ServerLastCollected, ServerLastCollected.AddDays(-10));
+
+        var mcp = CollectorRuntimePrecondition.GatedOffMessage(
+            ServerName, "running_jobs", CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            ServerLastCollected.AddDays(-3), ServerLastCollected, ServerLastCollected.AddDays(-10));
+
+        Assert.Equal(Visibility.Visible, state.Visibility);
+        Assert.Equal(
+            "The Running Jobs collector has not run for this server for over 24 hours, so what is shown is out of date. "
+            + CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            state.Text);
+        Assert.DoesNotContain("runtime PRECONDITION", state.Text, StringComparison.Ordinal);
+        Assert.Contains("runtime PRECONDITION", mcp, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -758,7 +787,7 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
 
     /// <summary>
     /// Both sides of the due time, through the viewer's read: one second before, the Running Jobs note says not yet and names no
-    /// cause. At the due time it gives the hedged note with the possible cause. Each time it is the MCP answer for the same read.
+    /// cause, as the MCP answer does. At the due time it gives the short never-ran line with the possible cause (#6764), where the MCP answer adds its closing sentence.
     /// </summary>
     [Fact]
     public async Task RunningJobs_JustBeforeItIsDue_SaysNotYet_AndOnceDue_NamesThePossibleCause_AsTheMcpAnswerDoes()
@@ -781,8 +810,9 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         var due = await ReadGapAsync(reader, new HashSet<string>(), "running_jobs", 0);
 
         Assert.Equal(Visibility.Visible, due.Visibility);
-        Assert.Equal(McpRunningJobsAnswer(reader.ServerFirstCollected), due.Text);
-        Assert.Contains("has never run against", due.Text, StringComparison.Ordinal);
+        Assert.Contains("runtime PRECONDITION", McpRunningJobsAnswer(reader.ServerFirstCollected), StringComparison.Ordinal);
+        Assert.StartsWith("The Running Jobs collector has never run for this server, so there is nothing to show. ", due.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("runtime PRECONDITION", due.Text, StringComparison.Ordinal);
         Assert.Contains(CollectorRuntimePrecondition.RunningJobsPossibleCauses, due.Text, StringComparison.Ordinal);
     }
 

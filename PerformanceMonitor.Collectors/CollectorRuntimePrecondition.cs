@@ -413,6 +413,47 @@ public static class CollectorRuntimePrecondition
     }
 
     /// <summary>
+    /// <see cref="GatedOffMessage"/> as a person reading a desktop panel or the web page should see it (#6764): the same
+    /// classification, so the panel and the MCP tool decide from the same facts, but worded for the reader. The MCP answer is
+    /// about 1200 characters and ends in a closing sentence that labels itself a runtime PRECONDITION and says to retry the read,
+    /// which only an MCP client can use. The two "not being invoked" arms (never ran, gone dark) become one line saying which
+    /// data is missing, followed by <paramref name="gateCandidates"/> as written. The first-run sentence is already short and is
+    /// returned as <see cref="GatedOffMessage"/> gives it. The two wordings match the web page's
+    /// (<c>runtimePreconditionText</c> in plain-text.js), so all three human surfaces read the same. Null where
+    /// <see cref="GatedOffMessage"/> is null. <see cref="GatedOffMessage"/> itself is unchanged: it is the MCP answer.
+    /// </summary>
+    public static string? GatedOffReaderMessage(
+        string serverName,
+        string collectorName,
+        string gateCandidates,
+        DateTime? collectorLastRunUtc,
+        DateTime? serverLastCollectedUtc,
+        DateTime? serverFirstCollectedUtc)
+    {
+        switch (ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc))
+        {
+            case GatedOffCase.GoneDark:
+                return $"The {CollectorWords(collectorName)} collector has not run for this server for over " +
+                       $"{GoneDarkHours.ToString("0", CultureInfo.InvariantCulture)} hours, so what is shown is out of date. " +
+                       gateCandidates;
+
+            case GatedOffCase.NeverRan:
+                return $"The {CollectorWords(collectorName)} collector has never run for this server, so there is nothing to show. " +
+                       gateCandidates;
+
+            default:
+                return GatedOffMessage(
+                    serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
+        }
+    }
+
+    /// <summary>A collector's name the way a panel says it: <c>running_jobs</c> is "Running Jobs".</summary>
+    private static string CollectorWords(string collectorName) =>
+        string.Join(
+            " ",
+            collectorName.Split('_').Select(w => w.Length == 0 ? w : char.ToUpperInvariant(w[0]) + w[1..]));
+
+    /// <summary>
     /// #6453: the sentence for a read that found no stored rows while the collector serving it is HEALTHY, or null when it is
     /// not. Healthy here is the newest <c>collection_log</c> run being <c>SUCCESS</c> with no note: the monitored server
     /// answered and had nothing for the collector, which <c>get_collection_health</c> reports as "every run completed and its
