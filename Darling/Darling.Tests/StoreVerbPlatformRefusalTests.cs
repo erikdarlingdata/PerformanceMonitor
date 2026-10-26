@@ -129,7 +129,7 @@ public sealed class StoreVerbPlatformRefusalTests
     {
         var usage = DarlingCliCommands.UsageText();
         Assert.Contains("dotnet PerformanceMonitor.Darling.Service.dll", usage, StringComparison.Ordinal);
-        var backfill = usage.Split(Environment.NewLine).First(l => l.Contains("--backfill-rollups  Materialize", StringComparison.Ordinal));
+        var backfill = usage.Split(Environment.NewLine).First(l => l.Contains("--backfill-rollups [--free-space <size>]  Materialize", StringComparison.Ordinal));
         Assert.Contains("bring-your-own", backfill, StringComparison.Ordinal);
         Assert.All(usage, ch => Assert.True(ch < 128, $"usage text must be ASCII; found U+{(int)ch:X4}"));
     }

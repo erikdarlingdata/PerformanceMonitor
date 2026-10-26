@@ -485,9 +485,9 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-web       Disable the web dashboard in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --backfill-rollups  Materialize the retention rollups back over existing history, after a disk preflight. Runs on Linux against a bring-your-own store; only a managed store needs Windows." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --backfill-rollups [--free-space <size>]  Materialize the retention rollups back over existing history, after a disk preflight. Runs on Linux against a bring-your-own store; only a managed store needs Windows. When the store is on another host, check the free space of its data volume there and pass it as --free-space, for example 41G." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed. Same platform rule as --backfill-rollups." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim [--free-space <size>]  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store; --free-space gives the free space you checked on the store host when the store is on another host)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --add-alert-source <name> [--config <path>]      Make a source for external alerts: a login that can send alerts and do nothing else. Prints its connection string ONCE; Darling keeps no copy. <name> is 2-31 characters: a letter, then lower-case letters, digits or underscores." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --rotate-alert-source <name> [--config <path>]   Give a source a new password and print its connection string once. The old password stops working." + Environment.NewLine +
@@ -5907,15 +5907,17 @@ public static partial class DarlingCliCommands
     /// <c>--vacuum-full</c>, <c>--no-vacuum-full</c> in any order, at most one bare argument (the config
     /// path). Unknown flags are NOT config paths — refusing beats silently treating a typo as a file.
     /// </summary>
-    public static (string? ConfigPath, bool DryRun, RecompressVacuumMode Mode, string? Error) ParseRecompressArgs(
+    public static (string? ConfigPath, bool DryRun, RecompressVacuumMode Mode, long? FreeBytes, string? Error) ParseRecompressArgs(
         ReadOnlySpan<string> rest)
     {
         string? configPath = null;
         var dryRun = false;
         var mode = RecompressVacuumMode.Auto;
+        long? freeBytes = null;
 
-        foreach (var arg in rest)
+        for (var i = 0; i < rest.Length; i++)
         {
+            var arg = rest[i];
             if (string.Equals(arg, "--dry-run", StringComparison.OrdinalIgnoreCase))
             {
                 dryRun = true;
@@ -5928,9 +5930,16 @@ public static partial class DarlingCliCommands
             {
                 mode = RecompressVacuumMode.Skip;
             }
+            else if (string.Equals(arg, FreeSpaceOption, StringComparison.OrdinalIgnoreCase))
+            {
+                if (TakeFreeSpaceOption(rest, ref i, ref freeBytes) is { } freeSpaceError)
+                {
+                    return (null, false, RecompressVacuumMode.Auto, null, freeSpaceError);
+                }
+            }
             else if (arg.StartsWith("--", StringComparison.Ordinal))
             {
-                return (null, false, RecompressVacuumMode.Auto, $"unknown option '{arg}' for --recompress-plan-dim");
+                return (null, false, RecompressVacuumMode.Auto, null, $"unknown option '{arg}' for --recompress-plan-dim");
             }
             else
             {
@@ -5938,8 +5947,121 @@ public static partial class DarlingCliCommands
             }
         }
 
-        return (configPath, dryRun, mode, null);
+        return (configPath, dryRun, mode, freeBytes, null);
     }
+
+    /// <summary>
+    /// Parses <c>--backfill-rollups</c>'s trailing arguments: <c>--dry-run</c>, <c>--free-space &lt;size&gt;</c> and at
+    /// most one bare argument (the config path), in any order. Unknown <c>--</c> options are refused: before
+    /// <c>--free-space</c> existed a typo here was read as the config path, and now it would swallow the size too.
+    /// </summary>
+    public static (string? ConfigPath, bool DryRun, long? FreeBytes, string? Error) ParseBackfillArgs(
+        ReadOnlySpan<string> rest)
+    {
+        string? configPath = null;
+        var dryRun = false;
+        long? freeBytes = null;
+
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (string.Equals(arg, "--dry-run", StringComparison.OrdinalIgnoreCase))
+            {
+                dryRun = true;
+            }
+            else if (string.Equals(arg, FreeSpaceOption, StringComparison.OrdinalIgnoreCase))
+            {
+                if (TakeFreeSpaceOption(rest, ref i, ref freeBytes) is { } freeSpaceError)
+                {
+                    return (null, false, null, freeSpaceError);
+                }
+            }
+            else if (arg.StartsWith("--", StringComparison.Ordinal))
+            {
+                return (null, false, null, $"unknown option '{arg}' for --backfill-rollups");
+            }
+            else
+            {
+                configPath = arg;
+            }
+        }
+
+        return (configPath, dryRun, freeBytes, null);
+    }
+
+    /// <summary>The option that hands a store verb the free space the operator checked on the store host (#6791).</summary>
+    private const string FreeSpaceOption = "--free-space";
+
+    /// <summary>
+    /// Reads the value after <c>--free-space</c> at <paramref name="index"/>, moving the index onto the value.
+    /// Returns the refusal text, or null when the size was taken.
+    /// </summary>
+    private static string? TakeFreeSpaceOption(ReadOnlySpan<string> rest, ref int index, ref long? freeBytes)
+    {
+        if (freeBytes is not null)
+        {
+            return "--free-space was given more than once. Pass it one time, with the free space of the store's data volume.";
+        }
+
+        if (index + 1 >= rest.Length || rest[index + 1].StartsWith("--", StringComparison.Ordinal))
+        {
+            return "--free-space needs a size after it, for example --free-space 41G.";
+        }
+
+        index++;
+        var (bytes, error) = ParseFreeSpaceSize(rest[index]);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        freeBytes = bytes;
+        return null;
+    }
+
+    /// <summary>
+    /// Parses a <c>--free-space</c> size: a whole number of bytes, or a number followed by K, M, G or T, optionally
+    /// followed by B or iB, in any case. All units are 1024-based, the way <c>df -h</c> prints them, so the
+    /// <c>41G</c> that <c>df -h</c> shows is accepted as written. Zero and negative sizes are refused: a store with
+    /// no free space is a refusal the verb reaches by comparing, not a value to type in.
+    /// </summary>
+    public static (long? Bytes, string? Error) ParseFreeSpaceSize(string? text)
+    {
+        var unreadable = $"--free-space could not read '{text}' as a size. Use a number of bytes, or a number with K, M, G or T, for example 41G or 512M.";
+        var match = FreeSpaceSizePattern.Match(text ?? string.Empty);
+        if (!match.Success
+            || !double.TryParse(match.Groups["number"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
+            || double.IsNaN(number) || double.IsInfinity(number))
+        {
+            return (null, unreadable);
+        }
+
+        var scale = match.Groups["unit"].Value.ToUpperInvariant() switch
+        {
+            "K" => 1024d,
+            "M" => 1024d * 1024,
+            "G" => 1024d * 1024 * 1024,
+            "T" => 1024d * 1024 * 1024 * 1024,
+            _ => 1d,
+        };
+
+        var bytes = number * scale;
+        if (bytes < 1)
+        {
+            return (null, $"--free-space must be more than zero; '{text}' is not. Pass the free space you checked on the store's data volume, for example 41G.");
+        }
+
+        if (bytes >= long.MaxValue)
+        {
+            return (null, $"--free-space '{text}' is larger than any volume. Pass the free space you checked on the store's data volume, for example 41G.");
+        }
+
+        return ((long)bytes, null);
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex FreeSpaceSizePattern = new(
+        @"^\s*(?<number>-?\d+(?:\.\d+)?)\s*(?:(?<unit>[KMGTkmgt])(?:[iI]?[bB])?|[bB])?\s*$",
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant | System.Text.RegularExpressions.RegexOptions.NonBacktracking);
 
     /// <summary>
     /// #2171: whether the store's plan_xml_compression setting is 'none' — the mode where the live
@@ -5995,7 +6117,7 @@ public static partial class DarlingCliCommands
     /// </summary>
     public static async Task<int> RecompressPlanDimAsync(
         string? configPath, bool dryRun, RecompressVacuumMode vacuumMode, TextWriter output, TextWriter error,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, long? freeSpaceBytes = null)
     {
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(error);
@@ -6111,7 +6233,7 @@ public static partial class DarlingCliCommands
 
             if (vacuumMode == RecompressVacuumMode.Force && !dryRun)
             {
-                return await CompactPlanDimAsync(connection, output, error, cancellationToken);
+                return await CompactPlanDimAsync(connection, freeSpaceBytes, output, error, cancellationToken);
             }
 
             output.WriteLine("  (Pass --vacuum-full to compact a previously-converted store whose file still");
@@ -6232,7 +6354,7 @@ public static partial class DarlingCliCommands
             return 0;
         }
 
-        return await CompactPlanDimAsync(connection, output, error, cancellationToken);
+        return await CompactPlanDimAsync(connection, freeSpaceBytes, output, error, cancellationToken);
     }
 
     /// <summary>
@@ -6244,7 +6366,8 @@ public static partial class DarlingCliCommands
     /// vacuum (the conversion itself is already committed either way).
     /// </summary>
     private static async Task<int> CompactPlanDimAsync(
-        NpgsqlConnection connection, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+        NpgsqlConnection connection, long? freeSpaceBytes, TextWriter output, TextWriter error,
+        CancellationToken cancellationToken)
     {
         long estimated;
         try
@@ -6257,13 +6380,18 @@ public static partial class DarlingCliCommands
             return 1;
         }
 
-        var (freeBytes, freeError) = await ResolveStoreFreeSpaceAsync(connection, cancellationToken);
+        var (freeBytes, freeError) = await ResolveStoreFreeSpaceAsync(connection, freeSpaceBytes, cancellationToken);
         if (freeError is not null)
         {
             error.WriteLine($"  REFUSING to VACUUM FULL: {freeError}");
-            error.WriteLine("  The conversion is committed; re-run with --vacuum-full on the store host (or after");
-            error.WriteLine("  fixing the above) to compact.");
+            error.WriteLine("  The conversion is committed; re-run with --vacuum-full (after fixing the above, or");
+            error.WriteLine("  with --free-space <size>) to compact.");
             return 1;
+        }
+
+        if (freeSpaceBytes is not null)
+        {
+            output.WriteLine($"  Free space {freeBytes / (1024.0 * 1024 * 1024):N1} GB comes from --free-space; it was not measured.");
         }
 
         /* 1.2x headroom on a sampled estimate: the rewrite holds old + new copies simultaneously, and the
@@ -8588,7 +8716,8 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
     /// error, on a preflight refusal, or when any rollup finished short of raw.</para>
     /// </summary>
     public static async Task<int> BackfillRollupsAsync(
-        string? configPath, bool dryRun, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+        string? configPath, bool dryRun, TextWriter output, TextWriter error, CancellationToken cancellationToken,
+        long? freeSpaceBytes = null)
     {
         DarlingConfig config;
         try
@@ -8764,7 +8893,7 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
                 "would have fit is recoverable, filling the volume is not.");
         }
 
-        var (freeBytes, freeError) = await ResolveStoreFreeSpaceAsync(connection, cancellationToken);
+        var (freeBytes, freeError) = await ResolveStoreFreeSpaceAsync(connection, freeSpaceBytes, cancellationToken);
         if (freeError is not null)
         {
             error.WriteLine();
@@ -8778,6 +8907,10 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
         output.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
             $"Free space on the store volume: {RollupBackfillPlan.FormatBytes(freeBytes)}; required: {RollupBackfillPlan.FormatBytes(RollupBackfill.RequiredBytes(totalEstimate))}."));
+        if (freeSpaceBytes is not null)
+        {
+            output.WriteLine("The free space above came from --free-space; it was not measured.");
+        }
 
         if (!RollupBackfill.HasRoom(totalEstimate, freeBytes))
         {
@@ -8975,11 +9108,81 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
     /// would measure the WRONG volume: the login cannot read the setting, or the store is on another host so
     /// the path does not exist here.
     /// </summary>
-    private static async Task<(long FreeBytes, string? Error)> ResolveStoreFreeSpaceAsync(
-        NpgsqlConnection connection, CancellationToken cancellationToken)
+    private static Task<(long FreeBytes, string? Error)> ResolveStoreFreeSpaceAsync(
+        NpgsqlConnection connection, long? givenFreeBytes, CancellationToken cancellationToken)
+        => ResolveFreeSpaceAsync(
+            givenFreeBytes,
+            token => RollupBackfill.DataDirectoryAsync(connection, token),
+            readAvailableFreeBytes: null,
+            cancellationToken);
+
+    /// <summary>
+    /// The step that picks the free-space number (#6791). With <paramref name="givenFreeBytes"/> (the operator's
+    /// <c>--free-space</c>) the store is NOT asked for its data directory and the path is NOT looked for on this
+    /// machine, because the store is on another host and neither answer would be about its volume. Without it the
+    /// store is asked and the directory is measured here. The caller runs the same comparison on either number.
+    /// </summary>
+    internal static async Task<(long FreeBytes, string? Error)> ResolveFreeSpaceAsync(
+        long? givenFreeBytes,
+        Func<CancellationToken, Task<string?>> readDataDirectory,
+        Func<string, long>? readAvailableFreeBytes,
+        CancellationToken cancellationToken)
     {
-        var dataDirectory = await RollupBackfill.DataDirectoryAsync(connection, cancellationToken);
-        return ResolveDirectoryFreeSpace(dataDirectory);
+        if (givenFreeBytes is { } given)
+        {
+            return (given, null);
+        }
+
+        var dataDirectory = await readDataDirectory(cancellationToken);
+        return ResolveDirectoryFreeSpace(dataDirectory, readAvailableFreeBytes);
+    }
+
+    /// <summary>The sentence the two "cannot measure it here" refusals end on: the way out (#6791).</summary>
+    private const string FreeSpaceWayOut =
+        " Check the free space of the store's data volume on the store host (for example df -h <data_directory> there)" +
+        " and pass it with --free-space <size>, for example --free-space 41G.";
+
+    /// <summary>
+    /// The mount a path lives on: of <paramref name="mountRoots"/>, the one whose root is the longest path prefix
+    /// of <paramref name="fullPath"/> (#6791). A root matches only on a separator boundary, so /var/lib/pg does not
+    /// claim /var/lib/pgdata. Null when no root contains the path. PURE, so a test can give it a container's mount
+    /// table. Paths use '/' (the Linux and macOS case; Windows reads its volume another way).
+    /// </summary>
+    internal static string? ChooseMountRoot(IEnumerable<string> mountRoots, string fullPath)
+    {
+        string? best = null;
+        foreach (var root in mountRoots)
+        {
+            if (string.IsNullOrEmpty(root))
+            {
+                continue;
+            }
+
+            var bare = root.Length > 1 ? root.TrimEnd('/') : root;
+            var contains = bare == "/"
+                || string.Equals(fullPath, bare, StringComparison.Ordinal)
+                || fullPath.StartsWith(bare + "/", StringComparison.Ordinal);
+            if (contains && (best is null || bare.Length > best.TrimEnd('/').Length))
+            {
+                best = root;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// Free bytes on the volume holding <paramref name="directory"/> outside Windows: the mount with the longest
+    /// matching root, not the path root, which is always / on Linux and is the wrong volume whenever the data
+    /// directory has a mount of its own (#6791).
+    /// </summary>
+    private static long ReadMountAvailableFreeBytes(string directory)
+    {
+        var fullPath = Path.GetFullPath(directory);
+        var drives = DriveInfo.GetDrives();
+        var root = ChooseMountRoot(drives.Select(d => d.Name), fullPath);
+        var drive = root is null ? null : Array.Find(drives, d => d.Name == root);
+        return (drive ?? new DriveInfo(Path.GetPathRoot(fullPath)!)).AvailableFreeSpace;
     }
 
     /// <summary>
@@ -8995,12 +9198,12 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
     {
         if (string.IsNullOrWhiteSpace(dataDirectory))
         {
-            return (0, "could not read the store's data_directory, so the free space on the volume that will grow is unknown. The login needs superuser or pg_read_all_settings.");
+            return (0, "could not read the store's data_directory, so the free space on the volume that will grow is unknown. The login needs superuser or pg_read_all_settings." + FreeSpaceWayOut);
         }
 
         if (!Directory.Exists(dataDirectory))
         {
-            return (0, $"the store's data directory ({dataDirectory}) does not exist on this machine, so the store is on another host and this machine's free space is not the number that matters. Run --backfill-rollups ON the store host.");
+            return (0, $"the store's data directory ({dataDirectory}) does not exist on this machine, so the store is on another host and this machine's free space is not the number that matters. Run this verb ON the store host." + FreeSpaceWayOut);
         }
 
         try
@@ -9013,7 +9216,7 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
                 }
                 else
                 {
-                    readAvailableFreeBytes = directory => new DriveInfo(Path.GetPathRoot(Path.GetFullPath(directory))!).AvailableFreeSpace;
+                    readAvailableFreeBytes = ReadMountAvailableFreeBytes;
                 }
             }
 
