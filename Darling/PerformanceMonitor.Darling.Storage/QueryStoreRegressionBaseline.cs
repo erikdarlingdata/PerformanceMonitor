@@ -1116,9 +1116,12 @@ public static class QueryStoreRegressionBaseline
     /// <summary>
     /// #6750 part 3: the self-statement test once the key table is backfilled. <see cref="QueryStoreSelfKeys"/> holds the key of every
     /// stored text that carries the marker, so a query whose text is in <c>query_store_text</c> is the monitor's own exactly when its
-    /// key is there, and the test reads no text. A query with no text row falls back to the <c>MAX(query_text)</c> sample, as the
-    /// probe does, tested inline with no I/O. The recent-days form's extra sample from latest is not read here: that text is from
-    /// before the separate-fetch cutover, and the collector's own drop removed the monitor's rows then.
+    /// key is there, and the test reads no text. The <c>MAX(query_text)</c> sample test is a second conjunct, tested inline with no
+    /// I/O, and it runs on every row, not only on a row with no text row as in the probe's <c>COALESCE</c>. The two tests differ in
+    /// one case: a query whose stored text is not the monitor's but whose inline sample carries the marker. The probe lists it, and
+    /// this test hides it. That case does not occur on a store today: under the separate text fetch the inline text is NULL, and the
+    /// rows that carried it before the cutover were dropped at collection when they carried the marker. The recent-days form's extra
+    /// sample from latest is not read here, for the same reason.
     /// </summary>
     private static readonly string SelfKeysTest =
         QueryStoreSelfStatement.NotSelfOfKey("$1", "f.database_name", "f.query_id") + " AND " + QueryStoreSelfStatement.NotSelfOfText("f.query_text_sample");
@@ -1126,7 +1129,8 @@ public static class QueryStoreRegressionBaseline
     /// <summary>
     /// #6750 part 3: <paramref name="sql"/> (any bound form of <see cref="Statement"/>) with the self-statement text probe replaced by
     /// the key-table test (<see cref="SelfKeysTest"/>). The caller passes it only when <see cref="QueryStoreSelfKeys.ReadyAsync"/>
-    /// answered true inside the read's own snapshot. The rows, the ranks and every total are the same: only the cost changes, from one
+    /// answered true inside the read's own snapshot. On every store today the rows, the ranks and every total are the same (the one
+    /// case where they could differ is in <see cref="SelfKeysTest"/>'s summary): only the cost changes, from one
     /// primary-key probe of the text table per flagged row to a primary-key probe of the key table, which holds no text. A text with no test in it is returned
     /// as it is, so it keeps the probe.
     /// </summary>

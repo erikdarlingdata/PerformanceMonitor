@@ -55,6 +55,14 @@ public static class QueryStoreSelfStatement
         return Open + textExpression + Close + " = 0";
     }
 
+    /// <summary>The same test, true for the monitor's own statement, over a text expression. The self-statement key writers
+    /// (<see cref="QueryStoreSelfKeys"/>) use it, so the keys they record and the text probe they replace are one definition (#6750).</summary>
+    public static string SelfOfText(string textExpression)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(textExpression);
+        return Open + textExpression + Close + " > 0";
+    }
+
     /// <summary>
     /// The predicate for a read that has not resolved the text: the text is looked up in <c>query_store_text</c> by its key
     /// (one primary-key probe per row), falling back to <paramref name="inlineTextExpression"/> when that table has no row for the

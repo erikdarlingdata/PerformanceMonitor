@@ -61,9 +61,9 @@ CREATE TABLE IF NOT EXISTS collect.query_store_self_keys_state (
     backfilled_at timestamp NOT NULL
 );";
 
-    /// <summary>The marker test over a text expression, true for the monitor's own statement. The same test as
-    /// <see cref="QueryStoreSelfStatement"/>'s, so the key table and the text probe cannot disagree.</summary>
-    internal static string IsSelf(string textExpression) => "strpos(COALESCE(" + textExpression + ", ''), '" + QueryStoreSelfStatement.Marker + "') > 0";
+    /// <summary>The marker test over a text expression, true for the monitor's own statement. An alias of
+    /// <see cref="QueryStoreSelfStatement.SelfOfText"/>, so the key table and the text probe are one definition.</summary>
+    internal static string IsSelf(string textExpression) => QueryStoreSelfStatement.SelfOfText(textExpression);
 
     /// <summary>
     /// Records the keys of every stored text that carries the marker. One sequential scan of the text table (it reads the

@@ -164,6 +164,7 @@ public sealed class QueryStoreSelfKeysLiveTests
 
         var unkeyed = await ReadBothAsync(rig, now, ct);
         Assert.Equal(Ordinary.Append(Own).ToList(), unkeyed.Mcp);
+        Assert.Equal(Ordinary.Append(Own).ToList(), unkeyed.Viewer);
         Assert.Equal(4L, unkeyed.Count);
     }
 
