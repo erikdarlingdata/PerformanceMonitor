@@ -854,14 +854,17 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         var (earlyWith, earlyLive) = await BothRecentFormsAsync(f.Connection, start, earlyEnd, baselineStart, early, ct);
         Assert.Equal("4", Row(earlyWith, 55)[10]);
 
-        /* Force T-2 as a recent day anyway, the day the gate refused: its totals hold query 55's row collected after the end,
-           so the read differs from the live one, and that row is the whole difference. */
-        var t2Midnight = DateTime.SpecifyKind(t2.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
-        var forced = early with { RecentDays = [t2], RecentLowEnd = t2Midnight, RecentHighStart = t2Midnight.AddDays(1) };
+        /* Force T-2 as a recent day anyway, the day the gate refused. The plan is built the way the resolver builds it. T-2's
+           totals hold query 55's row collected after the end, so the read differs from the live one, and that row is the whole
+           difference: every other row is identical. */
+        var forced = QueryStoreRegressionBaseline.WithRecentDays(early, [t2]);
         Assert.True(QueryStoreRegressionBaseline.ReadsRecentDays(forced));
         var earlyForced = await RunFullAsync(f.Connection, ServerId, Db, start, earlyEnd, baselineStart, forced, ct);
         Assert.NotEqual(earlyLive, earlyForced);
-        Assert.NotEqual("4", Row(earlyForced, 55)[10]);
+        var q55 = Db + "|55|";
+        Assert.Equal(
+            earlyLive.Where(r => !r.StartsWith(q55, StringComparison.Ordinal)).ToList(),
+            earlyForced.Where(r => !r.StartsWith(q55, StringComparison.Ordinal)).ToList());
         Assert.Equal("9", Row(earlyForced, 55)[10]);
     }
 }
