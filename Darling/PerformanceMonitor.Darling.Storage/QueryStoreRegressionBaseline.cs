@@ -128,6 +128,114 @@ public static class QueryStoreRegressionBaseline
         /// <c>windows</c> CTE: every row filter keeps the baseline start, so the rows read do not depend on it.
         /// </summary>
         public DateTime? HoursHeldStart { get; init; }
+
+        /// <summary>The start of the hours the FAILURE arm (<c>nonregular_rows</c>) holds (#6750), the value of
+        /// <see cref="FailureHoursHeldStartToken"/>. Null keeps <see cref="HoursHeldStart"/>: on the raw path both arms read one
+        /// table, so they hold the same hours.</summary>
+        public DateTime? FailureHoursHeldStart { get; init; }
+    }
+
+    /// <summary>
+    /// Where each arm of the table read starts (#6750), from <see cref="ResolveSpansAsync"/>. <see cref="RegularStart"/> serves the
+    /// Regular (cost) baseline and the recent arm, <see cref="FailureStart"/> serves <c>nonregular_rows</c> (the Aborted and Exception
+    /// runs, which only the wide table holds). <see cref="RegularFromLatestAllowed"/> false sends the Regular arms to the wide table,
+    /// whose proven start is <see cref="FailureStart"/>, so the two starts are then equal. <see cref="LatestFloor"/> is latest's own
+    /// floor for this server, for the floor clause of <see cref="LatestCoversRegularArms"/>.
+    /// </summary>
+    public sealed record ArmSpans(
+        DateTime RegularStart,
+        QueryStoreIntervalWide.WideStartBound RegularBound,
+        DateTime FailureStart,
+        QueryStoreIntervalWide.WideStartBound FailureBound,
+        bool RegularFromLatestAllowed,
+        DateTime? LatestFloor);
+
+    /// <summary>
+    /// The exact start of each arm of the table read (#6750). Before this every arm bound the gate's clamp, max(baseline start, raw's
+    /// floor). On the large production store raw keeps about 4 days, so at 168 hours the cost baseline was empty and the recent arm
+    /// was cut to raw's floor, while <c>query_store_interval_latest</c> (the Regular rows, 15 days) and the wide table (the Aborted and
+    /// Exception rows, 10 days) still held them.
+    /// <list type="bullet">
+    /// <item>Raw's floor at or before <paramref name="baselineStart"/> (the clamp is the baseline start): every arm starts there, the
+    /// read before #6750.</item>
+    /// <item>The failure arm: <paramref name="wide"/>'s <see cref="QueryStoreIntervalWide.WideReadPlan.ReadStart"/>, the wide table's
+    /// <see cref="QueryStoreIntervalWide.ExactBelowFloorStart"/> after its cadence and gap verdict.</item>
+    /// <item>The Regular arms: <see cref="QueryStoreIntervalWide.ExactBelowFloorStart"/> over latest, from the baseline start rounded
+    /// down to midnight (a baseline of 7 to 8 days, so its first day can come whole from the daily totals instead of a live edge),
+    /// latest's coverage claim and latest's floor plus <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/>, with the cadence and gap
+    /// verdict keyed on latest's floor. Where that start does not exist or the verdict refuses, the clamp. Where latest cannot serve
+    /// from it (a pending batch, no coverage, coverage or floor after it) or the wide table reaches further, the Regular arms read the
+    /// wide table from the failure arm's start.</item>
+    /// </list>
+    /// Reads latest's coverage inputs and its floor (<see cref="QueryStoreIntervalLatest.PlainTableFloorSql"/>, which the retention
+    /// pass warms after a drain) inside the caller's transaction. A fault propagates, so the caller falls back to raw.
+    /// </summary>
+    public static async Task<ArmSpans> ResolveSpansAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime baselineStart, QueryStoreIntervalWide.WideReadPlan wide,
+        int commandTimeoutSeconds, ILogger? logger, CancellationToken cancellationToken)
+    {
+        baselineStart = DateTime.SpecifyKind(baselineStart, DateTimeKind.Unspecified);
+        DateTime? filledSince;
+        bool hasPending;
+        await using (var inputs = new NpgsqlCommand(QueryStoreIntervalLatest.ReadSourceInputsSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds })
+        {
+            inputs.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = serverId });
+            await using var reader = await inputs.ExecuteReaderAsync(cancellationToken);
+            await reader.ReadAsync(cancellationToken);
+            filledSince = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+            hasPending = reader.GetBoolean(1);
+        }
+
+        DateTime? latestFloor;
+        await using (var floor = new NpgsqlCommand(QueryStoreIntervalLatest.PlainTableFloorSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds })
+        {
+            floor.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = serverId });
+            latestFloor = await floor.ExecuteScalarAsync(cancellationToken) as DateTime?;
+        }
+
+        var clamp = DateTime.SpecifyKind(wide.ClampedStart, DateTimeKind.Unspecified);
+        var failureStart = DateTime.SpecifyKind(wide.ReadStart, DateTimeKind.Unspecified);
+        var wideOnly = new ArmSpans(failureStart, wide.StartBound, failureStart, wide.StartBound, false, latestFloor);
+        if (clamp <= baselineStart)
+        {
+            /* Raw holds the whole baseline: every arm starts at the baseline start, as before #6750. */
+            return new ArmSpans(clamp, wide.StartBound, failureStart, wide.StartBound, true, latestFloor);
+        }
+
+        if (hasPending || filledSince is not DateTime f)
+        {
+            return wideOnly;
+        }
+
+        var regularStart = clamp;
+        var regularBound = QueryStoreIntervalWide.WideStartBound.RawFloor;
+        var below = QueryStoreIntervalWide.ExactBelowFloorStart(clamp, baselineStart.Date, f, latestFloor);
+        if (below is { } b && latestFloor is DateTime lf)
+        {
+            var verdict = await QueryStoreIntervalWide.CadenceAllowsAsync(
+                connection, serverId, lf, commandTimeoutSeconds, logger, cancellationToken, QueryStoreIntervalLatest.TableName);
+            if (verdict == QueryStoreIntervalWide.BelowFloorVerdict.Allowed)
+            {
+                regularStart = b.Start;
+                regularBound = b.Bound;
+            }
+            else
+            {
+                regularBound = verdict == QueryStoreIntervalWide.BelowFloorVerdict.LogNotYetCovering
+                    ? QueryStoreIntervalWide.WideStartBound.RawFloorLogNotYetCovering
+                    : QueryStoreIntervalWide.WideStartBound.RawFloorSlowCadence;
+            }
+        }
+
+        if (!LatestCoversRegularArms(f, hasPending, latestFloor, regularStart) || regularStart > failureStart)
+        {
+            return wideOnly;
+        }
+
+        logger?.LogDebug(
+            "#6750 regressions spans for server {ServerId}: Regular arms from {RegularStart:o} on latest ({RegularBound}), failure arm from {FailureStart:o} ({FailureBound})",
+            serverId, regularStart, regularBound, failureStart, wide.StartBound);
+        return new ArmSpans(regularStart, regularBound, failureStart, wide.StartBound, true, latestFloor);
     }
 
     /// <summary>
@@ -140,6 +248,30 @@ public static class QueryStoreRegressionBaseline
     public static Plan WithHoursHeldStart(Plan plan, DateTime planStart, DateTime? dataStart) =>
         plan with { HoursHeldStart = dataStart is DateTime data && data > planStart ? data : planStart };
 
+    /// <summary>
+    /// The table read's plan with the start of each arm's hours held (#6750): <see cref="Plan.HoursHeldStart"/> for the Regular arms and
+    /// <see cref="Plan.FailureHoursHeldStart"/> for the failure arm. An arm that starts below raw's floor (<paramref name="clamp"/>)
+    /// holds its hours from its own start: that start is the table's proof of complete history for this server, and it is at least the
+    /// server's own floor in that table plus a day. An arm at the clamp keeps the rule of <see cref="WithHoursHeldStart"/>, the later of
+    /// its start and <paramref name="dataStart"/> (this server's raw data start), so a store whose raw tier holds the whole baseline
+    /// reads as before.
+    /// <para>The below-floor hours are deliberately not capped by <paramref name="dataStart"/>:</para>
+    /// <list type="number">
+    /// <item>A below-floor start is at least this server's own floor in that table plus <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> (26 h).
+    /// The coverage claim and the cadence and gap verdict prove complete history from there.</item>
+    /// <item>Raw's data start for this server is at or after raw's floor, because the older raw chunks are dropped. Capping by it would
+    /// shrink the divisor back to raw's few days and overstate the baseline failure rates.</item>
+    /// <item>A young server is unaffected. Its own table floor plus 26 h is after raw's floor, so it gets no below-floor start, and its arm
+    /// keeps the <see cref="WithHoursHeldStart"/> rule (the later of the arm start and its data start).</item>
+    /// </list>
+    /// </summary>
+    public static Plan WithArmStarts(Plan plan, ArmSpans spans, DateTime clamp, DateTime? dataStart)
+    {
+        var at = DateTime.SpecifyKind(clamp, DateTimeKind.Unspecified);
+        DateTime Held(DateTime armStart) => armStart < at ? armStart : dataStart is DateTime d && d > armStart ? d : armStart;
+        return plan with { HoursHeldStart = Held(spans.RegularStart), FailureHoursHeldStart = Held(spans.FailureStart) };
+    }
+
     /// <summary>Whether the plan's statement reads the recent window's days from the daily totals: latest arms and at least one
     /// recent day (#5506). Both readers pick the SQL text and bind the three extra parameters on this one answer.</summary>
     public static bool ReadsRecentDays(Plan plan) => plan.RegularFromLatest && plan.RecentDays.Length > 0;
@@ -147,22 +279,23 @@ public static class QueryStoreRegressionBaseline
     /// <summary>
     /// Whether the table arms may take their three Regular arms from <c>query_store_interval_latest</c> (#5506). That table
     /// holds the same latest snapshot per Regular interval as the wide table, at about a third of the row width, so a cold
-    /// read takes about a third of the disk reads. It may answer only where its coverage claim reaches the whole read: a
-    /// coverage row (<paramref name="filledSince"/>) at or before the baseline start, and no pending batch (a batch that
-    /// stored raw and wide but missed latest is not in the claim). Otherwise the arms read the wide table, today's read.
-    /// The same two inputs as the built-days gate (<see cref="QueryStoreIntervalLatest.ReadSourceInputsSql"/>).
-    /// It has no table-floor check like the wide gate's (<see cref="QueryStoreIntervalWide.UseTable"/>, clause 3), and
-    /// <paramref name="filledSince"/> is a write-side claim that says nothing of what retention has removed since. That is
-    /// safe only because of an order kept in other files: latest keeps 15 days
-    /// (<c>DarlingRetention.QueryStoreIntervalLatestRetentionDays</c>) against the wide table's 10
-    /// (<see cref="QueryStoreIntervalPartitions.WideHorizonDays"/>), both purge oldest first on <c>first_execution_time</c>, and
-    /// the baseline start passed here is already the wide gate's clamp. So latest still holds every row the arms reach. If
-    /// latest's retention ever falls to the wide table's or below, this gate under-reads with no error.
-    /// <c>QueryStoreIntervalLatestWriterTests.Retention_DropsIntervalsPastFifteenDays_AndStalePendingRows_AndKeepsTheRest</c>
-    /// pins the 15 days.
+    /// read takes about a third of the disk reads. It may answer only where it provably holds every row the arms reach from
+    /// <paramref name="baselineStart"/>: a coverage row (<paramref name="filledSince"/>) at or before it, no pending batch (a batch
+    /// that stored raw and wide but missed latest is not in the claim), and latest's own floor (<paramref name="latestFloor"/>,
+    /// <see cref="QueryStoreIntervalLatest.PlainTableFloorSql"/>) at least <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/>
+    /// before it. The floor clause is the wide gate's clause 3 for latest: retention drops latest by whole days of
+    /// <c>first_execution_time</c>, and an interval that ran at or after the baseline start may have begun up to a day before it.
+    /// Before #6750 the clause was not needed, because the start passed here was always the wide gate's clamp and latest keeps
+    /// 15 days against the wide table's 10. The per-arm start (<see cref="ResolveSpansAsync"/>) reaches below that clamp, so the
+    /// floor is now checked. A null floor (latest holds no row for the server) passes, as the clause did not exist before.
+    /// Otherwise the arms read the wide table.
     /// </summary>
-    public static bool LatestCoversRegularArms(DateTime? filledSince, bool hasPending, DateTime baselineStart) =>
-        !hasPending && filledSince is DateTime f && f <= DateTime.SpecifyKind(baselineStart, DateTimeKind.Unspecified);
+    public static bool LatestCoversRegularArms(DateTime? filledSince, bool hasPending, DateTime? latestFloor, DateTime baselineStart)
+    {
+        var start = DateTime.SpecifyKind(baselineStart, DateTimeKind.Unspecified);
+        return !hasPending && filledSince is DateTime f && f <= start
+            && (latestFloor is not DateTime h || h + QueryStoreIntervalWide.PurgeEdgeMargin <= start);
+    }
 
     /// <summary>
     /// The high live range's start raised from the last run day's midnight to the next midnight minus
@@ -243,7 +376,8 @@ public static class QueryStoreRegressionBaseline
     /// </summary>
     public static async Task<Plan> ResolveAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime baselineStart, DateTime windowStart,
-        int commandTimeoutSeconds, ILogger? logger, CancellationToken cancellationToken, bool clampToRawFloor = false, DateTime? windowEnd = null)
+        int commandTimeoutSeconds, ILogger? logger, CancellationToken cancellationToken, bool clampToRawFloor = false, DateTime? windowEnd = null,
+        ArmSpans? spans = null)
     {
         const string savepoint = "qs_regression_built_days";
         List<PlanRegressionDaily.BuiltDay> built;
@@ -273,7 +407,17 @@ public static class QueryStoreRegressionBaseline
 
             /* Decided on the start the caller passed (the wide gate's clamp on the table arm), before any raw clamp below:
                the raw arm reads no latest rows. */
-            regularFromLatest = LatestCoversRegularArms(filledSince, hasPending, baselineStart);
+            /* #6750: the latest floor clause. The table read passes the floor ResolveSpansAsync read (and its verdict); a caller with
+               none reads it here, except on the raw arm, which reads no latest rows. */
+            var latestFloor = spans?.LatestFloor;
+            if (spans is null && !clampToRawFloor)
+            {
+                await using var floor = new NpgsqlCommand(QueryStoreIntervalLatest.PlainTableFloorSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
+                floor.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = serverId });
+                latestFloor = await floor.ExecuteScalarAsync(cancellationToken) as DateTime?;
+            }
+
+            regularFromLatest = (spans?.RegularFromLatestAllowed ?? true) && LatestCoversRegularArms(filledSince, hasPending, latestFloor, baselineStart);
 
             /* Read before the built days: that read swallows its own fault, which leaves the transaction aborted. */
             if (regularFromLatest && !clampToRawFloor && windowEnd is DateTime end)
@@ -421,9 +565,27 @@ public static class QueryStoreRegressionBaseline
     /// <c>$13</c>) and no number is left unbound.</summary>
     public const string HoursHeldStartToken = "@@HELD";
 
+    /// <summary>The failure arm's baseline start (#6750): <c>nonregular_rows</c>' row filters, on every form (the raw arm binds it to
+    /// the same value as <see cref="BaselineStartToken"/>). MCP <c>$12</c>, viewer <c>$11</c>. <see cref="Bind"/> replaces it before
+    /// <see cref="BaselineStartToken"/>, whose text it starts with.</summary>
+    public const string FailureBaselineStartToken = "@@BF";
+
+    /// <summary>
+    /// The table path's work_mem for the regressions statement (#6750), run by the MCP read and the Viewer's. Measured on the large
+    /// production store, a cold 168 hour read with the full baseline spilled a 97 MB external merge in the recent arm's sort, over the
+    /// store's 64 MB work_mem (the mcp and viewer roles set no override). SET LOCAL inside the read's own transaction, right before the
+    /// statement, so it ends with that transaction and no other read pays it.
+    /// </summary>
+    public const string TableReadWorkMemSql = "SET LOCAL work_mem = '256MB'";
+
+    /// <summary>The start of the hours the failure arm holds (#6750): the <c>windows</c> CTE's <c>base_fail_hours</c> and
+    /// <c>recent_fail_hours</c>, which every Aborted and Exception per-hour term divides by. MCP <c>$13</c>, viewer <c>$12</c>.
+    /// Replaced before <see cref="HoursHeldStartToken"/>, whose text it starts with.</summary>
+    public const string FailureHoursHeldStartToken = "@@HELDF";
+
     /// <summary>The recent window's tokens (#5506): its days read from the daily totals (date[]), and the end of its live low
     /// range and the start of its live high range (timestamp). Only the recent-days form names them
-    /// (<see cref="Statement"/> with <c>recentFromDaily</c>); MCP binds them as $12 to $14, the viewer as $11 to $13 (#6750 put <see cref="HoursHeldStartToken"/> before them).</summary>
+    /// (<see cref="Statement"/> with <c>recentFromDaily</c>); MCP binds them as $14 to $16, the viewer as $13 to $15 (#6750 put <see cref="HoursHeldStartToken"/> and the two failure tokens before them).</summary>
     public const string RecentDaysToken = "@@RDAYS";
     public const string RecentLowEndToken = "@@RLOW";
     public const string RecentHighStartToken = "@@RHIGH";
@@ -439,7 +601,8 @@ public static class QueryStoreRegressionBaseline
     /// <c>$8</c>, <c>$9</c>.</summary>
     public static string Bind(
         string sql, string baselineStart, string runDays, string lowEnd, string highStart, string limit, string exclude,
-        string hoursHeldStart, string? recentDays = null, string? recentLowEnd = null, string? recentHighStart = null)
+        string hoursHeldStart, string failureBaselineStart, string failureHoursHeldStart,
+        string? recentDays = null, string? recentLowEnd = null, string? recentHighStart = null)
     {
         if (recentDays is not null && recentLowEnd is not null && recentHighStart is not null)
         {
@@ -450,7 +613,9 @@ public static class QueryStoreRegressionBaseline
 
         return sql.Replace(LimitToken, limit, StringComparison.Ordinal)
            .Replace(ExcludeToken, exclude, StringComparison.Ordinal)
+           .Replace(FailureHoursHeldStartToken, failureHoursHeldStart, StringComparison.Ordinal)
            .Replace(HoursHeldStartToken, hoursHeldStart, StringComparison.Ordinal)
+           .Replace(FailureBaselineStartToken, failureBaselineStart, StringComparison.Ordinal)
            .Replace(BaselineStartToken, baselineStart, StringComparison.Ordinal)
            .Replace(RunDaysToken, "(" + runDays + "::date[])", StringComparison.Ordinal)
            .Replace(LowEndToken, "(" + lowEnd + "::timestamp)", StringComparison.Ordinal)
@@ -531,7 +696,7 @@ public static class QueryStoreRegressionBaseline
             FROM latest
             WHERE rn = 1
             AND   execution_type_desc <> 'Regular'
-            AND   last_execution_time >= @@B
+            AND   last_execution_time >= @@BF
         ),
         """;
 
@@ -665,9 +830,9 @@ public static class QueryStoreRegressionBaseline
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   {{NonRegularPredicate}}
-            AND   first_execution_time >= @@B - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time >= @@BF - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
-            AND   last_execution_time >= @@B
+            AND   last_execution_time >= @@BF
             AND   (last_execution_time < $2 OR collection_time <= $3)
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ),
@@ -881,7 +1046,10 @@ public static class QueryStoreRegressionBaseline
     /// <c>NULLIF(.., 0)</c> on every per-hour term turns into NULL, where a negative divisor gave a negative rate. The recent side
     /// holds <c>$3 - GREATEST($2, @@HELD)</c>. The row filters keep <c>@@B</c>, the requested start, not <c>@@HELD</c>: an interval
     /// whose last snapshot was collected after the raw floor but whose <c>last_execution_time</c> is before it is still read, so
-    /// raising the filters would drop it. Only the divisors use the hours held. Where the server's data holds the whole baseline
+    /// raising the filters would drop it. Only the divisors use the hours held. #6750: the failure arm has its own pair,
+    /// <c>base_fail_hours</c> and <c>recent_fail_hours</c> from <c>@@HELDF</c> (<see cref="Plan.FailureHoursHeldStart"/>), because on the
+    /// table path it reads the wide table from its own start while the Regular arms read latest from theirs. Every Aborted and Exception
+    /// per-hour term divides by that pair, the Regular per-hour terms by <c>base_hours</c> and <c>recent_hours</c>. Where the server's data holds the whole baseline
     /// (<c>@@HELD = @@B</c>) both terms are what they were before, so those reads are unchanged. A baseline that holds no hours (<c>base_hours = 0</c>) counts as empty: its timeout and error counts are not compared, so a row with enough recent runs is listed as it is against an empty baseline (rank 3), and the wire keeps <c>baseline_*_per_hour</c> NULL.
     /// </summary>
     private static string Suffix(string flaggedSample, string rankedSample) => $$"""
@@ -889,7 +1057,9 @@ public static class QueryStoreRegressionBaseline
         windows AS (
             SELECT
                 GREATEST(CAST(EXTRACT(EPOCH FROM (CAST($2 AS timestamp) - CAST(@@HELD AS timestamp))) / 3600.0 AS double precision), 0) AS base_hours,
-                CAST(EXTRACT(EPOCH FROM (CAST($3 AS timestamp) - GREATEST(CAST($2 AS timestamp), CAST(@@HELD AS timestamp)))) / 3600.0 AS double precision) AS recent_hours
+                CAST(EXTRACT(EPOCH FROM (CAST($3 AS timestamp) - GREATEST(CAST($2 AS timestamp), CAST(@@HELD AS timestamp)))) / 3600.0 AS double precision) AS recent_hours,
+                GREATEST(CAST(EXTRACT(EPOCH FROM (CAST($2 AS timestamp) - CAST(@@HELDF AS timestamp))) / 3600.0 AS double precision), 0) AS base_fail_hours,
+                CAST(EXTRACT(EPOCH FROM (CAST($3 AS timestamp) - GREATEST(CAST($2 AS timestamp), CAST(@@HELDF AS timestamp)))) / 3600.0 AS double precision) AS recent_fail_hours
         ),
         candidate_keys AS (
             SELECT database_name, query_id FROM recent_performance
@@ -924,7 +1094,9 @@ public static class QueryStoreRegressionBaseline
                 f.base_exception_dur_us,
                 f.recent_exception_dur_us,
                 w.base_hours,
-                w.recent_hours
+                w.recent_hours,
+                w.base_fail_hours,
+                w.recent_fail_hours
             FROM candidate_keys AS k
             LEFT JOIN recent_performance AS r ON r.database_name = k.database_name AND r.query_id = k.query_id
             LEFT JOIN baseline_performance AS b ON b.database_name = k.database_name AND b.query_id = k.query_id
@@ -938,11 +1110,11 @@ public static class QueryStoreRegressionBaseline
                 (j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) AS cpu_regression_percent,
                 COALESCE((j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) > {{CostGatePercent}}, false) AS is_cost,
                 COALESCE(j.recent_aborted_execs >= {{FailureMinRecentRuns}}
-                    AND (j.base_aborted_execs = 0 OR j.base_hours = 0
-                         OR (j.recent_aborted_execs / NULLIF(j.recent_hours, 0)) >= {{FailureRateMultiple}} * (j.base_aborted_execs / NULLIF(j.base_hours, 0))), false) AS is_timeouts,
+                    AND (j.base_aborted_execs = 0 OR j.base_fail_hours = 0
+                         OR (j.recent_aborted_execs / NULLIF(j.recent_fail_hours, 0)) >= {{FailureRateMultiple}} * (j.base_aborted_execs / NULLIF(j.base_fail_hours, 0))), false) AS is_timeouts,
                 COALESCE(j.recent_exception_execs >= {{FailureMinRecentRuns}}
-                    AND (j.base_exception_execs = 0 OR j.base_hours = 0
-                         OR (j.recent_exception_execs / NULLIF(j.recent_hours, 0)) >= {{FailureRateMultiple}} * (j.base_exception_execs / NULLIF(j.base_hours, 0))), false) AS is_errors
+                    AND (j.base_exception_execs = 0 OR j.base_fail_hours = 0
+                         OR (j.recent_exception_execs / NULLIF(j.recent_fail_hours, 0)) >= {{FailureRateMultiple}} * (j.base_exception_execs / NULLIF(j.base_fail_hours, 0))), false) AS is_errors
             FROM joined AS j
         ),
         qualified AS (
@@ -957,12 +1129,12 @@ public static class QueryStoreRegressionBaseline
                 END AS cost_rank,
                 GREATEST(
                     CASE WHEN NOT f.is_timeouts THEN 0
-                         WHEN f.base_aborted_execs = 0 OR f.base_hours = 0
-                              OR (f.recent_aborted_execs / NULLIF(f.recent_hours, 0)) >= {{FailureHighMultiple}} * (f.base_aborted_execs / NULLIF(f.base_hours, 0)) THEN 3
+                         WHEN f.base_aborted_execs = 0 OR f.base_fail_hours = 0
+                              OR (f.recent_aborted_execs / NULLIF(f.recent_fail_hours, 0)) >= {{FailureHighMultiple}} * (f.base_aborted_execs / NULLIF(f.base_fail_hours, 0)) THEN 3
                          ELSE 2 END,
                     CASE WHEN NOT f.is_errors THEN 0
-                         WHEN f.base_exception_execs = 0 OR f.base_hours = 0
-                              OR (f.recent_exception_execs / NULLIF(f.recent_hours, 0)) >= {{FailureHighMultiple}} * (f.base_exception_execs / NULLIF(f.base_hours, 0)) THEN 3
+                         WHEN f.base_exception_execs = 0 OR f.base_fail_hours = 0
+                              OR (f.recent_exception_execs / NULLIF(f.recent_fail_hours, 0)) >= {{FailureHighMultiple}} * (f.base_exception_execs / NULLIF(f.base_fail_hours, 0)) THEN 3
                          ELSE 2 END) AS failure_rank,
                 (f.recent_dur_ms - f.base_dur_ms) * f.recent_execs AS additional_duration_ms
             FROM flagged AS f
@@ -1056,10 +1228,11 @@ public static class QueryStoreRegressionBaseline
             /* Executions per hour, so the baseline (7 days) and the recent window (hours_back) compare in one unit. */
             r.base_execs / NULLIF(r.base_hours, 0) AS baseline_regular_per_hour,
             r.recent_execs / NULLIF(r.recent_hours, 0) AS recent_regular_per_hour,
-            r.base_aborted_execs / NULLIF(r.base_hours, 0) AS baseline_aborted_per_hour,
-            r.recent_aborted_execs / NULLIF(r.recent_hours, 0) AS recent_aborted_per_hour,
-            r.base_exception_execs / NULLIF(r.base_hours, 0) AS baseline_exception_per_hour,
-            r.recent_exception_execs / NULLIF(r.recent_hours, 0) AS recent_exception_per_hour,
+            /* #6750: the failure rates divide by the hours the failure arm's own table holds (base_fail_hours, recent_fail_hours). */
+            r.base_aborted_execs / NULLIF(r.base_fail_hours, 0) AS baseline_aborted_per_hour,
+            r.recent_aborted_execs / NULLIF(r.recent_fail_hours, 0) AS recent_aborted_per_hour,
+            r.base_exception_execs / NULLIF(r.base_fail_hours, 0) AS baseline_exception_per_hour,
+            r.recent_exception_execs / NULLIF(r.recent_fail_hours, 0) AS recent_exception_per_hour,
             /* #6128: the rows that passed the flags, before the cap. */
             r.total_count
         FROM ranked AS r

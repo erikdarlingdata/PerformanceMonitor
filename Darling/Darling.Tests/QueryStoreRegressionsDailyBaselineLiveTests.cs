@@ -285,6 +285,9 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
         command.Parameters.Add(DatabaseFilter.All.ExcludeParameter());
         /* #6750: the start of the hours held, the row filters' start here. */
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
+        /* #6750: the failure arm's row-filter start and its hours held, the same on this one-tier read. */
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
         var rows = new List<string>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -328,6 +331,9 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.HighStart });
         command.Parameters.Add(DatabaseFilter.All.ExcludeParameter());
         /* #6750: the start of the hours held, the row filters' start here. */
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
+        /* #6750: the failure arm's row-filter start and its hours held, the same on this one-tier read. */
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
         if (QueryStoreRegressionBaseline.ReadsRecentDays(plan))
         {

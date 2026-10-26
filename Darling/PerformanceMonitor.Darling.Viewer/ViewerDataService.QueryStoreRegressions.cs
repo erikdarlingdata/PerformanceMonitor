@@ -17,8 +17,14 @@ using PerformanceMonitor.Darling.Storage;
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>The regressions rows with the databases the read left out (#6654 review): the dropped ones, named for the grid's banner.
-/// <see cref="DatabasesLeftOut"/> is null when none were left out.</summary>
-public sealed record ViewerQueryStoreRegressionsRead(List<ViewerQueryStoreRegressionRow> Rows, IReadOnlyList<string>? DatabasesLeftOut);
+/// <see cref="DatabasesLeftOut"/> is null when none were left out.
+/// <para>#6750: <see cref="Source"/> is the tier that answered (<c>interval_table</c> or <c>raw</c>). <see cref="CostBaselineStart"/> and
+/// <see cref="FailureBaselineStart"/> are set only when the table read reached below raw's floor: the cost baseline (latest) and the
+/// timeouts and errors baseline (the wide table) then start where their own table proves complete history, and the banner names the
+/// cost start instead of raw's data start.</para></summary>
+public sealed record ViewerQueryStoreRegressionsRead(
+    List<ViewerQueryStoreRegressionRow> Rows, IReadOnlyList<string>? DatabasesLeftOut,
+    string Source = "raw", DateTime? CostBaselineStart = null, DateTime? FailureBaselineStart = null);
 
 /// <summary>
 /// One Query-Store regression row — the viewer copy of the Dashboard's
@@ -120,11 +126,12 @@ public sealed partial class ViewerDataService
     /// daily totals (date[]), $7 and $8 the live half's <c>first_execution_time</c> bounds, $9 the databases left out (#6654, text[] or NULL), $10 the start of the hours held (#6750, used only by the <c>windows</c> CTE).
     /// </summary>
     /// <para><paramref name="recentFromDaily"/> (latest only, #5506): the recent window's whole days from the daily totals,
-    /// $11 the days (date[]), $12 and $13 the recent arm's live <c>first_execution_time</c> bounds.</para>
+    /// $13 the days (date[]), $14 and $15 the recent arm's live <c>first_execution_time</c> bounds (#6750 put the failure arm's row-filter
+    /// start at $11 and its hours-held start at $12).</para>
     internal static string BuildQueryStoreRegressionsSql(bool wide, bool useDailyTotals, bool regularFromLatest = false, bool recentFromDaily = false) =>
         QueryStoreRegressionBaseline.Bind(
             QueryStoreRegressionBaseline.Statement(wide, useDailyTotals, regularFromLatest, recentFromDaily),
-            "$5", "$6", "$7", "$8", "50", "$9", "$10", "$11", "$12", "$13");
+            "$5", "$6", "$7", "$8", "50", "$9", "$10", "$11", "$12", "$13", "$14", "$15");
 
     /// <summary>
     /// The Query-Store regressions read — the Dashboard's <c>report.query_store_regressions(@start,@end)</c> inline TVF
@@ -262,11 +269,12 @@ public sealed partial class ViewerDataService
         var schemaVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
         if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
         {
-            var tableRows = await TryGetQueryStoreRegressionsFromTableAsync(
-                serverId, startUtc, endUtc, literalEndUtc, databaseNames, baselineStartUtc, excludedDatabases, cancellationToken, dataStartUtc);
-            if (tableRows is not null)
+            var table = await TryReadFromTableAsync(
+                serverId, startUtc, endUtc, literalEndUtc, databaseNames, baselineStartUtc, excludedDatabases, dataStartUtc, cancellationToken);
+            if (table is { } t)
             {
-                return new ViewerQueryStoreRegressionsRead(tableRows, DatabasesLeftOut.Distinct(excludedDatabases));
+                return new ViewerQueryStoreRegressionsRead(t.Rows, DatabasesLeftOut.Distinct(excludedDatabases), "interval_table",
+                    t.BelowRawFloor ? t.CostStart : null, t.BelowRawFloor ? t.FailureStart : null);
             }
         }
 
@@ -300,6 +308,12 @@ public sealed partial class ViewerDataService
     /// </summary>
     internal async Task<List<ViewerQueryStoreRegressionRow>?> TryGetQueryStoreRegressionsFromTableAsync(
         int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc, IReadOnlyList<string>? excludedDatabases, CancellationToken cancellationToken, DateTime? dataStartUtc = null)
+        => (await TryReadFromTableAsync(serverId, startUtc, endUtc, literalEndUtc, databaseNames, baselineStartUtc, excludedDatabases, dataStartUtc, cancellationToken))?.Rows;
+
+    /// <summary>The table read with where each arm started (#6750), the same binding as the MCP read
+    /// (<see cref="QueryStoreRegressionBaseline.ResolveSpansAsync"/>).</summary>
+    private async Task<(List<ViewerQueryStoreRegressionRow> Rows, DateTime CostStart, DateTime FailureStart, bool BelowRawFloor)?> TryReadFromTableAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc, IReadOnlyList<string>? excludedDatabases, DateTime? dataStartUtc, CancellationToken cancellationToken)
     {
         try
         {
@@ -318,17 +332,19 @@ public sealed partial class ViewerDataService
                 return null;
             }
 
+            /* #6750: each arm's own exact start, as the MCP read binds it. */
+            var spans = await QueryStoreRegressionBaseline.ResolveSpansAsync(
+                connection, transaction, serverId, baselineStartUtc, plan, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken);
             var baselinePlan = await QueryStoreRegressionBaseline.ResolveAsync(
-                connection, transaction, serverId, plan.ClampedStart, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken,
-                windowEnd: endUtc);
-            /* #6750: the divisors start at the later of the gate's clamp (what the row filters bind) and this server's data start. */
-            baselinePlan = QueryStoreRegressionBaseline.WithHoursHeldStart(baselinePlan, plan.ClampedStart, dataStartUtc);
+                connection, transaction, serverId, spans.RegularStart, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken,
+                windowEnd: endUtc, spans: spans);
+            baselinePlan = QueryStoreRegressionBaseline.WithArmStarts(baselinePlan, spans, plan.ClampedStart, dataStartUtc);
             var wideSql = QueryStoreRegressionsTableSqlFor(baselinePlan);
 
             /* #5506 step 2: the same measured margin as the MCP read (DarlingQueryStoreRegressionReader.TryGetQueryStoreRegressionsFromTableAsync
                explains it): the server's longest interval in place of the 26-hour floor, or the 26 hours where it is not known. */
             var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
-                connection, serverId, plan.ClampedStart, endUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+                connection, serverId, spans.RegularStart < spans.FailureStart ? spans.RegularStart : spans.FailureStart, endUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
             if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
             {
                 wideSql = QueryStoreIntervalWide.WithEdgeMargin(wideSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
@@ -337,10 +353,19 @@ public sealed partial class ViewerDataService
             /* #5506: the latest form's high live range starts at the next midnight minus the margin, as in the MCP read. */
             baselinePlan = QueryStoreRegressionBaseline.WithMeasuredHighStart(baselinePlan, edgeMargin);
 
+            /* #6750: the 97 MB recent-sort spill, the same SET LOCAL as the MCP read (DarlingQueryStoreRegressionReader.TableReadWorkMemSql). */
+            await using (var workMem = new NpgsqlCommand(QueryStoreRegressionBaseline.TableReadWorkMemSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
+            {
+                await workMem.ExecuteNonQueryAsync(cancellationToken);
+            }
+
             await using var command = new NpgsqlCommand(wideSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
-            AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, plan.ClampedStart, baselinePlan, excludedDatabases);
+            AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, spans.RegularStart, baselinePlan, excludedDatabases, spans.FailureStart);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            return await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);
+            var rows = await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);
+            var clamp = DateTime.SpecifyKind(plan.ClampedStart, DateTimeKind.Unspecified);
+            return (rows, baselinePlan.HoursHeldStart ?? spans.RegularStart, baselinePlan.FailureHoursHeldStart ?? spans.FailureStart,
+                spans.RegularStart < clamp || spans.FailureStart < clamp);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -352,10 +377,11 @@ public sealed partial class ViewerDataService
     /// <summary>The ten parameters both forms of the read take: $1 server_id, $2 window start, $3 window end, $4 database
     /// filter, $5 baseline start, $6 the baseline days read from the daily totals (#5506), $7 the end of the live half's low
     /// <c>first_execution_time</c> range, $8 the start of its high range, $9 the databases left out (#6654), $10 the start of the hours held
-    /// (#6750, <see cref="QueryStoreRegressionBaseline.Plan.HoursHeldStart"/>).</summary>
+    /// (#6750, <see cref="QueryStoreRegressionBaseline.Plan.HoursHeldStart"/>), $11 the failure arm's row-filter start and $12 the start
+    /// of its hours held (#6750: the same as $5 and $10 on raw).</summary>
     private static void AddQueryStoreRegressionsParameters(
         NpgsqlCommand command, int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc,
-        QueryStoreRegressionBaseline.Plan plan, IReadOnlyList<string>? excludedDatabases)
+        QueryStoreRegressionBaseline.Plan plan, IReadOnlyList<string>? excludedDatabases, DateTime? failureBaselineStartUtc = null)
     {
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
@@ -365,9 +391,11 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.HighStart, DateTimeKind.Unspecified) });
         command.Parameters.Add(DatabaseFilter.Excluding(excludedDatabases).ExcludeParameter());
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.HoursHeldStart ?? baselineStartUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(failureBaselineStartUtc ?? baselineStartUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.FailureHoursHeldStart ?? plan.HoursHeldStart ?? baselineStartUtc, DateTimeKind.Unspecified) });
         if (QueryStoreRegressionBaseline.ReadsRecentDays(plan))
         {
-            /* #5506: $11 to $13, only on the recent-days form, the only text that names them. */
+            /* #5506: $13 to $15, only on the recent-days form, the only text that names them. */
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RecentDays });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentLowEnd, DateTimeKind.Unspecified) });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentHighStart, DateTimeKind.Unspecified) });

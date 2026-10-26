@@ -494,6 +494,9 @@ public partial class ViewerServerTab
         var read = floorReadTask.Result;
         _queryStoreRegressionsFilterMgr!.UpdateData(read.Rows);
         ShowDatabasesLeftOutBanner(QueryStoreRegressionsLeftOutBanner, read.DatabasesLeftOut);
+        /* #6750: when the interval tables served below raw's floor, the banner names where the cost baseline started, not raw's floor.
+           The read has awaited the probe already, so swapping the task here loses nothing. */
+        floorTask = ServedStartOr(read, floorTask);
         await ShowQueryStoreRegressionsDataStartAsync(QueryStoreRegressionsTruncationBanner, floorTask, startUtc);
         AddQueryStoreRegressionsEmptyBaselineNote(QueryStoreRegressionsTruncationBanner, floorTask, startUtc);
         SetDefaultSortIfNone(QueryStoreRegressionsGrid, "DurationRegressionPercent", ListSortDirection.Descending);
@@ -556,6 +559,14 @@ public partial class ViewerServerTab
             banner,
             await DataStartOrNullAsync(probe, "Query Store Regressions"),
             ViewerDataService.QueryStoreRegressionsBaselineStart(startUtc));
+
+    /// <summary>
+    /// #6750: the start the regressions banner names. When the interval tables served below raw's floor, the read compared cost from
+    /// <see cref="ViewerQueryStoreRegressionsRead.CostBaselineStart"/>, so the banner names that instant; a banner over raw's probe would
+    /// show raw's floor for a read that compared days earlier. Otherwise the tab's raw probe.
+    /// </summary>
+    internal static Task<DateTime?> ServedStartOr(ViewerQueryStoreRegressionsRead read, Task<DateTime?> probe) =>
+        read.CostBaselineStart is DateTime cost ? Task.FromResult<DateTime?>(cost) : probe;
 
     /// <summary>
     /// #6750: after <see cref="ShowQueryStoreRegressionsDataStartAsync"/>, a store that starts at or after the range's start has a

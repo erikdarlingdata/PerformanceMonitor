@@ -62,6 +62,11 @@ public sealed class QueryStoreRegressionsHoursHeldLiveTests
         /// <summary>Where THIS server's data starts: the per-server probe the answer's <c>effective_start</c> comes from.</summary>
         public DateTime DataStart { get; set; }
 
+        /// <summary>The table path's failure start (#6750 part 2): this server's own oldest wide row plus the purge-edge margin, and the same
+        /// for the OTHER server's older row. Both come from the seeded times (a snapshot's first execution is 50 minutes before its collection).</summary>
+        public DateTime OwnFailureStart { get; set; }
+        public DateTime OtherFailureStart { get; set; }
+
         public async ValueTask DisposeAsync()
         {
             await Postgres.DisposeAsync();
@@ -345,6 +350,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         if (tablePath)
         {
             await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddDays(-6), 7);
+            rig.OwnFailureStart = now.AddDays(-6).AddMinutes(-50) + QueryStoreIntervalWide.PurgeEdgeMargin;
+            rig.OtherFailureStart = now.AddDays(-9).AddMinutes(-50) + QueryStoreIntervalWide.PurgeEdgeMargin;
         }
 
         if (baselineHoldsNoHours && regularRows)
@@ -399,10 +406,20 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         return rig;
     }
 
-    /// <summary>The answer's own data start, and the baseline's rate per hour over the hours from it to the baseline's end.</summary>
-    private static void AssertDividesByTheHoursFromTheAnswersDataStart(JsonElement hit, string expectedSource)
+    /// <summary>
+    /// The baseline's failure rate per hour over the hours from the answer's start to the baseline's end. On raw that start is this server's
+    /// data start (<c>effective_start</c>, about 6 h). On the table path (#6750 part 2) the failure arm reads wide from its own start,
+    /// <c>failure_baseline_start</c>: this server's oldest wide row plus 26 h. The other server's 9 day old row must not move it.
+    /// </summary>
+    private static void AssertDividesByTheHoursFromTheAnswersDataStart(JsonElement hit, string expectedSource, Rig rig)
     {
         Assert.Equal(expectedSource, hit.GetProperty("history_source").GetString());
+        if (expectedSource == "interval_table")
+        {
+            AssertTheTablePathDivisor(hit, rig);
+            return;
+        }
+
         var effective = DateTime.Parse(hit.GetProperty("effective_start").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
         var baselineEnd = DateTime.Parse(hit.GetProperty("baseline_end").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
         var baselineStart = DateTime.Parse(hit.GetProperty("baseline_start").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
@@ -416,6 +433,22 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.InRange(row.GetProperty("recent_aborted_per_hour").GetDouble(), (120 / 24.0) - 0.01, (120 / 24.0) + 0.01);
     }
 
+    private static void AssertTheTablePathDivisor(JsonElement hit, Rig rig)
+    {
+        var baselineEnd = DateTime.Parse(hit.GetProperty("baseline_end").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
+        var failureStart = DateTime.Parse(hit.GetProperty("failure_baseline_start").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
+        Assert.InRange(Math.Abs((failureStart - rig.OwnFailureStart).TotalSeconds), 0, 2);
+        Assert.True(Math.Abs((failureStart - rig.OtherFailureStart).TotalHours) > 24, "the other server's older row must not set this server's start");
+
+        var row = Assert.Single(hit.GetProperty("regressions").EnumerateArray());
+        Assert.Equal("timeouts", row.GetProperty("regression_reason").GetString());
+        var held = (baselineEnd - failureStart).TotalHours;
+        Assert.InRange(held, 94.5, 95.1);
+        /* The payload rounds the rate to two decimals. */
+        Assert.InRange(row.GetProperty("baseline_aborted_per_hour").GetDouble(), Math.Round(12 / held, 2) - 0.001, Math.Round(12 / held, 2) + 0.001);
+        Assert.InRange(row.GetProperty("recent_aborted_per_hour").GetDouble(), (120 / 24.0) - 0.01, (120 / 24.0) + 0.01);
+    }
+
     [Theory]
     [InlineData(false, "raw")]
     [InlineData(true, "interval_table")]
@@ -425,7 +458,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         await using var rig = await StartTwoServersAsync(tablePath, ct);
 
         var hit = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 24)).RootElement;
-        AssertDividesByTheHoursFromTheAnswersDataStart(hit, expectedSource);
+        AssertDividesByTheHoursFromTheAnswersDataStart(hit, expectedSource, rig);
     }
 
     /// <summary>
@@ -487,11 +520,27 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         await using var rig = await StartTwoServersAsync(tablePath, ct);
 
         await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
-        var rising = Assert.Single(await viewer.GetQueryStoreRegressionsAsync(ServerId, rig.Start, rig.End, [Db], cancellationToken: ct));
+        var read = await viewer.GetQueryStoreRegressionsWithScopeAsync(ServerId, rig.Start, rig.End, [Db], cancellationToken: ct);
+        var rising = Assert.Single(read.Rows);
         Assert.Equal(12, rising.BaselineAbortedCount);
-        var data = await viewer.GetQueryStoreRegressionsDataStartAsync(ServerId, rig.Start, rig.End, ct);
-        var held = (rig.Start - data!.Value).TotalHours;
-        Assert.InRange(held, 5.9, 6.1);
+        double held;
+        if (tablePath)
+        {
+            /* #6750 part 2: the failure arm starts at this server's oldest wide row plus 26 h, not at the other server's. */
+            Assert.Equal("interval_table", read.Source);
+            var failureStart = read.FailureBaselineStart!.Value;
+            Assert.InRange(Math.Abs((failureStart - rig.OwnFailureStart).TotalSeconds), 0, 2);
+            Assert.True(Math.Abs((failureStart - rig.OtherFailureStart).TotalHours) > 24, "the other server's older row must not set this server's start");
+            held = (rig.Start - failureStart).TotalHours;
+            Assert.InRange(held, 94.5, 95.1);
+        }
+        else
+        {
+            var data = await viewer.GetQueryStoreRegressionsDataStartAsync(ServerId, rig.Start, rig.End, ct);
+            held = (rig.Start - data!.Value).TotalHours;
+            Assert.InRange(held, 5.9, 6.1);
+        }
+
         Assert.InRange(rising.BaselineAbortedPerHour!.Value, (12 / held) - 0.001, (12 / held) + 0.001);
         Assert.InRange(rising.RecentAbortedPerHour!.Value, (120 / 24.0) - 0.01, (120 / 24.0) + 0.01);
     }
@@ -521,6 +570,9 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.LowEnd });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.HighStart });
         command.Parameters.Add(DatabaseFilter.All.ExcludeParameter());
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = hoursHeldStart });
+        /* #6750: the failure arm's row-filter start ($12) and its hours held ($13), the same as the Regular arms' on this raw read. */
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = rig.BaselineStart });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = hoursHeldStart });
         var lines = new List<string>();
         await using var reader = await command.ExecuteReaderAsync(ct);
