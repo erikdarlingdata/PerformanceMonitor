@@ -578,7 +578,9 @@ function initPageRefreshControl() {
 function markPageRenderStart(routeName, isPoll) {
   syncPageRefreshControl(routeName);
   if (!isPoll && (routeName === "view" || routeName === "notebook")) clearViewRefresh();
-  if (isNoPollRoute(routeName)) {
+  /* Query Tag Usage is a no-poll page whose one read can run for minutes (#6793): its "Updated" time is written when that read
+     settles, like every polled page, not at render start. The editors and #/triage read once or not at all, so they stamp now. */
+  if (isNoPollRoute(routeName) && routeName !== "queryTagUsage") {
     pageRendering = false;
     pageNextRefreshAt = Infinity;
     notePageUpdated(Date.now());

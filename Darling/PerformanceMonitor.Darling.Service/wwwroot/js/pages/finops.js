@@ -59,9 +59,11 @@ const TAB_KEY = "finops.tab";
 
 let renderGeneration = 0;
 let panelAbort = null;
-/* #6793: leaving the page (route() calls beginPageScope) aborts its panel reads. */
+/* #6793: leaving the page (route() calls beginPageScope) aborts its panel reads and clears the shared panel signal, which would
+   otherwise stay aborted for the next page that renders panels (panels.js keeps it as module state). */
 onPageLeave(() => {
   if (panelAbort) panelAbort.abort();
+  setPanelSignal();
 });
 /* The last list_servers rows, so a hashchange paints in the same tick and only the poll re-reads them. */
 let lastRows = null;
@@ -222,6 +224,8 @@ export function renderFinops(main, server, tabId, opts) {
       controller.abort();
       if (body) mount(body, emptyStrip("No servers are registered yet."));
     };
+    /* A read the page left (#6793) or a signed-out session says nothing about the registry: keep the cache and the painted page. */
+    if (res.kind === "aborted" || res.kind === "auth") return;
     if (res.kind === "error") return show(errorStrip(res.message));
     const rows = res.kind === "data" ? orderServers(serverRows(res.data)) : [];
     if (rows.length === 0) return showEmpty();

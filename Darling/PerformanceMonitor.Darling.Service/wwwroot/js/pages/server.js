@@ -122,9 +122,16 @@ let renderGeneration = 0;
    fresh renderServer, the loadServerCard callback, and the range-select handler) and every one of them must
    cancel the SAME previous batch, not just the one its own caller happens to remember. */
 let panelAbort = null;
-/* #6793: leaving the page (route() calls beginPageScope) aborts its panel reads. */
+/* #6793: leaving the page (route() calls beginPageScope) ends this page's render. The panel batch is aborted. The panel signal is
+   cleared, because it is panels.js state shared by every page that renders panels: left aborted, the next page's first grid would
+   short-circuit to "aborted" and stay on its loading strips (views.js clears it only after its first grid). renderGeneration moves
+   on and `current` is emptied, so a fleet read or a catalog read still out (neither can be aborted) cannot start a new panel batch,
+   which would count on the page now on screen. */
 onPageLeave(() => {
   if (panelAbort) panelAbort.abort();
+  setPanelSignal();
+  renderGeneration++;
+  current = { server: null, tab: null };
 });
 
 /* The last card seen for a server name, so a repeat render can choose its registry without a round trip. Keyed

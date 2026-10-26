@@ -18,7 +18,7 @@ namespace Darling.Tests;
 /// <summary>
 /// #6793: leaving a web page cancels that page's reads, and a read left behind never holds the next page's poll, Refresh
 /// button, tab-return refresh or render-time back-off. These run the shipped <c>app.js</c>, <c>util.js</c> and the Job History,
-/// Query Tag Usage and Server pages under Node (<c>web-route-change-abort-harness.mjs</c>) on a virtual clock and a fetch that
+/// Query Tag Usage, Server and FinOps pages and the view and notebook pages under Node (<c>web-route-change-abort-harness.mjs</c>) on a virtual clock and a fetch that
 /// records every request with its AbortSignal. The slow page's read stays out for 140 s of virtual time, the length measured
 /// on a production store. Node is skipped when it is not installed.
 /// </summary>
@@ -113,5 +113,50 @@ public sealed class WebRouteChangeAbortBehaviourTests
         var r = Run("sameRouteLoadAbortsOlderLoad");
         Assert.True(r.GetProperty("olderAborted").GetBoolean());
         Assert.Equal(2, r.GetProperty("reads").GetInt32());
+    }
+
+    [Fact]
+    public void LeavingTheServerPage_ForASavedView_SendsTheViewsPanelReads_NotAborted()
+    {
+        var r = Run("leaveServerForView");
+        Assert.Equal(1, r.GetProperty("reads").GetInt32());
+        Assert.False(r.GetProperty("abortedAtStart").GetBoolean());
+        Assert.False(r.GetProperty("aborted").GetBoolean());
+    }
+
+    [Fact]
+    public void LeavingTheServerPage_ForANotebook_SendsTheCellReads_NotAborted()
+    {
+        var r = Run("leaveServerForNotebook");
+        Assert.Equal(1, r.GetProperty("reads").GetInt32());
+        Assert.False(r.GetProperty("abortedAtStart").GetBoolean());
+        Assert.False(r.GetProperty("aborted").GetBoolean());
+    }
+
+    [Fact]
+    public void LeavingFinOps_WhileItsServerListIsOut_KeepsItsCache_AndPaintsFromItOnReturn()
+    {
+        var r = Run("finopsLeaveAndReturn");
+        Assert.True(r.GetProperty("pollOut").GetBoolean());
+        Assert.True(r.GetProperty("pollAborted").GetBoolean());
+        Assert.Equal(0, r.GetProperty("readsOnReturn").GetInt32());
+        Assert.False(r.GetProperty("loadingStrip").GetBoolean());
+    }
+
+    [Fact]
+    public void AFleetReadThatLandsAfterLeavingTheServerPage_StartsNoPanelReads_AndBlocksNothing()
+    {
+        var r = Run("fleetReadLandsAfterLeaving");
+        Assert.Equal(0, r.GetProperty("panelReadsStartedAfterLeave").GetInt32());
+        Assert.False(r.GetProperty("refreshDisabled").GetBoolean());
+        Assert.False(r.GetProperty("pollBlocked").GetBoolean());
+    }
+
+    [Fact]
+    public void QueryTagUsage_FooterTime_MovesWhenItsReadLands_NotAtRenderStart()
+    {
+        var r = Run("tagUsageFooterStamp");
+        Assert.False(r.GetProperty("stampedAtStart").GetBoolean());
+        Assert.True(r.GetProperty("stampedWhenReadLanded").GetBoolean());
     }
 }

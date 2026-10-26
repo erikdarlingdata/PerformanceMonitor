@@ -83,18 +83,38 @@ globalThis.setTimeout = () => 0;
 globalThis.clearTimeout = () => {};
 
 let fetches = 0; let serverRenders = 0;
-const fetchLog = [];        // { at, url, signal, aborted }
+const fetchLog = [];        // { at, url, signal, abortedAtStart, aborted }
 let slowReadMs = 140_000;
-const isSlow = (url) => url.includes("get_job_history") || url.includes("get_resource_use_by_tag");
+const isSlow = (url) => url.includes("get_job_history") || url.includes("get_resource_use_by_tag") || (slowRegistry && url.includes("list_servers"));
+let slowRegistry = false;   // a scenario sets this to leave the list_servers read out
+let holdFleet = false;      // a scenario sets this to leave /api/fleet out until landFleet()
+let fleetBody = null;       // a body for /api/fleet, or null for the default 500
+let tagBody = null;         // a body for get_resource_use_by_tag, or null for the default 500
+const json = (body, status = 200) => ({ status, body });
+/* What a read answers once it is due. Anything a scenario does not name answers 500, as before. */
+const answerFor = (url) => {
+  if (url.includes("/api/fleet")) return fleetBody ? json(fleetBody) : json({}, 500);
+  if (url.includes("get_resource_use_by_tag") && tagBody) return json(tagBody);
+  if (url.includes("/api/read/list_servers")) return json({ servers: [{ server_name: "alpha", display_name: "alpha" }] });
+  if (url.includes("/api/session")) return json({ can_edit: false });
+  if (url.includes("/api/catalog")) return json({ reads: [{ name: "get_view_panel_read" }, { name: "get_notebook_cell_read" }], viz: [], compose: {} });
+  if (url.includes("/api/views/view1")) return json({ id: "view1", name: "A view", definition: { panels: [{ title: "View panel", read: "get_view_panel_read", viz: "table" }] } });
+  if (url.includes("/api/views/note1")) return json({ id: "note1", name: "A notebook", definition: { kind: "notebook", cells: [{ type: "panel", title: "Cell", read: "get_notebook_cell_read", viz: "table" }] } });
+  return json({}, 500);
+};
 let pending = [];
 globalThis.fetch = (url, opts = {}) => {
   url = String(url);
   fetches++; if (url.includes("get_server_summary")) serverRenders++;
-  const rec = { at: now, url, signal: opts.signal || null, aborted: false };
+  const rec = { at: now, url, signal: opts.signal || null, abortedAtStart: !!(opts.signal && opts.signal.aborted), aborted: false };
   fetchLog.push(rec);
   return new Promise((resolve, reject) => {
-    const answer = () => resolve({ ok: false, status: 500, json: async () => ({}), text: async () => "" });
-    const p = { at: isSlow(url) ? now + slowReadMs : now, done: answer };
+    const answer = () => {
+      const a = answerFor(url);
+      resolve({ ok: a.status < 400, status: a.status, json: async () => a.body, text: async () => (a.status === 500 && !Object.keys(a.body).length ? "" : JSON.stringify(a.body)) });
+    };
+    const hold = holdFleet && url.includes("/api/fleet");
+    const p = { at: hold ? Infinity : isSlow(url) ? now + slowReadMs : now, done: answer, hold, url };
     pending.push(p);
     if (opts.signal) opts.signal.addEventListener("abort", () => {
       rec.aborted = true;
@@ -102,6 +122,13 @@ globalThis.fetch = (url, opts = {}) => {
       reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
     }, { once: true });
   });
+};
+/* Let the held /api/fleet read answer now and run what its callers do next, without releasing any other read. */
+const landFleet = async () => {
+  const held = pending.filter((p) => p.hold);
+  pending = pending.filter((p) => !p.hold);
+  held.forEach((p) => p.done());
+  await drain();
 };
 const releaseDue = () => { const due = pending.filter((p) => p.at <= now); pending = pending.filter((p) => p.at > now); due.forEach((p) => p.done()); };
 const drain = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
@@ -197,6 +224,66 @@ const scenarios = {
     const status = byId.main.find((x) => x.attrs["aria-label"] === "Status");
     status.value = "failed"; status.dispatch("change"); await drain();
     return { olderAborted: older.aborted, reads: count("get_job_history") };
+  },
+  /* The server page is left for a saved view: the view's first grid must send its panel reads, on a signal that is not aborted. */
+  async leaveServerForView() {
+    await boot("#/server/alpha");
+    await advance(2);
+    await go("#/view/view1"); await settle();
+    const reads = fetchLog.filter((r) => r.url.includes("get_view_panel_read"));
+    return { reads: reads.length, abortedAtStart: reads.some((r) => r.abortedAtStart), aborted: reads.some((r) => r.aborted) };
+  },
+  /* The same for a notebook, whose cells are drawn by renderNotebookDoc and never set the panel signal themselves. */
+  async leaveServerForNotebook() {
+    await boot("#/server/alpha");
+    await advance(2);
+    await go("#/notebook/note1"); await settle();
+    const reads = fetchLog.filter((r) => r.url.includes("get_notebook_cell_read"));
+    return { reads: reads.length, abortedAtStart: reads.some((r) => r.abortedAtStart), aborted: reads.some((r) => r.aborted) };
+  },
+  /* FinOps has its servers cached, its poll re-reads them (that read is slow), and the user leaves and comes back. */
+  async finopsLeaveAndReturn() {
+    await boot("#/finops");
+    await advance(2);
+    const first = count("list_servers");
+    slowRegistry = true;
+    await advance(65); // the poll re-reads the registry, and that read stays out
+    const poll = fetchLog.filter((r) => r.url.includes("list_servers")).at(-1);
+    const pollOut = count("list_servers") === first + 1 && !poll.aborted;
+    await go("#/server/alpha"); await settle();
+    const pollAborted = poll.aborted;
+    const before = count("list_servers");
+    await go("#/finops"); await settle();
+    const loading = !!byId.main.find((x) => (x.textContent || "").includes("Loading servers"));
+    return { first, pollOut, pollAborted, readsOnReturn: count("list_servers") - before, loadingStrip: loading };
+  },
+  /* First visit to a server page: the fleet read is still out when the user leaves, and lands afterwards. */
+  async fleetReadLandsAfterLeaving() {
+    holdFleet = true;
+    await boot("#/server/alpha");
+    await advance(2);
+    const panelReads = () => fetchLog.filter((r) => r.url.includes("/api/read/")).length;
+    await go("#/investigations"); await settle();
+    const before = panelReads();
+    holdFleet = false;
+    await landFleet();
+    tick(); await drain();
+    const btn = refreshBtn();
+    return { panelReadsStartedAfterLeave: panelReads() - before, refreshDisabled: btn.disabled === true, pollBlocked: pending.length > 0 };
+  },
+  /* Query Tag Usage stamps the footer's "Updated" time when its read lands, not when the page starts to render. */
+  async tagUsageFooterStamp() {
+    fleetBody = { cards: [], total_servers: 0, generated_at: "2020-01-01T00:00:00Z" };
+    tagBody = { sections: [] };
+    const stamp = (ms) => "Updated " + new Date(ms).toLocaleString();
+    const bar = () => { const n = byId.statusbar.find((x) => typeof x.textContent === "string" && x.textContent.startsWith("Updated ")); return n ? n.textContent : null; };
+    const t0 = now;
+    await boot("#/query-tag-usage");
+    await advance(2);
+    const during = bar();
+    await advance(150);
+    const after = bar();
+    return { stampedAtStart: during === stamp(t0), duringRead: during, stampedWhenReadLanded: after === stamp(t0 + 140_000), afterRead: after };
   },
 };
 if (!Object.hasOwn(scenarios, scenario)) throw new Error("unknown scenario " + scenario);
