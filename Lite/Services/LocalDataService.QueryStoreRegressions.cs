@@ -145,8 +145,11 @@ public partial class LocalDataService
            [baseline start, window start) and the store holds it from the data start, the recent window [window start, window end]
            and the store holds it from the later of the two. Both are numbers computed here, written as invariant literals. A side
            that holds no hour divides by NULL, so its per-hour rate is NULL as Darling's NULLIF gives (a zero literal would depend
-           on the engine's division by zero). When the store holds the whole baseline the two equal the old whole windows. A baseline that
-           holds no hours (NULL here) counts as empty: the failure gates and the rank skip comparing its counts, as Darling's do. */
+           on the engine's division by zero). When the store holds the whole baseline the two equal the old whole windows.
+           Darling's gates count a baseline that holds no hours as empty, because there a baseline row can have runs while it holds
+           none (its rows are filtered on last_execution_time). Here they need no such arm: the baseline rows are filtered on
+           collection_time < $2, and the data start is at or before the first row's collection_time (GetQueryWindowFloorAsync), so
+           a baseline with any row holds a positive number of hours (#6750). */
         static string Hours(TimeSpan held) => held > TimeSpan.Zero ? held.TotalHours.ToString("R", CultureInfo.InvariantCulture) : "CAST(NULL AS DOUBLE)";
         var baseHours = Hours(startTime - (dataStart > baselineStartTime ? dataStart : baselineStartTime));
         var recentHours = Hours(endTime - (dataStart > startTime ? dataStart : startTime));
@@ -300,10 +303,10 @@ flagged AS (
         (j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) AS cpu_regression_percent,
         COALESCE((j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) > " + QueryStoreRegressionRules.CostGatePercent + @", false) AS is_cost,
         COALESCE(j.recent_aborted_execs >= " + QueryStoreRegressionRules.FailureMinRecentRuns + @"
-            AND (j.base_aborted_execs = 0 OR " + baseHours + @" IS NULL
+            AND (j.base_aborted_execs = 0
                  OR (j.recent_aborted_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureRateMultiple + @" * (j.base_aborted_execs / " + baseHours + @")), false) AS is_timeouts,
         COALESCE(j.recent_exception_execs >= " + QueryStoreRegressionRules.FailureMinRecentRuns + @"
-            AND (j.base_exception_execs = 0 OR " + baseHours + @" IS NULL
+            AND (j.base_exception_execs = 0
                  OR (j.recent_exception_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureRateMultiple + @" * (j.base_exception_execs / " + baseHours + @")), false) AS is_errors
     FROM joined AS j
 ),
@@ -322,11 +325,11 @@ qualified AS (
         END AS cost_rank,
         GREATEST(
             CASE WHEN NOT f.is_timeouts THEN 0
-                 WHEN f.base_aborted_execs = 0 OR " + baseHours + @" IS NULL
+                 WHEN f.base_aborted_execs = 0
                       OR (f.recent_aborted_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureHighMultiple + @" * (f.base_aborted_execs / " + baseHours + @") THEN 3
                  ELSE 2 END,
             CASE WHEN NOT f.is_errors THEN 0
-                 WHEN f.base_exception_execs = 0 OR " + baseHours + @" IS NULL
+                 WHEN f.base_exception_execs = 0
                       OR (f.recent_exception_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureHighMultiple + @" * (f.base_exception_execs / " + baseHours + @") THEN 3
                  ELSE 2 END) AS failure_rank,
         (f.recent_dur_ms - f.base_dur_ms) * f.recent_execs AS additional_duration_ms
