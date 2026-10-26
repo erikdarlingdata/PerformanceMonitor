@@ -117,7 +117,28 @@ public static class QueryStoreRegressionBaseline
         /// midnight, raised by <see cref="WithMeasuredHighStart"/> to the next midnight minus the measured margin. Bound only
         /// when <see cref="RecentDays"/> is not empty.</summary>
         public DateTime RecentHighStart { get; init; }
+
+        /// <summary>
+        /// The start of the hours the read HOLDS (#6750), the value of <see cref="HoursHeldStartToken"/>: set by the caller
+        /// through <see cref="WithHoursHeldStart"/> to the later of the start the plan reads from and THIS SERVER's data start,
+        /// the same instant the answer reports as <c>effective_start</c> (the per-server <see cref="DataWindowFloor"/> probe).
+        /// The plan's start alone is the same for every server, and the store-wide chunk floor reads the oldest chunk of
+        /// every server, so neither says when this server's data begins. Null for a plan built by hand: callers then bind the
+        /// start they bind for the row filters, which is the read before this property existed. Used only by the
+        /// <c>windows</c> CTE: every row filter keeps the baseline start, so the rows read do not depend on it.
+        /// </summary>
+        public DateTime? HoursHeldStart { get; init; }
     }
+
+    /// <summary>
+    /// <paramref name="plan"/> with <see cref="Plan.HoursHeldStart"/> set (#6750): the later of <paramref name="planStart"/>, the
+    /// start the plan's statement reads from (the requested baseline start on the raw arm, the gate's clamp on the table arm),
+    /// and <paramref name="dataStart"/>, where this server's Query Store data starts. <paramref name="dataStart"/> is the value
+    /// the answer reports as <c>effective_start</c> (the <see cref="DataWindowFloor"/> probe over the baseline window), so the
+    /// note and the divisors name one instant. Null (no coverage, or the probe failed) keeps <paramref name="planStart"/>.
+    /// </summary>
+    public static Plan WithHoursHeldStart(Plan plan, DateTime planStart, DateTime? dataStart) =>
+        plan with { HoursHeldStart = dataStart is DateTime data && data > planStart ? data : planStart };
 
     /// <summary>Whether the plan's statement reads the recent window's days from the daily totals: latest arms and at least one
     /// recent day (#5506). Both readers pick the SQL text and bind the three extra parameters on this one answer.</summary>
@@ -393,9 +414,16 @@ public static class QueryStoreRegressionBaseline
     public const string LowEndToken = "@@LOW";
     public const string HighStartToken = "@@HIGH";
 
+    /// <summary>The start of the hours the read holds (#6750), a timestamp parameter used ONLY by the <c>windows</c> CTE
+    /// (<c>base_hours</c> and <c>recent_hours</c>); <see cref="Plan.HoursHeldStart"/> is its value, this server's data start or the plan's start, whichever is later. Every row filter keeps
+    /// <see cref="BaselineStartToken"/>. Bound right after the databases left out, on every form (MCP <c>$11</c>, viewer
+    /// <c>$10</c>), so the recent days' three parameters follow it (MCP <c>$12</c> to <c>$14</c>, viewer <c>$11</c> to
+    /// <c>$13</c>) and no number is left unbound.</summary>
+    public const string HoursHeldStartToken = "@@HELD";
+
     /// <summary>The recent window's tokens (#5506): its days read from the daily totals (date[]), and the end of its live low
     /// range and the start of its live high range (timestamp). Only the recent-days form names them
-    /// (<see cref="Statement"/> with <c>recentFromDaily</c>); MCP binds them as $11 to $13, the viewer as $10 to $12.</summary>
+    /// (<see cref="Statement"/> with <c>recentFromDaily</c>); MCP binds them as $12 to $14, the viewer as $11 to $13 (#6750 put <see cref="HoursHeldStartToken"/> before them).</summary>
     public const string RecentDaysToken = "@@RDAYS";
     public const string RecentLowEndToken = "@@RLOW";
     public const string RecentHighStartToken = "@@RHIGH";
@@ -411,7 +439,7 @@ public static class QueryStoreRegressionBaseline
     /// <c>$8</c>, <c>$9</c>.</summary>
     public static string Bind(
         string sql, string baselineStart, string runDays, string lowEnd, string highStart, string limit, string exclude,
-        string? recentDays = null, string? recentLowEnd = null, string? recentHighStart = null)
+        string hoursHeldStart, string? recentDays = null, string? recentLowEnd = null, string? recentHighStart = null)
     {
         if (recentDays is not null && recentLowEnd is not null && recentHighStart is not null)
         {
@@ -422,6 +450,7 @@ public static class QueryStoreRegressionBaseline
 
         return sql.Replace(LimitToken, limit, StringComparison.Ordinal)
            .Replace(ExcludeToken, exclude, StringComparison.Ordinal)
+           .Replace(HoursHeldStartToken, hoursHeldStart, StringComparison.Ordinal)
            .Replace(BaselineStartToken, baselineStart, StringComparison.Ordinal)
            .Replace(RunDaysToken, "(" + runDays + "::date[])", StringComparison.Ordinal)
            .Replace(LowEndToken, "(" + lowEnd + "::timestamp)", StringComparison.Ordinal)
@@ -845,12 +874,22 @@ public static class QueryStoreRegressionBaseline
         + " AND CAST(l.last_execution_time AS date) = ANY(@@RDAYS) AND l.last_execution_time >= $2"
         + " AND l.collection_time >= @@B AND l.collection_time <= $3)";
 
+    /// <summary>
+    /// The suffix over the shared arms. <c>windows</c> holds the hours each side actually HOLDS (#6750), not the hours its window
+    /// names. The baseline holds <c>$2 - @@HELD</c>, and none when the start <c>@@HELD</c> (<see cref="Plan.HoursHeldStart"/>: the later
+    /// of the plan's start and this server's data start, the answer's <c>effective_start</c>) sits at or after the recent window's start <c>$2</c>: <c>GREATEST(.., 0)</c> then gives 0, which the
+    /// <c>NULLIF(.., 0)</c> on every per-hour term turns into NULL, where a negative divisor gave a negative rate. The recent side
+    /// holds <c>$3 - GREATEST($2, @@HELD)</c>. The row filters keep <c>@@B</c>, the requested start, not <c>@@HELD</c>: an interval
+    /// whose last snapshot was collected after the raw floor but whose <c>last_execution_time</c> is before it is still read, so
+    /// raising the filters would drop it. Only the divisors use the hours held. Where the server's data holds the whole baseline
+    /// (<c>@@HELD = @@B</c>) both terms are what they were before, so those reads are unchanged. A baseline that holds no hours (<c>base_hours = 0</c>) counts as empty: its timeout and error counts are not compared, so a row with enough recent runs is listed as it is against an empty baseline (rank 3), and the wire keeps <c>baseline_*_per_hour</c> NULL.
+    /// </summary>
     private static string Suffix(string flaggedSample, string rankedSample) => $$"""
         ,
         windows AS (
             SELECT
-                CAST(EXTRACT(EPOCH FROM (CAST($2 AS timestamp) - CAST(@@B AS timestamp))) / 3600.0 AS double precision) AS base_hours,
-                CAST(EXTRACT(EPOCH FROM (CAST($3 AS timestamp) - CAST($2 AS timestamp))) / 3600.0 AS double precision) AS recent_hours
+                GREATEST(CAST(EXTRACT(EPOCH FROM (CAST($2 AS timestamp) - CAST(@@HELD AS timestamp))) / 3600.0 AS double precision), 0) AS base_hours,
+                CAST(EXTRACT(EPOCH FROM (CAST($3 AS timestamp) - GREATEST(CAST($2 AS timestamp), CAST(@@HELD AS timestamp)))) / 3600.0 AS double precision) AS recent_hours
         ),
         candidate_keys AS (
             SELECT database_name, query_id FROM recent_performance
@@ -899,10 +938,10 @@ public static class QueryStoreRegressionBaseline
                 (j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) AS cpu_regression_percent,
                 COALESCE((j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) > {{CostGatePercent}}, false) AS is_cost,
                 COALESCE(j.recent_aborted_execs >= {{FailureMinRecentRuns}}
-                    AND (j.base_aborted_execs = 0
+                    AND (j.base_aborted_execs = 0 OR j.base_hours = 0
                          OR (j.recent_aborted_execs / NULLIF(j.recent_hours, 0)) >= {{FailureRateMultiple}} * (j.base_aborted_execs / NULLIF(j.base_hours, 0))), false) AS is_timeouts,
                 COALESCE(j.recent_exception_execs >= {{FailureMinRecentRuns}}
-                    AND (j.base_exception_execs = 0
+                    AND (j.base_exception_execs = 0 OR j.base_hours = 0
                          OR (j.recent_exception_execs / NULLIF(j.recent_hours, 0)) >= {{FailureRateMultiple}} * (j.base_exception_execs / NULLIF(j.base_hours, 0))), false) AS is_errors
             FROM joined AS j
         ),
@@ -918,11 +957,11 @@ public static class QueryStoreRegressionBaseline
                 END AS cost_rank,
                 GREATEST(
                     CASE WHEN NOT f.is_timeouts THEN 0
-                         WHEN f.base_aborted_execs = 0
+                         WHEN f.base_aborted_execs = 0 OR f.base_hours = 0
                               OR (f.recent_aborted_execs / NULLIF(f.recent_hours, 0)) >= {{FailureHighMultiple}} * (f.base_aborted_execs / NULLIF(f.base_hours, 0)) THEN 3
                          ELSE 2 END,
                     CASE WHEN NOT f.is_errors THEN 0
-                         WHEN f.base_exception_execs = 0
+                         WHEN f.base_exception_execs = 0 OR f.base_hours = 0
                               OR (f.recent_exception_execs / NULLIF(f.recent_hours, 0)) >= {{FailureHighMultiple}} * (f.base_exception_execs / NULLIF(f.base_hours, 0)) THEN 3
                          ELSE 2 END) AS failure_rank,
                 (f.recent_dur_ms - f.base_dur_ms) * f.recent_execs AS additional_duration_ms

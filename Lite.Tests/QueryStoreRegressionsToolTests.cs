@@ -175,6 +175,63 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
     }
 
     /// <summary>
+    /// #6750: a server whose first row comes after the 168-hour window's start has an empty baseline and a cut recent window, and the note
+    /// says so with the three shared sentences, not with the one for a baseline that holds part of its span. A 24-hour read keeps the old
+    /// sentence.
+    /// </summary>
+    [Fact]
+    public async Task AServerWhoseFirstRowIsAfterTheWindowStart_SaysTheBaselineIsEmpty_AndTheRecentWindowIsCut()
+    {
+        var service = new LocalDataService(_duckDb);
+        var baseNow = Truncate(DateTime.UtcNow);
+
+        await SeedAsync(baseNow.AddHours(-30), 3, 1000, 1000, intervalId: 3, queryId: 7, executionType: "Aborted");
+        await SeedAsync(baseNow.AddHours(-10), 6, 1000, 1000, intervalId: 4, queryId: 7, executionType: "Aborted");
+
+        var hit = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, 168));
+        Assert.True(hit.GetProperty("window_truncated").GetBoolean());
+        var note = hit.GetProperty("truncation_note").GetString()!;
+        Assert.EndsWith(
+            PerformanceMonitor.Common.QueryStoreRegressionRules.EmptyBaselineTail + " " + PerformanceMonitor.Common.QueryStoreRegressionRules.RecentCutTail + " " + PerformanceMonitor.Common.QueryStoreRegressionRules.RecentHoursHeldTail,
+            note, StringComparison.Ordinal);
+        Assert.DoesNotContain(PerformanceMonitor.Common.QueryStoreRegressionRules.BaselineWindowTail, note, StringComparison.Ordinal);
+        Assert.Equal("timeouts", Assert.Single(hit.GetProperty("regressions").EnumerateArray()).GetProperty("regression_reason").GetString());
+
+        /* A 24-hour read of the same store: 3 timeouts in the 6 hours of baseline it holds (0.5 an hour) against 36 in the 24-hour window
+           (1.5 an hour). It must be a rise, or the answer is the empty envelope, which carries the note under hints, not at the top. */
+        await SeedAsync(baseNow.AddHours(-2), 30, 1000, 1000, intervalId: 5, queryId: 7, executionType: "Aborted");
+        var day = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, 24));
+        Assert.EndsWith(PerformanceMonitor.Common.QueryStoreRegressionRules.BaselineWindowTail, day.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #6750: the per-hour rates divide by the hours the store HOLDS, not by the 7 days and the window it was asked for. The store's
+    /// first row is 30 hours back, so a 24-hour read holds 6 hours of baseline. The steady query runs 2 timeouts an hour in both
+    /// (12 in the 6 hours held, 48 in the 24 hours), so it is not a rise: over the 168 hours asked for its baseline rate reads 0.07 an
+    /// hour and it would be flagged. The rising query's baseline rate is its count over the hours held.
+    /// </summary>
+    [Fact]
+    public async Task AStoreHoldingPartOfTheBaseline_DividesTheRatesByTheHoursHeld()
+    {
+        var service = new LocalDataService(_duckDb);
+        var baseNow = Truncate(DateTime.UtcNow);
+
+        await SeedAsync(baseNow.AddHours(-30), 12, 1000, 1000, intervalId: 3, queryId: 8, executionType: "Aborted");
+        await SeedAsync(baseNow.AddHours(-3), 48, 1000, 1000, intervalId: 4, queryId: 8, executionType: "Aborted");
+        await SeedAsync(baseNow.AddHours(-30), 6, 1000, 1000, intervalId: 5, queryId: 7, executionType: "Aborted");
+        await SeedAsync(baseNow.AddHours(-3), 120, 1000, 1000, intervalId: 6, queryId: 7, executionType: "Aborted");
+
+        var hit = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, 24));
+        var row = Assert.Single(hit.GetProperty("regressions").EnumerateArray());
+        Assert.Equal(7, row.GetProperty("query_id").GetInt64());
+        Assert.Equal("timeouts", row.GetProperty("regression_reason").GetString());
+
+        /* 6 runs over the 6 hours held (the 30 hours back to the window's start), not over 168. */
+        Assert.Equal(1.0, row.GetProperty("baseline_aborted_per_hour").GetDouble(), 1);
+        Assert.Equal(5.0, row.GetProperty("recent_aborted_per_hour").GetDouble(), 1);
+    }
+
+    /// <summary>
     /// #6654: with no database named, a regression in a database the server dropped (an earlier database_states snapshot lists it,
     /// the newest does not) is left out before the cap and named in databases_left_out; naming the database reads it as asked.
     /// </summary>
@@ -242,7 +299,7 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
     }
 
     private async Task SeedAsync(
-        DateTime collectionTime, long executions, long avgDurationUs, long avgCpuUs, long intervalId, long queryId = 1, string database = Db)
+        DateTime collectionTime, long executions, long avgDurationUs, long avgCpuUs, long intervalId, long queryId = 1, string database = Db, string executionType = "Regular")
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -260,7 +317,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
         cmd.Parameters.Add(new DuckDBParameter { Value = database });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryId });
         cmd.Parameters.Add(new DuckDBParameter { Value = 9L });
-        cmd.Parameters.Add(new DuckDBParameter { Value = "Regular" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executionType });
         cmd.Parameters.Add(new DuckDBParameter { Value = executions });
         cmd.Parameters.Add(new DuckDBParameter { Value = avgDurationUs });
         cmd.Parameters.Add(new DuckDBParameter { Value = avgCpuUs });

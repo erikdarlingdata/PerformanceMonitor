@@ -210,6 +210,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.LowEnd });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.HighStart });
         command.Parameters.Add(DatabaseFilter.All.ExcludeParameter());
+        /* #6750: the start of the hours held, the row filters' start here. */
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = rig.BaselineStart });
         await using var reader = await command.ExecuteReaderAsync(ct);
         return await DarlingQueryStoreRegressionReader.ReadRowsAsync(reader, ct);
     }

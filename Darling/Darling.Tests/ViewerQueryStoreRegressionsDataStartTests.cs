@@ -149,7 +149,13 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
     /* The banner the tab's own step (ShowQueryStoreRegressionsDataStartAsync) raises for the probe's answer on the range that starts at
        RangeStart, read off the control; null when it is hidden. Seeded visible, so a no-op cannot pass as a hidden banner. */
     private static string? BannerFor(DateTime? coverageStartUtc) =>
-        ReadBanner(banner => ViewerServerTab.ShowQueryStoreRegressionsDataStartAsync(banner, Task.FromResult(coverageStartUtc), RangeStart).GetAwaiter().GetResult());
+        ReadBanner(banner =>
+        {
+            /* The two steps the tab runs, in its order (#6750). */
+            var probe = Task.FromResult(coverageStartUtc);
+            ViewerServerTab.ShowQueryStoreRegressionsDataStartAsync(banner, probe, RangeStart).GetAwaiter().GetResult();
+            ViewerServerTab.AddQueryStoreRegressionsEmptyBaselineNote(banner, probe, RangeStart);
+        });
 
     /* The same answer compared with the RANGE's start, which is the keying the step moves off: the premise of the first case below. */
     private static string? BannerComparedWithTheRangeStart(DateTime? coverageStartUtc) =>
@@ -185,7 +191,11 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
     [Fact]
     public void CoverageThatStartsInsideTheRecentWindow_RaisesTheNotice()
     {
-        Assert.Equal("Showing since 2026-09-11 00:00:00", BannerFor(RangeStart.AddDays(1)));
+        Assert.Equal("Showing since 2026-09-11 00:00:00" + ViewerServerTab.QueryStoreRegressionsEmptyBaselineSuffix, BannerFor(RangeStart.AddDays(1)));
+        /* The range's own start is the edge: the baseline ends there, so it is empty at the start itself (#6750). */
+        Assert.EndsWith(ViewerServerTab.QueryStoreRegressionsEmptyBaselineSuffix, BannerFor(RangeStart)!, StringComparison.Ordinal);
+        /* A store that starts inside the baseline holds part of it, and the banner does not call it empty. */
+        Assert.DoesNotContain("baseline is empty", BannerFor(RangeStart.AddDays(-2))!, StringComparison.Ordinal);
     }
 
     /* A quiet start: the store covered the whole baseline (coverage 20 days before the range). No notice. */
