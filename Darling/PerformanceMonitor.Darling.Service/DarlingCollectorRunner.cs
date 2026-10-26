@@ -1015,7 +1015,7 @@ public sealed class DarlingCollectorRunner
     /// decision is reachable from a test — a bare conjunction there is droppable by a refactor with every
     /// pin still green, which is the failure mode this shape removes.
     /// </summary>
-    internal bool ShouldCapturePlanXmlFor(string collectorName, int serverId, bool? serverCapturePlans = null) =>
+    internal bool ShouldCapturePlanXmlFor(string collectorName, int serverId, bool? serverCapturePlans) =>
         CapturePlansFor(serverCapturePlans) && ShouldCapturePlanForCollector(collectorName, serverId);
 
     /// <summary>
@@ -1033,7 +1033,7 @@ public sealed class DarlingCollectorRunner
     /// second query, so it keeps the inline capture.
     /// </summary>
     internal bool ShouldDeferPlanFetchFor(
-        string collectorName, bool capturePlanXml, CollectorTargetInfo target, bool? serverCapturePlans = null) =>
+        string collectorName, bool capturePlanXml, CollectorTargetInfo target, bool? serverCapturePlans) =>
         ShouldDeferPlanFetchFor(
             collectorName, capturePlanXml, target, ProcedureStatsPlanFetchModeFor(collectorName, target, serverCapturePlans));
 
@@ -1057,7 +1057,7 @@ public sealed class DarlingCollectorRunner
     /// <see cref="ProcedureStatsPlanFetchModes.OfRun"/>.
     /// </summary>
     internal (bool DeferPlanXmlFetch, bool PlanIdentityColumns) StampPlanFetchFlags(
-        string collectorName, bool capturePlanXml, CollectorTargetInfo target, bool? serverCapturePlans = null)
+        string collectorName, bool capturePlanXml, CollectorTargetInfo target, bool? serverCapturePlans)
     {
         var mode = ProcedureStatsPlanFetchModeFor(collectorName, target, serverCapturePlans);
         return (
@@ -1074,7 +1074,7 @@ public sealed class DarlingCollectorRunner
     /// is unverified, so the identity could not be trusted there. An unrecognized knob value is off and warns once.
     /// </summary>
     internal ProcedureStatsPlanFetchMode ProcedureStatsPlanFetchModeFor(
-        string collectorName, CollectorTargetInfo target, bool? serverCapturePlans = null)
+        string collectorName, CollectorTargetInfo target, bool? serverCapturePlans)
     {
         if (!string.Equals(collectorName, PlanCadenceGatedCollector, StringComparison.Ordinal)
             || target.IsAzureSqlDb

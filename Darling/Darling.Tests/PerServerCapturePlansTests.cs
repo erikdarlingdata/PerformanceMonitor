@@ -113,8 +113,8 @@ public sealed class PerServerCapturePlansTests
     {
         await using var postgres = NpgsqlDataSource.Create(UnusedStore);
         var backfill = new QueryStoreBackfill(
-            postgres, new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator()), new CollectorDeltaCalculator(),
-            logger: null, capturePlans: () => fleet);
+            postgres, new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator(), capturePlans: () => fleet),
+            new CollectorDeltaCalculator(), logger: null);
 
         Assert.Equal(expected, backfill.CapturePlanXmlFor(RuntimeFor(server)));
     }
@@ -174,13 +174,13 @@ public sealed class PerServerCapturePlansTests
     }
 
     [Theory]
-    [InlineData(null, 0)]
-    [InlineData(true, 1)]
-    [InlineData(false, 2)]
-    public void TheViewerDialogsThreeChoices_RoundTripThroughTheStoredValue(bool? stored, int index)
+    [InlineData(null, "service")]
+    [InlineData(true, "on")]
+    [InlineData(false, "off")]
+    public void TheViewerDialogsThreeChoices_RoundTripThroughTheStoredValue(bool? stored, string tag)
     {
-        Assert.Equal(index, AddServerDialog.CapturePlansIndexOf(stored));
-        Assert.Equal(stored, AddServerDialog.CapturePlansOfIndex(index));
-        Assert.Null(AddServerDialog.CapturePlansOfIndex(-1));
+        Assert.Equal(tag, AddServerDialog.CapturePlansTagOf(stored));
+        Assert.Equal(stored, AddServerDialog.CapturePlansOfTag(tag));
+        Assert.Null(AddServerDialog.CapturePlansOfTag(null));
     }
 }
