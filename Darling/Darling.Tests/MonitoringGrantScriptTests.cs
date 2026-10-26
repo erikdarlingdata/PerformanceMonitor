@@ -521,6 +521,35 @@ public sealed class MonitoringGrantScriptTests
     }
 
     [Fact]
+    public async Task Verb_WhenNoServiceIsInstalledOnThisMachine_NamesAPlaceholder_NotThisMachinesAccount()
+    {
+        var output = new StringWriter();
+
+        var code = await DarlingCliCommands.GrantScriptAsync(
+            new[] { "--host", "sql01" }, output, new StringWriter(), TestContext.Current.CancellationToken,
+            readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP");
+
+        Assert.Equal(0, code);
+        Assert.Contains("PLACEHOLDER", output.ToString());
+        Assert.DoesNotContain("DARLING01$", output.ToString());
+        Assert.DoesNotContain(@"NT SERVICE\PerformanceMonitor Darling] FROM WINDOWS", output.ToString());
+    }
+
+    [Fact]
+    public async Task Verb_WithAServiceAccountOnTheCommandLine_UsesIt_EvenWhenTheRegistryHasNone()
+    {
+        var output = new StringWriter();
+
+        var code = await DarlingCliCommands.GrantScriptAsync(
+            new[] { "--host", "sql01", "--service-account", @"CORP\gmsa-darling$" }, output, new StringWriter(), TestContext.Current.CancellationToken,
+            readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP");
+
+        Assert.Equal(0, code);
+        Assert.Contains(@"CREATE LOGIN [CORP\gmsa-darling$] FROM WINDOWS;", output.ToString());
+        Assert.DoesNotContain("PLACEHOLDER", output.ToString());
+    }
+
+    [Fact]
     public async Task Verb_WithBadArguments_PrintsTheGrammar_AndExitsOne()
     {
         var output = new StringWriter();

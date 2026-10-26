@@ -67,7 +67,7 @@ Two operational notes. The msdb grants live inside a system database that SQL Se
 
 Darling can print this script for you. `PerformanceMonitor.Darling.Service.exe --grant-script <server-name>` prints the login and the grants below for a server that Darling monitors. `--grant-script --host <host>` does the same for a host that you did not add yet. In the Viewer, the Add Server dialog has a **Copy grant script** button that copies the same text.
 
-On the machine that runs the service, the Copy grant script button reads the account the service runs as. On any other machine it cannot read that. The script then names a placeholder account (`DOMAIN\your-service-account`) and says so. Run `--grant-script --host <host>` on the service's machine for the real account.
+On the machine that runs the service, the Copy grant script button and `--grant-script` read the account the service runs as. On any other machine they cannot read that. The script then names a placeholder account (`DOMAIN\your-service-account`) and says so. Run `--grant-script` on the service's machine for the real account, or pass `--service-account <account>` to name it yourself.
 
 The principal is the SQL login that the server entry uses. With Windows authentication, it is the account that the service runs as:
 

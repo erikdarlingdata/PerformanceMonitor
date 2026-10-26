@@ -8,16 +8,16 @@
 
 using System.Globalization;
 
-namespace PerformanceMonitor.Darling.Viewer;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
-/// How a panel note says how often a collector runs. The cadence is the collector's effective one (the shipped default, or the
+/// How a panel note, a web panel or an MCP tool says how often a collector runs. The cadence is the collector's effective one (the shipped default, or the
 /// fleet or per-server schedule override), so a note never states the default as fact for a server whose schedule was changed.
 /// </summary>
-internal static class ViewerCadenceText
+public static class CollectorCadenceText
 {
     /// <summary>"hourly", "daily", "every minute", "every 30 minutes" or "every 2 hours". Zero or less (no recurring cadence) reads "on its schedule".</summary>
-    internal static string Every(int minutes)
+    public static string Every(int minutes)
     {
         if (minutes <= 0)
         {
@@ -34,7 +34,7 @@ internal static class ViewerCadenceText
     }
 
     /// <summary>"minute", "hour", "day", "30 minutes", "2 hours" or "3 days": the span of one collection interval, for "the last ...". Zero or less reads "collection interval".</summary>
-    internal static string Span(int minutes)
+    public static string Span(int minutes)
     {
         if (minutes <= 0)
         {
