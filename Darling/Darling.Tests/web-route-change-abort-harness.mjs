@@ -85,7 +85,8 @@ globalThis.clearTimeout = () => {};
 let fetches = 0; let serverRenders = 0;
 const fetchLog = [];        // { at, url, signal, abortedAtStart, aborted }
 let slowReadMs = 140_000;
-const isSlow = (url) => url.includes("get_job_history") || url.includes("get_resource_use_by_tag") || (slowRegistry && url.includes("list_servers")) || (slowTrend && url.includes("get_server_trend"));
+const isSlow = (url) => url.includes("get_job_history") || url.includes("get_resource_use_by_tag") || (slowRegistry && url.includes("list_servers")) || (slowTrend && url.includes("get_server_trend")) || (slowPanels && url.includes("/api/read/") && !url.includes("list_investigation_requests"));
+let slowPanels = false;     // a scenario sets this to leave every server panel read out
 let slowTrend = false;      // a scenario sets this to leave the server page's trend reads out
 let slowRegistry = false;   // a scenario sets this to leave the list_servers read out
 let holdFleet = false;      // a scenario sets this to leave /api/fleet out until landFleet()
@@ -267,15 +268,16 @@ const scenarios = {
     await go("#/investigations"); await settle();
     const before = panelReads();
     holdFleet = false;
+    slowPanels = true; // a server panel read started now would stay out for 140 s
     await landFleet();
     tick(); await drain();
     const btn = refreshBtn();
-    /* Whether the page moved to is still polled: advance past its due time (a minute) and count that it re-rendered. */
     const started = panelReads() - before;
-    await settle();
-    const r0 = count("list_investigation_requests");
+    /* Whether the page moved to is still polled: advance past its due time (a minute) and count that it re-rendered. */
+    const polls = () => count("list_investigation_requests");
+    const p0 = polls();
     await advance(70);
-    return { panelReadsStartedAfterLeave: started, refreshDisabled: btn.disabled === true, pollReads: count("list_investigation_requests") - r0 };
+    return { panelReadsStartedAfterLeave: started, refreshDisabled: btn.disabled === true, pollReads: polls() - p0 };
   },
   /* The Memory tab's chart panels are hand-built and read get_server_trend with the signal of their batch: the trend read is still out when the user leaves. */
   async leaveServerWithTrendReadOut() {
