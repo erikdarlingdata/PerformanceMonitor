@@ -119,11 +119,12 @@ public sealed partial class ViewerDataService
     /// (text[]), $5 baseline start (window start minus <see cref="BaselineLookbackDays"/>), $6 the baseline days read from the
     /// daily totals (date[]), $7 and $8 the live half's <c>first_execution_time</c> bounds, $9 the databases left out (#6654, text[] or NULL).
     /// </summary>
-    internal static string BuildQueryStoreRegressionsSql(bool wide, bool useDailyTotals, bool regularFromLatest = false) =>
+    /// <para><paramref name="recentFromDaily"/> (latest only, #5506): the recent window's whole days from the daily totals,
+    /// $10 the days (date[]), $11 and $12 the recent arm's live <c>first_execution_time</c> bounds.</para>
+    internal static string BuildQueryStoreRegressionsSql(bool wide, bool useDailyTotals, bool regularFromLatest = false, bool recentFromDaily = false) =>
         QueryStoreRegressionBaseline.Bind(
-            (wide ? QueryStoreRegressionBaseline.TableArmsSql(regularFromLatest) : QueryStoreRegressionBaseline.RawArmsSql)
-            + "\n" + QueryStoreRegressionBaseline.AggregatesSql(useDailyTotals) + "\n" + QueryStoreRegressionBaseline.SuffixSql,
-            "$5", "$6", "$7", "$8", "50", "$9");
+            QueryStoreRegressionBaseline.Statement(wide, useDailyTotals, regularFromLatest, recentFromDaily),
+            "$5", "$6", "$7", "$8", "50", "$9", "$10", "$11", "$12");
 
     /// <summary>
     /// The Query-Store regressions read — the Dashboard's <c>report.query_store_regressions(@start,@end)</c> inline TVF
@@ -166,11 +167,21 @@ public sealed partial class ViewerDataService
 
     private static readonly string s_latestLiveSql = BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: false, regularFromLatest: true);
 
+    private static readonly string s_recentDailySql = BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: true, regularFromLatest: true, recentFromDaily: true);
+
+    private static readonly string s_recentLiveSql = BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: false, regularFromLatest: true, recentFromDaily: true);
+
+    /// <summary>Whether the plan's statement reads the recent window's days from the daily totals (#5506), as the MCP read's
+    /// <c>ReadsRecentDays</c>: it decides the text and the three extra parameters together.</summary>
+    private static bool ReadsRecentDays(QueryStoreRegressionBaseline.Plan plan) => plan.RegularFromLatest && plan.RecentDays.Length > 0;
+
     /// <summary>The table form for a resolved baseline plan, as the MCP read's <c>TableSqlFor</c> picks it (#5506).</summary>
     internal static string QueryStoreRegressionsTableSqlFor(QueryStoreRegressionBaseline.Plan plan) =>
-        plan.RegularFromLatest
-            ? (plan.BuiltDayCount > 0 ? s_latestDailySql : s_latestLiveSql)
-            : (plan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql);
+        ReadsRecentDays(plan)
+            ? (plan.BuiltDayCount > 0 ? s_recentDailySql : s_recentLiveSql)
+            : plan.RegularFromLatest
+                ? (plan.BuiltDayCount > 0 ? s_latestDailySql : s_latestLiveSql)
+                : (plan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql);
 
     /// <summary>
     /// The regression read over <c>query_store_interval_wide</c> (#5809), with the baseline's closed days from the daily
@@ -298,7 +309,8 @@ public sealed partial class ViewerDataService
             }
 
             var baselinePlan = await QueryStoreRegressionBaseline.ResolveAsync(
-                connection, transaction, serverId, plan.ClampedStart, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken);
+                connection, transaction, serverId, plan.ClampedStart, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken,
+                windowEnd: endUtc);
             var wideSql = QueryStoreRegressionsTableSqlFor(baselinePlan);
 
             /* #5506 step 2: the same measured margin as the MCP read (DarlingQueryStoreRegressionReader.TryGetQueryStoreRegressionsFromTableAsync
@@ -339,6 +351,13 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.LowEnd, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.HighStart, DateTimeKind.Unspecified) });
         command.Parameters.Add(DatabaseFilter.Excluding(excludedDatabases).ExcludeParameter());
+        if (ReadsRecentDays(plan))
+        {
+            /* #5506: $10 to $12, only on the recent-days form, the only text that names them. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RecentDays });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentLowEnd, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentHighStart, DateTimeKind.Unspecified) });
+        }
     }
 
     private static double? NullableMs(NpgsqlDataReader reader, int ordinal) =>

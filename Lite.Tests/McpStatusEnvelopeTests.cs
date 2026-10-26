@@ -356,6 +356,78 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         Assert.Contains("readable secondary", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A Secondary role with a health row for a database that is not flagged secondary (a database outside any availability group,
+    /// Query Store READ_WRITE): Query Store is still collected there, so the read must not say the server is a readable secondary.
+    /// The role decides only when the newest health capture is empty.
+    /// </summary>
+    [Fact]
+    public async Task GetQueryStoreTop_OnASecondaryRole_WithANonSecondaryDatabase_DoesNotAnswerNotCollected()
+    {
+        await SeedAgReplicaRoleAsync("Secondary");
+        await SeedQueryStoreHealthAsync("StandaloneDb", "READ_WRITE", readonlyReason: 0);
+
+        var root = Parse(await McpQueryTools.GetQueryStoreTop(_dataService, _serverManager));
+
+        Assert.NotEqual("not_collected", root.GetProperty("status").GetString());
+    }
+
+    /// <summary>
+    /// The on-prem health capture always holds tempdb with Query Store OFF, and leaves out the availability-group databases a
+    /// secondary does not own. That capture is a readable secondary's normal shape: it still answers not_collected, not a
+    /// precondition to turn Query Store on for tempdb.
+    /// </summary>
+    [Fact]
+    public async Task GetQueryStoreTop_OnASecondaryRole_WithOnlyTempdbOffInTheCapture_AnswersNotCollected()
+    {
+        var capture = DateTime.UtcNow.AddMinutes(-5);
+        await SeedAgReplicaRoleAsync("Secondary");
+        await SeedQueryStoreHealthAsync("tempdb", "OFF", readonlyReason: 0, captureTime: capture);
+
+        var root = Parse(await McpQueryTools.GetQueryStoreTop(_dataService, _serverManager));
+
+        Assert.Equal("not_collected", root.GetProperty("status").GetString());
+        Assert.Contains("readable secondary", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>Tempdb (OFF) beside the secondary-flagged rows of a pre-#6252 capture: the flagged rows are every database Query Store is read for.</summary>
+    [Fact]
+    public async Task GetQueryStoreTop_WithTempdbOffBesideSecondaryFlaggedRows_AnswersNotCollected()
+    {
+        var capture = DateTime.UtcNow.AddMinutes(-5);
+        await SeedQueryStoreHealthAsync("tempdb", "OFF", readonlyReason: 0, captureTime: capture);
+        await SeedQueryStoreHealthAsync("SalesDb", "READ_ONLY", readonlyReason: 8, captureTime: capture);
+
+        var root = Parse(await McpQueryTools.GetQueryStoreTop(_dataService, _serverManager));
+
+        Assert.Equal("not_collected", root.GetProperty("status").GetString());
+    }
+
+    /// <summary>A READ_WRITE database outside any availability group still vetoes the answer, with tempdb (OFF) in the same capture.</summary>
+    [Fact]
+    public async Task GetQueryStoreTop_OnASecondaryRole_WithTempdbOffAndAReadWriteDatabase_DoesNotAnswerNotCollected()
+    {
+        var capture = DateTime.UtcNow.AddMinutes(-5);
+        await SeedAgReplicaRoleAsync("Secondary");
+        await SeedQueryStoreHealthAsync("tempdb", "OFF", readonlyReason: 0, captureTime: capture);
+        await SeedQueryStoreHealthAsync("StandaloneDb", "READ_WRITE", readonlyReason: 0, captureTime: capture);
+
+        var root = Parse(await McpQueryTools.GetQueryStoreTop(_dataService, _serverManager));
+
+        Assert.NotEqual("not_collected", root.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task GetQueryStoreTop_OnASecondaryRole_WithNoHealthCapture_AnswersNotCollected()
+    {
+        await SeedAgReplicaRoleAsync("Secondary");
+
+        var root = Parse(await McpQueryTools.GetQueryStoreTop(_dataService, _serverManager));
+
+        Assert.Equal("not_collected", root.GetProperty("status").GetString());
+        Assert.Contains("readable secondary", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task GetQueryStoreTop_WithAStorageCapReadOnly_KeepsThePreconditionAnswer()
     {
@@ -434,7 +506,22 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task SeedQueryStoreHealthAsync(string databaseName, string actualState, int readonlyReason = 0)
+    private async Task SeedAgReplicaRoleAsync(string role)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, ag_replica_role) VALUES ($1, $2, $3, 'TestServer', 'Enterprise', '16.0.1000.6', 'RTM', 3, $4)";
+        void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        P(_nextId--);
+        P(DateTime.UtcNow.AddMinutes(-5));
+        P(_serverId);
+        P(role);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private async Task SeedQueryStoreHealthAsync(string databaseName, string actualState, int readonlyReason = 0, DateTime? captureTime = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var conn = await SeedConnectionAsync();
@@ -447,7 +534,7 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
             VALUES ($1, $2, $3, 'TestServer', $4, $5, 'READ_WRITE', $6, 0, 1000, 'AUTO', 30, 200, 60)";
         void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
         P(_nextId--);
-        P(DateTime.UtcNow.AddMinutes(-5));
+        P(captureTime ?? DateTime.UtcNow.AddMinutes(-5));
         P(_serverId);
         P(databaseName);
         P(actualState);
