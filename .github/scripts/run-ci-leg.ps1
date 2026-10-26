@@ -18,7 +18,9 @@
           darling the whole Darling suite, and of Lite.Tests the classes that read a Darling path (ci-select.py reads-classes
                   --suite lite), which is the scope build.yml gives a Darling-only change.
           classes only the test classes the pull request changed (#6734): -OnlyDarlingClasses and -OnlyLiteClasses, comma lists of
-                  simple names. A side with no name runs nothing.
+                  simple names. A side with no name runs nothing. A leg the cut gave none of the named classes runs no test and
+                  passes, because the other legs run them (the hash cut can leave a leg empty). Every named class must still be
+                  in the test host's listing, or the leg fails.
           lite    the whole Lite suite, and of Darling.Tests the Stage=Guard classes plus the classes that read a Lite
                   path (ci-select.py reads-classes), which is the scope build.yml gives a Lite-only change.
   The Darling slice is cut by run-darling-pg-shard.ps1 (shard Leg-1 of LegCount); the Lite slice is cut here, because
@@ -163,6 +165,7 @@ function Get-Slice([string[]] $classes, [string] $weightsFile, [int] $shard, [st
 function Write-Slice([string] $title, $slice, [int] $total) {
     Write-Host "::group::$title - $($slice.Classes.Count) of $total classes ($($slice.Header))"
     foreach ($c in $slice.Classes) { Write-Host "  $c" }
+    if ($slice.Classes.Count -eq 0 -and $Areas -eq 'classes') { Write-Host "  (none of the named classes is in this slice: it runs no test, and the other legs run them)" }
     Write-Host '::endgroup::'
 }
 
@@ -272,6 +275,11 @@ if ($runLite) {
             $length += $cost
         }
         if ($current.Count -gt 0) { $chunks.Add($current.ToArray()) }
+        if ($chunks.Count -eq 0) {
+            # Only the classes plan may hand a leg none of its few classes: the other legs run them all (the packer proves it).
+            if ($Areas -ne 'classes') { throw "lite shard $shard has no class to run" }
+            Write-Host "lite shard ${shard}: no named class in this slice, so it runs no test. The other legs run them."
+        }
         $failedChunks = 0
         $n = 0
         foreach ($chunk in $chunks) {

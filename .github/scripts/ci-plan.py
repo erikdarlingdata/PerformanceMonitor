@@ -129,7 +129,9 @@ def unknown_paths(rules, files: "list[str]") -> "list[str]":
 
 def changed_test_classes(rules, files: "list[str]", catalog: "dict | None") -> "dict[str, list[str]] | None":
     """{suite: [class names]} when every file is documentation or a test-class file, else None (#6734).
-    A test-class file is a .cs file the catalog's file table knows, whose classes all hold tests and none is a base class.
+    A test-class file is a .cs file the catalog's file table knows, that declares a class holding a test, with no base class
+    in it and no helper class that another test file uses. Only the classes that hold a test are picked: a helper or fake of
+    the same file runs no test, so the test host's class listing may not name it, and the class beside it is what changes.
     A file the table does not know (a helper, a fixture, a .csproj, a lock file, a deleted or new file, a missing table)
     gives None, and so does a product file."""
     table = (catalog or {}).get("files") or {}
@@ -141,7 +143,7 @@ def changed_test_classes(rules, files: "list[str]", catalog: "dict | None") -> "
         row = table.get(f) if f.endswith(".cs") else None
         if not row or row["suite"] not in picks or not f.startswith(TEST_TREES[row["suite"]]) or not row["safe"]:
             return None
-        picks[row["suite"]] += [c for c in row["classes"] if c not in picks[row["suite"]]]
+        picks[row["suite"]] += [c for c in row["tests"] if c not in picks[row["suite"]]]
     return picks if any(picks.values()) else None
 
 
@@ -217,7 +219,8 @@ def load_catalog(root: str = ROOT) -> dict:
 
 
 def _file_table(root: str, classes: "dict[str, dict[str, set[str]]]") -> "dict[str, dict]":
-    """{repo-relative .cs file: {suite, classes, safe}} for the darling and lite test trees (#6734). safe: the file
+    """{repo-relative .cs file: {suite, classes, tests, safe}} for the darling and lite test trees (#6734). classes: every
+    class the file declares. tests: those that hold a test (the only ones the plan names). safe: the file
     declares at least one class that holds a test, none of its classes is the base class of another class (a derived
     class would run its tests), and every class of it that holds no test (a helper, a fake) is named in no other test
     file, so no other class can break when this file changes. A class with the same name in two files is unsafe."""
@@ -229,15 +232,17 @@ def _file_table(root: str, classes: "dict[str, dict[str, set[str]]]") -> "dict[s
     table: "dict[str, dict]" = {}
     helpers: "dict[str, list[str]]" = {}
     for suite, rel, name, _traits in rows:
-        ent = table.setdefault(rel, {"suite": suite, "classes": [], "safe": True})
+        ent = table.setdefault(rel, {"suite": suite, "classes": [], "tests": [], "safe": True})
         ent["classes"].append(name)
         holds = _CS.NO_TESTS_TRAIT not in classes[suite].get(name, {_CS.NO_TESTS_TRAIT})
+        if holds:
+            ent["tests"].append(name)
         if name in bases or len(owners[name]) > 1:
             ent["safe"] = False
         elif not holds:
             helpers.setdefault(name, []).append(rel)
     for rel, ent in table.items():
-        if not any(_CS.NO_TESTS_TRAIT not in classes[ent["suite"]].get(c, {_CS.NO_TESTS_TRAIT}) for c in ent["classes"]):
+        if not ent["tests"]:
             ent["safe"] = False
     if helpers:
         for rel in table:
@@ -318,7 +323,8 @@ def plan(event: str, base: str, head_ref: str, draft: bool, labels: "list[str]",
         total = d_min + l_min
         n = leg_count(total, event)
         if c["areas"] == "classes":
-            # A leg with no class of a side cannot cut that side (the runners refuse an empty slice): never more legs than classes.
+            # Never more legs than classes, so no leg is empty on the duration cut. The hash cut (a class the weight table does not
+            # know) can still leave one empty: the runners let such a leg pass under -Areas classes, and the other legs run every class.
             sizes = [len(_selected(catalog["classes"][s], c[f"{s}_scope"], "", picks[s])) for s in ("darling", "lite") if picks[s]]
             n = max(1, min([n] + sizes))
         out["test_minutes"] = f"{total:.1f}"

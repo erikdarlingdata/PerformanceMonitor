@@ -247,13 +247,13 @@ check("bool", [cp.parse_bool(x) for x in ("true", "True", "false", "", "null")],
 # --- the changed-classes plan (#6734) ---------------------------------------------------------------------------
 DT = "Darling/Darling.Tests/"
 LT = "Lite.Tests/"
-cc_files = {DT + "D1Tests.cs": {"suite": "darling", "classes": ["D1"], "safe": True},
-            DT + "D3Tests.cs": {"suite": "darling", "classes": ["D3", "D4"], "safe": True},
-            DT + "Helpers.cs": {"suite": "darling", "classes": ["Helper"], "safe": False},
-            LT + "L1Tests.cs": {"suite": "lite", "classes": ["L1"], "safe": True},
-            LT + "L2Tests.cs": {"suite": "lite", "classes": ["L2"], "safe": True}}
+cc_files = {DT + "D1Tests.cs": {"suite": "darling", "classes": ["D1"], "tests": ["D1"], "safe": True},
+            DT + "D3Tests.cs": {"suite": "darling", "classes": ["D3", "D4"], "tests": ["D3", "D4"], "safe": True},
+            DT + "Helpers.cs": {"suite": "darling", "classes": ["Helper"], "tests": [], "safe": False},
+            LT + "L1Tests.cs": {"suite": "lite", "classes": ["L1"], "tests": ["L1"], "safe": True},
+            LT + "L2Tests.cs": {"suite": "lite", "classes": ["L2"], "tests": ["L2"], "safe": True}}
 for i in range(14):
-    cc_files[DT + f"B{i}Tests.cs"] = {"suite": "darling", "classes": [f"B{i}"], "safe": True}
+    cc_files[DT + f"B{i}Tests.cs"] = {"suite": "darling", "classes": [f"B{i}"], "tests": [f"B{i}"], "safe": True}
 cc_cat = {**catalog, "files": cc_files}
 big_cc = {**big, "files": cc_files}
 
@@ -299,6 +299,21 @@ check("classes lite: product file keeps today's rules", cc([LT + "L1Tests.cs", "
 check("classes: a push is never narrowed", run([DT + "D1Tests.cs"], event="push", base="dev", cat=cc_cat)["areas"], "all")
 check("classes: a non-dev base is never narrowed", run([DT + "D1Tests.cs"], base="main", cat=cc_cat)["areas"], "all")
 
+# A same-file helper (no test) stays safe but is never picked: the test host's class listing may not name it (#6734).
+with tempfile.TemporaryDirectory() as hroot:
+    hdir = os.path.join(hroot, "Darling", "Darling.Tests")
+    os.makedirs(hdir)
+    with open(os.path.join(hdir, "WithHelperTests.cs"), "w", encoding="utf-8") as fh:
+        fh.write("namespace N;\npublic class WithHelperTests\n{\n    [Fact]\n    public void A() { new FakeBox(); }\n}\n"
+                 "internal class FakeBox\n{\n}\n")
+    h_tbl = cp._file_table(hroot, cs.scan_classes(hroot))
+    h_row = h_tbl[DT + "WithHelperTests.cs"]
+    check("helper file: both classes recorded", h_row["classes"], ["WithHelperTests", "FakeBox"])
+    check("helper file: only the test class is a test", (h_row["tests"], h_row["safe"]), (["WithHelperTests"], True))
+    h_cat = {**catalog, "files": h_tbl}
+    r = run(["README.md", DT + "WithHelperTests.cs"], cat=h_cat)
+    check("helper file: the picks name only the test class", (r["areas"], r["darling_classes"]), ("classes", "WithHelperTests"))
+
 # The real file table: a class file maps to its classes, a helper and a missing map do not narrow.
 real_cat = cp.load_catalog()
 tbl = real_cat["files"]
@@ -306,6 +321,11 @@ one = next(f for f, e in sorted(tbl.items()) if e["suite"] == "darling" and e["s
 r = cp.plan("pull_request", "dev", "x", False, [], ["README.md", one], live_rules := cs.Rules(), real_cat)
 check("real table: one class file narrows", (r["areas"], r["darling_classes"]), ("classes", tbl[one]["classes"][0]))
 check("real table: every row has a class", all(e["classes"] for e in tbl.values()), True)
+no_test = {(s, c) for s, m in real_cat["classes"].items() for c, t in m.items() if cs.NO_TESTS_TRAIT in t}
+check("real table: no picked name is a class without tests",
+      sorted((e["suite"], c) for e in tbl.values() for c in e["tests"] if (e["suite"], c) in no_test), [])
+check("real table: some file has a helper beside its tests", any(set(e["classes"]) - set(e["tests"]) and e["tests"] for e in tbl.values()), True)
+check("real table: every safe file picks a class", all(e["tests"] for e in tbl.values() if e["safe"]), True)
 unsafe = [f for f, e in tbl.items() if not e["safe"]]
 check("real table: some helper files are unsafe", bool(unsafe), True)
 r = cp.plan("pull_request", "dev", "x", False, [], ["README.md", one, unsafe[0]], live_rules, real_cat)
