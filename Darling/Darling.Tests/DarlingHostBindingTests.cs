@@ -803,3 +803,4 @@ public sealed class DarlingHostBindingTests
         Assert.True(proxies[0].Contains(IPAddress.Parse("192.168.10.77")));
     }
 }
+// #6734 check: a pull request that changes only this test class runs only this class. Not for merge.
