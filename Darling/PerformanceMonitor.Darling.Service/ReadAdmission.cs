@@ -102,6 +102,27 @@ public sealed class ReadAdmission
         [DarlingWebEndpoints.InvestigationExportRoute] = "reads up to 2,000 cases with their reports, briefs and feedback into one file",
     };
 
+    /// <summary>
+    /// #6800: the routes whose whole-fleet form (no server named) is cached for the TTL in the table, whatever its window band, and
+    /// not by the p90 table or the band prior. The fleet <c>get_resource_use_by_tag</c> reads its Query Store section over the whole
+    /// window and takes about 61 s cold on a 42-server store, yet its 24-hour band is light, so it was never kept and every visit,
+    /// every user and every page picker ran it again. The one-server form takes about 1.3 s and is left to the band as before.
+    /// <para>The 5 minutes: the plan cache and procedures sections come from the hourly rollup and change once an hour, and the Query
+    /// Store section changes as the Query Store collection lands, every 5 minutes by default. A 24-hour window moves by well under
+    /// 1/288th in one cycle, so a 5-minute-old answer is not distinguishable from a fresh one, and it is never older than one
+    /// collection cycle. A shorter TTL gives up the repeat visits that matter (a page reload, a second user), a longer one would
+    /// outlast a cycle. A write (the tag map, a rule) moves the cache's generation and drops the entry at once.</para>
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, TimeSpan> FleetCachedRoutes = new Dictionary<string, TimeSpan>(StringComparer.Ordinal)
+    {
+        ["get_resource_use_by_tag"] = TimeSpan.FromMinutes(5),
+    };
+
+    /// <summary>Whether a read of <paramref name="route"/> names no server (null, empty or blank), the whole-fleet form of a route in
+    /// <see cref="FleetCachedRoutes"/>.</summary>
+    internal static bool IsFleetRead(string route, string? server) =>
+        FleetCachedRoutes.ContainsKey(route) && string.IsNullOrWhiteSpace(server);
+
     /// <summary>Whether a tool or web read goes through admission: not a health read (<see cref="SkippedRoutes"/>) and not
     /// an MCP write tool (writes never wait).</summary>
     internal static bool IsAdmitted(string name) =>
@@ -152,12 +173,16 @@ public sealed class ReadAdmission
 
     /// <summary>Whether an answer of (<paramref name="surface"/>, <paramref name="route"/>, <paramref name="band"/>) is
     /// served from and stored in <see cref="Cache"/>: a cacheable route (<see cref="ReadResultCache.IsCacheableRoute"/>)
-    /// whose pair is heavy. It does not depend on the limit: with admission off, heavy answers are still cached.</summary>
-    internal bool IsCached(ReadSurface surface, string route, string? band) =>
+    /// whose pair is heavy, or a whole-fleet read of a route in <see cref="FleetCachedRoutes"/>
+    /// (<paramref name="fleetRead"/>, from <see cref="IsFleetRead"/>), which is cached whatever its band. It does not depend
+    /// on the limit: with admission off, heavy answers are still cached. Caching a fleet read takes no slot: whether
+    /// the read waits for one stays with <see cref="IsHeavy"/> (<see cref="AdmitAsync"/>).</summary>
+    internal bool IsCached(ReadSurface surface, string route, string? band, bool fleetRead = false) =>
         Cache.Enabled
         && !string.IsNullOrEmpty(route)
         && ReadResultCache.IsCacheableRoute(route)
-        && IsHeavy(surface, route, string.IsNullOrEmpty(band) ? ReadWindowBand.None : band, out _);
+        && ((fleetRead && FleetCachedRoutes.ContainsKey(route))
+            || IsHeavy(surface, route, string.IsNullOrEmpty(band) ? ReadWindowBand.None : band, out _));
 
     /// <summary>The limit in force (0 = off).</summary>
     internal int Limit => _state.Limit;

@@ -139,9 +139,11 @@ public sealed class McpToolLatencyFilter
 
             /* #5506 part 3: a heavy cacheable read is answered from the read cache, joins an identical read running now,
                or runs once and is stored. A hit skips admission. */
-            if (_admission is { } admission && admission.IsCached(ReadSurface.Mcp, toolName, windowBand))
+            /* #6800: a whole-fleet read of get_resource_use_by_tag (no server_name) is cached whatever its band, for its own TTL. */
+            var fleetRead = IsFleetRead(toolName, request.Params?.Arguments);
+            if (_admission is { } admission && admission.IsCached(ReadSurface.Mcp, toolName, windowBand, fleetRead))
             {
-                return await ServeCachedAsync(admission, next, request, toolName, windowBand, readScope.Scope, caller, cancellationToken);
+                return await ServeCachedAsync(admission, next, request, toolName, windowBand, fleetRead, readScope.Scope, caller, cancellationToken);
             }
 
             CallToolResult answer;
@@ -268,6 +270,23 @@ public sealed class McpToolLatencyFilter
         }
     }
 
+    /// <summary>#6800: whether a call names no server: <c>server_name</c> absent, null or blank, on a route in
+    /// <see cref="ReadAdmission.FleetCachedRoutes"/>. A value of another kind is not a server name, so it is not read as the fleet.</summary>
+    internal static bool IsFleetRead(string toolName, System.Collections.Generic.IDictionary<string, System.Text.Json.JsonElement>? arguments)
+    {
+        if (arguments is null || !arguments.TryGetValue("server_name", out var value))
+        {
+            return ReadAdmission.IsFleetRead(toolName, null);
+        }
+
+        return value.ValueKind switch
+        {
+            System.Text.Json.JsonValueKind.Null or System.Text.Json.JsonValueKind.Undefined => ReadAdmission.IsFleetRead(toolName, null),
+            System.Text.Json.JsonValueKind.String => ReadAdmission.IsFleetRead(toolName, value.GetString()),
+            _ => false,
+        };
+    }
+
     /// <summary>
     /// #5506 part 3: a heavy read through the read cache. A stored answer is returned at once and records
     /// <c>cache_hit</c>. Otherwise the caller joins the identical read running now, or starts it (D6): the caller that
@@ -276,14 +295,14 @@ public sealed class McpToolLatencyFilter
     /// once. Neither a hit nor a joined caller counts as a read in flight (round 2, L3).
     /// </summary>
     private async Task<CallToolResult> ServeCachedAsync(ReadAdmission admission, McpRequestHandler<CallToolRequestParams, CallToolResult> next,
-        RequestContext<CallToolRequestParams> request, string toolName, string windowBand, ReadScope scope, string caller,
+        RequestContext<CallToolRequestParams> request, string toolName, string windowBand, bool fleetRead, ReadScope scope, string caller,
         CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
         var cache = admission.Cache;
         var gcf = (request.Services?.GetService(typeof(IGcfOutputFormat)) as IGcfOutputFormat)?.Enabled ?? GcfOutput.Enabled;
         var types = request.Services?.GetService(typeof(McpToolParameterTypes)) as McpToolParameterTypes;
-        var ttl = ReadResultCache.TtlOf(windowBand);
+        var ttl = ReadResultCache.TtlFor(toolName, windowBand, fleetRead);
         var key = ReadCacheKey.ForMcp(toolName, request.Params?.Arguments, types, gcf, cache.Generation, cache, ttl);
         if (cache.TryGet(key, out var stored))
         {

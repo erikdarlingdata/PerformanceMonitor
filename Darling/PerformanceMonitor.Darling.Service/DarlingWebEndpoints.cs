@@ -564,10 +564,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 /* #5506 part 3: a heavy cacheable read is answered from the read cache, joins an identical read running now,
                    or runs once and is stored (the text before the statement sweep, which ToHttpResult runs on every answer).
                    The key is the query string as sent, before the read below adds its own as_of. A hit skips admission. */
-                if (readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand))
+                /* #6800: a whole-fleet read of get_resource_use_by_tag (no server) is cached whatever its band, for its own TTL. */
+                var fleetRead = ReadAdmission.IsFleetRead(name, Server(context));
+                if (readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand, fleetRead))
                 {
                     var cache = admission.Cache;
-                    var ttl = ReadResultCache.TtlOf(admissionBand);
+                    var ttl = ReadResultCache.TtlFor(name, admissionBand, fleetRead);
                     /* Round 2, L4: each value of a repeated name is passed apart (StringValues.ToString() joins them with a comma,
                        which ?database=x%2Cy also gives); the key escapes every name and value. */
                     var key = ReadCacheKey.ForWeb(name,
