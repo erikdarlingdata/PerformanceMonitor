@@ -69,7 +69,7 @@ public enum GrantPrincipalKind
 }
 
 /// <summary>Who the script grants to, and the comment lines that explain the choice.</summary>
-public sealed record GrantPrincipal(GrantPrincipalKind Kind, string Name, IReadOnlyList<string> Notes);
+public sealed record GrantPrincipal(GrantPrincipalKind Kind, string Name, IReadOnlyList<string> Notes, bool IsPlaceholder = false);
 
 /// <summary>What the principal choice reads. Pure data, so the choice is testable without a machine.</summary>
 public sealed record GrantPrincipalInputs(
@@ -80,7 +80,10 @@ public sealed record GrantPrincipalInputs(
     string? ServiceAccount,
     /* The machine the service runs on, and its domain (NetBIOS), as the caller sees them. */
     string MachineName,
-    string? DomainName);
+    string? DomainName,
+    /* True when the caller looked for the service on its own machine and found none (the Viewer on another machine): the service's account
+       is unknown, so a Windows-authentication script names a placeholder rather than the caller's own machine account. */
+    bool ServiceNotOnThisMachine = false);
 
 /// <summary>
 /// #6472: the monitoring login and grants as one list in code, and the script built from it. The list is the Darling reading of
@@ -92,6 +95,12 @@ public static class MonitoringGrantScript
 {
     /// <summary>The Windows service's virtual account, the principal for a SQL Server on the same machine.</summary>
     public const string ServiceVirtualAccount = @"NT SERVICE\PerformanceMonitor Darling";
+
+    /// <summary>The Windows service's registered name; the key under <c>HKLM\SYSTEM\CurrentControlSet\Services</c>.</summary>
+    public const string ServiceName = "PerformanceMonitor Darling";
+
+    /// <summary>The Windows account the script names when the caller cannot tell what the service runs as.</summary>
+    public const string PlaceholderServiceAccount = @"DOMAIN\your-service-account";
 
     /// <summary>The login name the script uses when the server entry names none.</summary>
     public const string PlaceholderLogin = "YourLogin";
@@ -201,6 +210,27 @@ public static class MonitoringGrantScript
             && text.IndexOf('.', StringComparison.Ordinal) == text.Length - suffix.Length;
     }
 
+    /// <summary>The account the Darling Windows service is configured to run as (<c>sc qc</c>'s SERVICE_START_NAME), read from the service's
+    /// registry key, which any user can read. Null when this is not the service's machine, not Windows, or the key cannot be read. A read of
+    /// one registry value; it never throws.</summary>
+    public static string? ReadServiceAccountName()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\" + ServiceName);
+            return key?.GetValue("ObjectName") as string;
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or System.IO.IOException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>
     /// The principal for this install. SQL authentication names the login. Entra authentication names an identity placeholder. Windows
     /// authentication is the account the service runs as: the virtual account for a SQL Server on the same machine, the machine account
@@ -250,6 +280,23 @@ public static class MonitoringGrantScript
                 GrantPrincipalKind.WindowsLogin,
                 service,
                 new[] { $"Principal: the {kind} the Darling service runs as ({service})." });
+        }
+
+        /* The caller is not on the service's machine, so neither the virtual account nor this machine's account is known to be right. */
+        if (service is null && input.ServiceNotOnThisMachine)
+        {
+            return new GrantPrincipal(
+                GrantPrincipalKind.WindowsLogin,
+                PlaceholderServiceAccount,
+                new[]
+                {
+                    "Principal: a PLACEHOLDER. The account the Darling service runs as could not be read from this machine, so replace " + PlaceholderServiceAccount + " before you run this.",
+                    @"On the service's machine, run PerformanceMonitor.Darling.Service.exe --grant-script --host <host> to print this script with the real account.",
+                    @"  NT SERVICE\PerformanceMonitor Darling   the default; a SQL Server on the same machine as the service",
+                    @"  DOMAIN\MACHINE$   the machine account of the service's machine; a SQL Server on another machine",
+                    @"  DOMAIN\account or DOMAIN\gmsa$   when the service's Log On account was changed (see Darling/README.md)",
+                },
+                IsPlaceholder: true);
         }
 
         var choices = new[]
