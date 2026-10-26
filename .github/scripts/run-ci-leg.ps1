@@ -68,7 +68,16 @@ $runLite = $Areas -ne 'classes' -or [bool]$LiteClasses
 if ($Areas -eq 'classes' -and -not $DarlingClasses -and -not $LiteClasses) { throw '-Areas classes needs -DarlingClasses or -LiteClasses' }
 function Select-ByKey([string[]] $names, [string] $csv) {
     $only = @($csv -split ',' | Where-Object { $_ })
-    return @($names | Where-Object { $only -contains ($_ -split '[.+/]')[-1] })
+    $picked = @($names | Where-Object { $only -contains ($_ -split '[.+/]')[-1] })
+    # #6734: every class the plan named must be in the listing. A name that matches nothing would otherwise run no test
+    # and pass the leg green.
+    $found = @($picked | ForEach-Object { ($_ -split '[.+/]')[-1] })
+    $missing = @($only | Where-Object { $found -notcontains $_ })
+    if ($missing.Count -gt 0) {
+        $message = "#6734: the plan named test classes the listing does not have: $($missing -join ', ')"
+        if ($DryRun) { Write-Warning $message } else { throw $message }
+    }
+    return $picked
 }
 # The Darling scope under -Areas lite, in run-darling-pg-shard.ps1's own -ScopeFilter vocabulary.
 $darlingScopeFilter = if ($Areas -eq 'lite') { '-trait Stage=Guard -trait Reads=Lite' } else { '' }
