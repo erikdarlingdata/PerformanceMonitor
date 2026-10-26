@@ -135,6 +135,16 @@ public sealed class WebStatusTextsTests
         Assert.DoesNotContain("To read the active queries live", edit.GetProperty("text").GetString()!, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void TheActiveQueriesLiveBar_DrawsNothingWhenTheSessionProbeFailed()
+    {
+        /* The session answer carries no can_edit, so the client falls back to its fail-closed { can_edit: false, probe_failed: true }: not a read-only seat, so no note, and no button either. */
+        var failed = Run("failed").GetProperty("liveBar");
+        Assert.Equal(0, failed.GetProperty("buttons").GetArrayLength());
+        Assert.Equal(string.Empty, failed.GetProperty("text").GetString());
+        Assert.Equal(JsonValueKind.Null, failed.GetProperty("status").ValueKind);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

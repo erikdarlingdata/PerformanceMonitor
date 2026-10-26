@@ -139,9 +139,10 @@ export function activeQueriesLiveBar(server, columns) {
   const signal = getPanelSignal();
   (async () => {
     const session = await getSession();
-    if (!session || session.probe_failed === true) return;
-    /* A seat that cannot edit gets the note and never a button or the availability probe (the server answers 403 to a queue from it). */
+    if (!session) return;
+    /* A seat that cannot edit gets the note and never a button or the availability probe (the server answers 403 to a queue from it); a failed probe also arrives as can_edit false and draws nothing. */
     if (!session.can_edit) {
+      if (session.probe_failed === true) return;
       mount(slot, [noticeStrip(liveReadOnlyNote(session))]);
       slot.dataset.status = "read-only";
       return;

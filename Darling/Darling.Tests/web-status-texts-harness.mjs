@@ -10,7 +10,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const jsDir = process.argv[2];
-const seat = process.argv[3] === "readonly" ? "readonly" : "edit";
+const seat = process.argv[3] === "readonly" ? "readonly" : process.argv[3] === "failed" ? "failed" : "edit";
 
 class FakeNode {
   constructor(tag, text) {
@@ -71,7 +71,7 @@ globalThis.fetch = async (url) => {
   const body = u.pathname === "/api/fleet"
     ? FLEET
     : u.pathname === "/api/session"
-    ? { can_edit: seat === "edit", managed_store: false, admin_writes_off: false }
+    ? (seat === "failed" ? {} : { can_edit: seat === "edit", managed_store: false, admin_writes_off: false })
     : u.pathname === "/api/active-queries/live/available"
     ? { can_queue: true, can_edit: true, managed_store: false }
     : u.pathname.endsWith("/get_running_jobs")
