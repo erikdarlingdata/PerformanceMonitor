@@ -603,6 +603,17 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// How often one collector runs on one server: its per-server or fleet schedule override, else the shipped default
+    /// (<see cref="CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes{T}"/>), else <paramref name="fallbackMinutes"/> for a collector
+    /// the schedule does not know or when the overrides cannot be read. For the panel notes that say how often a collector runs.
+    /// </summary>
+    public async Task<int> GetEffectiveCollectorMinutesAsync(string collectorName, int serverId, int fallbackMinutes, CancellationToken cancellationToken = default)
+    {
+        var overrides = await ReadScheduleOverridesForHealthAsync(cancellationToken);
+        return CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes(collectorName, serverId, overrides) ?? fallbackMinutes;
+    }
+
+    /// <summary>
     /// #4999: every collector schedule override row, the fleet-wide ones and every server's own, for the
     /// collection-health reads, which band a collector against the interval it is scheduled at. The same rows the
     /// schedule editor reads (<see cref="GetCollectorSchedulesAsync"/>); the table is sparse. A failure to read costs

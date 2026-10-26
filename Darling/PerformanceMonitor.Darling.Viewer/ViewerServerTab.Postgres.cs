@@ -234,8 +234,9 @@ public partial class ViewerServerTab
 
         PgCpuGrid.ItemsSource = rows;
         UpdateTruncationBanner(PgCpuDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL CPU"), startUtc);
+        var cpuMinutes = await _dataService.GetEffectiveCollectorMinutesAsync("pg_cpu_utilization", _server.ServerId, 5);
         PgCpuNote.Text = PanelNote("pg_cpu_utilization", rows.Count,
-            "This collector samples AWS Performance Insights on a 5-minute cadence, so a server added "
+            $"This collector samples AWS Performance Insights {ViewerCadenceText.Every(cpuMinutes)}, so a server added "
             + "recently may have nothing here yet.");
     }
 
@@ -329,13 +330,14 @@ public partial class ViewerServerTab
         await ShowEventDataStartAsync(PgConfigChangesDataStartBanner, dataStartTask, "PostgreSQL Configuration Changes", startUtc,
             rows.Select(r => (DateTime?)r.ChangedAtUtc), bannerRowCap);
 
+        var configMinutes = await _dataService.GetEffectiveCollectorMinutesAsync("pg_server_config", _server.ServerId, 60);
         PgConfigChangesNote.Text = PanelNote("pg_server_config", rows.Count,
             "No configuration parameter changed value in this window. This compares consecutive snapshots, so an "
             + "unchanged server is legitimately empty here: it is a finding, not missing data.")
             + (rows.Count == 0
                 ? string.Empty
-                : "Configuration changes, newest first. The collector runs hourly, so a change happened in the hour "
-                  + "before it was seen."
+                : $"Configuration changes, newest first. The collector runs {ViewerCadenceText.Every(configMinutes)}, so a change happened in the "
+                  + $"{ViewerCadenceText.Span(configMinutes)} before it was seen."
                   + (truncated
                       ? $"  Showing the newest {ViewerDataService.PgConfigChangesRowCap}; narrow the window to see the rest."
                       : string.Empty));
@@ -375,9 +377,10 @@ public partial class ViewerServerTab
         if (audit is null)
         {
             PgLoggingAuditGrid.ItemsSource = null;
+            var auditMinutes = await _dataService.GetEffectiveCollectorMinutesAsync("pg_server_config", _server.ServerId, 60);
             PgLoggingAuditNote.Text =
-                "No configuration snapshot to audit. pg_server_config runs hourly, so a server registered in the last "
-                + "hour has not reached its first collection. This is the absence of evidence, not a verdict about "
+                $"No configuration snapshot to audit. pg_server_config runs {ViewerCadenceText.Every(auditMinutes)}, so a server registered in the last "
+                + $"{ViewerCadenceText.Span(auditMinutes)} has not reached its first collection. This is the absence of evidence, not a verdict about "
                 + "the server's logging.";
             return;
         }
@@ -744,6 +747,7 @@ public partial class ViewerServerTab
         var instrument = await _dataService.GetPgWaitInstrumentAsync(_server.ServerId);
         var serviceTier = instrument is not null
             && string.Equals(instrument.Instrument, PgWaitInstrument.ServiceSampled, StringComparison.Ordinal);
+        var waitMinutes = await _dataService.GetEffectiveCollectorMinutesAsync("pg_wait_sampling", _server.ServerId, 5);
 
         PgWaitSamplingGrid.ItemsSource = PgDisplay.WaitSamplingRows(rows);
         UpdateTruncationBanner(PgWaitSamplingDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL Wait Sampling"), startUtc);
@@ -765,8 +769,8 @@ public partial class ViewerServerTab
             : $"{rows.Count:N0} wait event(s), {attributed:N0} attributed to a query. "
               + (serviceTier
                   ? "Instrument: SERVICE SAMPLER — pg_wait_sampling is not installed, so this is the "
-                    + "service polling pg_stat_activity once a second for a 30-second window every five "
-                    + "minutes. A floor, not parity: waits shorter than a second are under-counted and "
+                    + $"service polling pg_stat_activity once a second for a 30-second window {ViewerCadenceText.Every(waitMinutes)}. "
+                    + "A floor, not parity: waits shorter than a second are under-counted and "
                     + "nothing between windows is seen. Installing the extension moves this server to "
                     + "the 10 ms tier. "
                   : instrument is not null

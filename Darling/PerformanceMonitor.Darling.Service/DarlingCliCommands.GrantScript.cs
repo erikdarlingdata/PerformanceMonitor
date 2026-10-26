@@ -134,26 +134,6 @@ public static partial class DarlingCliCommands
         return true;
     }
 
-    /// <summary>The account the Darling Windows service is configured to run as (<c>sc qc</c>'s SERVICE_START_NAME), or null when this is
-    /// not the service's machine, not Windows, or the key cannot be read. A read of one registry value; it never throws.</summary>
-    internal static string? ReadServiceAccountName()
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return null;
-        }
-
-        try
-        {
-            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\" + ServiceName);
-            return key?.GetValue("ObjectName") as string;
-        }
-        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
-        {
-            return null;
-        }
-    }
-
     /// <summary>The wording for the registry list <c>--grant-script</c> reads: it needs the entry's login and auth, nothing more.</summary>
     private static readonly RegistryListWording GrantScriptRegistryWording = new(
         "using darling.json's own server list instead.",
@@ -239,7 +219,7 @@ public static partial class DarlingCliCommands
 
         var inputs = new GrantPrincipalInputs(
             auth, username, host,
-            args.ServiceAccount ?? (readServiceAccount ?? ReadServiceAccountName)(),
+            args.ServiceAccount ?? (readServiceAccount ?? MonitoringGrantScript.ReadServiceAccountName)(),
             machineName ?? Environment.MachineName,
             domainName ?? Environment.UserDomainName);
         var azure = args.Azure || MonitoringGrantScript.IsAzureSqlDatabaseHost(host);

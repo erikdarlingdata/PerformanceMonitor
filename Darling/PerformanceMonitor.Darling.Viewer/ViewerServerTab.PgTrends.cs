@@ -130,7 +130,7 @@ public partial class ViewerServerTab
         PgDatabaseTrendNote.Text = d.Count == 0
             ? PanelNote("pg_database_stats", 0,
                 "No differenced intervals for the busiest database in this window. A trend needs at least two snapshots, so a short window is legitimately empty here.")
-            : $"Database Trend: {db.Subject}, the biggest temp-file spiller in this window, {BucketSentence(db.BucketMinutes)}. "
+            : $"Database Trend: {db.Subject}, {(d.Any(p => p.TempBytes > 0) ? "the biggest temp-file spiller in this window" : "the busiest by block access in this window (nothing spilled)")}, {BucketSentence(db.BucketMinutes)}. "
               + "The hit ratio is each interval's own, not the lifetime average, and Worst Hit % is the worst single interval in the bucket.";
         RenderPgTrendPanels(PgDatabaseTrendHost, new[]
         {
