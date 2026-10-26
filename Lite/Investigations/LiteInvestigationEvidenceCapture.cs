@@ -231,7 +231,7 @@ LIMIT 10";
 SELECT event_time, database_name, blocked_spid, blocked_ecid, blocking_spid, blocking_ecid, wait_time_ms, wait_resource, lock_mode,
        contentious_object, blocked_sql_text, blocking_sql_text, blocked_login_name, blocking_login_name, blocked_host_name,
        blocking_host_name, blocking_client_app, blocking_status, blocked_process_report_xml
-FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev
+FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql) + @" AS ev
 ORDER BY event_time DESC, wait_time_ms DESC
 LIMIT 500";
 

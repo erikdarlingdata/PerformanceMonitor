@@ -175,9 +175,30 @@ VALUES (1, '{Ts(T0)}', '{Ts(T0.AddSeconds(-20))}', {Server}, 'srv', 'AppDb', 60,
 
     private int _reportId;
 
-    private void BlockedReportRow(DateTime eventAt, DateTime collectedAt) =>
+    private void BlockedReportRow(DateTime eventAt, DateTime collectedAt, int blockedSpid = 60, int blockingSpid = 55) =>
         Exec($@"INSERT INTO blocked_process_reports (blocked_report_id, collection_time, event_time, server_id, server_name, database_name, blocked_spid, blocking_spid, wait_time_ms, blocked_process_report_xml)
-VALUES ({++_reportId}, '{Ts(collectedAt)}', '{Ts(eventAt)}', {Server}, 'srv', 'AppDb', 60, 55, 9000, '{BlockedReportXml}')");
+VALUES ({++_reportId}, '{Ts(collectedAt)}', '{Ts(eventAt)}', {Server}, 'srv', 'AppDb', {blockedSpid}, {blockingSpid}, 9000, '{BlockedReportXml}')");
+
+    /// <summary>A parallel query's thread waiting on its own session (blocked spid = blocking spid) is not blocking
+    /// (BlockingWaits.NotSelfWaitSql): a newer self-wait report for the blocked session must not make it its own head.</summary>
+    [Fact]
+    public async Task BlockingSections_LeaveAParallelSelfWaitOut_SoTheRealHeadStaysTheHead()
+    {
+        var opened = await Open("Blocking Detected", "blocking");
+        BlockedReportRow(T0.AddSeconds(-20), T0);
+        BlockedReportRow(T0.AddSeconds(-5), T0, blockedSpid: 60, blockingSpid: 60);
+        CollectorRan("blocked_process_report", T0.AddMinutes(2));
+        _now = T0.AddMinutes(3);
+        await Capture().CaptureOnceAsync(Ct);
+
+        var sections = (await _store.ReadEvidenceAsync(opened.RequestId, Ct)).ToDictionary(r => r.Section);
+        var chain = Assert.Single(JsonNode.Parse(sections["blocking_chains"].ContentJson!)!["rows"]!.AsArray())!;
+        Assert.Equal(60, chain["blocked_spid"]!.GetValue<int>());
+        Assert.Equal(55, chain["blocking_spid"]!.GetValue<int>());
+        Assert.Equal(55, chain["head_blocker_spid"]!.GetValue<int>());
+        var head = Assert.Single(JsonNode.Parse(sections["head_blocker"].ContentJson!)!["rows"]!.AsArray())!;
+        Assert.Equal(55, head["spid"]!.GetValue<int>());
+    }
 
     [Fact]
     public async Task DeadlockSection_ListsADeadlockStoredInTwoBatchesOnce()
