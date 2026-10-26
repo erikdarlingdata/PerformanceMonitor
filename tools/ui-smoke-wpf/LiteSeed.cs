@@ -19,6 +19,10 @@ namespace UiSmokeWpf;
 /// a hash of the server's storage name, so after each scenario every server_id column is rewritten to that hash (which
 /// also takes the rows out of the next scenario's own clear of -999). The rows sit in the last day (the scenarios'
 /// period ends at the latest 04:00 UTC), so settings.json opens the tab on "2d".</para>
+///
+/// <para>Meant for the CI runner. The seed writes into Lite's real data folder, so <see cref="LiteSeedGuard"/> stops it unless
+/// that folder does not exist yet or the CI environment variable is set; a developer machine that uses Lite keeps its servers
+/// and settings.</para>
 /// </summary>
 internal static class LiteSeed
 {
@@ -33,6 +37,11 @@ internal static class LiteSeed
 
     public static async Task SeedAsync()
     {
+        /* Before anything is created: Lite has no data-folder override, so this folder is the real one on a machine that uses Lite. */
+        var refusal = LiteSeedGuard.Refusal(DataRoot, Environment.GetEnvironmentVariable("CI"));
+        if (refusal != null)
+            throw new InvalidOperationException(refusal);
+
         Directory.CreateDirectory(DataRoot);
         var config = Path.Combine(DataRoot, "config");
         Directory.CreateDirectory(config);

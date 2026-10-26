@@ -164,28 +164,104 @@ public sealed class ServerHostBindingTests : IDisposable
         var dataDir = Path.Combine(_root, "data");
         var database = Path.Combine(dataDir, "monitor.duckdb");
         var config = Path.Combine(dataDir, "config");
+        var recordPath = Path.Combine(config, ServerHostBindings.FileName);
 
         /* The first start: nothing there yet. The database is created next, and the record cannot be written. */
         Assert.False(ServerHostBindings.IsFirstStartInUsedFolder(database, config));
+        Directory.CreateDirectory(dataDir);
         File.WriteAllText(database, "");
         WriteSharedServers(Server("a", "sql01", AuthenticationTypes.Windows));
-        Directory.CreateDirectory(_bindingsPath);
-        Assert.Equal(0, NewManager().BindHostsOnFirstRun(hadLiteData: false, []));
-        Directory.Delete(_bindingsPath);
+        Directory.CreateDirectory(recordPath);
+        Assert.Equal(0, NewManagerIn(config).BindHostsOnFirstRun(hadLiteData: false, []));
+        Directory.Delete(recordPath);
 
         /* The next start sees the database and no record, and still binds nothing. */
         var hadLiteData = ServerHostBindings.IsFirstStartInUsedFolder(database, config);
         Assert.False(hadLiteData);
-        var next = NewManager();
+        var next = NewManagerIn(config);
         Assert.Equal(0, next.BindHostsOnFirstRun(hadLiteData, ["sql01"]));
         Assert.NotNull(next.HostChange(next.GetServerById("a")!));
+    }
 
-        /* A folder an earlier Lite used is an upgrade on this build's first start only. */
+    /// <summary>A manager whose per-user record sits in <paramref name="config"/>, as it does in Lite's own config folder.</summary>
+    private ServerManager NewManagerIn(string config) =>
+        new(_sharedDir, hostBindingsPath: Path.Combine(config, ServerHostBindings.FileName), credentialService: _credentials);
+
+    [Fact]
+    public void FolderAnEarlierLiteUsed_StartThatNeverBound_LeavesNoMarker_AndTheNextStartStillBindsTheServersWithRows()
+    {
         var oldDir = Path.Combine(_root, "old");
+        var database = Path.Combine(oldDir, "monitor.duckdb");
+        var config = Path.Combine(oldDir, "config");
         Directory.CreateDirectory(oldDir);
-        File.WriteAllText(Path.Combine(oldDir, "monitor.duckdb"), "");
-        Assert.True(ServerHostBindings.IsFirstStartInUsedFolder(Path.Combine(oldDir, "monitor.duckdb"), Path.Combine(oldDir, "config")));
-        Assert.False(ServerHostBindings.IsFirstStartInUsedFolder(Path.Combine(oldDir, "monitor.duckdb"), Path.Combine(oldDir, "config")));
+        File.WriteAllText(database, "");
+        WriteSharedServers(Server("a", "sql01", AuthenticationTypes.Windows), Server("b", "sql02", AuthenticationTypes.Windows));
+
+        /* The first start of this build: the folder is an earlier Lite's. The local store then fails to open (or the window is
+           closed), so the first-run step never runs. */
+        Assert.True(ServerHostBindings.IsFirstStartInUsedFolder(database, config));
+        Assert.False(File.Exists(Path.Combine(config, ServerHostBindings.StartedMarkerName)));
+
+        /* The next start still reads the folder as an earlier Lite's and binds the server that has rows. */
+        Assert.True(ServerHostBindings.IsFirstStartInUsedFolder(database, config));
+        var manager = NewManagerIn(config);
+        Assert.Equal(1, manager.BindHostsOnFirstRun(hadLiteData: true, ["sql01"]));
+        Assert.Null(manager.HostChange(manager.GetServerById("a")!));
+        Assert.NotNull(manager.HostChange(manager.GetServerById("b")!));
+
+        /* Once the record is written the marker is too, and later starts are not upgrades. */
+        Assert.True(File.Exists(Path.Combine(config, ServerHostBindings.StartedMarkerName)));
+        Assert.False(ServerHostBindings.IsFirstStartInUsedFolder(database, config));
+    }
+
+    [Fact]
+    public void FolderAnEarlierLiteUsed_FailedRecordWrite_LeavesNoMarker_AndTheNextStartBindsTheServersWithRows()
+    {
+        var oldDir = Path.Combine(_root, "old");
+        var database = Path.Combine(oldDir, "monitor.duckdb");
+        var config = Path.Combine(oldDir, "config");
+        var recordPath = Path.Combine(config, ServerHostBindings.FileName);
+        Directory.CreateDirectory(oldDir);
+        File.WriteAllText(database, "");
+        WriteSharedServers(Server("a", "sql01", AuthenticationTypes.Windows));
+
+        /* A folder where the record file goes: the write fails the way a locked or read-only file does. */
+        Directory.CreateDirectory(recordPath);
+        var firstStart = ServerHostBindings.IsFirstStartInUsedFolder(database, config);
+        Assert.True(firstStart);
+        Assert.Equal(0, NewManagerIn(config).BindHostsOnFirstRun(firstStart, ["sql01"]));
+        Assert.False(File.Exists(Path.Combine(config, ServerHostBindings.StartedMarkerName)));
+        Directory.Delete(recordPath);
+
+        var hadLiteData = ServerHostBindings.IsFirstStartInUsedFolder(database, config);
+        Assert.True(hadLiteData);
+        var next = NewManagerIn(config);
+        Assert.Equal(1, next.BindHostsOnFirstRun(hadLiteData, ["sql01"]));
+        Assert.Null(next.HostChange(next.GetServerById("a")!));
+    }
+
+    [Theory]
+    [InlineData("{\"Servers\":{}}")]
+    [InlineData("this is not json")]
+    public void FolderWithARecordAndNoMarker_GetsTheMarkerOnTheFirstRunStep_SoTheNextStartIsNotAnUpgrade(string recordText)
+    {
+        var oldDir = Path.Combine(_root, "old");
+        var database = Path.Combine(oldDir, "monitor.duckdb");
+        var config = Path.Combine(oldDir, "config");
+        var marker = Path.Combine(config, ServerHostBindings.StartedMarkerName);
+        Directory.CreateDirectory(config);
+        File.WriteAllText(database, "");
+        File.WriteAllText(Path.Combine(config, ServerHostBindings.FileName), recordText);
+        WriteSharedServers(Server("a", "sql01", AuthenticationTypes.Windows));
+
+        /* A record an earlier start wrote (its marker write failed), or one that does not parse: with no marker the folder
+           reads as an upgrade, and every later start would run the stored-server-name sweep again. */
+        Assert.True(ServerHostBindings.IsFirstStartInUsedFolder(database, config));
+
+        Assert.Equal(0, NewManagerIn(config).BindHostsOnFirstRun(hadLiteData: true, ["sql01"]));
+
+        Assert.True(File.Exists(marker));
+        Assert.False(ServerHostBindings.IsFirstStartInUsedFolder(database, config));
     }
 
     [Fact]

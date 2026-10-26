@@ -389,6 +389,26 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     }
 
     [Fact]
+    public async Task AParallelSelfWaitReport_IsLeftOut_SoTheRealHeadStaysTheHead()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            /* Session 70 is blocked by 55; a newer report has 70 waiting on itself (a parallel query's thread, not blocking). */
+            var report = BlockedProcessReport(blockingFrame: null);
+            await PlantBlockedReportAsync(setup.Connection, ct, AlertAt.AddMinutes(-3), report, blockedSpid: 70, blockingSpid: 55);
+            await PlantBlockedReportAsync(setup.Connection, ct, AlertAt.AddMinutes(-1), report, blockedSpid: 70, blockingSpid: 70);
+            var requestId = await OpenBlockingAndCaptureAsync(setup, ct);
+
+            var evidence = await setup.Requests.ReadEvidenceAsync(requestId, ct);
+            var chain = Assert.Single(Rows(evidence, "blocking_chains"));
+            Assert.Equal(70, chain["blocked_spid"]!.GetValue<int>());
+            Assert.Equal(55, chain["blocking_spid"]!.GetValue<int>());
+            Assert.Equal(55, chain["head_blocker_spid"]!.GetValue<int>());
+            Assert.Equal(55, Assert.Single(Rows(evidence, "head_blocker"))["spid"]!.GetValue<int>());
+        });
+    }
+
+    [Fact]
     public async Task ASessionBlockedByTwoBlockersInOneWindow_GetsOneHead_AndTheSectionsFreeze()
     {
         await RunAsync(async (setup, ct) =>
