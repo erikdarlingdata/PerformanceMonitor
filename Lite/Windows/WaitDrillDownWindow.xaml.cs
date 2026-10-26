@@ -273,7 +273,7 @@ public partial class WaitDrillDownWindow : Window
         return column;
     }
 
-    private void SetWarningBanner(WaitClassification classification)
+    internal void SetWarningBanner(WaitClassification classification)
     {
         if (classification.Category == WaitCategory.Uncapturable)
         {
@@ -285,25 +285,22 @@ public partial class WaitDrillDownWindow : Window
         {
             WarningText.Text = $"{_waitType} waits are too brief to appear in query snapshots. " +
                                "Showing all queries active during this period, sorted by the most correlated metric.";
-            WarningBanner.Visibility = Visibility.Visible;
-            WarningBanner.Background = new System.Windows.Media.SolidColorBrush(
-                System.Windows.Media.Color.FromArgb(0x3D, 0x00, 0x33, 0x66));
-            WarningBanner.BorderBrush = new System.Windows.Media.SolidColorBrush(
-                System.Windows.Media.Color.FromArgb(0x66, 0x00, 0x55, 0x99));
-            WarningText.Foreground = new System.Windows.Media.SolidColorBrush(
-                System.Windows.Media.Color.FromRgb(0x66, 0xBB, 0xFF));
+            ShowInfoBanner();
         }
         else if (classification.Category == WaitCategory.Chain)
         {
             WarningText.Text = $"Showing head blockers (the cause of {_waitType} waits), not the waiting sessions themselves.";
-            WarningBanner.Visibility = Visibility.Visible;
-            WarningBanner.Background = new System.Windows.Media.SolidColorBrush(
-                System.Windows.Media.Color.FromArgb(0x3D, 0x00, 0x33, 0x66));
-            WarningBanner.BorderBrush = new System.Windows.Media.SolidColorBrush(
-                System.Windows.Media.Color.FromArgb(0x66, 0x00, 0x55, 0x99));
-            WarningText.Foreground = new System.Windows.Media.SolidColorBrush(
-                System.Windows.Media.Color.FromRgb(0x66, 0xBB, 0xFF));
+            ShowInfoBanner();
         }
+    }
+
+    private void ShowInfoBanner()
+    {
+        // #6773: theme brushes by reference (not new SolidColorBrush), so the light themes get a readable
+        // blue and a theme switch while the window is open still applies.
+        WarningBanner.Visibility = Visibility.Visible;
+        WarningBanner.SetResourceReference(Border.BorderBrushProperty, "InfoBrush");
+        WarningText.SetResourceReference(TextBlock.ForegroundProperty, "InfoTextBrush");
     }
 
     private static SnapshotInfo ToSnapshotInfo(QuerySnapshotRow row) => new()
