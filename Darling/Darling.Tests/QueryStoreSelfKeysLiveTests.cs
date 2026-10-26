@@ -292,14 +292,15 @@ WHERE EXCLUDED.last_seen >= query_store_text.last_seen";
 
         Assert.Equal(0L, await CountAsync(rig.Connection, "SELECT CASE WHEN to_regclass('collect.query_store_self_keys_state') IS NULL THEN 0 ELSE 1 END", ct));
 
-        /* In a transaction, as the reads run it: the gate answers closed and the transaction is still usable. */
+        /* The reads first: each meets the missing table inside its own snapshot transaction. */
+        AssertOwnHidden(await ReadBothAsync(rig, now, ct));
+
+        /* And the gate itself, in a transaction as the reads run it: closed, and the transaction is still usable. */
         await using (var transaction = await rig.Connection.BeginTransactionAsync(ct))
         {
             Assert.False(await QueryStoreSelfKeys.ReadyAsync(rig.Connection, transaction, 30, ct));
             await using var after = new NpgsqlCommand("SELECT 1", rig.Connection, transaction);
             Assert.Equal(1, await after.ExecuteScalarAsync(ct));
         }
-
-        AssertOwnHidden(await ReadBothAsync(rig, now, ct));
     }
 }
