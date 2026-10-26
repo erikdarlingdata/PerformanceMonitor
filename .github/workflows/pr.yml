@@ -45,6 +45,8 @@ jobs:
       outcome: ${{ steps.plan.outputs.outcome }}
       areas: ${{ steps.plan.outputs.areas }}
       darling_scope: ${{ steps.plan.outputs.darling_scope }}
+      darling_classes: ${{ steps.plan.outputs.darling_classes }}
+      lite_classes: ${{ steps.plan.outputs.lite_classes }}
       build: ${{ steps.plan.outputs.build }}
       legs: ${{ steps.plan.outputs.legs }}
       legs_json: ${{ steps.plan.outputs.legs_json }}
@@ -341,7 +343,9 @@ jobs:
           LEG: ${{ matrix.leg }}
           LEG_COUNT: ${{ needs.plan.outputs.legs }}
           AREAS: ${{ needs.plan.outputs.areas }}
-        run: ./.github/scripts/run-ci-leg.ps1 -Leg $env:LEG -LegCount $env:LEG_COUNT -Areas $env:AREAS -NoTreeGuards
+          DARLING_CLASSES: ${{ needs.plan.outputs.darling_classes }}
+          LITE_CLASSES: ${{ needs.plan.outputs.lite_classes }}
+        run: ./.github/scripts/run-ci-leg.ps1 -Leg $env:LEG -LegCount $env:LEG_COUNT -Areas $env:AREAS -DarlingClasses $env:DARLING_CLASSES -LiteClasses $env:LITE_CLASSES -NoTreeGuards
 
       - name: Stop PostgreSQL
         if: always() && (needs.plan.outputs.darling_scope != 'none' || needs.plan.outputs.areas == 'lite')

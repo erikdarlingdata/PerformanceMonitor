@@ -21,6 +21,8 @@
                          classes it names; FULL, unreadable or empty means every class this leg was cut runs.
   -ScopeFilter           extra runner arguments for the class listing, for a caller that runs part of the suite
                          (the build job's Lite-reads pass: '-trait Stage=Guard -trait Reads=Lite'). Empty: all.
+  -OnlyClasses           comma list of simple class names (#6734): keep only those classes of the listing, before the
+                         cut. Empty: no narrowing.
   -RunAttempt            the workflow's run attempt, in the timing file name.
 #>
 param(
@@ -31,7 +33,8 @@ param(
     [string] $ResultPrefix = 'darling-pr',
     [string] $RunAttempt = '1',
     [string] $SelectionFile = '',
-    [string] $ScopeFilter = ''
+    [string] $ScopeFilter = '',
+    [string] $OnlyClasses = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -73,6 +76,10 @@ if ($readsLite) {
 }
 else {
     $classes = @(Get-DarlingClasses $scopeArgs)
+}
+if ($OnlyClasses) {
+    $only = @($OnlyClasses -split ',' | Where-Object { $_ })
+    $classes = @($classes | Where-Object { $only -contains ($_ -split '[.+/]')[-1] })
 }
 if ($classes.Count -eq 0) { throw 'the class listing returned no classes - the shard would silently run nothing' }
 
