@@ -240,6 +240,30 @@ public sealed class ServerHostBindingTests : IDisposable
         Assert.Null(next.HostChange(next.GetServerById("a")!));
     }
 
+    [Theory]
+    [InlineData("{\"Servers\":{}}")]
+    [InlineData("this is not json")]
+    public void FolderWithARecordAndNoMarker_GetsTheMarkerOnTheFirstRunStep_SoTheNextStartIsNotAnUpgrade(string recordText)
+    {
+        var oldDir = Path.Combine(_root, "old");
+        var database = Path.Combine(oldDir, "monitor.duckdb");
+        var config = Path.Combine(oldDir, "config");
+        var marker = Path.Combine(config, ServerHostBindings.StartedMarkerName);
+        Directory.CreateDirectory(config);
+        File.WriteAllText(database, "");
+        File.WriteAllText(Path.Combine(config, ServerHostBindings.FileName), recordText);
+        WriteSharedServers(Server("a", "sql01", AuthenticationTypes.Windows));
+
+        /* A record an earlier start wrote (its marker write failed), or one that does not parse: with no marker the folder
+           reads as an upgrade, and every later start would run the stored-server-name sweep again. */
+        Assert.True(ServerHostBindings.IsFirstStartInUsedFolder(database, config));
+
+        Assert.Equal(0, NewManagerIn(config).BindHostsOnFirstRun(hadLiteData: true, ["sql01"]));
+
+        Assert.True(File.Exists(marker));
+        Assert.False(ServerHostBindings.IsFirstStartInUsedFolder(database, config));
+    }
+
     [Fact]
     public void TypedPassword_WithWeakerEncryptionOrADatabaseChange_StillAsks()
     {

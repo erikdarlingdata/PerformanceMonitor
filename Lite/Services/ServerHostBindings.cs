@@ -137,7 +137,7 @@ public sealed class ServerHostBindings
     /// each server waits for its settings to be confirmed. A user who did (an upgrade) gets bound only the servers
     /// <paramref name="wasUsed"/> says they used, to the settings servers.json names now; the rest wait too. The record is
     /// written first, and when it cannot be written nothing is bound, so a failed write never leaves a binding behind that
-    /// the next start would make again unseen. Does nothing once a record exists, and runs once per instance. Returns how
+    /// the next start would make again unseen. Binds nothing once a record exists (it only writes the marker, so a record whose marker write failed earlier does not leave the folder reading as an upgrade), and runs once per instance. Returns how
     /// many servers were bound.
     /// </summary>
     public int BindOnFirstRun(IEnumerable<ServerConnection> servers, bool hadLiteData, Func<ServerConnection, bool> wasUsed)
@@ -157,8 +157,18 @@ public sealed class ServerHostBindings
 
         lock (_lock)
         {
-            if (_hasRecord || _firstRunDone)
+            if (_firstRunDone)
                 return 0;
+
+            /* A record that already exists (an earlier start whose marker write failed, or a file that does not parse) binds
+               nothing, but the marker still goes in: without it every later start reads the folder as an upgrade and runs the
+               stored-server-name sweep again. */
+            if (_hasRecord)
+            {
+                _firstRunDone = true;
+                WriteStartedMarker();
+                return 0;
+            }
             _firstRunDone = true;
 
             problem = TryWrite(chosen);
@@ -386,6 +396,9 @@ public sealed class ServerHostBindings
         var marker = Path.Combine(Path.GetDirectoryName(_filePath)!, StartedMarkerName);
         try
         {
+            if (File.Exists(marker))
+                return;
+
             Directory.CreateDirectory(Path.GetDirectoryName(marker)!);
             File.WriteAllText(marker,
                 $"Lite first started with this data folder on {DateTime.UtcNow.ToString("u", CultureInfo.InvariantCulture)}. " +
