@@ -91,13 +91,13 @@
             <Button x:Name="DismissAllButton" Content="Dismiss All" Click="DismissAll_Click"
                     Margin="4,0,0,0" Padding="10,4" MinWidth="70"/>
             <TextBlock x:Name="DismissWaitIndicator" Text="Waiting for the local database..." Margin="10,0,0,0"
-                       VerticalAlignment="Center" FontStyle="Italic" Foreground="#FFCC6600" Visibility="Collapsed"/>
+                       VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource WarningTextBrush}" Visibility="Collapsed"/>
             <TextBlock x:Name="AlertCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
                        FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
             <TextBlock x:Name="LastRefreshedIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
                        FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
             <TextBlock x:Name="ArchivalWarning" Text="" Margin="8,0,0,0" VerticalAlignment="Center"
-                       FontSize="11" Foreground="#FFCC6600" FontWeight="SemiBold" Visibility="Collapsed"/>
+                       FontSize="11" Foreground="{DynamicResource WarningTextBrush}" FontWeight="SemiBold" Visibility="Collapsed"/>
         </WrapPanel>
 
         <!-- DataGrid -->
