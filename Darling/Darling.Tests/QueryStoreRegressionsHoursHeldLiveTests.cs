@@ -522,6 +522,9 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.HighStart });
         command.Parameters.Add(DatabaseFilter.All.ExcludeParameter());
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = hoursHeldStart });
+        /* #6750: the failure arm's row-filter start ($12) and its hours held ($13), the same as the Regular arms' on this raw read. */
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = rig.BaselineStart });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = hoursHeldStart });
         var lines = new List<string>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))

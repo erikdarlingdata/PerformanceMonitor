@@ -158,6 +158,9 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
         command.Parameters.Add(DatabaseFilter.All.ExcludeParameter());
         /* #6750: the start of the hours held, the row filters' start here. */
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
+        /* #6750: the failure arm's row-filter start and its hours held, the same on this one-tier read. */
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
     }
 
     /// <summary>
@@ -184,6 +187,9 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
                 command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.HighStart });
                 command.Parameters.Add(DatabaseFilter.All.ExcludeParameter());
                 /* #6750: the start of the hours held, the row filters' start here. */
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
+                /* #6750: the failure arm's row-filter start and its hours held, the same on this one-tier read. */
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
                 command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
             }
             else

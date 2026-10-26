@@ -1020,7 +1020,7 @@ FROM (
     internal static bool GapWindowSettled(DateTime floorDay) =>
         floorDay.AddDays(GapCacheWindowDays) <= GapCacheClock() - WatermarkPolicy.MaxCatchup - GapSettleMargin;
 
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(string StoreKey, int ServerId, DateTime FloorDay, int CadenceMinutes), TimeSpan?> GapCache = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(string StoreKey, int ServerId, string Table, DateTime FloorDay, int CadenceMinutes), TimeSpan?> GapCache = new();
 
     private static int _gapReads;
 
@@ -1057,15 +1057,19 @@ FROM (
     /// in the past (<see cref="GapWindowSettled"/>), because a collection can still land in a window that is not.
     /// An unsettled verdict is recomputed on every decision. The
     /// window derives from the key's floor day, never from the raw floor, so a verdict cached for day D can
-    /// never serve a floor in day D+1. One entry is kept per (store, server): storing a new floor day or
-    /// cadence removes that server's older entries. A read that yields no value is not cached.
+    /// never serve a floor in day D+1. One entry is kept per (store, server, table): storing a new floor day or
+    /// cadence removes that server's older entries for the same table. A read that yields no value is not cached.
+    /// <para>#6750: <paramref name="table"/> is the table whose floor this is. The regressions read checks the cadence at two
+    /// floors, the wide table's and <c>query_store_interval_latest</c>'s, so a key without the table would make the two floors
+    /// evict each other's entry on every call.</para>
     /// </summary>
     internal static async Task<TimeSpan?> MaxCollectionGapCachedAsync(
-        NpgsqlConnection connection, int serverId, DateTime tableFloor, int frequencyMinutes, int commandTimeoutSeconds, CancellationToken cancellationToken)
+        NpgsqlConnection connection, int serverId, DateTime tableFloor, int frequencyMinutes, int commandTimeoutSeconds, CancellationToken cancellationToken,
+        string table = TableName)
     {
         var floorDay = DateTime.SpecifyKind(tableFloor.Date, DateTimeKind.Unspecified);
         var storeKey = GapStoreKey(connection);
-        var key = (storeKey, serverId, floorDay, frequencyMinutes);
+        var key = (storeKey, serverId, table, floorDay, frequencyMinutes);
         if (GapCache.TryGetValue(key, out var cached))
         {
             return cached;
@@ -1089,7 +1093,7 @@ FROM (
         {
             foreach (var stale in GapCache.Keys)
             {
-                if (stale.StoreKey == storeKey && stale.ServerId == serverId)
+                if (stale.StoreKey == storeKey && stale.ServerId == serverId && stale.Table == table)
                 {
                     GapCache.TryRemove(stale, out _);
                 }
@@ -1101,15 +1105,18 @@ FROM (
         return gap;
     }
 
-    private enum BelowFloorVerdict
+    internal enum BelowFloorVerdict
     {
         Allowed,
         SlowCadence,
         LogNotYetCovering,
     }
 
-    private static async Task<BelowFloorVerdict> CadenceAllowsAsync(
-        NpgsqlConnection connection, int serverId, DateTime tableFloor, int commandTimeoutSeconds, ILogger? logger, CancellationToken cancellationToken)
+    /// <summary>The cadence and gap verdict for reading below raw's floor from a table whose floor is <paramref name="tableFloor"/>.
+    /// <paramref name="table"/> (#6750) keys the gap cache, so the wide table's and latest's verdicts are cached apart.</summary>
+    internal static async Task<BelowFloorVerdict> CadenceAllowsAsync(
+        NpgsqlConnection connection, int serverId, DateTime tableFloor, int commandTimeoutSeconds, ILogger? logger, CancellationToken cancellationToken,
+        string table = TableName)
     {
         int? perServer = null;
         int? fleet = null;
@@ -1151,7 +1158,7 @@ FROM (
             return BelowFloorVerdict.LogNotYetCovering;
         }
 
-        var gap = await MaxCollectionGapCachedAsync(connection, serverId, tableFloor, frequency, commandTimeoutSeconds, cancellationToken);
+        var gap = await MaxCollectionGapCachedAsync(connection, serverId, tableFloor, frequency, commandTimeoutSeconds, cancellationToken, table);
 
         return CadenceAllowsBelowFloor(frequency, gap) ? BelowFloorVerdict.Allowed : BelowFloorVerdict.SlowCadence;
     }
@@ -1168,6 +1175,8 @@ FROM (
     /// its <c>collection_time</c> is inside the window.</item>
     /// <item><paramref name="windowStart"/>: never read before the window asked for.</item>
     /// </list>
+    /// <para>#6750: pure and table-agnostic. The regressions read also runs it for <c>query_store_interval_latest</c>, with that
+    /// table's coverage claim and floor (<see cref="QueryStoreRegressionBaseline.ResolveSpansAsync"/>).</para>
     /// </summary>
     public static (DateTime Start, WideStartBound Bound)? ExactBelowFloorStart(
         DateTime? rawFloor, DateTime windowStart, DateTime filledSince, DateTime? tableFloor)

@@ -112,12 +112,28 @@ internal static class DarlingQueryStoreRegressionReader
     /// reads the three Regular arms from <c>query_store_interval_latest</c> (<see cref="QueryStoreRegressionBaseline.Plan.RegularFromLatest"/>).
     /// <paramref name="recentFromDaily"/> (latest only) reads the recent window's whole days from the daily totals
     /// (<see cref="QueryStoreRegressionBaseline.Plan.RecentDays"/>, #5506): $12 the days (date[]), $13 and $14 the recent arm's
-    /// live <c>first_execution_time</c> bounds.
+    /// live <c>first_execution_time</c> bounds. #6750 put the failure arm's two starts at $12 (its row filters) and $13 (its hours
+    /// held), so the recent days' three parameters are $14 to $16.
     /// </summary>
     internal static string BuildSql(bool wide, bool useDailyTotals, bool regularFromLatest = false, bool recentFromDaily = false) =>
         QueryStoreRegressionBaseline.Bind(
             QueryStoreRegressionBaseline.Statement(wide, useDailyTotals, regularFromLatest, recentFromDaily),
-            "$6", "$7", "$8", "$9", "$5", "$10", "$11", "$12", "$13", "$14");
+            "$6", "$7", "$8", "$9", "$5", "$10", "$11", "$12", "$13", "$14", "$15", "$16");
+
+    /// <summary>
+    /// Where each arm of a regressions read started (#6750), for the answer's notice. <see cref="CostStart"/> is the start of the
+    /// Regular (cost) baseline and <see cref="FailureStart"/> the start of the timeouts and errors baseline, each the start of the hours
+    /// its own per-hour rates divide by. <see cref="BelowRawFloor"/> is true only when the table read reached below raw's floor (raw's
+    /// floor is after the requested baseline start): the answer then names these starts and the tables that served them. Otherwise
+    /// (raw served, or raw holds the whole baseline) the answer keeps raw's notice, and both starts are raw's effective start.
+    /// </summary>
+    public sealed record RegressionSpans(DateTime CostStart, DateTime FailureStart, bool BelowRawFloor, bool CostFromLatest);
+
+    /// <summary>A regressions read with the tier that answered and, on the table path, where each arm started (#6750).</summary>
+    public sealed record RegressionRead(List<RegressionRow> Rows, string Source, RegressionSpans? Spans);
+
+    /// <summary>The table path's work_mem for the regressions statement (#6750, <see cref="QueryStoreRegressionBaseline.TableReadWorkMemSql"/>).</summary>
+    internal const string TableReadWorkMemSql = QueryStoreRegressionBaseline.TableReadWorkMemSql;
 
     /// <summary>
     /// The viewer's regression read over raw <c>query_store_stats</c>, with the baseline's closed days from the daily totals
@@ -203,11 +219,21 @@ internal static class DarlingQueryStoreRegressionReader
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
         DatabaseFilter databases, int limit, DateTime baselineStartUtc, DateTime? dataStartUtc, CancellationToken cancellationToken = default)
     {
-        var tableRows = await TryGetQueryStoreRegressionsFromTableAsync(
+        var read = await ReadWithSpansAsync(postgres, serverId, startUtc, endUtc, databases, limit, baselineStartUtc, dataStartUtc, cancellationToken);
+        return (read.Rows, read.Source);
+    }
+
+    /// <summary><see cref="ReadQueryStoreRegressionsAsync(NpgsqlDataSource, int, DateTime, DateTime, DatabaseFilter, int, DateTime, DateTime?, CancellationToken)"/>
+    /// with where each arm started (#6750, <see cref="RegressionSpans"/>).</summary>
+    public static async Task<RegressionRead> ReadWithSpansAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        DatabaseFilter databases, int limit, DateTime baselineStartUtc, DateTime? dataStartUtc, CancellationToken cancellationToken = default)
+    {
+        var table = await TryReadFromTableAsync(
             postgres, serverId, startUtc, endUtc, databases, limit, baselineStartUtc, dataStartUtc, cancellationToken);
-        if (tableRows is not null)
+        if (table is not null)
         {
-            return (tableRows, ReadScope.SourceIntervalTable);
+            return table;
         }
 
         /* #5506: raw too reads the baseline's closed days from the daily totals, so it runs in the same kind of snapshot
@@ -226,7 +252,8 @@ internal static class DarlingQueryStoreRegressionReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var rows = await ReadRowsAsync(reader, cancellationToken);
         ReadScope.NoteSource(ReadScope.SourceRaw);
-        return (rows, ReadScope.SourceRaw);
+        var held = plan.HoursHeldStart ?? baselineStartUtc;
+        return new RegressionRead(rows, ReadScope.SourceRaw, new RegressionSpans(held, held, false, false));
     }
 
     /// <summary>The raw read with no run day: the baseline is all live and the daily table is not named (#5506).</summary>
@@ -270,9 +297,13 @@ internal static class DarlingQueryStoreRegressionReader
     /// as the top and history reads do, and so do the baseline's built days (#5506). Null when the gate says raw or anything
     /// here faults (cancellation propagates), so the caller runs the raw read; an empty list is a real answer from the table
     /// and is returned as one.
-    /// <para>The table read binds the gate's <see cref="QueryStoreIntervalWide.WideReadPlan.ClampedStart"/>, not its
-    /// below-floor <c>ReadStart</c>: the tool's <c>effective_start</c> notice is raw's, so the table reads exactly the
-    /// span raw would. The built days start no earlier than that bound either.</para>
+    /// <para>#6750: each arm binds its own exact start (<see cref="QueryStoreRegressionBaseline.ResolveSpansAsync"/>). Before this
+    /// every arm bound the gate's <see cref="QueryStoreIntervalWide.WideReadPlan.ClampedStart"/>, max(baseline start, raw's floor), so
+    /// on a store whose raw tier keeps 4 days a 168 hour read had an empty cost baseline and a recent window cut to raw's floor, while
+    /// the interval tables held both. Now the Regular baseline and the recent arm bind the start <c>query_store_interval_latest</c>
+    /// proves (the daily days start no earlier), and <c>nonregular_rows</c> binds the wide table's below-floor <c>ReadStart</c>
+    /// (<c>@@BF</c>). Each per-hour rate divides by the hours from its own arm's start. Where raw holds the whole baseline every
+    /// start is the baseline start and the read is the one before #6750.</para>
     /// </summary>
     internal static Task<List<RegressionRow>?> TryGetQueryStoreRegressionsFromTableAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
@@ -282,6 +313,11 @@ internal static class DarlingQueryStoreRegressionReader
     /// <summary><see cref="TryGetQueryStoreRegressionsFromTableAsync(NpgsqlDataSource, int, DateTime, DateTime, DatabaseFilter, int, DateTime, CancellationToken)"/>
     /// with this server's data start (#6750), where the divisors start at the later of it and the gate's clamp.</summary>
     internal static async Task<List<RegressionRow>?> TryGetQueryStoreRegressionsFromTableAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        DatabaseFilter databases, int limit, DateTime baselineStartUtc, DateTime? dataStartUtc, CancellationToken cancellationToken)
+        => (await TryReadFromTableAsync(postgres, serverId, startUtc, endUtc, databases, limit, baselineStartUtc, dataStartUtc, cancellationToken))?.Rows;
+
+    private static async Task<RegressionRead?> TryReadFromTableAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
         DatabaseFilter databases, int limit, DateTime baselineStartUtc, DateTime? dataStartUtc, CancellationToken cancellationToken)
     {
@@ -316,11 +352,13 @@ internal static class DarlingQueryStoreRegressionReader
             }
 
             gateDecided = true;
+            /* #6750: each arm's own exact start, from the table that serves it. */
+            var spans = await QueryStoreRegressionBaseline.ResolveSpansAsync(
+                connection, transaction, serverId, baselineStartUtc, wide, McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken);
             var plan = await QueryStoreRegressionBaseline.ResolveAsync(
-                connection, transaction, serverId, wide.ClampedStart, startUtc, McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken,
-                windowEnd: endUtc);
-            /* #6750: the divisors start at the later of the gate's clamp (what the row filters bind) and this server's data start. */
-            plan = QueryStoreRegressionBaseline.WithHoursHeldStart(plan, wide.ClampedStart, dataStartUtc);
+                connection, transaction, serverId, spans.RegularStart, startUtc, McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken,
+                windowEnd: endUtc, spans: spans);
+            plan = QueryStoreRegressionBaseline.WithArmStarts(plan, spans, wide.ClampedStart, dataStartUtc);
             var wideSql = TableSqlFor(plan);
 
             /* #5506 step 2: the first_execution_time floors of the live arms reach PurgeEdgeMargin (26 hours) before their bound,
@@ -329,7 +367,7 @@ internal static class DarlingQueryStoreRegressionReader
                read whole (#5882, the same lookup as get_query_store_top and the aborts read). A server with no trustworthy
                measurement keeps the 26 hours. The lookup is one extra round trip, 5 to 9 ms warm. */
             var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
-                connection, serverId, wide.ClampedStart, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
+                connection, serverId, spans.RegularStart < spans.FailureStart ? spans.RegularStart : spans.FailureStart, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
             if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
             {
                 wideSql = QueryStoreIntervalWide.WithEdgeMargin(wideSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
@@ -339,12 +377,20 @@ internal static class DarlingQueryStoreRegressionReader
                run day's midnight, so that day's rows are not read only to be dropped. */
             plan = QueryStoreRegressionBaseline.WithMeasuredHighStart(plan, edgeMargin);
 
+            await using (var workMem = new NpgsqlCommand(TableReadWorkMemSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                await workMem.ExecuteNonQueryAsync(cancellationToken);
+            }
+
             await using var command = new NpgsqlCommand(wideSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
-            AddParameters(command, serverId, startUtc, endUtc, databases, limit, wide.ClampedStart, plan);
+            AddParameters(command, serverId, startUtc, endUtc, databases, limit, spans.RegularStart, plan, spans.FailureStart);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             var rows = await ReadRowsAsync(reader, cancellationToken);
             ReadScope.NoteSource(ReadScope.SourceIntervalTable);
-            return rows;
+            var clamp = DateTime.SpecifyKind(wide.ClampedStart, DateTimeKind.Unspecified);
+            var belowRawFloor = spans.RegularStart < clamp || spans.FailureStart < clamp;
+            return new RegressionRead(rows, ReadScope.SourceIntervalTable, new RegressionSpans(
+                plan.HoursHeldStart ?? spans.RegularStart, plan.FailureHoursHeldStart ?? spans.FailureStart, belowRawFloor, plan.RegularFromLatest));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -386,10 +432,12 @@ internal static class DarlingQueryStoreRegressionReader
     /// end, $4 database filter, $5 row cap, $6 baseline start, $7 the baseline days read from the daily totals (#5506), $8 the
     /// end of the live half's low <c>first_execution_time</c> range, $9 the start of its high range, $10 the databases left out
     /// (<see cref="DatabaseFilter.ExcludeParameter"/>, #6654), $11 the start of the hours held (#6750): the later of the plan's start and this server's
-    /// data start (<see cref="QueryStoreRegressionBaseline.Plan.HoursHeldStart"/>). The row filters ($6) keep the requested start on every path, so the rows read are the same.</summary>
+    /// data start (<see cref="QueryStoreRegressionBaseline.Plan.HoursHeldStart"/>). The row filters ($6) keep the requested start on every path, so the rows read are the same.
+    /// #6750: $12 the failure arm's row-filter start (<paramref name="failureBaselineStartUtc"/>, the Regular start when null, as on raw)
+    /// and $13 the start of its hours held (<see cref="QueryStoreRegressionBaseline.Plan.FailureHoursHeldStart"/>, else $11's value).</summary>
     private static void AddParameters(
         NpgsqlCommand command, int serverId, DateTime startUtc, DateTime endUtc, DatabaseFilter databases, int limit, DateTime baselineStartUtc,
-        QueryStoreRegressionBaseline.Plan plan)
+        QueryStoreRegressionBaseline.Plan plan, DateTime? failureBaselineStartUtc = null)
     {
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         command.Parameters.Add(databases.Parameter());
@@ -400,9 +448,11 @@ internal static class DarlingQueryStoreRegressionReader
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.HighStart, DateTimeKind.Unspecified) });
         command.Parameters.Add(databases.ExcludeParameter());
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.HoursHeldStart ?? baselineStartUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(failureBaselineStartUtc ?? baselineStartUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.FailureHoursHeldStart ?? plan.HoursHeldStart ?? baselineStartUtc, DateTimeKind.Unspecified) });
         if (QueryStoreRegressionBaseline.ReadsRecentDays(plan))
         {
-            /* #5506: $12 to $14, only on the recent-days form, the only text that names them. */
+            /* #5506: $14 to $16, only on the recent-days form, the only text that names them. */
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RecentDays });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentLowEnd, DateTimeKind.Unspecified) });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentHighStart, DateTimeKind.Unspecified) });
@@ -456,6 +506,52 @@ internal static class DarlingQueryStoreRegressionReader
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// <see cref="RegressionCoverageSql"/> over the interval table that served a table read's cost arms (#6750): latest when it did,
+    /// the wide table otherwise. $1 server_id, $2 window start, $3 window end, $4 the cost arm's start, $5 database filter. A row is on
+    /// the baseline side when its last run is in [$4, $2), on the recent side when it is at or after $2, the line the read itself
+    /// splits on. The <c>first_execution_time</c> bounds are the read's own, so each EXISTS is an index probe of that table.
+    /// </summary>
+    internal static string TableCoverageSql(string table) => $$"""
+        SELECT
+            EXISTS (
+                SELECT 1
+                FROM collect.{{table}}
+                WHERE server_id = $1
+                AND   first_execution_time >= $4 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+                AND   first_execution_time < $2
+                AND   last_execution_time >= $4
+                AND   last_execution_time < $2
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            ) AS has_baseline,
+            EXISTS (
+                SELECT 1
+                FROM collect.{{table}}
+                WHERE server_id = $1
+                AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+                AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+                AND   last_execution_time >= $2
+                AND   collection_time <= $3
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            ) AS has_recent
+        """;
+
+    /// <summary>Runs <see cref="TableCoverageSql"/> for the table that served <paramref name="spans"/>' cost arms.</summary>
+    public static async Task<(bool HasBaseline, bool HasRecent)> GetTableCoverageAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, RegressionSpans spans,
+        DatabaseFilter databases, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(TableCoverageSql(spans.CostFromLatest ? QueryStoreIntervalLatest.TableName : QueryStoreIntervalWide.TableName));
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(spans.CostStart, DateTimeKind.Unspecified) });
+        command.Parameters.Add(databases.Parameter());
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+            return (false, false);
+        return (reader.GetBoolean(0), reader.GetBoolean(1));
     }
 
     /// <summary>Runs <see cref="RegressionCoverageSql"/>. <paramref name="databases"/> narrows both questions to

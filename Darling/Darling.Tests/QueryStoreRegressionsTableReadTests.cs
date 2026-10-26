@@ -86,16 +86,23 @@ public sealed class QueryStoreRegressionsTableReadTests
     }
 
     /// <summary>#5506: the Regular arms may read <c>query_store_interval_latest</c> only where its coverage starts at or before
-    /// the baseline start and no batch is pending; anything else keeps the wide table.</summary>
+    /// the baseline start and no batch is pending; anything else keeps the wide table. #6750: and only where latest's floor is at
+    /// least the purge-edge margin (26 hours) before the baseline start, since the per-arm start can now reach below raw's floor.</summary>
     [Fact]
-    public void TheLatestGate_AllowsOnlyCoverageFromTheBaselineStartWithNoPendingBatch()
+    public void TheLatestGate_AllowsOnlyCoverageFromTheBaselineStartWithNoPendingBatch_AndAFloorAMarginBeforeIt()
     {
         var baselineStart = new DateTime(2026, 10, 21, 12, 0, 0);
-        Assert.True(QueryStoreRegressionBaseline.LatestCoversRegularArms(baselineStart.AddDays(-20), hasPending: false, baselineStart));
-        Assert.True(QueryStoreRegressionBaseline.LatestCoversRegularArms(baselineStart, hasPending: false, baselineStart));
-        Assert.False(QueryStoreRegressionBaseline.LatestCoversRegularArms(baselineStart.AddTicks(1), hasPending: false, baselineStart));
-        Assert.False(QueryStoreRegressionBaseline.LatestCoversRegularArms(baselineStart.AddDays(-20), hasPending: true, baselineStart));
-        Assert.False(QueryStoreRegressionBaseline.LatestCoversRegularArms(null, hasPending: false, baselineStart));
+        var oldFloor = baselineStart.AddDays(-14);
+        Assert.True(QueryStoreRegressionBaseline.LatestCoversRegularArms(baselineStart.AddDays(-20), hasPending: false, oldFloor, baselineStart));
+        Assert.True(QueryStoreRegressionBaseline.LatestCoversRegularArms(baselineStart, hasPending: false, oldFloor, baselineStart));
+        Assert.False(QueryStoreRegressionBaseline.LatestCoversRegularArms(baselineStart.AddTicks(1), hasPending: false, oldFloor, baselineStart));
+        Assert.False(QueryStoreRegressionBaseline.LatestCoversRegularArms(baselineStart.AddDays(-20), hasPending: true, oldFloor, baselineStart));
+        Assert.False(QueryStoreRegressionBaseline.LatestCoversRegularArms(null, hasPending: false, oldFloor, baselineStart));
+
+        var edge = baselineStart - QueryStoreIntervalWide.PurgeEdgeMargin;
+        Assert.True(QueryStoreRegressionBaseline.LatestCoversRegularArms(baselineStart.AddDays(-20), hasPending: false, edge, baselineStart));
+        Assert.False(QueryStoreRegressionBaseline.LatestCoversRegularArms(baselineStart.AddDays(-20), hasPending: false, edge.AddTicks(1), baselineStart));
+        Assert.True(QueryStoreRegressionBaseline.LatestCoversRegularArms(baselineStart.AddDays(-20), hasPending: false, null, baselineStart));
     }
 
     /// <summary>#5506: each reader runs the latest form where the plan allows it, and the wide form otherwise, with and
