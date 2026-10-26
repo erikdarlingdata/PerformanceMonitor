@@ -407,7 +407,7 @@ public sealed class ServerConnectDefinitionEditTests
     /// again at the retired re-check, right after the install bookkeeping and before any store work: the
     /// seeded failure count (5) and failure text are what tell an install from a discard.
     /// </summary>
-    private static async Task<object> TryConnectAsync(MonitoredServer current, MonitoredServer attempted, bool failed)
+    private static async Task<object> TryConnectAsync(MonitoredServer current, MonitoredServer attempted, bool failed, ServerRuntime? attemptRuntime = null)
     {
         var state = ServerConnectBackoffTests.NewLoopState(LoopState, current);
         Set(state, "ConsecutiveConnectFailures", 5);
@@ -417,7 +417,7 @@ public sealed class ServerConnectDefinitionEditTests
 
         var attempt = new ConnectAttempt(
             attempted,
-            failed ? null : RuntimeFor(attempted),
+            failed ? null : attemptRuntime ?? RuntimeFor(attempted),
             failed ? new InvalidOperationException("unreachable") : null);
         var tryConnect = typeof(DarlingWorker).GetMethod("TryConnectAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
         await (Task)tryConnect.Invoke(NewWorker(), new object?[] { state, null, new DarlingConfig(), attempt, CancellationToken.None })!;
@@ -451,6 +451,24 @@ public sealed class ServerConnectDefinitionEditTests
 
         Assert.Equal(0, (int)Get(state, "ConsecutiveConnectFailures")!);
         Assert.Null(Get(state, "LastConnectFailureLogged"));
+    }
+
+    [Fact]
+    public async Task APlanCaptureEditDuringTheAttempt_IsOnTheInstalledRuntime_NotTheValueTheAttemptWasBuiltWith()
+    {
+        /* #6771: capture_plans is outside ServerDefinitionEquals (an edit must not reconnect), so this attempt is still good and
+           installs. The runtime it carries was stamped from the attempt's definition (the old value); ReconcileServers had no runtime
+           to re-stamp while the body waited, so the install itself must take the held definition's value. */
+        var attemptRuntime = RuntimeFor(new MonitoredServer { Name = "s", Host = "same.invalid", StoredServerId = 7, CapturePlans = null });
+        attemptRuntime.CapturePlans = null;
+
+        await TryConnectAsync(
+            current: new MonitoredServer { Name = "s", Host = "same.invalid", StoredServerId = 7, CapturePlans = false },
+            attempted: new MonitoredServer { Name = "s", Host = "same.invalid", StoredServerId = 7, CapturePlans = null },
+            failed: false,
+            attemptRuntime);
+
+        Assert.False(attemptRuntime.CapturePlans);
     }
 
     [Fact]

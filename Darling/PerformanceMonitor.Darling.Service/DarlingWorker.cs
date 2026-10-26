@@ -3762,7 +3762,7 @@ LIMIT 1";
            PostgreSQL store there are no hourly rollups for a backdated row to fall out of, so the refresh
            term does not apply and that deployment mode keeps the full raw-tier depth. Passed as a provider
            rather than a value so it cannot capture a stale reading. */
-        var queryStoreBackfill = new QueryStoreBackfill(postgres, runner, deltas, _logger, () => config.CapturePlans,
+        var queryStoreBackfill = new QueryStoreBackfill(postgres, runner, deltas, _logger,
             () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb),
             () => _timescaleAvailable,
             /* #5483: the server's effective database_states cadence, resolved live like the alert adapter's, so the
@@ -7189,6 +7189,18 @@ LIMIT 1";
                ServerDefinitionEquals) drops the runtime to reconnect through the startup path. */
             var connectionChanged = !ServerDefinitionEquals(state.Config, desiredServer);
             state.Config = desiredServer;
+            /* #6771: the plan-capture setting is not a connection field, so an edit must reach the next cycle without a reconnect.
+               The collectors read the runtime (set at connect, init-only Config), so the new value goes onto the live runtime too. */
+            if (state.Runtime is { } liveRuntime)
+            {
+                liveRuntime.CapturePlans = desiredServer.CapturePlans;
+            }
+
+            if (state.LastKnownRuntime is { } lastRuntime)
+            {
+                lastRuntime.CapturePlans = desiredServer.CapturePlans;
+            }
+
             if (connectionChanged)
             {
                 _logger.LogInformation(
@@ -14010,6 +14022,11 @@ AND   j.hypertable_name = '{relation}'", connection))
             }
 
             var runtime = attempt.Value.Runtime!;
+
+            /* #6771: the plan-capture setting is not part of ServerDefinitionEquals (an edit must not reconnect), so the
+               attempt's runtime can carry the value from before an edit that landed while this body waited for the permit,
+               and ReconcileServers had no runtime to re-stamp. The held definition is the current one: copy from it. */
+            runtime.CapturePlans = server.Config.CapturePlans;
             server.Runtime = runtime;
             server.LastKnownRuntime = runtime;
             server.WatchingSinceUtc = DateTime.UtcNow;

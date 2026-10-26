@@ -2463,7 +2463,7 @@ SELECT name, host, database, auth, username, encrypted_password, encrypt_mode, t
        read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override,
        engine, port, server_id, plan_force_bot_enabled, remediation_username, remediation_encrypted_password,
        aws_role_arn, aws_external_id, hypothetical_index_username, hypothetical_index_encrypted_password,
-       query_store_replica
+       query_store_replica, capture_plans
 FROM config_monitored_servers WHERE is_enabled = TRUE
 ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
@@ -2642,6 +2642,9 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             HypotheticalIndexEncryptedPassword = reader.IsDBNull(22) ? null : reader.GetString(22),
             /* V213 (#6254): the Query Store replica. Nullable with no default: NULL is the shipped state and reads from the server itself. */
             QueryStoreReplica = reader.IsDBNull(23) ? null : reader.GetString(23),
+            /* #6771: the per-server plan-capture setting. Nullable with no default: NULL is every server nobody has set, and it means
+               the service-wide setting. Read through IsDBNull, never GetBoolean alone, so NULL does not become false. */
+            CapturePlans = reader.IsDBNull(24) ? null : reader.GetBoolean(24),
         };
 
         /* #5366: the identity a sealed password is bound to is the row's own text, read through the one raw-row mapping

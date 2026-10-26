@@ -8,9 +8,11 @@
 
 using System;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -143,6 +145,10 @@ public partial class AddServerDialog : Window
             AlertNotificationMode.PerEvent => 2,
             _ => 0
         };
+        /* #6771: prefill the per-server plan-capture choice (null = "Use the service setting"). */
+        CapturePlansBox.SelectedItem = CapturePlansBox.Items.OfType<ComboBoxItem>()
+            .FirstOrDefault(item => string.Equals(item.Tag as string, CapturePlansTagOf(existing.CapturePlans), StringComparison.Ordinal))
+            ?? CapturePlansBox.Items[0];
         FavoriteCheckBox.IsChecked = isFavorite;
 
         EncryptModeComboBox.SelectedIndex = existing.EncryptMode switch
@@ -767,7 +773,7 @@ public partial class AddServerDialog : Window
             /* Preserve the excluded-databases (edited via the dedicated dialog), not lost on a plain save. */
             ExcludedDatabases = _existing?.ExcludedDatabases ?? new System.Collections.Generic.List<string>(),
             MonthlyCostUsd = monthlyCost,
-            CapturePlans = _existing?.CapturePlans,
+            CapturePlans = CapturePlansOfTag((CapturePlansBox.SelectedItem as ComboBoxItem)?.Tag as string),
             AlertDeliveryModeOverride = GetSelectedDeliveryOverride(),
             IsEnabled = EnabledCheckBox.IsChecked == true,
         };
@@ -823,6 +829,23 @@ public partial class AddServerDialog : Window
     {
         1 => AlertNotificationMode.Summary,
         2 => AlertNotificationMode.PerEvent,
+        _ => null
+    };
+
+    /// <summary>#6771: the Tag of the "Capture plans" combo item for a stored value: "service" = use the service setting (null), "on" = true, "off" = false.
+    /// Mapped by Tag, not by position, so reordering the items in the XAML cannot swap On and Off.</summary>
+    internal static string CapturePlansTagOf(bool? capturePlans) => capturePlans switch
+    {
+        true => "on",
+        false => "off",
+        _ => "service"
+    };
+
+    /// <summary>#6771: the stored value for a "Capture plans" combo item Tag (the inverse of <see cref="CapturePlansTagOf"/>).</summary>
+    internal static bool? CapturePlansOfTag(string? tag) => tag switch
+    {
+        "on" => true,
+        "off" => false,
         _ => null
     };
 
