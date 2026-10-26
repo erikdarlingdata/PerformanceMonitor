@@ -104,6 +104,8 @@ export function destinationPayload(entries) {
 /** The request body for the entries. The service applies the rules (the same ones as the Viewer); this only turns the boxes into
     values, and says which box is not a number. */
 export function routePayload(entries) {
+  /* A blank match is refused by the service with this sentence (a 400); said here it costs no request. */
+  if (String(entries.match).trim() === "") return { error: "Choose a family or enter an exact metric name." };
   const whole = (label, text) => {
     const t = String(text).trim();
     return /^\d+$/.test(t) ? { value: Number(t) } : { error: label + " must be a whole number." };
