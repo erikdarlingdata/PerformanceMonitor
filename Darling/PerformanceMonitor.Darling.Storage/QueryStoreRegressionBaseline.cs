@@ -1020,6 +1020,36 @@ public static class QueryStoreRegressionBaseline
     /// </summary>
     public static readonly string SuffixSql = Suffix("f.query_text_sample", "r.query_text_sample");
 
+    /// <summary>The comments around the self-statement test in <c>qualified</c>, so <see cref="WithSelfKeys"/> finds it after
+    /// <see cref="Bind"/> and <see cref="QueryStoreIntervalWide.WithEdgeMargin"/> have rewritten the rest of the text.</summary>
+    private const string SelfTestOpen = "/* self-test: */ (";
+
+    private const string SelfTestClose = ") /* :self-test */";
+
+    /// <summary>
+    /// #6750 part 3: the self-statement test once the key table is backfilled. <see cref="QueryStoreSelfKeys"/> holds the key of every
+    /// stored text that carries the marker, so a query whose text is in <c>query_store_text</c> is the monitor's own exactly when its
+    /// key is there, and the test reads no text. A query with no text row falls back to the <c>MAX(query_text)</c> sample, as the
+    /// probe does, tested inline with no I/O. The recent-days form's extra sample from latest is not read here: that text is from
+    /// before the separate-fetch cutover, and the collector's own drop removed the monitor's rows then.
+    /// </summary>
+    private static readonly string SelfKeysTest =
+        QueryStoreSelfStatement.NotSelfOfKey("$1", "f.database_name", "f.query_id") + " AND " + QueryStoreSelfStatement.NotSelfOfText("f.query_text_sample");
+
+    /// <summary>
+    /// #6750 part 3: <paramref name="sql"/> (any bound form of <see cref="Statement"/>) with the self-statement text probe replaced by
+    /// the key-table test (<see cref="SelfKeysTest"/>). The caller passes it only when <see cref="QueryStoreSelfKeys.ReadyAsync"/>
+    /// answered true inside the read's own snapshot. The rows, the ranks and every total are the same: only the cost changes, from one
+    /// primary-key probe of the text table per flagged row to a probe of a table of a few rows. A text with no test in it is returned
+    /// as it is, so it keeps the probe.
+    /// </summary>
+    public static string WithSelfKeys(string sql)
+    {
+        var open = sql.IndexOf(SelfTestOpen, StringComparison.Ordinal);
+        var close = open < 0 ? -1 : sql.IndexOf(SelfTestClose, open, StringComparison.Ordinal);
+        return close < 0 ? sql : string.Concat(sql.AsSpan(0, open + SelfTestOpen.Length), SelfKeysTest, sql.AsSpan(close));
+    }
+
     /// <summary>
     /// <see cref="SuffixSql"/> for the recent-days form (#5506). The daily totals hold no <c>query_text</c>, so the
     /// <c>MAX(query_text)</c> sample covers only the live ranges. Where the text table has no row for the key (the only
@@ -1150,7 +1180,7 @@ public static class QueryStoreRegressionBaseline
                flags come from, so the probe runs only on rows that already pass them. The result is the same: a row the flags
                drop was dropped by the WHERE above anyway. */
             AND   CASE WHEN (f.is_cost OR f.is_timeouts OR f.is_errors)
-                       THEN {{QueryStoreSelfStatement.NotSelfOfKeyedText("$1", "f.database_name", "f.query_id", flaggedSample)}}
+                       THEN {{SelfTestOpen}}{{QueryStoreSelfStatement.NotSelfOfKeyedText("$1", "f.database_name", "f.query_id", flaggedSample)}}{{SelfTestClose}}
                        ELSE false END
         ),
         ranked AS (

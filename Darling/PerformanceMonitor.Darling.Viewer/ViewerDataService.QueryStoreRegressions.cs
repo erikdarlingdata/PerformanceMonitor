@@ -291,7 +291,14 @@ public sealed partial class ViewerDataService
             connection, transaction, serverId, baselineStartUtc, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken,
             clampToRawFloor: true);
         plan = QueryStoreRegressionBaseline.WithHoursHeldStart(plan, baselineStartUtc, dataStartUtc);
-        await using var command = new NpgsqlCommand(plan.BuiltDayCount > 0 ? QueryStoreRegressionsSql : s_rawLiveSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+        /* #6750 part 3: the self-statement test on the key table once its backfill has run, read in this snapshot. */
+        var rawSql = plan.BuiltDayCount > 0 ? QueryStoreRegressionsSql : s_rawLiveSql;
+        if (await QueryStoreSelfKeys.ReadyAsync(connection, transaction, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken))
+        {
+            rawSql = QueryStoreRegressionBaseline.WithSelfKeys(rawSql);
+        }
+
+        await using var command = new NpgsqlCommand(rawSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
         AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, baselineStartUtc, plan, excludedDatabases);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return new ViewerQueryStoreRegressionsRead(await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken), DatabasesLeftOut.Distinct(excludedDatabases));
@@ -340,6 +347,11 @@ public sealed partial class ViewerDataService
                 windowEnd: endUtc, spans: spans);
             baselinePlan = QueryStoreRegressionBaseline.WithArmStarts(baselinePlan, spans, plan.ClampedStart, dataStartUtc);
             var wideSql = QueryStoreRegressionsTableSqlFor(baselinePlan);
+            if (await QueryStoreSelfKeys.ReadyAsync(connection, transaction, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken))
+            {
+                /* #6750 part 3: as the MCP read, the key table once its backfill has run. */
+                wideSql = QueryStoreRegressionBaseline.WithSelfKeys(wideSql);
+            }
 
             /* #5506 step 2: the same measured margin as the MCP read (DarlingQueryStoreRegressionReader.TryGetQueryStoreRegressionsFromTableAsync
                explains it): the server's longest interval in place of the 26-hour floor, or the 26 hours where it is not known. */

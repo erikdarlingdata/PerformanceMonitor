@@ -533,6 +533,10 @@ DO $$ BEGIN IF to_regclass('config.config_server_actions') IS NOT NULL THEN
   ALTER TABLE config.config_server_actions DROP CONSTRAINT IF EXISTS ck_config_server_actions_action;
   ALTER TABLE config.config_server_actions ADD CONSTRAINT ck_config_server_actions_action CHECK (action IN ('force_plan', 'evict_plan', 'kill_session'));
 END IF; END $$;"),
+        // V219 (#6750): the Query Store self-statement key tables. The state table is the probe's newest sentinel. The rewind drops both, so a
+        // re-run of V219 creates them again. Safe on a store that never had them.
+        new(219, "hasQueryStoreSelfKeys",
+            "DROP TABLE IF EXISTS collect.query_store_self_keys_state, collect.query_store_self_keys;"),
     ];
 
     /// <summary>

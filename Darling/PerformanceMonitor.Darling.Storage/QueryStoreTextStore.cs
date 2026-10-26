@@ -84,8 +84,16 @@ public static class QueryStoreTextStore
     /// <c>WHERE EXCLUDED.last_seen &gt;=</c> guard keeps the stamp monotonic so an out-of-order write
     /// cannot age a row backwards into the prune's reach. <c>query_hash</c> takes EXCLUDED when the fetch
     /// carried one and keeps the stored value otherwise — never replace knowledge with absence.</para>
+    ///
+    /// <para><b>The self-statement keys (#6750 part 3).</b> The same statement records, for every row it wrote, whether the text
+    /// it landed is the monitor's own (<see cref="QueryStoreSelfKeys"/>): the key is inserted when the text carries the marker and
+    /// deleted when an overwrite lands text without it (a reset renumbered the id). It reads the upsert's <c>RETURNING</c>, so a
+    /// row the monotonic guard skipped keeps its text and its key. One statement, so one transaction, and the key rows it touches
+    /// are exactly the text rows the upsert has already locked in key order, so a concurrent batch over the same keys waits on
+    /// the text row first and the #1801 ordering covers the key table too.</para>
     /// </summary>
-    public const string UpsertSql = @"INSERT INTO collect.query_store_text
+    public static readonly string UpsertSql = @"WITH upserted AS (
+INSERT INTO collect.query_store_text
     (server_id, database_name, query_id, query_sql_text, query_hash, last_seen)
 SELECT server_id, database_name, query_id, query_sql_text, query_hash, stamped
 FROM unnest($1::integer[], $2::text[], $3::bigint[], $4::text[], $5::text[], $6::timestamp[])
@@ -95,7 +103,23 @@ ON CONFLICT (server_id, database_name, query_id) DO UPDATE SET
     query_sql_text = EXCLUDED.query_sql_text,
     query_hash = COALESCE(EXCLUDED.query_hash, query_store_text.query_hash),
     last_seen = EXCLUDED.last_seen
-WHERE EXCLUDED.last_seen >= query_store_text.last_seen";
+WHERE EXCLUDED.last_seen >= query_store_text.last_seen
+RETURNING server_id, database_name, query_id, query_sql_text
+),
+self_added AS (
+INSERT INTO collect.query_store_self_keys (server_id, database_name, query_id)
+SELECT u.server_id, u.database_name, u.query_id
+FROM upserted AS u
+WHERE " + QueryStoreSelfKeys.IsSelf("u.query_sql_text") + @"
+ORDER BY u.server_id, u.database_name, u.query_id
+ON CONFLICT (server_id, database_name, query_id) DO NOTHING
+)
+DELETE FROM collect.query_store_self_keys AS k
+USING upserted AS u
+WHERE k.server_id = u.server_id
+AND   k.database_name = u.database_name
+AND   k.query_id = u.query_id
+AND   NOT " + QueryStoreSelfKeys.IsSelf("u.query_sql_text");
 
     /// <summary>
     /// The text side's liveness touch and missing-set probe (#2312), the single-table sibling of

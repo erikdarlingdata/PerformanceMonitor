@@ -1,0 +1,202 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #6750 part 3: the keys of the monitor's own Query Store statements (<see cref="QueryStoreSelfKeys"/>). The text writer records a
+/// key when the text it lands carries the marker and removes it when an overwrite lands text without it. The backfill records the
+/// keys of text stored before the table existed and opens the gate. The regressions read (the MCP tool and the Viewer grid) hides
+/// the monitor's own statement and counts only the other regressions, with the gate closed (the text probe) and open (the keys).
+/// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test reaches DARLING_TEST_PG only to CREATE and DROP its
+   own database through ScratchPostgres and works entirely inside it. It shares the gap-cache collection with the other regressions
+   table tests, because the gate's cadence check reads a process-wide cache. */
+[Collection("gap-cache-serial")]
+public sealed class QueryStoreSelfKeysLiveTests
+{
+    private const int ServerId = QueryStoreRegressionsFailureGroupsLiveTests.ServerId;
+    private const string Db = QueryStoreRegressionsFailureGroupsLiveTests.Db;
+    private const long Own = 43;
+    private static readonly long[] Ordinary = [40, 41, 42];
+
+    private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    private static string SelfText(long id) => "(@cutoff_time datetime2(7))SELECT /* " + QueryStoreCollector.SelfQueryMarker + " */ qsrs.plan_id -- " + id;
+
+    private static async Task<long> CountAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(ct));
+    }
+
+    private static Task<long> KeysAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        CountAsync(connection, "SELECT count(*) FROM collect.query_store_self_keys", ct);
+
+    [Fact]
+    public async Task TheTextWriter_RecordsTheKeyOfAMarkedText_AndRemovesItWhenAnOverwriteLandsOtherText()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #6750 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var now = DateTime.UtcNow;
+
+        /* The real fetch-store path: one marked text and one ordinary one. Only the marked one has a key. */
+        await QueryStoreTextWriter.WriteAsync(connection, ServerId, Db,
+            [new FetchedQueryText(Own, SelfText(Own), "0x01"), new FetchedQueryText(40, "SELECT 40", "0x02")], now, 30, cancellationToken: ct);
+        Assert.Equal(1L, await CountAsync(connection, $"SELECT count(*) FROM collect.query_store_self_keys WHERE server_id = {ServerId} AND database_name = '{Db}' AND query_id = {Own}", ct));
+        Assert.Equal(1L, await KeysAsync(connection, ct));
+
+        /* A Query Store reset renumbered the id: the same id now names an ordinary statement, and its key goes with the old text. */
+        await QueryStoreTextWriter.WriteAsync(connection, ServerId, Db,
+            [new FetchedQueryText(Own, "SELECT after_reset", "0x03")], now.AddMinutes(5), 30, cancellationToken: ct);
+        Assert.Equal(0L, await KeysAsync(connection, ct));
+
+        /* And back: an ordinary id that is now the monitor's own statement gains a key. */
+        await QueryStoreTextWriter.WriteAsync(connection, ServerId, Db,
+            [new FetchedQueryText(40, SelfText(40), "0x04")], now.AddMinutes(10), 30, cancellationToken: ct);
+        Assert.Equal(1L, await CountAsync(connection, $"SELECT count(*) FROM collect.query_store_self_keys WHERE query_id = 40", ct));
+
+        /* Retention: a key whose text row is gone is pruned, a key whose text row is there stays. */
+        await QueryStoreTextWriter.WriteAsync(connection, ServerId, Db,
+            [new FetchedQueryText(Own, SelfText(Own), "0x05")], now.AddMinutes(15), 30, cancellationToken: ct);
+        Assert.Equal(2L, await KeysAsync(connection, ct));
+        await using (var gone = new NpgsqlCommand("DELETE FROM collect.query_store_text WHERE query_id = 40", connection))
+        {
+            await gone.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var prune = new NpgsqlCommand(QueryStoreSelfKeys.PruneSql, connection))
+        {
+            prune.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(now, DateTimeKind.Unspecified) });
+            Assert.Equal(1, await prune.ExecuteNonQueryAsync(ct));
+        }
+
+        Assert.Equal(1L, await CountAsync(connection, $"SELECT count(*) FROM collect.query_store_self_keys WHERE query_id = {Own}", ct));
+    }
+
+    /// <summary>The rig: three ordinary queries and the monitor's own statement, each tripling its CPU from the baseline to the recent
+    /// window. The stats rows carry ordinary inline text for all four, so only the text table says which one is the monitor's.</summary>
+    private static async Task<QueryStoreRegressionsFailureGroupsLiveTests.Rig> OpenRigAsync(DateTime now, CancellationToken ct) =>
+        await QueryStoreRegressionsFailureGroupsLiveTests.OpenAsync(async (runner, server, context, today, start) =>
+        {
+            long id = 9800;
+            foreach (var q in Ordinary.Append(Own))
+            {
+                foreach (var (first, cpu) in new[] { (now.AddDays(-5), 1_000L), (now.AddHours(-3), 3_000L) })
+                {
+                    id++;
+                    await QueryStoreRegressionsFailureGroupsLiveTests.WriteAsync(runner, server, context, "Regular", id, first, q, 100, cpu, cpu * 2, ct, Db, "SELECT " + q);
+                }
+            }
+
+            await QueryStoreRegressionsFailureGroupsLiveTests.WriteAsync(runner, server, context, "Regular", ++id, start.AddDays(-12), 90, 5, 1_000, 1_000, ct, Db, "SELECT floor");
+        }, ct);
+
+    /// <summary>The MCP tool's ids and <c>regression_count</c>, and the Viewer grid's ids.</summary>
+    private static async Task<(List<long> Mcp, long Count, List<long> Viewer)> ReadBothAsync(QueryStoreRegressionsFailureGroupsLiveTests.Rig rig, DateTime now, CancellationToken ct)
+    {
+        var json = await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, "qsfail", 24, DatabaseFilter.All, 30, false, null, NullLogger.Instance, ct);
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var ids = doc.RootElement.GetProperty("regressions").EnumerateArray().Select(r => r.GetProperty("query_id").GetInt64()).OrderBy(x => x).ToList();
+        var count = doc.RootElement.GetProperty("regression_count").GetInt64();
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+        var grid = await viewer.GetQueryStoreRegressionsWithScopeAsync(ServerId, now.AddHours(-24), now, cancellationToken: ct);
+        return (ids, count, grid.Rows.Select(r => r.QueryId).OrderBy(x => x).ToList());
+    }
+
+    private static void AssertOwnHidden((List<long> Mcp, long Count, List<long> Viewer) read)
+    {
+        Assert.Equal(Ordinary.ToList(), read.Mcp);
+        Assert.Equal(3L, read.Count);
+        Assert.Equal(Ordinary.ToList(), read.Viewer);
+    }
+
+    [Fact]
+    public async Task TheRegressionsRead_HidesTheMonitorsOwnStatement_AndCountsThree_WithTheGateClosedAndOpen()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #6750 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var now = LiveClock.Now();
+        await using var rig = await OpenRigAsync(now, ct);
+
+        /* The live shape: the text lands through the fetch-store path, and only the monitor's own carries the marker. */
+        await QueryStoreTextWriter.WriteAsync(rig.Connection, ServerId, Db,
+            [.. Ordinary.Select(q => new FetchedQueryText(q, "SELECT " + q, null)), new FetchedQueryText(Own, SelfText(Own), null)],
+            DateTime.SpecifyKind(now, DateTimeKind.Utc), 30, cancellationToken: ct);
+        Assert.Equal(1L, await KeysAsync(rig.Connection, ct));
+
+        /* Gate closed (no backfill yet): the text probe hides it. */
+        Assert.False(await QueryStoreSelfKeys.ReadyAsync(rig.Connection, null, 30, ct));
+        AssertOwnHidden(await ReadBothAsync(rig, now, ct));
+
+        /* Gate open: the keys hide it, with the same rows and the same count. */
+        Assert.Equal(0, await QueryStoreSelfKeys.BackfillAsync(rig.Connection, ct));
+        Assert.True(await QueryStoreSelfKeys.ReadyAsync(rig.Connection, null, 30, ct));
+        AssertOwnHidden(await ReadBothAsync(rig, now, ct));
+
+        /* Not vacuous: with the gate open it is the key that hides the statement, not the text. Take the key away and it is listed. */
+        await using (var drop = new NpgsqlCommand("DELETE FROM collect.query_store_self_keys", rig.Connection))
+        {
+            await drop.ExecuteNonQueryAsync(ct);
+        }
+
+        var unkeyed = await ReadBothAsync(rig, now, ct);
+        Assert.Equal(Ordinary.Append(Own).ToList(), unkeyed.Mcp);
+        Assert.Equal(4L, unkeyed.Count);
+    }
+
+    [Fact]
+    public async Task TheBackfill_KeysTextStoredBeforeTheTable_AndTheReadHidesItWithTheGateOpen()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #6750 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var now = LiveClock.Now();
+        await using var rig = await OpenRigAsync(now, ct);
+
+        /* Text stored before the key table existed: written straight to the text table, so no key. */
+        await using (var old = new NpgsqlCommand(
+            "INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen) SELECT $1, $2, q, CASE WHEN q = $3 THEN $4 ELSE 'SELECT ' || q END, $5 FROM unnest($6::bigint[]) AS q",
+            rig.Connection))
+        {
+            old.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+            old.Parameters.Add(new NpgsqlParameter<string> { TypedValue = Db });
+            old.Parameters.Add(new NpgsqlParameter<long> { TypedValue = Own });
+            old.Parameters.Add(new NpgsqlParameter<string> { TypedValue = SelfText(Own) });
+            old.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(now, DateTimeKind.Unspecified) });
+            old.Parameters.Add(new NpgsqlParameter<long[]> { TypedValue = [.. Ordinary, Own] });
+            await old.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.Equal(0L, await KeysAsync(rig.Connection, ct));
+
+        /* The step records the one key, opens the gate, and a second run does nothing. */
+        Assert.Equal(1, await QueryStoreSelfKeys.BackfillAsync(rig.Connection, ct));
+        Assert.True(await QueryStoreSelfKeys.ReadyAsync(rig.Connection, null, 30, ct));
+        Assert.Null(await QueryStoreSelfKeys.BackfillAsync(rig.Connection, ct));
+        Assert.Equal(1L, await CountAsync(rig.Connection, $"SELECT count(*) FROM collect.query_store_self_keys WHERE query_id = {Own}", ct));
+
+        AssertOwnHidden(await ReadBothAsync(rig, now, ct));
+    }
+}

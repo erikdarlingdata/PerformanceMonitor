@@ -809,6 +809,21 @@ public static class DarlingRetention
                     {
                         tablesFailed++;
                     }
+
+                    /* #6750 part 3: the self-statement keys whose text row the prune above retired. A few rows per database,
+                       so one anti-join is the whole purge (single-shot). Its cutoff parameter is unused. */
+                    var selfKeysDeleted = await PurgeOneAsync(
+                        postgres, QueryStoreSelfKeys.TableName, QueryStoreSelfKeys.PruneSql, queryTextCutoff, logger, cancellationToken,
+                        batchSize: SingleShotStatement, pacer: walPacer);
+                    if (selfKeysDeleted is not null)
+                    {
+                        tablesPurged++;
+                        totalRowsDeleted += selfKeysDeleted.Value;
+                    }
+                    else
+                    {
+                        tablesFailed++;
+                    }
                 }
 
                 foreach (var dimTable in PayloadDimensions.DimTables)

@@ -2994,6 +2994,11 @@ LIMIT 1";
         var queryStoreIndexes = QueryStoreIntervalPartitions.RunDelayedAsync(
             postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, QueryStoreBackgroundIndexes.All, stoppingToken);
 
+        /* #6750 part 3: the keys of the monitor's own Query Store statements stored before V219, one scan of the text table, in the
+           background QueryStoreBackgroundIndexes.StartDelay after start. Until it has run the regressions read keeps the text probe
+           (QueryStoreSelfKeys explains the gate). Once per start, a no-op once the state row exists, and it never throws. */
+        var queryStoreSelfKeys = QueryStoreSelfKeys.RunDelayedAsync(postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, stoppingToken);
+
         /* #4957: one rollup-coverage probe in the background RollupCoverageWarmup.ServiceStartDelay after start, so
            the first MCP or web call finds each rollup's floor already measured and does not wait ~10 s on the
            large stores for the oldest compressed chunk's min(bucket). Launched after migrations, never awaited on
@@ -4728,6 +4733,9 @@ LIMIT 1";
 
         /* And the Query Store read index ensures (#4605, #4952, #5507), which absorb their own failures. */
         await queryStoreIndexes;
+
+        /* And the self-statement key backfill (#6750), which absorbs its own failures. */
+        await queryStoreSelfKeys;
 
         /* And the rollup-coverage warm (#4957), which also absorbs its own failures. */
         await rollupCoverageWarm;
