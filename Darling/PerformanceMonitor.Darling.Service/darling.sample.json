@@ -540,8 +540,10 @@
     // Adding or editing a server in the dashboard defaults to Windows authentication, where the service presents
     // its own computer account to the host the form names. By default the dashboard refuses a Windows-authentication
     // server that also sets trust_server_certificate or an encrypt_mode other than Mandatory or Strict, because the
-    // service could not confirm which server it reached. An edit is judged only when it changes the host, the port,
-    // the auth type, trust_server_certificate, encrypt_mode or the Query Store replica. Uncomment to allow it. SQL authentication and the
+    // service could not confirm which server it reached. An edit is judged only when it changes the machine the entry
+    // names or its sign-in and certificate settings: the host, the port, the auth type, trust_server_certificate,
+    // encrypt_mode or the Query Store replica. read_only_intent and multi_subnet_failover do not change the host the
+    // entry names, so they are not judged. Uncomment to allow it. SQL authentication and the
     // Entra modes are not affected. The same rule as mcp.allowWindowsAuthOverUnverifiedTls for MCP. Default off.
     // Restart to change.
     // "allowWindowsAuthOverUnverifiedTls": true,

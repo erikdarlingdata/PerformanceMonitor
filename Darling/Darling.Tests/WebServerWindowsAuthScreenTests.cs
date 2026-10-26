@@ -16,9 +16,11 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -240,6 +242,62 @@ public sealed class WebServerWindowsAuthScreenTests
         var text = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
 
         Assert.DoesNotContain(WebKey, text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("{\"web\":{\"enabled\":true}}", true)]
+    [InlineData("{\"web\":{\"allowWindowsAuthOverUnverifiedTls\":false}}", true)]
+    [InlineData("{\"web\":{\"allowWindowsAuthOverUnverifiedTls\":true}}", false)]
+    public async Task HostPipeline_CarriesTheParsedSetting_ToThePostRoute(string json, bool refused)
+    {
+        /* Through the host's own ConfigurePipeline -> MapAll -> MapServers, with the setting read from parsed darling.json text and the
+           route's default wiring over a store nothing listens behind: off answers the refusal row naming the web key; on gets past the
+           screen to the unreachable store, so the refusal text is absent. */
+        var config = DarlingConfig.Parse(json);
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        var postgres = NpgsqlDataSource.Create(DeadStore);
+        builder.Services.AddSingleton(postgres);
+        DarlingWebHostService.ConfigureResponseCompression(builder.Services);
+        await using var app = builder.Build();
+        var host = new DarlingWebHostService(
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingWebHostService>.Instance,
+            new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
+        const string hostName = "192.168.1.205";
+        var remote = System.Net.IPAddress.Parse("192.168.1.50");
+        host.ConfigurePipeline(
+            app, postgres, networkMode: true, networkListenIp: System.Net.IPAddress.Parse(hostName),
+            allowedCidr: System.Net.IPNetwork.Parse("192.168.1.0/24"), accessToken: "correct-token-value", oidcClient: null,
+            allowWindowsAuthOverUnverifiedTls: config.Web?.AllowWindowsAuthOverUnverifiedTls ?? false);
+        await app.StartAsync(TestContext.Current.CancellationToken);
+        var server = app.GetTestServer();
+
+        /* The shared-token seat edits: sign in with the token, then send the add with the session cookie it mints. */
+        var exchange = await DarlingWebHostGateLiveTests.PostSignIn(server, hostName, remote, "correct-token-value");
+        var cookie = exchange.Response.Headers.SetCookie.ToString().Split(';')[0];
+        var payload = Encoding.UTF8.GetBytes(Windows(",\"trust_server_certificate\":true"));
+        var context = await server.SendAsync(c =>
+        {
+            c.Request.Method = "POST";
+            c.Request.Path = "/api/servers";
+            c.Request.Headers.Host = hostName;
+            c.Request.Headers["Cookie"] = cookie;
+            c.Request.ContentType = "application/json";
+            c.Request.ContentLength = payload.Length;
+            c.Request.Body = new System.IO.MemoryStream(payload);
+            c.Connection.RemoteIpAddress = remote;
+        });
+        using var reader = new System.IO.StreamReader(context.Response.Body);
+        var text = await reader.ReadToEndAsync(TestContext.Current.CancellationToken);
+        var response = context.Response;
+
+        Assert.True(refused == text.Contains(WebKey, StringComparison.Ordinal), response.StatusCode + " " + text);
+        if (refused)
+        {
+            Assert.Equal(200, response.StatusCode);
+            Assert.Equal("invalid", AddStatus(JsonNode.Parse(text)!));
+        }
     }
 
     /* ---------------- edit ---------------- */

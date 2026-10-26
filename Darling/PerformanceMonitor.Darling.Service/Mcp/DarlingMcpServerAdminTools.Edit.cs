@@ -388,8 +388,10 @@ LIMIT 1";
         }
 
         /* The web route's one rule (web.allowWindowsAuthOverUnverifiedTls), on the server as it would be saved. It runs only when the edit
-           changes what the Windows sign-in is judged on: the host, the port, the auth type, trust_server_certificate, encrypt_mode or the
-           Query Store replica (the replica is reached with the primary's Windows sign-in and certificate settings).
+           changes the machine the entry names or its sign-in and certificate settings: the host, the port, the auth type,
+           trust_server_certificate, encrypt_mode or the Query Store replica (the replica is reached with the primary's Windows sign-in
+           and certificate settings). read_only_intent and multi_subnet_failover are not in the list: read-only routing goes to a replica
+           the availability group's own routing list picks, and multi-subnet failover keeps the same host name.
            An edit of anything else (display name, thresholds, tags, enabled) is never refused, even on a server that already has the
            combination. It runs before any further store read or probe. */
         if (webScreen is not null && (plan.ReplicaChanged || plan.ChangedFields.Exists(f => f is "host" or "port" or "auth" or "trust_server_certificate" or "encrypt_mode"))

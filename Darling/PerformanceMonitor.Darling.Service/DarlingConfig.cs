@@ -1917,8 +1917,10 @@ public sealed class WebConfig
     /// Default OFF; a darling.json without the key keeps it off. Adding or editing a server in the web dashboard defaults to Windows
     /// authentication, where this service presents its own computer account to the host the form names. Off, the web add and edit refuse a
     /// Windows-authentication server that also sets <c>trust_server_certificate</c> or an <c>encrypt_mode</c> other than Mandatory or
-    /// Strict, because the service could not confirm which server it reached; an edit is judged only when it changes the host, the port,
-    /// the auth type, <c>trust_server_certificate</c>, <c>encrypt_mode</c> or the Query Store replica, on the server as it would be saved. On, the web accepts
+    /// Strict, because the service could not confirm which server it reached. An edit is judged only when it changes the machine the entry
+    /// names or its sign-in and certificate settings (the host, the port, the auth type, <c>trust_server_certificate</c>,
+    /// <c>encrypt_mode</c> or the Query Store replica), on the server as it would be saved; <c>read_only_intent</c> and
+    /// <c>multi_subnet_failover</c> do not change the host the entry names, so they are not judged. On, the web accepts
     /// them. SQL authentication and the Entra modes are not affected. The same rule as <see cref="McpConfig.AllowWindowsAuthOverUnverifiedTls"/>
     /// for MCP; the <c>--add-server</c> command is the operator's own and is not gated. File-only and restart-only.
     /// </summary>

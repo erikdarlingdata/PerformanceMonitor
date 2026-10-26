@@ -876,6 +876,15 @@ public sealed class DarlingWebHostService : BackgroundService
                 _adminArm = WebAdminArm.ForHost(config.Postgres, web.AllowAdminWrites, _logger);
             }
 
+            /* The MCP host warns the same way while its twin setting is on: the state of this gate is otherwise visible nowhere at start. */
+            if (web.AllowWindowsAuthOverUnverifiedTls)
+            {
+                _logger.LogWarning(
+                    "{Setting} is on: the dashboard's server add and edit accept Windows authentication with trust_server_certificate or " +
+                    "optional encryption, so a signed-in editor can point this service's own account at a server it cannot verify.",
+                    DarlingUnverifiedWindowsAuthScreen.WebSetting);
+            }
+
             /* Off Windows there is no managed store and no admin pool, but OIDC without a role mapping still gives every signed-in user the edit seat. */
             WebAdminArm.WarnWhenOidcHasNoRoleMapping(_oidcClient, DarlingWebStoreWrites.IsManaged(config.Postgres), _adminArm, _logger);
 

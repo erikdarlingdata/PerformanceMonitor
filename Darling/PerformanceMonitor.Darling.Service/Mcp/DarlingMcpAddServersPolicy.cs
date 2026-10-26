@@ -66,26 +66,6 @@ public sealed class DarlingMcpAddServersPolicy
         List<DarlingMcpServerAdminTools.ParsedServerEntry> entries,
         List<DarlingMcpServerAdminTools.ServerResult> results)
     {
-        if (policy is null)
-        {
-            return entries;
-        }
-
-        var allowed = new List<DarlingMcpServerAdminTools.ParsedServerEntry>(entries.Count);
-        foreach (var entry in entries)
-        {
-            var refusal = policy.Refusal(entry.ProbeConfig);
-            if (refusal is null)
-            {
-                allowed.Add(entry);
-            }
-            else
-            {
-                results.Add(new DarlingMcpServerAdminTools.ServerResult(
-                    entry.Order, entry.DisplayName, DarlingMcpServerAdminTools.AddStatus.Invalid, refusal));
-            }
-        }
-
-        return allowed;
+        return DarlingUnverifiedWindowsAuthScreen.Screen(policy?.WindowsAuthScreen, entries, results);
     }
 }
