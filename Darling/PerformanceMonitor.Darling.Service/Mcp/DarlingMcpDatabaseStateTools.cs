@@ -40,6 +40,11 @@ public sealed class DarlingMcpDatabaseStateTools
     private const string IgnoreToken = "IGNORE";
     private const int MaxRows = 500;
 
+    /* The engine half of the collector's gate (Azure SQL Database) is answered before this is used, so the one candidate left is the
+       operator having switched the collector off in this server's schedule. */
+    private const string GateCandidates =
+        "Possible cause: the database_states collector is switched off in this server's collector schedule; get_collector_schedules shows it.";
+
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
     [McpServerTool(Name = "get_database_state_expectations"), Description(
         "Lists one server's databases with the state each is in now and the state the Database State alert expects it to be in: expected_state, whether a person set it (is_user_override), and status (as_expected, deviating, ignored, or pending when no baseline is learned yet). The Viewer's database state override editor shows the same. " +
@@ -64,17 +69,33 @@ public sealed class DarlingMcpDatabaseStateTools
             }
 
             var rows = await DatabaseStateExpectedStore.ReadAsync(postgres, resolved.ServerId, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            if (rows.Count == 0)
+            {
+                /* No snapshot exists for this server at all, so the database_name filter has nothing to say yet. A PostgreSQL target or an
+                   Azure SQL Database never writes one (not_collected, permanent). A SQL Server target whose collector ran and recorded a
+                   fault gets that fault; one whose collector is switched off (never invoked while the server collects normally) gets the
+                   gated-off answer, called AFTER StatusAsync as the other reads do; any other SQL Server target has not been collected
+                   yet (unavailable). */
+                var noSnapshot = await DarlingEngineCapability.NotCollectedStatusAsync(
+                        postgres, resolved.ServerId, resolved.DisplayName, "database_states", cancellationToken)
+                    ?? await DarlingRuntimePrecondition.StatusAsync(
+                        postgres, resolved.ServerId, resolved.DisplayName, "database_states", cancellationToken)
+                    ?? await DarlingRuntimePrecondition.GatedOffStatusAsync(
+                        postgres, resolved.ServerId, resolved.DisplayName, "database_states", GateCandidates, cancellationToken);
+                return noSnapshot ?? DarlingMcpAlertTools.Outcome("unavailable",
+                    $"No database state has been collected for server '{resolved.DisplayName}' yet. The database_states collector writes it every minute by default on a SQL Server target, " +
+                    "so if this server has been monitored for more than a few minutes, check collection health (get_collection_health).");
+            }
+
             if (!string.IsNullOrWhiteSpace(database_name))
             {
                 rows = rows.Where(r => string.Equals(r.DatabaseName, database_name, StringComparison.Ordinal)).ToList();
-            }
-
-            if (rows.Count == 0)
-            {
-                return DarlingMcpAlertTools.Outcome("empty",
-                    $"No database state is collected for server '{resolved.DisplayName}'" +
-                    (string.IsNullOrWhiteSpace(database_name) ? "." : $" for database '{database_name}'.") +
-                    " The collector may not have run yet, or the server's engine does not collect it.");
+                if (rows.Count == 0)
+                {
+                    return DarlingMcpAlertTools.Outcome("empty",
+                        $"The newest database state snapshot for server '{resolved.DisplayName}' does not list a database named '{database_name}'. " +
+                        "A database created, renamed or dropped since that snapshot is not in it.");
+                }
             }
 
             return JsonSerializer.Serialize(new
