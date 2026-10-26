@@ -325,12 +325,23 @@ public static class CollectionHealthStatements
                     l.slowest_item_ms,
                     width_bucket(l.duration_ms - 1, {CollectionLogHourly.BoundsArraySql}) AS slot
                 FROM raw_ranges rr
-                JOIN v_collection_log l
-                  ON  l.collection_time >= rr.range_start
-                  AND l.collection_time < rr.range_end
-                WHERE l.server_id = $1
-                AND   l.collection_time >= $2
-                AND   l.{CollectionCycleRow.NotCycleRowSql}
+                -- #5506: one bounded probe per raw range. A plain join read every row of the server for the whole
+                -- window (about 223k rows, keeping 2,670 through a join filter), mostly from the two uncompressed
+                -- chunks that hold every server's rows on shared pages: 10.5 s and 185 MB read cold on the large
+                -- production store. This form took 0.73 s and 27 MB cold with identical output. OFFSET 0 must stay:
+                -- without it the planner flattens the LATERAL back into the plain join (measured 7.7 s), the same
+                -- fence CollectionLogHourly.UpsertSql uses. The select list must hold every column read above.
+                CROSS JOIN LATERAL
+                (
+                    SELECT x.collector_name, x.collection_time, x.status, x.error_message, x.rows_collected, x.duration_ms, x.slowest_item_ms
+                    FROM v_collection_log x
+                    WHERE x.server_id = $1
+                    AND   x.collection_time >= $2
+                    AND   x.collection_time >= rr.range_start
+                    AND   x.collection_time < rr.range_end
+                    AND   x.{CollectionCycleRow.NotCycleRowSql}
+                    OFFSET 0
+                ) l
             ) w
             GROUP BY w.collector_name
         ),
