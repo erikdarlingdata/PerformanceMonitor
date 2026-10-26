@@ -153,6 +153,15 @@ public sealed class AnalysisFindingsTabTests
     }
 
     [Fact]
+    public void TheSeverityNumber_IsLabelledAsAScore_NotRunIntoTheCategory()
+    {
+        var text = Run("scoreWording").GetProperty("text").GetString()!;
+        Assert.Contains("(score 0.80)", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0.80 waits", text, StringComparison.Ordinal);
+        Assert.Contains("waits", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheReadCapNote_AndThePageNote_AreBothShown()
     {
         var text = Run("truncation").GetProperty("text").GetString()!;
