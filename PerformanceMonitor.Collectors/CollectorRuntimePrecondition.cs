@@ -748,12 +748,16 @@ public static class CollectorRuntimePrecondition
     /// say the server is one. The collectors skip every database whose <c>readonly_reason</c> has bit 8 (Query Store, its
     /// forced-plan and plan-correction fan-outs, and since #6252 its health row), so a registered secondary has no Query Store
     /// rows to read, and the older answers ("empty", "Query Store is READ_ONLY") sent the reader to look for a fault in what is a
-    /// secondary's normal state. The server is a secondary when its collected <c>ag_replica_role</c> says <c>Secondary</c>, or when
-    /// every database in its newest health capture carries the bit (an RDS read replica reads <c>Standalone</c> in the role, and
-    /// captures from before #6252 still carry the bit). Null when <paramref name="replicaConfigured"/> is true: then the Query Store
+    /// secondary's normal state. The server is a secondary when every database in its newest health capture that Query Store is read
+    /// for carries the bit (an RDS read replica reads <c>Standalone</c> in the role, and captures from before #6252 still carry the bit).
+    /// A capture with any such database not flagged secondary says the server still collects Query Store for it, so the answer is null
+    /// whatever the role says (an instance whose role reads <c>Secondary</c> can host databases outside any availability group).
+    /// The databases counted are the ones the collector reads Query Store for: the on-prem health capture always holds tempdb (its
+    /// database list is <c>database_id &gt; 4 OR database_id = 2</c>) with Query Store OFF, and a database whose Query Store is OFF has
+    /// nothing to read, so neither counts. Only when no such database is left does the collected <c>ag_replica_role</c> decide: <c>Secondary</c> is a secondary. Null when <paramref name="replicaConfigured"/> is true: then the Query Store
     /// is read from a replica and an empty read has some other cause.
     /// </summary>
-    /// <param name="healthDatabases">Databases in the newest <c>query_store_health</c> capture.</param>
+    /// <param name="healthDatabases">Databases in the newest <c>query_store_health</c> capture, leaving out tempdb and any database whose Query Store is OFF.</param>
     /// <param name="healthSecondaryDatabases">Of those, how many carry <see cref="ReadableSecondaryReadonlyBit"/>.</param>
     /// <param name="settingClause">Why the product does not read it, and the setting that changes that (product specific).</param>
     public static string? QueryStoreReadableSecondaryMessage(
@@ -769,9 +773,21 @@ public static class CollectorRuntimePrecondition
             return null;
         }
 
-        var roleSaysSecondary = string.Equals(agReplicaRole?.Trim(), "Secondary", StringComparison.OrdinalIgnoreCase);
-        var healthSaysSecondary = healthDatabases > 0 && healthSecondaryDatabases == healthDatabases;
-        if (!roleSaysSecondary && !healthSaysSecondary)
+        // The newest health capture decides when it has rows: the collectors skip a secondary's databases, so a database
+        // in the capture that is not flagged secondary is one Query Store is still read for (an instance whose role reads
+        // Secondary can host databases outside any availability group), and an empty read there is not "nothing can be read".
+        // The role decides only when the capture has no database Query Store is read for (tempdb and OFF databases do not count).
+        bool secondary;
+        if (healthDatabases > 0)
+        {
+            secondary = healthSecondaryDatabases == healthDatabases;
+        }
+        else
+        {
+            secondary = string.Equals(agReplicaRole?.Trim(), "Secondary", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (!secondary)
         {
             return null;
         }
