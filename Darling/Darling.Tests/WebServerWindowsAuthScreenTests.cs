@@ -135,7 +135,7 @@ public sealed class WebServerWindowsAuthScreenTests
         return new Web { App = app, Client = app.GetTestClient(), ProbeCount = probes };
     }
 
-    private static string Windows(string extra) => "[{\"host\":\"win-01.example.test\",\"auth\":\"Windows\"" + extra + "}]";
+    private static string Windows(string extra) => "[{\"host\":\"winhost.example.test\",\"auth\":\"Windows\"" + extra + "}]";
 
     private static string SqlTrust() =>
         "[{\"host\":\"sql-01.example.test\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"Synth-Web-Pw-1\",\"trust_server_certificate\":true}]";
