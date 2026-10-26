@@ -74,7 +74,9 @@ it that number.
   ```
 
   The size is a whole number of bytes, or a number with K, M, G or T (optionally followed by B or iB). Units are
-  1024-based, as `df -h` prints them. `--recompress-plan-dim` takes the same option for its closing VACUUM FULL.
+  1024-based, as `df -h` prints them. `--recompress-plan-dim` takes the same option for its closing VACUUM FULL, and
+  its `--dry-run` shows that free-space check too, so you can see before the conversion whether the compaction would
+  be refused. Do not pass it with `--no-vacuum-full`, which skips the check.
 
 A managed store on a non-Windows host is refused with a message that says so.
 

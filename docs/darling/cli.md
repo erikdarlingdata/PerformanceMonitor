@@ -159,6 +159,8 @@ For both, `default` clears the stored value, so the next level applies. Without 
 
 All three accept `--dry-run`. It prints the plan and changes nothing. `--recompress-plan-dim` also accepts `--vacuum-full` and `--no-vacuum-full`. By default it compacts the table after the conversion when that returns space. `--no-vacuum-full` skips the compaction. `--vacuum-full` compacts a table that was converted earlier.
 
+`--backfill-rollups` and `--recompress-plan-dim` also accept `--free-space <size>`. Before it materializes anything or compacts the table, the verb checks that the store's data volume has room, and `--free-space` gives it the free space when it cannot measure it, for example when the store is in another container or on another host. The size is a whole number of bytes, or a number with K, M, G or T, optionally followed by B or iB, in 1024-based units. The `--dry-run` of both verbs shows the check and its result. `--recompress-plan-dim` refuses `--free-space` together with `--no-vacuum-full`, because that flag skips the check. See [the retention hold runbook](../retention-hold-runbook.md#on-linux-or-any-host-that-runs-the-service-as-a-net-app-6071).
+
 They run on Linux against an own store. Against a managed store they need Windows, because only Windows can read the managed credential.
 
 ### `--drop-xe-sessions`
