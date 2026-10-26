@@ -164,7 +164,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.EndsWith(QueryStoreRegressionRules.EmptyBaselineTail + " " + QueryStoreRegressionRules.RecentCutTail + " " + QueryStoreRegressionRules.RecentHoursHeldTail, note, StringComparison.Ordinal);
         Assert.DoesNotContain(QueryStoreRegressionRules.BaselineWindowTail, note, StringComparison.Ordinal);
 
-        /* Timeouts were tested, cost was not: the one row is a timeouts row. */
+        /* No interval ran before baseline_end here, so cost has nothing to flag against: the one row is a timeouts row. */
         var row = Assert.Single(hit.GetProperty("regressions").EnumerateArray());
         Assert.Equal("timeouts", row.GetProperty("regression_reason").GetString());
 

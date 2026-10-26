@@ -558,8 +558,9 @@ public partial class ViewerServerTab
             ViewerDataService.QueryStoreRegressionsBaselineStart(startUtc));
 
     /// <summary>
-    /// #6750: after <see cref="ShowQueryStoreRegressionsDataStartAsync"/>, a store that starts at or after the range's start has an
-    /// EMPTY baseline: nothing is compared for cost, and only timeouts and errors can be listed. "Showing since" alone read as a
+    /// #6750: after <see cref="ShowQueryStoreRegressionsDataStartAsync"/>, a store that starts at or after the range's start has a
+    /// baseline that holds no hours: timeouts and errors are flagged on recent runs alone, and cost only against a run from before the
+    /// window that was collected later. "Showing since" alone read as a
     /// shorter baseline, so the banner says so. A separate step so the banner call above keeps its shape. The probe has been awaited by
     /// then, so a probe that failed or was cancelled adds nothing (the first step already logged it).
     /// </summary>
@@ -573,7 +574,7 @@ public partial class ViewerServerTab
 
     /// <summary>What the regressions banner adds when the store starts at or after the range's start (#6750).</summary>
     internal const string QueryStoreRegressionsEmptyBaselineSuffix =
-        " · the baseline is empty, so no query can be flagged for cost, and only timeouts and errors were tested";
+        " · the baseline holds no hours, so timeouts and errors are flagged on recent runs alone, and a cost flag can come only from a run before the window that was collected later";
 
     /// <summary>
     /// Loads the Plan Corrections grid (#1952) — the engine's own automatic plan correction recommendations

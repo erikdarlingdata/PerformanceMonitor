@@ -383,8 +383,8 @@ export function plainText(text) {
   );
   /* #6750: the empty-baseline sentence and the cut-recent-window sentences that follow it. */
   t = t.replace(
-    /Here effective_start is at or after baseline_end, so the baseline is empty: no query can be flagged for cost, and only timeouts and errors were tested\./g,
-    "Here the store starts at or after the end of the baseline period, so the baseline is empty: no query can be flagged for cost, and only timeouts and errors were tested.",
+    /Here effective_start is at or after baseline_end, so the baseline holds no hours: timeouts and errors are flagged on recent runs alone, and a cost flag can come only from an interval that ran before baseline_end and was collected after it\./g,
+    "Here the store starts at or after the end of the baseline period, so the baseline holds no hours: timeouts and errors are flagged on recent runs alone, and a cost flag can come only from a run before the baseline period ended that was collected later.",
   );
   t = t.replace(
     /effective_start is also after baseline_end, so the recent window holds only the part from effective_start\./g,

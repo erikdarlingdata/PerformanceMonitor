@@ -273,7 +273,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
     /// gate's clamp is the baseline's start. Neither says when THIS server's data starts. <paramref name="tablePath"/> sends the read
     /// through the interval table (coverage forced back and a run log seeded for the server), false through raw.
     /// </summary>
-    private static async Task<Rig> StartTwoServersAsync(bool tablePath, CancellationToken ct, bool baselineHoldsNoHours = false)
+    private static async Task<Rig> StartTwoServersAsync(bool tablePath, CancellationToken ct, bool baselineHoldsNoHours = false, bool regularRows = false)
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #6750 live tests.");
@@ -299,7 +299,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
 
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
         long intervalId = 9000;
-        async Task SnapshotAsync(int serverId, string serverName, long queryId, DateTime collected, long count, DateTime? lastRunAt = null)
+        async Task SnapshotAsync(int serverId, string serverName, long queryId, DateTime collected, long count, DateTime? lastRunAt = null, string executionType = "Aborted", long avgCpuUs = 40_000)
         {
             intervalId++;
             var context = new CollectorContext { ServerId = serverId, ServerName = serverName + "-host", CollectionTime = DateTime.SpecifyKind(now, DateTimeKind.Utc), Deltas = new CollectorDeltaCalculator() };
@@ -318,14 +318,14 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
                 DatabaseName = Db,
                 QueryId = queryId,
                 PlanId = queryId + 91,
-                ExecutionTypeDesc = "Aborted",
+                ExecutionTypeDesc = executionType,
                 FirstExecutionTime = lastRun.AddMinutes(-30),
                 LastExecutionTime = lastRun,
                 QueryHash = "0x" + queryId.ToString("X8", CultureInfo.InvariantCulture),
                 QueryPlanHash = "0x" + (queryId + 91).ToString("X8", CultureInfo.InvariantCulture),
                 QueryText = "SELECT " + queryId.ToString(CultureInfo.InvariantCulture),
                 ExecutionCount = count,
-                AvgCpuTimeUs = 40_000,
+                AvgCpuTimeUs = avgCpuUs,
                 AvgDurationUs = 80_000,
                 AvgLogicalIoReads = 4_000,
                 IsForcedPlan = false,
@@ -347,7 +347,15 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
             await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddDays(-6), 7);
         }
 
-        if (baselineHoldsNoHours)
+        if (baselineHoldsNoHours && regularRows)
+        {
+            /* The cost variant (#6750): the same two collections as below, as Regular intervals. The first, ten hours back, carries an
+               interval last run 26 hours back at 1000 us average CPU, so the baseline has a CPU average over no hours. The second,
+               inside the window, runs at 2500 us. */
+            await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddHours(-10), 12, lastRunAt: now.AddHours(-26), executionType: "Regular", avgCpuUs: 1_000);
+            await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddHours(-3), 120, executionType: "Regular", avgCpuUs: 2_500);
+        }
+        else if (baselineHoldsNoHours)
         {
             /* The reviewer's state (#6750): this server's FIRST collection is ten hours back, inside the 24 hour window, and carries an
                interval whose last run was 26 hours back, before the window start. The row filters (collected and last run at or after
@@ -446,6 +454,28 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.Equal(JsonValueKind.Null, row.GetProperty("baseline_aborted_per_hour").ValueKind);
         Assert.Equal(12, row.GetProperty("baseline_aborted_count").GetInt64());
         Assert.Equal(120, row.GetProperty("recent_aborted_count").GetInt64());
+    }
+
+    /// <summary>
+    /// The cost side of the same state (#6750). Cost compares per-execution averages, which need no hours, so a Regular interval that
+    /// ran before the window and was collected inside it (1000 us) is a baseline for the Regular interval inside the window (2500
+    /// us). The row is listed for cost beside a note that says what the zero-hour baseline can and cannot flag.
+    /// </summary>
+    [Fact]
+    public async Task ABaselineThatHoldsNoHours_ButHoldsARegularInterval_ListsTheCostRow_McpRead()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await StartTwoServersAsync(tablePath: false, ct, baselineHoldsNoHours: true, regularRows: true);
+
+        var hit = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 24)).RootElement;
+        Assert.Equal("raw", hit.GetProperty("history_source").GetString());
+        Assert.EndsWith(QueryStoreRegressionRules.EmptyBaselineTail + " " + QueryStoreRegressionRules.RecentCutTail + " " + QueryStoreRegressionRules.RecentHoursHeldTail,
+            hit.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
+
+        var row = Assert.Single(hit.GetProperty("regressions").EnumerateArray());
+        Assert.Equal(RisingQuery, row.GetProperty("query_id").GetInt64());
+        Assert.Contains("cost", row.GetProperty("regression_reason").GetString()!, StringComparison.Ordinal);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("baseline_regular_per_hour").ValueKind);
     }
 
     [Theory]

@@ -168,7 +168,7 @@ public sealed class WebPlainTextTests
             QueryStoreRegressionRules.EmptyBaselineTail,
             QueryStoreRegressionRules.TailFor(new DateTime(2026, 1, 5), new DateTime(2026, 1, 1)),
         ], out _);
-        Assert.Equal("Here the store starts at or after the end of the baseline period, so the baseline is empty: no query can be flagged for cost, and only timeouts and errors were tested.", o[0]);
+        Assert.Equal("Here the store starts at or after the end of the baseline period, so the baseline holds no hours: timeouts and errors are flagged on recent runs alone, and a cost flag can come only from a run before the baseline period ended that was collected later.", o[0]);
         Assert.StartsWith(o[0], o[1], StringComparison.Ordinal);
         Assert.Contains("The store also starts after the recent window began, so the recent window holds only the part the store has.", o[1], StringComparison.Ordinal);
         Assert.EndsWith("Its per-hour rates divide by the hours it holds.", o[1], StringComparison.Ordinal);

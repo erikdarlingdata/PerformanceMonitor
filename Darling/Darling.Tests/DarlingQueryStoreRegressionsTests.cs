@@ -420,7 +420,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
     /// <summary>
     /// #6750: a raw-only store whose first row comes after the 168-hour window's start. The baseline is empty and the recent window is
     /// cut, so the note ends with those three sentences, not with the sentence for a baseline that holds part of its span. A timeouts
-    /// row still comes back (cost cannot flag). A 24-hour read of the same store keeps the old
+    /// row still comes back (this store holds no interval from before baseline_end, so cost has nothing to flag against). A 24-hour read of the same store keeps the old
     /// sentence, because there the store starts inside the baseline.
     /// </summary>
     [Fact]
