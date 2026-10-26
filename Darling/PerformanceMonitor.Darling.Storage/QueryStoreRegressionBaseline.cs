@@ -1127,7 +1127,7 @@ public static class QueryStoreRegressionBaseline
     /// #6750 part 3: <paramref name="sql"/> (any bound form of <see cref="Statement"/>) with the self-statement text probe replaced by
     /// the key-table test (<see cref="SelfKeysTest"/>). The caller passes it only when <see cref="QueryStoreSelfKeys.ReadyAsync"/>
     /// answered true inside the read's own snapshot. The rows, the ranks and every total are the same: only the cost changes, from one
-    /// primary-key probe of the text table per flagged row to a probe of a table of a few rows. A text with no test in it is returned
+    /// primary-key probe of the text table per flagged row to a primary-key probe of the key table, which holds no text. A text with no test in it is returned
     /// as it is, so it keeps the probe.
     /// </summary>
     public static string WithSelfKeys(string sql)

@@ -69,7 +69,7 @@ public static class QueryStoreSelfStatement
 
     /// <summary>
     /// #6750 part 3: the predicate over the key table the text writer fills (<see cref="QueryStoreSelfKeys"/>), true when the query is
-    /// not one of the monitor's own. A probe of a table of a few rows per database, so it reads no text. Use it only once
+    /// not one of the monitor's own. One primary-key probe of that table per row, so it reads no text. Use it only once
     /// <see cref="QueryStoreSelfKeys.ReadyAsync"/> says the backfill has run: before that the table misses the text stored earlier.
     /// </summary>
     public static string NotSelfOfKey(string serverIdExpression, string databaseExpression, string queryIdExpression) =>

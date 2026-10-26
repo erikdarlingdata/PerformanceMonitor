@@ -23,7 +23,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// rows after that filter. Testing the marker against the stored text there is one primary-key probe of the TOAST-heavy text
 /// table per row that passes the flags: measured at about 2,400 rows, 1.95 s and about 2,900 blocks cold on a large store at
 /// 168 hours. The text writer already has the text in hand when it lands it, so it records the marker test once, here, and
-/// the read anti-joins this server's few keys instead.</para>
+/// the read probes the key table's primary key instead, which reads no text.</para>
 ///
 /// <para><b>Who writes it.</b> <see cref="QueryStoreTextStore.UpsertSql"/> inserts the key when a landed text carries the marker
 /// and deletes it when an overwrite lands text without it (a Query Store reset renumbers ids), in the same statement as the text
@@ -36,7 +36,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// text probe. The writer keeps the key table current from the moment the rung runs, so the backfill only has to cover the text
 /// stored before it.</para>
 ///
-/// <para>A plain table, never a hypertable. It holds about one to three rows per monitored database.</para>
+/// <para>A plain table, never a hypertable. It holds one row per stored text that carries the marker. On a large production store
+/// that is about 2% of the text rows: an estimated 150,000 keys of 6.8 million rows, from a 1% sample, so a few MB against the text
+/// table's 11 GB.</para>
 /// </summary>
 public static class QueryStoreSelfKeys
 {
@@ -85,8 +87,9 @@ ON CONFLICT (id) DO NOTHING";
     /// <summary>Whether the backfill has run: the read's gate.</summary>
     public const string ReadySql = "SELECT EXISTS (SELECT 1 FROM collect.query_store_self_keys_state)";
 
-    /// <summary>Deletes the keys whose text row is gone (retention pruned it). The key table is a few rows per database, so this
-    /// is one small anti-join per retention pass, one probe of the text table's primary key per key. <c>$1</c> is the retention
+    /// <summary>Deletes the keys whose text row is gone (retention pruned it). It runs with the text prune, so at most once a day
+    /// (the text prune's gate), as one anti-join of the key table against the text table's primary key. At about 150,000 keys on a
+    /// large store that reads at most that primary key (about 0.8 GB), less than the text prune's own scan of the heap. <c>$1</c> is the retention
     /// pass's cutoff, which every purge statement is bound with. The test does not need it, and it is named only so the bind
     /// matches the statement.</summary>
     public const string PruneSql = @"
