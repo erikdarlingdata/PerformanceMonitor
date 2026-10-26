@@ -171,13 +171,9 @@ public sealed partial class ViewerDataService
 
     private static readonly string s_recentLiveSql = BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: false, regularFromLatest: true, recentFromDaily: true);
 
-    /// <summary>Whether the plan's statement reads the recent window's days from the daily totals (#5506), as the MCP read's
-    /// <c>ReadsRecentDays</c>: it decides the text and the three extra parameters together.</summary>
-    private static bool ReadsRecentDays(QueryStoreRegressionBaseline.Plan plan) => plan.RegularFromLatest && plan.RecentDays.Length > 0;
-
     /// <summary>The table form for a resolved baseline plan, as the MCP read's <c>TableSqlFor</c> picks it (#5506).</summary>
     internal static string QueryStoreRegressionsTableSqlFor(QueryStoreRegressionBaseline.Plan plan) =>
-        ReadsRecentDays(plan)
+        QueryStoreRegressionBaseline.ReadsRecentDays(plan)
             ? (plan.BuiltDayCount > 0 ? s_recentDailySql : s_recentLiveSql)
             : plan.RegularFromLatest
                 ? (plan.BuiltDayCount > 0 ? s_latestDailySql : s_latestLiveSql)
@@ -351,7 +347,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.LowEnd, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.HighStart, DateTimeKind.Unspecified) });
         command.Parameters.Add(DatabaseFilter.Excluding(excludedDatabases).ExcludeParameter());
-        if (ReadsRecentDays(plan))
+        if (QueryStoreRegressionBaseline.ReadsRecentDays(plan))
         {
             /* #5506: $10 to $12, only on the recent-days form, the only text that names them. */
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RecentDays });

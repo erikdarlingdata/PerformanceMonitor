@@ -119,6 +119,10 @@ public static class QueryStoreRegressionBaseline
         public DateTime RecentHighStart { get; init; }
     }
 
+    /// <summary>Whether the plan's statement reads the recent window's days from the daily totals: latest arms and at least one
+    /// recent day (#5506). Both readers pick the SQL text and bind the three extra parameters on this one answer.</summary>
+    public static bool ReadsRecentDays(Plan plan) => plan.RegularFromLatest && plan.RecentDays.Length > 0;
+
     /// <summary>
     /// Whether the table arms may take their three Regular arms from <c>query_store_interval_latest</c> (#5506). That table
     /// holds the same latest snapshot per Regular interval as the wide table, at about a third of the row width, so a cold

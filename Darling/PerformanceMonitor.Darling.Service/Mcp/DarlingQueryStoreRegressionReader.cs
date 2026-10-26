@@ -229,15 +229,11 @@ internal static class DarlingQueryStoreRegressionReader
 
     private static readonly string s_recentLiveSql = BuildSql(wide: true, useDailyTotals: false, regularFromLatest: true, recentFromDaily: true);
 
-    /// <summary>Whether the plan's statement reads the recent window's days from the daily totals: latest arms and at least one
-    /// recent day (#5506). Decides the text and the three extra parameters together.</summary>
-    internal static bool ReadsRecentDays(QueryStoreRegressionBaseline.Plan plan) => plan.RegularFromLatest && plan.RecentDays.Length > 0;
-
     /// <summary>The table form for a resolved baseline plan: daily totals when it has run days, and the Regular arms on
     /// <c>query_store_interval_latest</c> when its gate allows (#5506), else on the wide table. With recent days, the recent
     /// window's whole days come from the daily totals too.</summary>
     internal static string TableSqlFor(QueryStoreRegressionBaseline.Plan plan) =>
-        ReadsRecentDays(plan)
+        QueryStoreRegressionBaseline.ReadsRecentDays(plan)
             ? (plan.BuiltDayCount > 0 ? s_recentDailySql : s_recentLiveSql)
             : plan.RegularFromLatest
                 ? (plan.BuiltDayCount > 0 ? s_latestDailySql : s_latestLiveSql)
@@ -377,7 +373,7 @@ internal static class DarlingQueryStoreRegressionReader
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.LowEnd, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.HighStart, DateTimeKind.Unspecified) });
         command.Parameters.Add(databases.ExcludeParameter());
-        if (ReadsRecentDays(plan))
+        if (QueryStoreRegressionBaseline.ReadsRecentDays(plan))
         {
             /* #5506: $11 to $13, only on the recent-days form, the only text that names them. */
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RecentDays });
