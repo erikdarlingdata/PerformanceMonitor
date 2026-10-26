@@ -1914,6 +1914,18 @@ public sealed class WebConfig
     public bool AllowAdminWrites { get; set; }
 
     /// <summary>
+    /// Default OFF; a darling.json without the key keeps it off. Adding or editing a server in the web dashboard defaults to Windows
+    /// authentication, where this service presents its own computer account to the host the form names. Off, the web add and edit refuse a
+    /// Windows-authentication server that also sets <c>trust_server_certificate</c> or an <c>encrypt_mode</c> other than Mandatory or
+    /// Strict, because the service could not confirm which server it reached; an edit is judged only when it changes the host, the port,
+    /// the auth type, <c>trust_server_certificate</c> or <c>encrypt_mode</c>, on the server as it would be saved. On, the web accepts
+    /// them. SQL authentication and the Entra modes are not affected. The same rule as <see cref="McpConfig.AllowWindowsAuthOverUnverifiedTls"/>
+    /// for MCP; the <c>--add-server</c> command is the operator's own and is not gated. File-only and restart-only.
+    /// </summary>
+    [JsonPropertyName("allowWindowsAuthOverUnverifiedTls")]
+    public bool AllowWindowsAuthOverUnverifiedTls { get; set; }
+
+    /// <summary>
     /// Opt-in network exposure for the web dashboard (darling-network-endpoints). Omit <c>listen</c> for the
     /// default = loopback-only HTTP; the block's token gates that listener too. Managed-mode only; ignored in BYO with a caller warning. Any missing
     /// precondition (token / valid allowFrom / managed) keeps the dashboard loopback-only + LogCritical —

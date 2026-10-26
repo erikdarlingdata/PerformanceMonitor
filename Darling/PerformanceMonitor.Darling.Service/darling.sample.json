@@ -537,6 +537,15 @@
     // A store you bring yourself is not affected.
     "allowAdminWrites": true,
 
+    // Adding or editing a server in the dashboard defaults to Windows authentication, where the service presents
+    // its own computer account to the host the form names. By default the dashboard refuses a Windows-authentication
+    // server that also sets trust_server_certificate or an encrypt_mode other than Mandatory or Strict, because the
+    // service could not confirm which server it reached. An edit is judged only when it changes the host, the port,
+    // the auth type, trust_server_certificate or encrypt_mode. Uncomment to allow it. SQL authentication and the
+    // Entra modes are not affected. The same rule as mcp.allowWindowsAuthOverUnverifiedTls for MCP. Default off.
+    // Restart to change.
+    // "allowWindowsAuthOverUnverifiedTls": true,
+
     // The base URL RECIPIENTS can reach this dashboard on (e.g. "http://10.0.0.5:5153", or a DNS name
     // fronted by a proxy). Set it and every alert webhook (Teams/Slack/PagerDuty/generic {{triage_url}})
     // and email carries a per-alert triage-page link; leave it empty (the default) and alerts carry no

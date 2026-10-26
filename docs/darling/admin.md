@@ -14,7 +14,7 @@ To change the list, use one of these:
 - The `add_servers`, `edit_server` and `remove_server` MCP tools. They need `mcp.allowWrites` and `mcp.allowServerAdmin`.
 - The `--add-server` command line verb. It can add a server. It cannot remove one.
 
-The web Admin page can edit a server that already exists. It cannot add, remove, enable or disable one. The page says so itself. For the full list of what the file still controls, see [`darling.json` is only a seed](install.md#darlingjson-is-only-a-seed).
+The web Admin page can edit a server that already exists. It cannot add, remove, enable or disable one. The page says so itself. The dashboard's add and edit save a server that uses Windows authentication only over a verified certificate (`trust_server_certificate` false and `encrypt_mode` `Mandatory` or `Strict`), unless `web.allowWindowsAuthOverUnverifiedTls` is on (default off), as `mcp.allowWindowsAuthOverUnverifiedTls` does for the MCP tools. For the full list of what the file still controls, see [`darling.json` is only a seed](install.md#darlingjson-is-only-a-seed).
 
 Run the command line verbs on the service host, from the folder that holds `PerformanceMonitor.Darling.Service.exe`. If a verb reads a credential or a token, run it from an elevated PowerShell.
 
