@@ -1,0 +1,204 @@
+/* #6793: runs the shipped app.js (the real route(), scheduler tick, refresh-policy.js, refresh-control.js and util.js read
+   counter) and the real Job History, Query Tag Usage and Server pages against a stand-in DOM, a virtual clock and a fetch
+   that records every request and its AbortSignal. Prints what a scenario measured as one line of JSON.
+   WebRouteChangeAbortBehaviourTests starts it as
+       node web-route-change-abort-harness.mjs <path to wwwroot/js> <scenario>
+   A read of the two slow pages never answers by itself: it ends only when the page aborts it or when `slowReadMs` of virtual
+   time has passed (140 s, the measured Query Tag Usage read). Every other read answers at once with a 500. */
+import { pathToFileURL } from "node:url";
+import path from "node:path";
+
+const jsDir = path.resolve(process.argv[2]);
+const scenario = process.argv[3];
+
+class FakeNode {
+  constructor(tag) {
+    this.tag = tag; this.children = []; this.attrs = {}; this.dataset = {}; this.style = {}; this.className = "";
+    this.listeners = {}; this.parentNode = null; this.hidden = false; this.value = ""; this.textContent = "";
+    this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
+  }
+  get firstChild() { return this.children[0] || null; }
+  appendChild(c) { if (c && typeof c === "object") c.parentNode = this; this.children.push(c); return c; }
+  append(...cs) { cs.forEach((c) => this.appendChild(c)); }
+  prepend(c) { this.children.unshift(c); }
+  removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); return c; }
+  replaceChildren(...cs) { this.children = []; cs.forEach((c) => this.appendChild(c)); }
+  remove() {}
+  setAttribute(n, v) { this.attrs[n] = String(v); }
+  getAttribute(n) { return n in this.attrs ? this.attrs[n] : null; }
+  removeAttribute(n) { delete this.attrs[n]; }
+  addEventListener(t, f) { (this.listeners[t] ||= []).push(f); }
+  removeEventListener() {}
+  dispatch(t) { (this.listeners[t] || []).forEach((f) => f({ target: this, preventDefault() {}, stopPropagation() {} })); }
+  focus() {}
+  querySelector() { return null; }
+  querySelectorAll() { return []; }
+  find(pred) {
+    if (pred(this)) return this;
+    for (const c of this.children) { const f = c && c.find ? c.find(pred) : null; if (f) return f; }
+    return null;
+  }
+}
+
+const docListeners = {};
+const byId = {};
+for (const id of ["main", "server-list", "view-list", "statusbar", "refresh-hint"]) byId[id] = new FakeNode("div");
+const brand = new FakeNode("div");
+byId["auto-refresh-toggle"] = new FakeNode("button");
+brand.appendChild(byId["auto-refresh-toggle"]);
+
+globalThis.document = {
+  createElement: (t) => new FakeNode(t), createElementNS: (_n, t) => new FakeNode(t),
+  createTextNode: (t) => { const n = new FakeNode("#text"); n.textContent = String(t); return n; },
+  createDocumentFragment: () => new FakeNode("#frag"),
+  getElementById: (id) => byId[id] || null, querySelector: () => null, querySelectorAll: () => [],
+  addEventListener(t, f) { (docListeners[t] ||= []).push(f); }, removeEventListener() {}, body: new FakeNode("body"), documentElement: new FakeNode("html"),
+  cookie: "", hidden: false,
+};
+globalThis.Node = FakeNode;
+globalThis.window = globalThis;
+globalThis.scrollTo = () => {};
+globalThis.location = { hash: "#/server/alpha", pathname: "/", search: "", href: "http://localhost/", origin: "http://localhost" };
+globalThis.history = { pushState() {}, replaceState() {}, back() {} };
+const winListeners = {};
+globalThis.addEventListener = (t, f) => { (winListeners[t] ||= []).push(f); };
+globalThis.removeEventListener = () => {};
+globalThis.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+globalThis.requestAnimationFrame = () => 0;
+globalThis.cancelAnimationFrame = () => {};
+let storage = new Map();
+globalThis.localStorage = {
+  getItem: (k) => (storage.has(k) ? storage.get(k) : null),
+  setItem: (k, v) => { storage.set(k, String(v)); },
+  removeItem: (k) => { storage.delete(k); },
+};
+globalThis.sessionStorage = globalThis.localStorage;
+
+let now = 1_000_000;
+Date.now = () => now;
+let tick = null;
+globalThis.setInterval = (fn) => { tick = fn; return 1; };
+globalThis.clearInterval = () => {};
+globalThis.setTimeout = () => 0;
+globalThis.clearTimeout = () => {};
+
+let fetches = 0; let serverRenders = 0;
+const fetchLog = [];        // { at, url, signal, aborted }
+let slowReadMs = 140_000;
+const isSlow = (url) => url.includes("get_job_history") || url.includes("get_resource_use_by_tag");
+let pending = [];
+globalThis.fetch = (url, opts = {}) => {
+  url = String(url);
+  fetches++; if (url.includes("get_server_summary")) serverRenders++;
+  const rec = { at: now, url, signal: opts.signal || null, aborted: false };
+  fetchLog.push(rec);
+  return new Promise((resolve, reject) => {
+    const answer = () => resolve({ ok: false, status: 500, json: async () => ({}), text: async () => "" });
+    const p = { at: isSlow(url) ? now + slowReadMs : now, done: answer };
+    pending.push(p);
+    if (opts.signal) opts.signal.addEventListener("abort", () => {
+      rec.aborted = true;
+      pending = pending.filter((x) => x !== p);
+      reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+    }, { once: true });
+  });
+};
+const releaseDue = () => { const due = pending.filter((p) => p.at <= now); pending = pending.filter((p) => p.at > now); due.forEach((p) => p.done()); };
+const drain = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
+async function advance(seconds) {
+  for (let i = 0; i < seconds; i++) { now += 1000; releaseDue(); await drain(); tick(); await drain(); }
+}
+const settle = async () => { for (let i = 0; i < 10; i++) { releaseDue(); await drain(); } };
+const count = (needle) => fetchLog.filter((r) => r.url.includes(needle)).length;
+const fire = (list, type) => (list[type] || []).forEach((f) => f({}));
+
+async function boot(hash) {
+  location.hash = hash;
+  await import(pathToFileURL(path.join(jsDir, "app.js")).href + "?run=1");
+  await drain();
+}
+const go = async (hash) => { location.hash = hash; fire(winListeners, "hashchange"); await drain(); };
+const refreshBtn = () => brand.find((x) => x.attrs.id === "page-refresh-now");
+const hint = () => byId["refresh-hint"].textContent;
+
+const scenarios = {
+  /* The Job History read is out (140 s long) when the user goes to the Server page. */
+  async leaveSlowPage() {
+    await boot("#/job-history");
+    await advance(2);
+    const slow = fetchLog.find((r) => r.url.includes("get_job_history"));
+    const before = { started: !!slow, aborted: slow.aborted };
+    await go("#/server/alpha");
+    const afterLeave = { aborted: slow.aborted, serverRenders };
+    await advance(3);
+    const btn = refreshBtn();
+    const out = { before, afterLeave, busyAfterSettle: btn.disabled === true };
+    const r0 = serverRenders;
+    btn.dispatch("click"); await settle();
+    out.refreshClickReads = serverRenders - r0;
+    return out;
+  },
+  /* The poll of the page that was moved to: the 1 minute poll re-reads it while the old read would still be running. */
+  async pollAfterLeaving() {
+    await boot("#/job-history");
+    await advance(2);
+    await go("#/server/alpha");
+    await advance(3);
+    const r0 = serverRenders;
+    await advance(70); // well inside the slow read's 140 s
+    return { pollReads: serverRenders - r0, slowStillOut: pending.some((p) => p.at > now) };
+  },
+  /* The tab was hidden and comes back after the page is due: the visibility handler must refresh the page. */
+  async tabReturnAfterLeaving() {
+    await boot("#/job-history");
+    await advance(2);
+    await go("#/server/alpha");
+    await advance(3);
+    document.hidden = true; fire(docListeners, "visibilitychange");
+    await advance(100); // hidden: the scheduler settles the render and schedules the next one, and re-renders nothing
+    const r0 = serverRenders;
+    document.hidden = false; fire(docListeners, "visibilitychange");
+    await advance(5);
+    return { returnReads: serverRenders - r0 };
+  },
+  /* The old read ends 140 s after it started; the page moved to must not be timed by it. */
+  async backOffAfterLeaving() {
+    await boot("#/job-history");
+    await advance(2);
+    await go("#/server/alpha");
+    await advance(150); // past the end of the old read
+    const text = hint();
+    return { hint: text, serverRenders };
+  },
+  /* Query Tag Usage shows 24 hour totals: the 60 s poll never re-reads it. */
+  async tagUsagePoll() {
+    slowReadMs = 0; // the read answers at once, so nothing but the poll's own choice can keep it from running again
+    await boot("#/query-tag-usage");
+    await advance(2);
+    const first = count("get_resource_use_by_tag");
+    await advance(400); // six and a half poll intervals
+    const out = { first, afterPoll: count("get_resource_use_by_tag"), hint: hint() };
+    return out;
+  },
+  /* The page's own server picker still re-reads it, and a second read aborts the first. */
+  async tagUsagePickerStillReads() {
+    await boot("#/query-tag-usage");
+    await advance(2);
+    const select = byId.main.find((x) => x.attrs["aria-label"] === "Server");
+    const firstRead = fetchLog.find((r) => r.url.includes("get_resource_use_by_tag"));
+    select.value = "alpha"; select.dispatch("change"); await drain();
+    return { reads: count("get_resource_use_by_tag"), firstAborted: firstRead.aborted };
+  },
+  /* The page's own re-load (a filter change here) still aborts its older read: the Status picker asks for a different read. */
+  async sameRouteLoadAbortsOlderLoad() {
+    await boot("#/job-history");
+    await advance(2);
+    const older = fetchLog.find((r) => r.url.includes("get_job_history"));
+    const status = byId.main.find((x) => x.attrs["aria-label"] === "Status");
+    status.value = "failed"; status.dispatch("change"); await drain();
+    return { olderAborted: older.aborted, reads: count("get_job_history") };
+  },
+};
+if (!Object.hasOwn(scenarios, scenario)) throw new Error("unknown scenario " + scenario);
+const __r = await scenarios[scenario](); if (process.env.DBG) console.error(fetchLog.map(r=>(r.at-1000000)/1000+" "+r.url).join("\n")); console.log(JSON.stringify(__r));
+process.exit(0);

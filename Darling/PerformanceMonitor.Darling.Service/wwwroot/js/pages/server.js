@@ -45,7 +45,7 @@
  * subtitle rather than inheriting a label that would misdescribe them.
  */
 
-import { el, mount, apiGetFleet, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime } from "../util.js";
+import { el, mount, apiGetFleet, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime } from "../util.js";
 import { getDatabaseFilter } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
@@ -122,6 +122,10 @@ let renderGeneration = 0;
    fresh renderServer, the loadServerCard callback, and the range-select handler) and every one of them must
    cancel the SAME previous batch, not just the one its own caller happens to remember. */
 let panelAbort = null;
+/* #6793: leaving the page (route() calls beginPageScope) aborts its panel reads. */
+onPageLeave(() => {
+  if (panelAbort) panelAbort.abort();
+});
 
 /* The last card seen for a server name, so a repeat render can choose its registry without a round trip. Keyed
    on the ROUTE's name (which may be either the server name or the display name — the same key loadServerCard

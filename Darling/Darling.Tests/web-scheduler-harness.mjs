@@ -80,6 +80,7 @@ const sandbox = {
   bandClass: () => "",
   localTime: String,
   hasInFlightReads: () => inFlight > 0,
+  beginPageScope() {},
   readErrorCount: () => errors,
   isSessionExpired: () => false,
   onSessionExpired() {},

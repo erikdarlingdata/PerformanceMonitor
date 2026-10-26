@@ -25,7 +25,7 @@ import { VIZ } from "../panels.js";
 import { pageRangePicker, windowOfSpec } from "../page-range.js";
 import { relativeSpec } from "../time-range.js";
 import { orderServers } from "../server-order.js";
-import { el, mount, clear, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, localTime, makeActivatable, clampText } from "../util.js";
+import { el, mount, clear, onPageLeave, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, localTime, makeActivatable, clampText } from "../util.js";
 
 /** The default range, in hours. The range itself is the shared time range picker's (#5562). */
 export const DEFAULT_HOURS = 24;
@@ -95,6 +95,11 @@ let pageSeq = 0;
 let loadSeq = 0;
 let pageAbort = null;
 let loadAbort = null;
+/* #6793: leaving the page (route() calls beginPageScope) aborts its reads, so a slow read does not run on after the user went elsewhere. */
+onPageLeave(() => {
+  if (pageAbort) pageAbort.abort();
+  if (loadAbort) loadAbort.abort();
+});
 
 function serverRows(data) {
   if (Array.isArray(data)) return data;

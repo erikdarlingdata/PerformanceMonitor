@@ -21,7 +21,7 @@
  * fleet-wide: the picker stays visible on that tab and its build ignores the choice.
  */
 
-import { el, mount, readTool, loadingStrip, errorStrip, emptyStrip } from "../util.js";
+import { el, mount, readTool, onPageLeave, loadingStrip, errorStrip, emptyStrip } from "../util.js";
 import { setPanelSignal } from "../panels.js";
 import { orderServers } from "../server-order.js";
 import { isPostgresRow } from "./finops/gate.js";
@@ -59,6 +59,10 @@ const TAB_KEY = "finops.tab";
 
 let renderGeneration = 0;
 let panelAbort = null;
+/* #6793: leaving the page (route() calls beginPageScope) aborts its panel reads. */
+onPageLeave(() => {
+  if (panelAbort) panelAbort.abort();
+});
 /* The last list_servers rows, so a hashchange paints in the same tick and only the poll re-reads them. */
 let lastRows = null;
 

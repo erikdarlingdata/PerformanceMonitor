@@ -29,7 +29,7 @@ import { VIZ } from "../panels.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { getSession } from "../views-api.js";
 import { canCloseState, closeRequest, writeAccess, SIGN_IN_SENTENCE, CLOSE_REASON_MAX_LENGTH } from "../investigation-writes.js";
-import { el, mount, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, localTime, makeActivatable, rowsUnder } from "../util.js";
+import { el, mount, onPageLeave, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, localTime, makeActivatable, rowsUnder } from "../util.js";
 
 /** The states the list read takes; an empty value is every state. */
 export const STATES = [
@@ -109,6 +109,11 @@ let pageSeq = 0;
 let detailSeq = 0;
 let pageAbort = null;
 let detailAbort = null;
+/* #6793: leaving the page (route() calls beginPageScope) aborts its reads. */
+onPageLeave(() => {
+  if (pageAbort) pageAbort.abort();
+  if (detailAbort) detailAbort.abort();
+});
 
 function select(label, options, value, onPick) {
   const sel = el("select", { "aria-label": label, class: "range-select-inline" }, options.map((o) => el("option", { value: String(o.value), text: o.label })));
