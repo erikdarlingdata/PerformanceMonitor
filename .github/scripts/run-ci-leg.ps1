@@ -17,7 +17,7 @@
   -Areas  all     the whole Darling suite and the whole Lite suite.
           darling the whole Darling suite, and of Lite.Tests the classes that read a Darling path (ci-select.py reads-classes
                   --suite lite), which is the scope build.yml gives a Darling-only change.
-          classes only the test classes the pull request changed (#6734): -DarlingClasses and -LiteClasses, comma lists of
+          classes only the test classes the pull request changed (#6734): -OnlyDarlingClasses and -OnlyLiteClasses, comma lists of
                   simple names. A side with no name runs nothing.
           lite    the whole Lite suite, and of Darling.Tests the Stage=Guard classes plus the classes that read a Lite
                   path (ci-select.py reads-classes), which is the scope build.yml gives a Lite-only change.
@@ -41,8 +41,10 @@ param(
     [int] $Leg = 1,
     [Parameter(Mandatory)][int] $LegCount,
     [ValidateSet('all', 'darling', 'lite', 'classes')][string] $Areas = 'all',
-    [string] $DarlingClasses = '',
-    [string] $LiteClasses = '',
+    # Not -DarlingClasses / -LiteClasses: PowerShell variable names ignore case, so those would be the [string] typed
+    # $darlingClasses and $liteClasses lists below, and every list assigned to them would collapse into one string (#6734).
+    [string] $OnlyDarlingClasses = '',
+    [string] $OnlyLiteClasses = '',
     [string] $RunAttempt = '1',
     [string] $ResultPrefix = 'darling-ci',
     [switch] $DryRun,
@@ -63,9 +65,9 @@ $darlingDll = 'Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.d
 $liteWeights = Join-Path $scripts 'lite-shard-weights.json'
 $darlingWeights = Join-Path $scripts 'darling-shard-weights.json'
 # Every area runs some Darling.Tests classes: all of them, or under 'lite' the Guard and Lite-reads scope.
-$runDarling = $Areas -ne 'classes' -or [bool]$DarlingClasses
-$runLite = $Areas -ne 'classes' -or [bool]$LiteClasses
-if ($Areas -eq 'classes' -and -not $DarlingClasses -and -not $LiteClasses) { throw '-Areas classes needs -DarlingClasses or -LiteClasses' }
+$runDarling = $Areas -ne 'classes' -or [bool]$OnlyDarlingClasses
+$runLite = $Areas -ne 'classes' -or [bool]$OnlyLiteClasses
+if ($Areas -eq 'classes' -and -not $OnlyDarlingClasses -and -not $OnlyLiteClasses) { throw '-Areas classes needs -OnlyDarlingClasses or -OnlyLiteClasses' }
 function Select-ByKey([string[]] $names, [string] $csv) {
     $only = @($csv -split ',' | Where-Object { $_ })
     $picked = @($names | Where-Object { $only -contains ($_ -split '[.+/]')[-1] })
@@ -101,9 +103,9 @@ function Get-ListedClasses([string] $project, [string[]] $extra) {
 
 function Get-DarlingClasses {
     if ($Areas -eq 'classes') {
-        if (Test-Path -LiteralPath $darlingDll) { return @(Select-ByKey @(Get-ListedClasses $darlingProject @()) $DarlingClasses) }
+        if (Test-Path -LiteralPath $darlingDll) { return @(Select-ByKey @(Get-ListedClasses $darlingProject @()) $OnlyDarlingClasses) }
         if (-not $DryRun) { throw "no built Darling.Tests at $darlingDll - the build artifact was not unpacked" }
-        return @(Select-ByKey @(Get-WeightedNames $darlingWeights 'Darling.Tests.') $DarlingClasses)
+        return @(Select-ByKey @(Get-WeightedNames $darlingWeights 'Darling.Tests.') $OnlyDarlingClasses)
     }
     if (-not (Test-Path -LiteralPath $darlingDll)) {
         if (-not $DryRun) { throw "no built Darling.Tests at $darlingDll - the build artifact was not unpacked" }
@@ -138,7 +140,7 @@ function Get-LiteClasses {
         $names = @(Get-WeightedNames $liteWeights '')
     }
     else { $names = @(Get-ListedClasses $liteProject @()) }
-    if ($Areas -eq 'classes') { return @(Select-ByKey $names $LiteClasses) }
+    if ($Areas -eq 'classes') { return @(Select-ByKey $names $OnlyLiteClasses) }
     if ($Areas -ne 'darling') { return $names }
     Write-Host "(darling scope: only the Lite classes that read a Darling file, $($reads.Count) named by the source scan)"
     return @($names | Where-Object { $reads -contains $_ })
@@ -251,7 +253,7 @@ if ($runDarling) {
     Invoke-Piece "Darling.Tests slice $Leg of $LegCount" {
         $shardParams = @{ Shard = $shard; ShardCount = $LegCount; ResultPrefix = $ResultPrefix; RunAttempt = $RunAttempt }
         if ($darlingScopeFilter) { $shardParams.ScopeFilter = $darlingScopeFilter }
-        if ($Areas -eq 'classes') { $shardParams.OnlyClasses = $DarlingClasses }
+        if ($Areas -eq 'classes') { $shardParams.OnlyClasses = $OnlyDarlingClasses }
         & (Join-Path $scripts 'run-darling-pg-shard.ps1') @shardParams
     }
 }
