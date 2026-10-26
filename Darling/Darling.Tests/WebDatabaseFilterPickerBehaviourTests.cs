@@ -92,6 +92,23 @@ public sealed class WebDatabaseFilterPickerBehaviourTests
         Assert.Equal(3, r.GetProperty("afterClickOnRefreshedCard").GetInt32());
     }
 
+    /// <summary>
+    /// The server page's tab strip carries the <c>subtabs</c> class, the one app.css wraps onto a second row, and draws every
+    /// tab of a long list (a SQL Server page has more tabs than fit in one row at a laptop width). A strip without that class
+    /// would go back to one clipped row.
+    /// </summary>
+    [Fact]
+    public void TheServerTabStrip_CarriesTheWrappingClass_AndListsEveryTab()
+    {
+        var r = Run("tabBar");
+
+        Assert.Equal(1, r.GetProperty("stripCount").GetInt32());
+        Assert.Contains("subtabs", r.GetProperty("stripClass").GetString()!.Split(' '));
+        var tabs = Strings(r.GetProperty("tabs"));
+        Assert.Equal(Enumerable.Range(0, 14).Select(i => "Tab t" + i.ToString("00")), tabs);
+        Assert.Equal(14, r.GetProperty("tabsWithTheTabClass").GetInt32());
+    }
+
     [Fact]
     public void APostgreSqlServer_GetsNoPicker_AndNoFilter()
     {
