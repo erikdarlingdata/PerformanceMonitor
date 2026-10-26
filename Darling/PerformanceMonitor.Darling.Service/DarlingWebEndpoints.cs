@@ -423,7 +423,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, McpDataDetail dataDetail = McpDataDetail.MetadataOnly, IPseudonymKeySource? pseudonymKeys = null, InvestigationExportGate? investigationExportGate = null, IPasswordKeyRing? passwordKeys = null, WebAdminArm? adminArm = null)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, McpDataDetail dataDetail = McpDataDetail.MetadataOnly, IPseudonymKeySource? pseudonymKeys = null, InvestigationExportGate? investigationExportGate = null, IPasswordKeyRing? passwordKeys = null, WebAdminArm? adminArm = null, bool allowWindowsAuthOverUnverifiedTls = false)
     {
         /* #4442 scope 2, #4782: the read-latency seat THIS call's routes record into -- the accumulator and
            logger this call was given, held in a per-call object that the two record sites close over: the
@@ -747,7 +747,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapCollectorRuns(app, new PostgresSnapshotNowStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct, NameClash.Refuse); return (r.ServerId, err); });
         MapActiveQueriesLive(app, new PostgresActiveQueriesLiveStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct, NameClash.Refuse); return (r.ServerId, err); }, managedStore, readAdmission: readAdmission, readLatencyRecorder: readLatencyRecorder);
         MapAnalyzeNow(app, new PostgresAnalyzeNowStore(postgres), postgres, logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct, NameClash.Refuse); return (r.ServerId, err); }, managedStore);
-        MapServers(app, postgres, logger);
+        MapServers(app, postgres, logger, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls);
         MapAlertHistoryDismiss(app, postgres, logger);
         MapInvestigationFeedback(app, postgres, logger, managedStore, adminArm);
         MapInvestigationExport(
@@ -2194,9 +2194,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         TimeSpan? addTimeout = null,
         Func<int, string, Task<string>>? editServer = null,
         TimeSpan? editTimeout = null,
-        Func<int, Task<DarlingMcpServerAdminTools.ServerEditRow?>>? readServer = null)
+        Func<int, Task<DarlingMcpServerAdminTools.ServerEditRow?>>? readServer = null,
+        bool allowWindowsAuthOverUnverifiedTls = false)
     {
         var slotTimeout = addTimeout ?? ServerAddSlotTimeout;
+        /* web.allowWindowsAuthOverUnverifiedTls: the add and the edit refuse Windows authentication over a connection whose server
+           identity is not verified unless it is on, the rule MCP applies under mcp.allowWindowsAuthOverUnverifiedTls. */
+        var windowsAuthScreen = DarlingUnverifiedWindowsAuthScreen.ForWeb(allowWindowsAuthOverUnverifiedTls);
         var editSlotTimeout = editTimeout ?? ServerEditSlotTimeout;
 
         /* One gate per host: MapAll runs once per process. ADD and EDIT share it (#5240): both probe over the network
@@ -2204,12 +2208,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         var serverWriteInFlight = new SemaphoreSlim(1, 1);
 
         /* The seam a test stands a stub probe or a held add in through; production runs the core itself. */
-        addServers ??= body => DarlingMcpServerAdminTools.AddServers(postgres, body, logger);
+        addServers ??= body => DarlingMcpServerAdminTools.AddServers(postgres, body, logger, windowsAuthScreen);
 
         /* The edit core and the by-id read, with the same seam. The edit core gets NO audit logger: the route writes the one
            audit line itself, with the signed-in principal. It gets the logger for a failed connection test's driver
            text alone (probeLogger), which the reply to the browser does not carry. */
-        editServer ??= (id, body) => DarlingMcpServerAdminTools.EditServerByIdAsync(postgres, id, body, null, CancellationToken.None, probeLogger: logger);
+        editServer ??= (id, body) => DarlingMcpServerAdminTools.EditServerByIdAsync(postgres, id, body, null, CancellationToken.None, probeLogger: logger, webScreen: windowsAuthScreen);
         readServer ??= id => new DarlingMcpServerAdminTools.PostgresServerEditStore(postgres).ReadRowAsync(id, CancellationToken.None);
 
         app.MapPost("/api/servers", async (HttpContext context) =>

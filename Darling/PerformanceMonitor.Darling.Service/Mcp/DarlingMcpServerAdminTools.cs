@@ -189,8 +189,8 @@ public sealed partial class DarlingMcpServerAdminTools
 
     /// <summary>The same onboarding core for a caller that is not an MCP client (the signed-in web dashboard's add
     /// route): no MCP caller policy, and a failed connection keeps the generic reply with the driver text in the log.</summary>
-    internal static Task<string> AddServers(NpgsqlDataSource postgres, string servers_json, ILogger? logger) =>
-        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, logger: logger);
+    internal static Task<string> AddServers(NpgsqlDataSource postgres, string servers_json, ILogger? logger, DarlingUnverifiedWindowsAuthScreen? webScreen = null) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, logger: logger, webScreen: webScreen);
 
     /// <summary>The testable core of <c>add_servers</c>: validates + dedupes + probes (through the injected
     /// <paramref name="probe"/> seam) + encrypts + INSERTs, aggregating a per-server result. Structural validation
@@ -222,7 +222,8 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static async Task<string> AddServersAsync(
         IServerDefinitions definitions, string servers_json, ServerProbe probe, CancellationToken cancellationToken,
         bool allowSecretReferences = false, IPasswordKeyRing? ring = null, AwsRoleAllowlist? awsRoleAllowlist = null,
-        ILogger? logger = null, bool revealConnectError = false, DarlingMcpAddServersPolicy? policy = null)
+        ILogger? logger = null, bool revealConnectError = false, DarlingMcpAddServersPolicy? policy = null,
+        DarlingUnverifiedWindowsAuthScreen? webScreen = null)
     {
         ring ??= DarlingPasswordKey.Current;
         try
@@ -237,6 +238,9 @@ public sealed partial class DarlingMcpServerAdminTools
 
             /* The MCP caller's policy refuses entries here, before any store access or probe. */
             entries = DarlingMcpAddServersPolicy.Screen(policy, entries, results);
+
+            /* The web route's one rule, with no other part of the MCP policy: the same Windows-sign-in check, naming the web setting. */
+            entries = DarlingUnverifiedWindowsAuthScreen.Screen(webScreen, entries, results);
 
             /* No structurally-valid candidate → never open the store (validate-before-write); the aggregate below
                reports only the per-entry invalids. */
