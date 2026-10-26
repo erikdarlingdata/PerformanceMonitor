@@ -57,8 +57,9 @@ public sealed class QueryStoreRegressionsEmptyBaselineLiveTests
         }
     }
 
-    /// <summary>A hypertable store with one query: Regular runs from nine days back (the table's floor), then Aborted runs 30, 20 and
-    /// 10 hours back. Raw's chunks older than three days are dropped, so raw's floor is after the 168-hour window's start.</summary>
+    /// <summary>A hypertable store with one query: Regular runs from nine days back (the table's floor) and one just inside the
+    /// three days raw keeps, then Aborted runs 30, 20 and 10 hours back. Raw's chunks older than three days are dropped, so raw's
+    /// floor is after the 168-hour window's start.</summary>
     private static async Task<Rig> StartAsync(CancellationToken ct)
     {
         var baseCs = BaseConnectionString;
@@ -125,6 +126,12 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         {
             await IntervalAsync(now.AddDays(-daysBack), "Regular", 1_000);
         }
+
+        /* Raw's floor is the start of the oldest chunk the drop keeps. This interval's snapshots are just inside the three days, so
+           the floor is at least 46 hours before a 24-hour window's start, at any time of day. Without it the oldest kept snapshot was
+           the 30-hour interval's own, and from 05:40 to 06:00 UTC its chunk began after that interval's start, so the 24-hour
+           baseline lost its only Aborted interval and the read came back empty (PR CI run 40272513437). */
+        await IntervalAsync(now.AddDays(-3).AddHours(1), "Regular", 1_000);
 
         foreach (var hoursBack in new[] { 30, 20, 10 })
         {
@@ -198,14 +205,31 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         var before = await RunAsync(rig.Connection, old, start, end, baselineStart, ct);
         Assert.NotEmpty(now);
         Assert.Equal(before, now);
-        /* The fixture is not vacuous: the baseline's per-hour rate is a positive number here (30 runs over the hours the baseline holds). */
-        Assert.True(now.Any(line => line.Contains("baseline_aborted_per_hour=1.", StringComparison.Ordinal)), string.Join("\n", now));
+        /* The fixture is not vacuous: the baseline's per-hour rate is the 30-hour interval's 30 runs over the hours from raw's floor to
+           the window's start. */
+        var expected = 30 / (start - baselineStart).TotalHours;
+        Assert.True(now.Any(line => Field(line, "baseline_aborted_per_hour") is double rate && Math.Abs(rate - expected) < 0.01),
+            $"expected baseline_aborted_per_hour {expected:0.000}:\n" + string.Join("\n", now));
 
         /* And through the tool: the baseline starts before baseline_end, so the old sentence stays. */
         /* The answer may be the empty envelope (nothing rose over the 6 hours of baseline the store holds), which carries the note under hints. */
         var hit = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 24)).RootElement;
         var dayNote = hit.TryGetProperty("truncation_note", out var top) ? top : hit.GetProperty("hints").GetProperty("truncation_note");
         Assert.EndsWith(QueryStoreRegressionRules.BaselineWindowTail, dayNote.GetString()!, StringComparison.Ordinal);
+    }
+
+    private static double? Field(string line, string name)
+    {
+        foreach (var part in line.Split('|'))
+        {
+            if (part.StartsWith(name + "=", StringComparison.Ordinal)
+                && double.TryParse(part.AsSpan(name.Length + 1), NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+            {
+                return value;
+            }
+        }
+
+        return null;
     }
 
     private static async Task<List<string>> RunAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, DateTime baselineStart, CancellationToken ct)

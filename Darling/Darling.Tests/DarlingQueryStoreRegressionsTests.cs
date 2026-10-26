@@ -443,8 +443,10 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             var row = Assert.Single(hit.GetProperty("regressions").EnumerateArray());
             Assert.Equal("timeouts", row.GetProperty("regression_reason").GetString());
 
-            /* A 24-hour read: the store starts inside the baseline window, so the baseline holds part of its span. */
-            await SeedAsync(connection, ct, baseNow.AddHours(-2), 3, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 5, queryId: 7, executionType: "Aborted");
+            /* A 24-hour read: the store starts inside the baseline window, so the baseline holds part of its span. 3 timeouts in the
+               6 hours of baseline the store holds (0.5 an hour) against 36 in the 24-hour window (1.5 an hour). It must be a rise, or
+               the answer is the empty envelope, which carries the note under hints, not at the top (as in the Lite copy). */
+            await SeedAsync(connection, ct, baseNow.AddHours(-2), 30, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 5, queryId: 7, executionType: "Aborted");
             var day = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
             Assert.EndsWith(BaselineTail, day.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
         });
