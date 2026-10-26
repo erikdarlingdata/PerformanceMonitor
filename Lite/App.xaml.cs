@@ -653,8 +653,8 @@ public partial class App : Application
 
         /* Read before anything below creates either file: whether this Windows user ran an earlier Lite with this folder. A
            user who did is upgrading, and the servers they collected from are bound to their current settings; a new user
-           confirms each one. The marker it writes makes every later start read false, so a folder this build created never
-           counts as an upgrade, even when its first record write failed. */
+           confirms each one. This only reads: the first-run step in the main window writes the marker once the record is
+           written, so a start that stops first (the store would not open) is worked out again on the next start. */
         HadLiteDataAtStart = Services.ServerHostBindings.IsFirstStartInUsedFolder(DatabasePath, ConfigDirectory);
 
         // Ensure directories exist

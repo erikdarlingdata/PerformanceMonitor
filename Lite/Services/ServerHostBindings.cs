@@ -35,7 +35,7 @@ public sealed class ServerHostBindings
 
     /// <summary>
     /// The file, in the user's own config folder beside <see cref="FileName"/>, that says a build keeping the record has started
-    /// with this data folder before (see <see cref="IsFirstStartInUsedFolder"/>).
+    /// with this data folder before (see <see cref="IsFirstStartInUsedFolder"/>); <see cref="BindOnFirstRun"/> writes it.
     /// </summary>
     public const string StartedMarkerName = "server-hosts.started";
 
@@ -168,6 +168,13 @@ public sealed class ServerHostBindings
                     _bindings[id] = binding;
                 _hasRecord = true;
             }
+
+            /* The marker goes in after the record, so a start that never got here derives "used before" again. A failed write
+               for a folder with no earlier Lite data still gets it: there is nothing to bind on a retry, and a folder this
+               build created must not read as an upgrade on the next start. A failed write for an upgrade does not, so the
+               next start binds the servers that have rows. */
+            if (problem == null || !hadLiteData)
+                WriteStartedMarker();
 
             bound = problem == null ? chosen.Count : 0;
         }
@@ -353,23 +360,33 @@ public sealed class ServerHostBindings
 
     /// <summary>
     /// Whether this start is the first one, by a build that keeps the record, with a data folder an earlier Lite used
-    /// (<paramref name="databasePath"/> or settings.json exists): only that start binds the servers the user used. Writes
-    /// <see cref="StartedMarkerName"/> before Lite creates the database, so every later start reads false. A folder this
-    /// build created, or one whose first record write failed or whose first start stopped before the record was written, is
-    /// then never taken for an earlier Lite's, and Lite asks again about each server it has no record for.
+    /// (<paramref name="databasePath"/> or settings.json exists): only that start binds the servers the user used. Reads only:
+    /// <see cref="BindOnFirstRun"/> writes <see cref="StartedMarkerName"/> once the record is written, so a start that stops
+    /// before the servers are bound (the local store would not open, the window was closed first) leaves no marker and the next
+    /// start works it out from the data file again. After the marker is written every start reads false, so a folder this
+    /// build created, or one whose record was written, is never taken for an earlier Lite's, and Lite asks again about each
+    /// server it has no record for.
     /// </summary>
     /// <param name="databasePath">monitor.duckdb.</param>
     /// <param name="configDirectory">The user's own config folder (settings.json and the record).</param>
     public static bool IsFirstStartInUsedFolder(string databasePath, string configDirectory)
     {
-        var marker = Path.Combine(configDirectory, StartedMarkerName);
-        if (File.Exists(marker))
+        if (File.Exists(Path.Combine(configDirectory, StartedMarkerName)))
             return false;
 
-        var usedBefore = File.Exists(databasePath) || File.Exists(Path.Combine(configDirectory, "settings.json"));
+        return File.Exists(databasePath) || File.Exists(Path.Combine(configDirectory, "settings.json"));
+    }
+
+    /// <summary>Records, beside the record file, that this build has run its first-run step for the folder.</summary>
+    private void WriteStartedMarker()
+    {
+        if (_filePath == null)
+            return;
+
+        var marker = Path.Combine(Path.GetDirectoryName(_filePath)!, StartedMarkerName);
         try
         {
-            Directory.CreateDirectory(configDirectory);
+            Directory.CreateDirectory(Path.GetDirectoryName(marker)!);
             File.WriteAllText(marker,
                 $"Lite first started with this data folder on {DateTime.UtcNow.ToString("u", CultureInfo.InvariantCulture)}. " +
                 $"While this file exists, a missing {FileName} means Lite asks again about each server before it connects.");
@@ -378,8 +395,6 @@ public sealed class ServerHostBindings
         {
             AppLogger.Warn("ServerHostBindings", $"Could not write {marker}: {ex.Message}");
         }
-
-        return usedBefore;
     }
 
     private void Report(string? problem)
