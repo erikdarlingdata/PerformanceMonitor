@@ -442,6 +442,56 @@ public sealed class WebPlainTextTests
         Assert.NotEqual(generic, o[0]);
     }
 
+    /// <summary>The Running Jobs panel showed the 1222-character "never run" answer written for an MCP client (it labels itself a runtime
+    /// PRECONDITION and says to retry). From the real builder's text: the page says which data is missing and keeps the possible causes
+    /// the server names, as written.</summary>
+    [Fact]
+    public void TheNeverRanAnswer_BecomesTwoShortSentences_KeepingThePossibleCauses()
+    {
+        var now = new DateTime(2026, 10, 25, 12, 0, 0, DateTimeKind.Utc);
+        var real = PerformanceMonitor.Collectors.CollectorRuntimePrecondition.GatedOffMessage(
+            "ui-sql", "running_jobs", PerformanceMonitor.Collectors.CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            null, now, now.AddDays(-3))!;
+        Assert.Contains("has never run against", real);
+        Assert.True(real.Length > 1000, "the builder's text is the long one");
+
+        var o = Run([real], out _);
+        Assert.Equal(
+            "The Running Jobs collector has never run for this server, so there is nothing to show. " +
+            PerformanceMonitor.Collectors.CollectorRuntimePrecondition.RunningJobsPossibleCauses, o[0]);
+        Assert.DoesNotContain("PRECONDITION", o[0]);
+        Assert.DoesNotContain("Retrying", o[0]);
+    }
+
+    [Fact]
+    public void TheGoneDarkAnswer_BecomesOneShortLine_AndAPreconditionWithAStatementKeepsIt()
+    {
+        var now = new DateTime(2026, 10, 25, 12, 0, 0, DateTimeKind.Utc);
+        var dark = PerformanceMonitor.Collectors.CollectorRuntimePrecondition.GatedOffMessage(
+            "ui-sql", "running_jobs", PerformanceMonitor.Collectors.CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            now.AddDays(-5), now, now.AddDays(-9))!;
+        Assert.Contains("no longer being invoked", dark);
+
+        var session = PerformanceMonitor.Collectors.CollectorRuntimePrecondition.CollectionOutcomeMessage(
+            "ui-sql", "system_health", PerformanceMonitor.Collectors.CollectorRuntimePrecondition.CaptureSessionMissingStatus, null, now)!;
+        Assert.Contains("runtime PRECONDITION", session);
+
+        var o = Run([dark, session], out _);
+        Assert.StartsWith("The Running Jobs collector has not run for this server for over 24 hours, so what is shown is out of date. Possible cause:", o[0]);
+        Assert.DoesNotContain("PRECONDITION", o[0]);
+        Assert.Contains("ALTER ANY EVENT SESSION", o[1]);
+        Assert.DoesNotContain("PRECONDITION", o[1]);
+        Assert.DoesNotContain("nothing to restart", o[1]);
+    }
+
+    /// <summary>Text without the precondition closing sentence is not touched by that rule.</summary>
+    [Fact]
+    public void ATextWithoutThePreconditionMarks_IsUnchanged()
+    {
+        const string plain = "The running jobs table has no rows for this window. Try a wider range.";
+        Assert.Equal(plain, Run([plain], out _)[0]);
+    }
+
     /// <summary>#6439: the tempdb File I/O Latency panel on an Azure SQL Database says the same short line as the other Azure panels, not "check
     /// that collection is running"; any other engine gets no such answer and keeps its own miss.</summary>
     [Fact]

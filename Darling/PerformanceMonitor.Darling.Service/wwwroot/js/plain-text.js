@@ -318,6 +318,7 @@ export function plainText(text) {
   if (typeof text !== "string" || text === "") return text;
   if (text.includes(ENGINE_GATE_MARK)) return AZURE_SQL_DATABASE_MARK.test(text) ? AZURE_SQL_DATABASE_NOT_COLLECTED_LINE : NOT_COLLECTED_LINE;
   let t = text;
+  if (text.includes(RUNTIME_PRECONDITION_MARK)) t = runtimePreconditionText(text);
   t = namedTokenText(t);
 
   /* The health sentence's collector and field names, said as the page's own words (#5492). Not in the named path: a Last
@@ -394,6 +395,36 @@ export function plainText(text) {
   t = lowerEmphasisWords(t);
 
   return t;
+}
+
+/** The words every runtime-precondition answer opens its closing sentence with (CollectorRuntimePrecondition.cs: the
+    PreconditionEpilogue and ConnectScopedEpilogue constants). */
+const RUNTIME_PRECONDITION_MARK = "This is a runtime PRECONDITION";
+
+/** How CollectorRuntimePrecondition.GatedOffMessage opens its "never ran" answer. */
+const NEVER_RAN_OPENING = /^The ([a-z][a-z0-9]*(?:_[a-z0-9]+)*) collector has never run against .+?, while the server itself is collecting normally/s;
+
+/** How CollectorRuntimePrecondition.GatedOffMessage opens its "no longer invoked" answer, with the number of hours it names. */
+const GONE_DARK_OPENING = /^The ([a-z][a-z0-9]*(?:_[a-z0-9]+)*) collector is no longer being invoked against .+? by more than (\d+) hours/s;
+
+/** What GatedOffMessage puts between its fixed sentences and the closing sentence: the text its caller passes for what could switch the collector off. */
+const SWITCHED_OFF_CAUSES = /(?:never|no longer) permitted to look\.\s*(.*?)\s*This is a runtime PRECONDITION/s;
+
+/**
+ * A runtime-precondition answer (CollectorRuntimePrecondition.cs) the way the page shows it. The server's text is written for
+ * an MCP client: it labels itself a runtime PRECONDITION and says to retry, which a reader of the page cannot use. Without
+ * that closing sentence the rest is kept as written, because it names the statement, grant or step that satisfies it.
+ * The two "the collector is not being invoked" answers (never ran, gone dark) are longer than the page needs: each becomes a
+ * line saying which data is missing, followed by the possible causes the server names, as written.
+ */
+function runtimePreconditionText(text) {
+  const causes = SWITCHED_OFF_CAUSES.exec(text);
+  const tail = causes && causes[1] ? " " + causes[1] : "";
+  const never = NEVER_RAN_OPENING.exec(text);
+  if (never) return "The " + toolWords(never[1]) + " collector has never run for this server, so there is nothing to show." + tail;
+  const dark = GONE_DARK_OPENING.exec(text);
+  if (dark) return "The " + toolWords(dark[1]) + " collector has not run for this server for over " + dark[2] + " hours, so what is shown is out of date." + tail;
+  return text.slice(0, text.indexOf(RUNTIME_PRECONDITION_MARK)).trimEnd();
 }
 
 /** The one short line the page shows where the server says a collector can never run on this kind of server. The
