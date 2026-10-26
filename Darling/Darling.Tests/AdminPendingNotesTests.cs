@@ -87,6 +87,39 @@ public sealed class AdminPendingNotesTests
         Assert.Equal(JsonValueKind.Null, expired.GetProperty("message").ValueKind);
     }
 
+    /* An empty Write note says "Enter the note's text." at once, as the service would, and sends no change: before, the click made a
+       round trip, logged a 400 in the console and only then showed the sentence. */
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void WritingABlankNote_SaysSoWithoutSendingARequest_Pure(string noteText)
+    {
+        var run = AdminServerEditBehaviourTests.Run("pure", JsonSerializer.Serialize(new
+        {
+            fn = "writeNote",
+            args = new object[] { new { server_id = "", metric_name = "", note_text = noteText, days = "90" } },
+        }));
+        var result = run.GetProperty("result");
+
+        Assert.False(result.GetProperty("ok").GetBoolean());
+        Assert.Equal("The note was not written. Enter the note's text.", result.GetProperty("message").GetString());
+        Assert.Equal(0, run.GetProperty("writes").GetInt32());
+    }
+
+    /* An empty Add route says what the service says (a family or an exact metric name is needed) before anything is sent: the save
+       shows an error from routePayload without a request. A route with a match builds its body. */
+    [Fact]
+    public void AddingARouteWithNoMatch_IsRefusedByTheFormBeforeARequest_Pure()
+    {
+        var blank = Pure("routePayload", new { id = (int?)null, match = "  ", perHour = "10", perDay = "50", lease = "30", expiry = "120", fallback = "", scope = "", level = "", resolutions = "", enabled = true });
+        var named = Pure("routePayload", new { id = (int?)null, match = "blocking", perHour = "10", perDay = "50", lease = "30", expiry = "120", fallback = "", scope = "", level = "", resolutions = "", enabled = true });
+
+        Assert.Equal("Choose a family or enter an exact metric name.", blank.GetProperty("error").GetString());
+        Assert.False(blank.TryGetProperty("payload", out _));
+        Assert.False(named.TryGetProperty("error", out _));
+        Assert.Equal("blocking", named.GetProperty("payload").GetProperty("metric_match").GetString());
+    }
+
     [Fact]
     public void OnlyASeatThatCanEdit_GetsTheDecideColumn_Pure()
     {
