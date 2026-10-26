@@ -706,7 +706,7 @@ function findTab(id) {
 }
 
 function tabBar(active) {
-  return el("nav", { class: "subtabs wrap", "aria-label": "Admin sections" },
+  return el("nav", { class: "subtabs", "aria-label": "Admin sections" },
     TABS.map((t) => el("a", {
       class: "subtab" + (t.id === active.id ? " active" : ""),
       href: "#/admin/" + t.id,
