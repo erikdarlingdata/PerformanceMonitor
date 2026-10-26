@@ -2005,8 +2005,8 @@ export const SERVER_TABS = [
   {
     id: "queries",
     label: "Queries",
-    note: "Plan analysis, cached-plan retrieval and actual-plan re-execution are in the desktop viewer, not on this page. The Active Queries panel can read the running requests live with Run live now (accounts that can edit; otherwise use the viewer's Current Active Queries).",
-    noteInfo: "They need a plan renderer and a connection back to the monitored server. Apart from the Active Queries live read, this page only shows collected data.",
+    note: "Plan analysis, cached-plan retrieval and actual-plan re-execution are in the desktop viewer, not on this page.",
+    noteInfo: "They need a plan renderer and a connection back to the monitored server. Apart from the Active Queries live read (Run live now, for accounts that can edit; otherwise use the viewer's Current Active Queries), this page only shows collected data.",
     build: (server, ctx) => [
       activeQueriesPanel(server, ctx),
       /* #2484: the viewer's Performance Trends tab is four charts over three reads. Duration and the
@@ -2361,7 +2361,15 @@ export const SERVER_TABS = [
         "jobs",
         JOB_COLUMNS,
         SNAPSHOT,
-        "No SQL Agent jobs were running at the last collection — the normal state for most servers."
+        runningJobsEmptyText(ctx),
+        2,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        ctx.offline === true
       ),
       table(
         "Job History",
@@ -3449,6 +3457,16 @@ export function isPostgresTarget(card) {
 export function findServerTab(id, tabs) {
   const registry = tabs || SERVER_TABS;
   return registry.find((t) => t.id === id) || registry[0];
+}
+
+/** What Running Jobs says when nothing is listed. "The normal state for most servers" is a claim about a server that is
+ *  collecting; a server whose collection is stale (the fleet card's is_online false, the same signal the page header's
+ *  Collectors chip reads) has no current reading, so it says so instead and the panel's sentence replaces the read's own
+ *  empty message (table()'s emptyWins). */
+export function runningJobsEmptyText(ctx) {
+  return ctx && ctx.offline === true
+    ? "No running jobs can be shown: collection for this server is stale, so the last snapshot is not a current reading. See Collection Health."
+    : "No SQL Agent jobs were running at the last collection — the normal state for most servers.";
 }
 
 /** The tab's note as a rendered strip, or null. Kept here so the shell has no opinion about its wording. A note can be

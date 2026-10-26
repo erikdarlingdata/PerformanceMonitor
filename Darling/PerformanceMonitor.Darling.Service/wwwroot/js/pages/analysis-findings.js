@@ -197,7 +197,8 @@ export async function runAnalyzeNow(server) {
 export function generateUnavailableNote(managedStore) {
   return managedStore === true
     ? listOnlyNote(true, "an analysis cannot be started from this page", "To generate recommendations now")
-    : "This dashboard's store login cannot queue an analysis. Re-run Darling/tools/provision-roles.sql on the store, or use the Viewer's Generate now.";
+    : "Generate now is not available. This seat can edit, but the store login this dashboard connects with (postgres.webConnectionString) is not allowed to queue an analysis: the store's roles script has not been run since the service was upgraded. " +
+      "To fix it, run provision-roles.sql (from the Darling/tools folder of the project's GitHub repository) against the store as its owner, then reload this page. Or use the Viewer's Generate now.";
 }
 
 /* The server page rebuilds this tab on every poll, and a pass can outlast a poll, so the lock, the status line and the reload hook live

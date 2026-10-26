@@ -2773,7 +2773,7 @@ public sealed class DarlingWebHostService : BackgroundService
 <form method='post' action='/auth/login'>
   <div class='brand'>
     <h1>Darling Web</h1>
-    <div class='sub'>SQL Server fleet monitor</div>
+    <div class='sub'>SQL Server and PostgreSQL monitor</div>
   </div>
   <label for='token'>Access token</label>
   <input id='token' name='token' type='password' autocomplete='off' autofocus>

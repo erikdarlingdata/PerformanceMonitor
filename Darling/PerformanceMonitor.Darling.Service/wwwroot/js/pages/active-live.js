@@ -77,7 +77,8 @@ export async function runLiveActiveQueries(server) {
 export function liveUnavailableNote(managedStore) {
   return managedStore === true
     ? listOnlyNote(true, "the live read cannot be queued from this page", "To read the active queries live")
-    : "This dashboard's store login cannot queue a live read. Re-run Darling/tools/provision-roles.sql on the store, or use the Viewer's Current Active Queries to read the active queries live.";
+    : "Run live now is not available. This seat can edit, but the store login this dashboard connects with (postgres.webConnectionString) is not allowed to queue a live read: the store's roles script has not been run since the service was upgraded. " +
+      "To fix it, run provision-roles.sql (from the Darling/tools folder of the project's GitHub repository) against the store as its owner, then reload this page. Or use the Viewer's Current Active Queries.";
 }
 
 /* #6386: what the page says for each server, kept here and not in the elements. The server page replaces its whole panel grid on every
