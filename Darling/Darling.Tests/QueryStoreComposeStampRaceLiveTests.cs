@@ -157,7 +157,7 @@ public sealed class QueryStoreComposeStampRaceLiveTests
         {
             /* A service clock two hours ahead of the store would plan the hour that is only an hour old by the store's clock, where the
                trigger's margin is still open. The plan reads the store's clock, so the newest hour it plans is three hours old by it. */
-            var plan = await QueryStoreComposeStamp.PlanBuildsAsync(connection, DateTime.UtcNow.AddHours(2), RetentionDays, ct);
+            var plan = await QueryStoreComposeStamp.PlanBuildsAsync(connection, ClockWithin(hourNow).AddHours(2), RetentionDays, ct);
             Assert.NotEmpty(plan);
             Assert.Equal(hourNow.AddHours(-3), plan[0].Hour);
             Assert.All(plan, b => Assert.True(b.Hour <= hourNow.AddHours(-3), $"{b.Hour:O} is too young"));
@@ -200,7 +200,7 @@ public sealed class QueryStoreComposeStampRaceLiveTests
             Assert.True(await MismatchesAsync(connection, hour, hour.AddHours(1), ct) > 0, "the rollup does not hold the writer's row");
             Assert.Equal(hour, await StampThroughAsync(connection, hour.AddHours(-2), hourNow.AddHours(-2), ct));
 
-            var tick = await QueryStoreComposeStamp.RunTickAsync(source, DateTime.UtcNow, RetentionDays, NullLogger.Instance, ct);
+            var tick = await ComposeStampLiveSupport.TickAtAsync(source, ClockWithin(hourNow), ct);
             Assert.Equal(0, tick.Failed);
             Assert.Equal(1, tick.BuiltStale);
             Assert.Equal(0, await StalePairsAsync(connection, ct));
