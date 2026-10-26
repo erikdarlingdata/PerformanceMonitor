@@ -147,14 +147,22 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         return rig;
     }
 
+    /// <summary>
+    /// The raw path. Since #6750 part 2 the table path serves this store's full baseline at 168 hours (its own tables reach below raw's
+    /// floor), so the empty-baseline state exists only where raw answers. A pending wide batch sends the read to raw, where raw's floor
+    /// is after the window start.
+    /// </summary>
     [Fact]
     public async Task ARawFloorAfterTheWindowStart_SaysTheBaselineIsEmpty_AndDividesTheRecentRateByTheHoursItHolds()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await StartAsync(ct);
+        await QueryStoreIntervalWideBelowFloorLiveTests.ExecAsync(rig.Connection,
+            "INSERT INTO collect.query_store_interval_wide_pending (server_id, collection_time, database_name, recorded_at) VALUES (@server_id, @cutoff, 'qsEmpty', @cutoff)",
+            rig.RawFloor, ct);
 
         var hit = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 168)).RootElement;
-        Assert.Equal("interval_table", hit.GetProperty("history_source").GetString());
+        Assert.Equal("raw", hit.GetProperty("history_source").GetString());
         Assert.True(hit.GetProperty("window_truncated").GetBoolean());
 
         /* The sentence matches the comparison: the store starts after baseline_end and after recent_window_start. */
@@ -211,11 +219,29 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.True(now.Any(line => Field(line, "baseline_aborted_per_hour") is double rate && Math.Abs(rate - expected) < 0.01),
             $"expected baseline_aborted_per_hour {expected:0.000}:\n" + string.Join("\n", now));
 
-        /* And through the tool: the baseline starts before baseline_end, so the old sentence stays. */
-        /* The answer may be the empty envelope (nothing rose over the 6 hours of baseline the store holds), which carries the note under hints. */
+        /* And through the tool (#6750 part 2): at 24 hours the baseline starts at 8 days, below raw's floor (about 3 days back), so the
+           table serves each arm from its own start. The note is the table note, not raw's BaselineWindowTail. The floors are read back
+           from the store: both tables start at the 9 day old interval, so each arm starts a purge-edge margin after it. */
+        var wideFloor = (DateTime)(await QueryStoreIntervalWideBelowFloorLiveTests.ScalarAsync(rig.Connection, QueryStoreIntervalWide.PlainTableFloorSql.Replace("$1", "@server_id", StringComparison.Ordinal), ct))!;
+        var latestFloor = (DateTime)(await QueryStoreIntervalWideBelowFloorLiveTests.ScalarAsync(rig.Connection, QueryStoreIntervalLatest.PlainTableFloorSql.Replace("$1", "@server_id", StringComparison.Ordinal), ct))!;
+        /* The answer may be the empty envelope (nothing rose), which carries the notice's keys under hints. */
         var hit = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 24)).RootElement;
-        var dayNote = hit.TryGetProperty("truncation_note", out var top) ? top : hit.GetProperty("hints").GetProperty("truncation_note");
-        Assert.EndsWith(QueryStoreRegressionRules.BaselineWindowTail, dayNote.GetString()!, StringComparison.Ordinal);
+        Assert.Equal("interval_table", hit.TryGetProperty("history_source", out var source) ? source.GetString() : "interval_table");
+        var carrier = hit.TryGetProperty("truncation_note", out _) ? hit : hit.GetProperty("hints");
+        var dayNote = carrier.GetProperty("truncation_note").GetString()!;
+        Assert.StartsWith("The window reaches further back", dayNote, StringComparison.Ordinal);
+        Assert.DoesNotContain(QueryStoreRegressionRules.BaselineWindowTail, dayNote, StringComparison.Ordinal);
+        if (hit.TryGetProperty("cost_baseline_start", out var costStart))
+        {
+            Assert.Equal(McpHelpers.FormatEffectiveStart(latestFloor + QueryStoreIntervalWide.PurgeEdgeMargin), costStart.GetString());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(wideFloor + QueryStoreIntervalWide.PurgeEdgeMargin), hit.GetProperty("failure_baseline_start").GetString());
+        }
+        else
+        {
+            Assert.Equal(McpHelpers.FormatEffectiveStart(wideFloor + QueryStoreIntervalWide.PurgeEdgeMargin), carrier.GetProperty("effective_start").GetString());
+        }
+
+        Assert.Contains(McpHelpers.FormatEffectiveStart(wideFloor + QueryStoreIntervalWide.PurgeEdgeMargin), dayNote, StringComparison.Ordinal);
     }
 
     private static double? Field(string line, string name)

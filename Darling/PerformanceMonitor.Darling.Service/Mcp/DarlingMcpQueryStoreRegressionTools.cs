@@ -240,8 +240,8 @@ public sealed class DarlingMcpQueryStoreRegressionTools
         var failure = McpHelpers.FormatEffectiveStart(spans.FailureStart);
         var note = "The window reaches further back than this server's raw query_store_stats retains, so the baseline was read from the per-interval tables, each from where it holds complete history. ";
         note += spans.CostFromLatest
-            ? $"Cost (Regular runs) was compared from {cost} to the end of the baseline, from query_store_interval_latest, which keeps 15 days. Timeouts and errors were compared from {failure} to the end of the baseline, from query_store_interval_wide, which keeps 10 days."
-            : $"Cost, timeouts and errors were compared from {failure} to the end of the baseline, from query_store_interval_wide, which keeps 10 days.";
+            ? $"Cost (Regular runs) was compared from {cost} to the end of the baseline, from query_store_interval_latest, which keeps {DarlingRetention.QueryStoreIntervalLatestRetentionDays} days. Timeouts and errors were compared from {failure} to the end of the baseline, from query_store_interval_wide, which keeps {QueryStoreIntervalPartitions.WideHorizonDays} days."
+            : $"Cost, timeouts and errors were compared from {failure} to the end of the baseline, from query_store_interval_wide, which keeps {QueryStoreIntervalPartitions.WideHorizonDays} days.";
         if (DateTime.SpecifyKind(spans.FailureStart, DateTimeKind.Unspecified) >= DateTime.SpecifyKind(baselineEnd, DateTimeKind.Unspecified))
         {
             note += " That timeouts and errors baseline holds no hours, so timeouts and errors are flagged on recent runs alone.";

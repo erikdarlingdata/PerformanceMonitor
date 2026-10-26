@@ -255,6 +255,15 @@ public static class QueryStoreRegressionBaseline
     /// server's own floor in that table plus a day. An arm at the clamp keeps the rule of <see cref="WithHoursHeldStart"/>, the later of
     /// its start and <paramref name="dataStart"/> (this server's raw data start), so a store whose raw tier holds the whole baseline
     /// reads as before.
+    /// <para>The below-floor hours are deliberately not capped by <paramref name="dataStart"/>:</para>
+    /// <list type="number">
+    /// <item>A below-floor start is at least this server's own floor in that table plus <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> (26 h).
+    /// The coverage claim and the cadence and gap verdict prove complete history from there.</item>
+    /// <item>Raw's data start for this server is at or after raw's floor, because the older raw chunks are dropped. Capping by it would
+    /// shrink the divisor back to raw's few days and overstate the baseline failure rates.</item>
+    /// <item>A young server is unaffected. Its own table floor plus 26 h is after raw's floor, so it gets no below-floor start, and its arm
+    /// keeps the <see cref="WithHoursHeldStart"/> rule (the later of the arm start and its data start).</item>
+    /// </list>
     /// </summary>
     public static Plan WithArmStarts(Plan plan, ArmSpans spans, DateTime clamp, DateTime? dataStart)
     {
