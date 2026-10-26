@@ -137,6 +137,46 @@ public sealed class QueryTagRollupRoutingLiveTests
             Assert.Contains("materialized only to", plan.GetProperty("window_edges_note").GetString(), StringComparison.Ordinal);
         });
 
+    /// <summary>#6794: a 24-hour window is inside raw retention, so a one-server read takes raw. A fleet read (no server) takes the hourly
+    /// io rollup there, because raw would be every server's raw rows for the whole window, and says so with the hourly route's own words:
+    /// tier hourly, the served window_end and the edges note. The figures are the rollup's, which equal raw's over the whole hours.</summary>
+    [Fact]
+    public Task AFleetRead_InsideRawRetention_TakesTheHourlyRollup_AndSaysSo_WhileOneServerKeepsRaw() =>
+        WithStoreAsync(async (scratch, connection, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            /* One row before the window, so the io rollup's floor reaches the window's start, and one inside it, in a whole hour. */
+            await TopRankingLiveTests.PlantQueryAsync(connection, ct, "collect.query_stats", ServerId, ServerName, now.AddHours(-30), "QOLD", 1_000, 1_000, 7, 1);
+            await TopRankingLiveTests.PlantQueryAsync(connection, ct, "collect.query_stats", ServerId, ServerName, now.AddHours(-3), "QNEW", 4_000_000, 6_000_000, 11, 3);
+            await TopRankingLiveTests.PlantProcedureAsync(connection, ct, "collect.procedure_stats", ServerId, ServerName, now.AddHours(-30), "POLD", 1_000, 1_000, 7, 1);
+            await TopRankingLiveTests.PlantProcedureAsync(connection, ct, "collect.procedure_stats", ServerId, ServerName, now.AddHours(-3), "PNEW", 4_000_000, 6_000_000, 11, 3);
+            foreach (var view in new[] { TimescaleSupport.QueryStatsIoHourlyView, TimescaleSupport.ProcedureStatsIoHourlyView })
+            {
+                await RefreshAsync(connection, ct, view, now.AddHours(-32), now.AddHours(-1));
+            }
+
+            await using var fleetSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            using var fleet = JsonDocument.Parse(await DarlingMcpQueryTagRollupTools.GetResourceUseByTagCore(fleetSource, null, 24, null, 25, null, null, ct));
+            foreach (var name in new[] { "plan_cache", "procedures" })
+            {
+                var section = Section(fleet, name);
+                Assert.Equal("hourly", section.GetProperty("tier").GetString());
+                Assert.Contains("hourly rollup", section.GetProperty("source").GetString(), StringComparison.Ordinal);
+                Assert.Equal(JsonValueKind.String, section.GetProperty("window_end").ValueKind);
+                Assert.False(string.IsNullOrEmpty(section.GetProperty("window_edges_note").GetString()));
+                Assert.Equal(4_000, section.GetProperty("fleet_total").GetProperty("cpu_ms").GetDouble());
+            }
+
+            await using var oneSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            using var one = JsonDocument.Parse(await DarlingMcpQueryTagRollupTools.GetResourceUseByTagCore(oneSource, ServerName, 24, null, 25, null, null, ct));
+            foreach (var name in new[] { "plan_cache", "procedures" })
+            {
+                var section = Section(one, name);
+                Assert.Equal("raw", section.GetProperty("tier").GetString());
+                Assert.Equal(4_000, section.GetProperty("total").GetProperty("cpu_ms").GetDouble());
+            }
+        });
+
     /// <summary>The io hourly statement for the plan cache reads its measures by name: five different figures land on five different measures.</summary>
     [Fact]
     public Task ThePlanCacheHourlyStatement_ReadsEachMeasureByName() =>

@@ -100,8 +100,9 @@ public sealed class DarlingMcpQueryTagRollupTools
 
             /* Each stats section routes on its own (their rollups and floors are independent) and says how far back it reached: the raw branch
                carries effective_start / window_truncated, the hourly branch the served window_end. The routing lives in the reader, which judges
-               the retention tier against the wall clock; this tool's only "now" is the as_of anchor (windowEnd). */
-            var (planRoute, procRoute) = await DarlingQueryTagRollupRouting.ChooseStatsRoutesAsync(postgres, serverIds, windowStart, windowEnd, cancellationToken);
+               the retention tier against the wall clock; this tool's only "now" is the as_of anchor (windowEnd). A fleet read takes the hourly
+               rollup also inside raw retention when it reaches the window (#6794). */
+            var (planRoute, procRoute) = await DarlingQueryTagRollupRouting.ChooseStatsRoutesAsync(postgres, serverIds, windowStart, windowEnd, cancellationToken, fleet);
 
             var sections = new List<object>();
             /* anyWork: any collected work in the window at all. anyData: the answer holds figures, so with a tag filter it is decided from the
