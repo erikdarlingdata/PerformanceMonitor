@@ -73,12 +73,22 @@ public sealed class ViewerBlockedProcessRow : BlockedProcessAlertRow
     public int BlockedPriority { get; set; }
     public int BlockingPriority { get; set; }
 
-    /* #5632 part 4, DMV-snapshot rows only (null on an XE report row and on a row captured before the columns existed): the head
+    /* #5632 part 4, DMV-snapshot rows only (null on an XE report row unless a same-minute DMV row for the pair was folded into it, and on a row captured before the columns existed): the head
        blocker's session. The two times are the monitored server's own clock, stored raw. */
     public DateTime? BlockingLoginTime { get; set; }
     public DateTime? BlockingLastRequestEndTime { get; set; }
     public int? BlockingOpenTransactionCount { get; set; }
     public long? BlockingTranLogBytesUsed { get; set; }
+
+    /// <inheritdoc/>
+    public override void FillHeadEvidenceFrom(BlockedProcessAlertRow dmvRow)
+    {
+        if (dmvRow is not ViewerBlockedProcessRow dmv) return;
+        BlockingLoginTime ??= dmv.BlockingLoginTime;
+        BlockingLastRequestEndTime ??= dmv.BlockingLastRequestEndTime;
+        BlockingOpenTransactionCount ??= dmv.BlockingOpenTransactionCount;
+        BlockingTranLogBytesUsed ??= dmv.BlockingTranLogBytesUsed;
+    }
 
     /// <summary>When the head blocker's session signed in, rendered as the server's clock (the stored value is not UTC); empty for NULL.</summary>
     public string BlockingLoginTimeLocal => ViewerDataService.FormatServerClock(BlockingLoginTime);

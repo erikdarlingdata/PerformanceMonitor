@@ -517,6 +517,17 @@ VALUES ($1, $2, $3, $4, 512, 8, 8, $5, 0, 128, 0.5, 2, $6, $7, 0, 3, 20, 12.5,
             Assert.Equal(5, s3!.TotalRunnableTasksCount);
             Assert.Equal(5.00m, s3.AvgRunnableTasksCount);
 
+            /* t4: the shown memory row is under 10 % of total (4,000,000 of 65,536,000 KB) but the engine says available memory is
+               high (a buffer pool that uses the RAM), so a split collection is not under pressure; the same pair with the low
+               state (t1) still is. */
+            var t4 = t1.AddMinutes(15);
+            await InsertFullAsync(connection, 61, t4, 4, 0, 4, 8, 50.00m, 65536000L, 32768000L, "Available physical memory is high");
+            await InsertFullAsync(connection, 60, t4, 4, 0, 3, 9, 33.33m, 65536000L, 4000000L, "Available physical memory is high");
+            var s4 = await viewer.GetCpuSchedulerSnapshotAsync(ServerId, t4.AddMinutes(-1), t4.AddMinutes(1));
+            Assert.NotNull(s4);
+            Assert.Equal(4000000L, s4!.AvailablePhysicalMemoryKb);
+            Assert.False(s4.PhysicalMemoryPressureWarning);
+
             bodySucceeded = true;
         }
         finally

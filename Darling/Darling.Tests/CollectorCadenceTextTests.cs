@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -102,6 +103,35 @@ public sealed class CollectorCadenceTextTests
 
         Assert.NotNull(await cache.GetAsync());
         Assert.Equal(2, reads);
+    }
+
+    [Fact]
+    public async Task SeveralCallersWaitingOnOneFailedRead_AllGetNull_AndTheFailureIsReportedOnce()
+    {
+        /* The Viewer asks from the UI thread, one continuation at a time; an exclusive scheduler gives the test the same order. */
+        var oneAtATime = new ConcurrentExclusiveSchedulerPair().ExclusiveScheduler;
+        await Task.Factory.StartNew(async () =>
+        {
+            var reads = 0;
+            var reported = new List<Exception>();
+            var read = new TaskCompletionSource<IReadOnlyList<CollectorScheduleRow>>();
+            var cache = new ViewerScheduleOverridesCache(
+                () => ++reads == 1 ? read.Task : Task.FromResult<IReadOnlyList<CollectorScheduleRow>>(Array.Empty<CollectorScheduleRow>()),
+                () => DateTime.UtcNow,
+                reported.Add);
+
+            /* One Overview refresh: three panel notes and the picker ask while the one read is still under way. */
+            var asks = new[] { cache.GetAsync(), cache.GetAsync(), cache.GetAsync(), cache.GetAsync() };
+            read.SetException(new InvalidOperationException("store down"));
+            var results = await Task.WhenAll(asks);
+
+            Assert.Equal(1, reads);
+            Assert.All(results, Assert.Null);
+            Assert.Single(reported);
+            /* The failure was not kept: the next ask reads again. */
+            Assert.NotNull(await cache.GetAsync());
+            Assert.Equal(2, reads);
+        }, CancellationToken.None, TaskCreationOptions.None, oneAtATime).Unwrap();
     }
 
     [Fact]

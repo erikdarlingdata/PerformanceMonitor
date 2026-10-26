@@ -136,7 +136,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
 
         /* One piece stored TRUE at 6,000,000 KB, the other FALSE at 20,000,000 KB: the read shows the 6,000,000 KB row (9.2 %),
            so the flag is TRUE. */
-        await InsertPieceAsync(9301L, time, runnable: 1, avg: 1m, currentWorkers: 10, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 6000000L, memoryWarning: true);
+        await InsertPieceAsync(9301L, time, runnable: 1, avg: 1m, currentWorkers: 10, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 6000000L, memoryWarning: true, memoryState: "Available physical memory is low");
         await InsertPieceAsync(9302L, time, runnable: 1, avg: 1m, currentWorkers: 10, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 20000000L);
 
         var snapshot = await new LocalDataService(_duckDb).GetCpuSchedulerSnapshotAsync(ServerId, hoursBack: 24);
@@ -144,6 +144,25 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         Assert.NotNull(snapshot);
         Assert.Equal(6000000L, snapshot!.AvailablePhysicalMemoryKb);
         Assert.True(snapshot.PhysicalMemoryPressureWarning);
+    }
+
+    /// <summary>
+    /// The 10 % rule does not hold while the engine says available memory is high (a buffer pool that uses the RAM): a split
+    /// collection whose shown row is under 10 % but reports the high state is not under pressure, and one that reports any other
+    /// state still is.
+    /// </summary>
+    [Fact]
+    public async Task Snapshot_SplitCollection_MemoryPressureFlag_IsFalseWhileTheEngineSaysAvailableMemoryIsHigh()
+    {
+        var high = DateTime.UtcNow.AddMinutes(-2);
+        await InsertPieceAsync(9321L, high, runnable: 1, avg: 1m, currentWorkers: 10, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 4000000L, memoryWarning: true, memoryState: "Available physical memory is high");
+        await InsertPieceAsync(9322L, high, runnable: 1, avg: 1m, currentWorkers: 10, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 20000000L);
+
+        var snapshot = await new LocalDataService(_duckDb).GetCpuSchedulerSnapshotAsync(ServerId, hoursBack: 24);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(4000000L, snapshot!.AvailablePhysicalMemoryKb);
+        Assert.False(snapshot.PhysicalMemoryPressureWarning);
     }
 
     [Fact]

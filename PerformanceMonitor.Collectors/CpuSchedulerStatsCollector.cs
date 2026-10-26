@@ -145,6 +145,7 @@ SELECT /* PerformanceMonitorLite */
             bit,
             CASE
                 WHEN osm.available_physical_memory_kb < (osm.total_physical_memory_kb * 0.10)
+                AND  osm.system_high_memory_signal_state = 0 /*The engine says available memory is high: a buffer pool that uses the RAM is not pressure*/
                 THEN 1
                 ELSE 0
             END
