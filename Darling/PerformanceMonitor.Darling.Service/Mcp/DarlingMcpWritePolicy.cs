@@ -283,11 +283,11 @@ internal static class DarlingMcpWritePolicy
         internal bool IsOperator => Writes && !Investigations;
 
         /// <summary>The journal actor of an operator-class caller's route agent change, else null: <c>operator:&lt;token name&gt;</c> for a named
-        /// operator token, and for the legacy token <c>operator:</c> with the token identity the route write log lines already carry
-        /// (<see cref="ReadCaller.AmbientMcpToken"/>, the fingerprint). Never a token value.</summary>
+        /// operator token, and for the legacy token <c>operator:</c> with the store-safe token identity
+        /// (<see cref="ReadCaller.StoreTokenIdentity"/>: <c>legacy token</c>, never the fingerprint the log lines carry). Never a token value.</summary>
         internal string? OperatorActor => !IsOperator ? null
             : TokenName is { } name ? "operator:" + name
-            : "operator:" + (ReadCaller.AmbientMcpToken ?? "token unknown");
+            : "operator:" + ReadCaller.StoreTokenIdentity();
 
         /// <summary>True when a tool named <paramref name="toolName"/> is offered under this policy.</summary>
         internal bool Offers(string toolName) => Offers(toolName, AgentActionTools);

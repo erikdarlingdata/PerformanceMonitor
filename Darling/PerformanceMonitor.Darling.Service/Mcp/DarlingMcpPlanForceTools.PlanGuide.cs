@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.Json;
 using System.Threading;
@@ -45,7 +46,7 @@ public sealed partial class DarlingMcpPlanForceTools
     /// <summary>The create tool body (#6569), so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
     internal static async Task<string> RunCreatePlanGuideAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, string? server_name, string? database_name,
         string? name, string? statement, string? type, string? module_or_batch, string? parameters, string? hints, string? agent_action, bool dry_run, CancellationToken ct,
-        string? agentTokenName = null)
+        string? agentTokenName = null, IReadOnlySet<string>? namedAgentNames = null)
     {
         const string tool = CreatePlanGuideToolName;
         logger ??= NullLogger.Instance;
@@ -60,13 +61,13 @@ public sealed partial class DarlingMcpPlanForceTools
             /* 1: arguments that cannot make a guide are refused before the gate, and journaled as a block is. */
             var (definition, badCode, badMessage) = PlanGuideDefinition.TryCreate(name, statement, type, module_or_batch, parameters, hints);
             if (definition is null)
-                return await RefuseBeforeGateAsync(store, agent_action, tool, badCode!, badMessage!, ct, agentTokenName);
+                return await RefuseBeforeGateAsync(store, agent_action, tool, badCode!, badMessage!, agentTokenName, namedAgentNames, ct);
 
             var database = database_name?.Trim();
             if (string.IsNullOrEmpty(database) || database.Length > 128 || ContainsControlCharacter(database))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadDatabase,
-                    "database_name is the database the guide is created in, at most 128 characters. Nothing was run.", ct, agentTokenName);
+                    "database_name is the database the guide is created in, at most 128 characters. Nothing was run.", agentTokenName, namedAgentNames, ct);
             }
 
             /* 2: SQL Server only. Microsoft's sp_create_plan_guide page lists Azure SQL Database and Managed Instance, but the sp_control_plan_guide page, which the
@@ -75,13 +76,13 @@ public sealed partial class DarlingMcpPlanForceTools
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
-                    $"{resolved.DisplayName} is a PostgreSQL target. A plan guide is SQL Server only; there is no PostgreSQL equivalent.", ct, agentTokenName);
+                    $"{resolved.DisplayName} is a PostgreSQL target. A plan guide is SQL Server only; there is no PostgreSQL equivalent.", agentTokenName, namedAgentNames, ct);
             }
 
             if (engineEdition is AzureSqlDatabaseEdition or AzureManagedInstanceEdition)
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, EngineNotSupported,
-                    $"{resolved.DisplayName} is an Azure SQL target. Darling creates plan guides on SQL Server only: Microsoft documents sp_control_plan_guide, which the drop of an invalid guide and the Undo use, for SQL Server alone. Nothing was run.", ct, agentTokenName);
+                    $"{resolved.DisplayName} is an Azure SQL target. Darling creates plan guides on SQL Server only: Microsoft documents sp_control_plan_guide, which the drop of an invalid guide and the Undo use, for SQL Server alone. Nothing was run.", agentTokenName, namedAgentNames, ct);
             }
 
             if (owner is null)
@@ -92,7 +93,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
             /* 3: the gate, for a dry run too. The permit's Id is the guide's name and its Database is the database. */
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, definition.Name, database);
-            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.CreatePlanGuide, agent_action, target, ct, agentTokenName);
+            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.CreatePlanGuide, agent_action, target, ct, agentTokenName, namedAgentNames);
             if (decision.Refusal is { } gateRefusal)
                 return await GateRefusalAnswerAsync(gateRefusal, dry_run, owner, logger, resolved.ServerId, resolved.ServerName, ServerActionNames.CreatePlanGuide, ct);
             var permit = decision.Permit!;
@@ -105,7 +106,7 @@ public sealed partial class DarlingMcpPlanForceTools
             /* 3b: a database the server's entry excludes is one Darling does not act in. */
             if (IsExcludedDatabase(row.ExcludedDatabases, database))
             {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, ct);
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, agentTokenName, ct);
                 return DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database));
             }
 
@@ -117,13 +118,13 @@ public sealed partial class DarlingMcpPlanForceTools
             var before = new
             {
                 database,
-                guide = new { name = definition.Name, type = definition.Type, statement = definition.Statement, module_or_batch = definition.ModuleOrBatch, @params = definition.Params, hints = definition.Hints },
+                guide = GuideCreateImage(definition),
                 cached_matches = dry.CachedMatches,
             };
             if (dry.Outcome != RemediationOutcome.Done)
             {
                 if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
-                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, ct);
+                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, agentTokenName, ct);
                 return Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message,
                     new { dry_run, statement = dry.Statement ?? statementText, before });
             }
@@ -163,7 +164,7 @@ public sealed partial class DarlingMcpPlanForceTools
                         return JsonSerializer.Serialize(new { statement = written.Statement ?? statementText, message = written.Message, matches = written.CachedMatches }, McpHelpers.JsonOptions);
                     },
                 };
-                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.PlanGuideCreate, action!, target), hooks, ct);
+                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.PlanGuideCreate, action!, target, agentTokenName), hooks, ct);
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
                 if (result.OutcomeUnknown && unknown is not null)
@@ -289,12 +290,24 @@ public sealed partial class DarlingMcpPlanForceTools
     }
 
     /// <summary>The definition a drop reads, in the shape the journal keeps and the Undo re-creates from (#6569, slice 2b): the create's own definition fields plus <c>is_disabled</c>.</summary>
-    private static object GuideImage(PlanGuideDefinition guide, bool disabled) =>
-        new { name = guide.Name, type = guide.Type, statement = guide.Statement, module_or_batch = guide.ModuleOrBatch, @params = guide.Params, hints = guide.Hints, is_disabled = disabled };
+    internal static object GuideImage(PlanGuideDefinition guide, bool disabled) =>
+        new { name = guide.Name, type = guide.Type, statement = guide.Statement, module = ObjectModule(guide), module_or_batch = guide.ModuleOrBatch, @params = guide.Params, hints = guide.Hints, is_disabled = disabled };
+
+    /// <summary>The create answer's guide image: the same fields as <see cref="GuideImage"/> without <c>is_disabled</c>, which a new guide does not have yet.</summary>
+    private static object GuideCreateImage(PlanGuideDefinition guide) =>
+        new { name = guide.Name, type = guide.Type, statement = guide.Statement, module = ObjectModule(guide), module_or_batch = guide.ModuleOrBatch, @params = guide.Params, hints = guide.Hints };
+
+    /// <summary>
+    /// An OBJECT guide's module name (<c>[schema].[name]</c>), under its own key. <c>module_or_batch</c> holds batch text for a SQL guide, so the data-detail
+    /// masker withholds it; an object's name is kept at every level, as it is everywhere else in an answer, so the module needs a key of its own that is kept.
+    /// Null for a SQL or TEMPLATE guide.
+    /// </summary>
+    private static string? ObjectModule(PlanGuideDefinition guide) =>
+        string.Equals(guide.Type, "OBJECT", StringComparison.OrdinalIgnoreCase) ? guide.ModuleOrBatch : null;
 
     /// <summary>The drop tool body (#6569, slice 2b), so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
     internal static async Task<string> RunDropPlanGuideAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, string? server_name, string? database_name,
-        string? name, string? agent_action, bool dry_run, CancellationToken ct, string? agentTokenName = null)
+        string? name, string? agent_action, bool dry_run, CancellationToken ct, string? agentTokenName = null, IReadOnlySet<string>? namedAgentNames = null)
     {
         const string tool = DropPlanGuideToolName;
         logger ??= NullLogger.Instance;
@@ -309,13 +322,13 @@ public sealed partial class DarlingMcpPlanForceTools
             /* 1: arguments that cannot name a guide are refused before the gate, and journaled as a block is. */
             var guideName = PlanGuideDefinition.TryName(name);
             if (guideName is null)
-                return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadGuideName, PlanGuideDefinition.BadNameMessage, ct, agentTokenName);
+                return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadGuideName, PlanGuideDefinition.BadNameMessage, agentTokenName, namedAgentNames, ct);
 
             var database = database_name?.Trim();
             if (string.IsNullOrEmpty(database) || database.Length > 128 || ContainsControlCharacter(database))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadDatabase,
-                    "database_name is the database the guide is dropped from, at most 128 characters. Nothing was run.", ct, agentTokenName);
+                    "database_name is the database the guide is dropped from, at most 128 characters. Nothing was run.", agentTokenName, namedAgentNames, ct);
             }
 
             /* 2: SQL Server only, as the create is: sp_control_plan_guide is documented for SQL Server alone. */
@@ -323,13 +336,13 @@ public sealed partial class DarlingMcpPlanForceTools
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
-                    $"{resolved.DisplayName} is a PostgreSQL target. A plan guide is SQL Server only; there is no PostgreSQL equivalent.", ct, agentTokenName);
+                    $"{resolved.DisplayName} is a PostgreSQL target. A plan guide is SQL Server only; there is no PostgreSQL equivalent.", agentTokenName, namedAgentNames, ct);
             }
 
             if (engineEdition is AzureSqlDatabaseEdition or AzureManagedInstanceEdition)
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, EngineNotSupported,
-                    $"{resolved.DisplayName} is an Azure SQL target. Darling drops plan guides on SQL Server only: Microsoft documents sp_control_plan_guide for SQL Server alone. Nothing was run.", ct, agentTokenName);
+                    $"{resolved.DisplayName} is an Azure SQL target. Darling drops plan guides on SQL Server only: Microsoft documents sp_control_plan_guide for SQL Server alone. Nothing was run.", agentTokenName, namedAgentNames, ct);
             }
 
             if (owner is null)
@@ -340,7 +353,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
             /* 3: the gate, for a dry run too. The permit's Id is the guide's name and its Database is the database. */
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, guideName, database);
-            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.DropPlanGuide, agent_action, target, ct, agentTokenName);
+            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.DropPlanGuide, agent_action, target, ct, agentTokenName, namedAgentNames);
             if (decision.Refusal is { } gateRefusal)
                 return await GateRefusalAnswerAsync(gateRefusal, dry_run, owner, logger, resolved.ServerId, resolved.ServerName, ServerActionNames.DropPlanGuide, ct);
             var permit = decision.Permit!;
@@ -353,7 +366,7 @@ public sealed partial class DarlingMcpPlanForceTools
             /* 3b: a database the server's entry excludes is one Darling does not act in. */
             if (IsExcludedDatabase(row.ExcludedDatabases, database))
             {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, ct);
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, agentTokenName, ct);
                 return DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database));
             }
 
@@ -365,7 +378,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (dry.Outcome != RemediationOutcome.Done || dry.Guide is null)
             {
                 if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
-                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, ct);
+                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, agentTokenName, ct);
                 return Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message,
                     new { dry_run, statement = dry.Statement ?? statementText, before = new { database } });
             }
@@ -379,7 +392,7 @@ public sealed partial class DarlingMcpPlanForceTools
             {
                 var notUndoable = "Plan guide " + guideName + " was not dropped: its definition does not pass the checks a create makes ("
                     + undoMessage!.Replace(" Nothing was run.", "", StringComparison.Ordinal) + "), so the Undo could not re-create it. Nothing was run.";
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, GuideNotUndoable, ct);
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, GuideNotUndoable, agentTokenName, ct);
                 return Answer("refused", GuideNotUndoable, notUndoable, new { dry_run, statement = dry.Statement ?? statementText, before = new { database } });
             }
 
@@ -420,7 +433,7 @@ public sealed partial class DarlingMcpPlanForceTools
                         return JsonSerializer.Serialize(new { statement = written.Statement ?? statementText, message = written.Message }, McpHelpers.JsonOptions);
                     },
                 };
-                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.PlanGuideDrop, action!, target), hooks, ct);
+                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.PlanGuideDrop, action!, target, agentTokenName), hooks, ct);
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
                 if (result.OutcomeUnknown && unknown is not null)
@@ -541,7 +554,7 @@ public sealed partial class DarlingMcpPlanForceTools
         DarlingMcpServedPolicy? served = null,
         CancellationToken cancellationToken = default) =>
         RunCreatePlanGuideAsync(postgres, ownerSource?.Read(), logger, server_name, database_name, name, statement, type, module_or_batch, @params, hints, agent_action, dry_run, cancellationToken,
-            served?.Policy.AgentTokenName);
+            served?.Policy.AgentTokenName, served?.NamedAgentNames);
 
     [McpServerTool(Name = "drop_plan_guide"), Description(
         "Agent arm, SQL Server only (an Azure SQL target is refused as engine_not_supported): drops ONE plan guide by name with sys.sp_control_plan_guide N'DROP', so the statement it applied to runs without the guide's hints again. Dry run by default: reads the guide and returns the exact statement and the whole definition that would be journaled, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's drop_plan_guide switch and remediation login (with ALTER on the module for an OBJECT guide, ALTER on the database for a SQL guide); ships off. " +
@@ -560,5 +573,5 @@ public sealed partial class DarlingMcpPlanForceTools
         ILogger? logger = null,
         DarlingMcpServedPolicy? served = null,
         CancellationToken cancellationToken = default) =>
-        RunDropPlanGuideAsync(postgres, ownerSource?.Read(), logger, server_name, database_name, name, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName);
+        RunDropPlanGuideAsync(postgres, ownerSource?.Read(), logger, server_name, database_name, name, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName, served?.NamedAgentNames);
 }

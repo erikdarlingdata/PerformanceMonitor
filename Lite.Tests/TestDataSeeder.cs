@@ -1090,6 +1090,57 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     /// <summary>
+    /// One short, wide-open blocking chain: head 500 (in WAITFOR, so not sleeping) holds locks and blocks an UPDATE (501)
+    /// and a SELECT (502), sampled once a minute by blocked-process reports for <paramref name="minutes"/> minutes, the
+    /// last sample landing at <paramref name="lastSeen"/>. The longest wait grows a minute per sample, so the chain is
+    /// two sessions wide and <paramref name="minutes"/> minutes long. The head's transaction started a minute before its first
+    /// victim began waiting.
+    /// </summary>
+    internal async Task SeedLiveBlockingChainAsync(DateTime lastSeen, int minutes)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
+
+        var firstSeen = lastSeen.AddMinutes(-(minutes - 1));
+        for (var i = 0; i < minutes; i++)
+        {
+            foreach (var victim in new[] { 501, 502 })
+            {
+                var eventTime = firstSeen.AddMinutes(i);
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = @"
+INSERT INTO blocked_process_reports
+    (blocked_report_id, collection_time, server_id, server_name,
+     event_time, database_name, blocked_spid, blocked_last_tran_started,
+     blocking_spid, blocking_last_tran_started, wait_time_ms,
+     lock_mode, blocked_status, blocking_status, blocked_sql_text, blocking_sql_text,
+     blocked_ecid)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)";
+
+                cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+                cmd.Parameters.Add(new DuckDBParameter { Value = eventTime });
+                cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
+                cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
+                cmd.Parameters.Add(new DuckDBParameter { Value = eventTime });
+                cmd.Parameters.Add(new DuckDBParameter { Value = "LiveDb" });
+                cmd.Parameters.Add(new DuckDBParameter { Value = victim });
+                cmd.Parameters.Add(new DuckDBParameter { Value = firstSeen });
+                cmd.Parameters.Add(new DuckDBParameter { Value = 500 });
+                cmd.Parameters.Add(new DuckDBParameter { Value = firstSeen.AddMinutes(-1) });
+                cmd.Parameters.Add(new DuckDBParameter { Value = (long)(i + 1) * 60_000L });
+                cmd.Parameters.Add(new DuckDBParameter { Value = "X" });
+                cmd.Parameters.Add(new DuckDBParameter { Value = "suspended" });
+                cmd.Parameters.Add(new DuckDBParameter { Value = "suspended" });
+                cmd.Parameters.Add(new DuckDBParameter { Value = victim == 501 ? "UPDATE dbo.T SET v = 2" : "SELECT * FROM dbo.T" });
+                cmd.Parameters.Add(new DuckDBParameter { Value = "WAITFOR DELAY '00:30:00'" });
+                cmd.Parameters.Add(new DuckDBParameter { Value = 0 });
+                await cmd.ExecuteNonQueryAsync();
+            }
+        }
+    }
+
+    /// <summary>
     /// Deep blocking chain scenario: a depth-4 chain with a sleeping apex, plus corroborating
     /// lock and thread-exhaustion waits and deadlocks. Expected: a BLOCKING_CHAIN finding
     /// (depth 4, apex 200) that traverses to LCK / THREADPOOL.

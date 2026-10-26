@@ -42,6 +42,9 @@ public partial class CustomViewsWindow : Window
     private bool _dirty;
     private bool _quiet;
 
+    /* A slow read of one row can finish after the operator has moved to another; the newest claim wins, as on Fleet Sweeps. */
+    private readonly PerformanceMonitor.Ui.ScopedLoadGenerations _loads = new();
+
     public CustomViewsWindow(ViewerDataService dataService)
     {
         InitializeComponent();
@@ -182,9 +185,18 @@ public partial class CustomViewsWindow : Window
             return;
         }
 
+        var gen = _loads.Claim(nameof(ViewsGrid_SelectionChanged));
         try
         {
             var result = await _dataService.GetCustomViewAsync(row.Id);
+
+            /* Two quick selection changes whose reads finish out of order would leave the grid on the second row and the editor
+               (and Save, Move/Rename and Delete, which act on _loaded) on the first. Drop a result the operator has moved past. */
+            if (_loads.Superseded(nameof(ViewsGrid_SelectionChanged), gen) || !ReferenceEquals(ViewsGrid.SelectedItem, row))
+            {
+                return;
+            }
+
             if (result is CustomViewResult.Ok { View: { } view })
             {
                 _loaded = view;
@@ -201,6 +213,13 @@ public partial class CustomViewsWindow : Window
         }
         catch (Exception ex)
         {
+            /* The success path's test, for the same reason: a read that failed after the operator moved on must not pop an error
+               over the view the newer selection loaded. */
+            if (_loads.Superseded(nameof(ViewsGrid_SelectionChanged), gen) || !ReferenceEquals(ViewsGrid.SelectedItem, row))
+            {
+                return;
+            }
+
             ShowError("Could not read the custom view", ex);
         }
     }

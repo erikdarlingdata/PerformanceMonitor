@@ -124,7 +124,7 @@ The collector verbs differ in one case. A managed credential that was never stor
 1. Pipe a JSON array to standard input. The shape is the one the `add_servers` MCP tool takes.
 2. Give one server in flags: `--host`, `--name`, `--auth`, `--username`, `--engine`, `--database`. A SQL login is asked for its password, and the password is hidden.
 
-The password is never a flag, so it does not land in the process list or the shell history. Add `--config <path>` to name a `darling.json`. The running service picks up the new servers without a restart.
+`--auth` takes `windows` (or `integrated`, the same thing), `sql`, `serviceprincipal` or `managedidentity`. The password is never a flag, so it does not land in the process list or the shell history. Add `--config <path>` to name a `darling.json`. The running service picks up the new servers without a restart.
 
 Re-running the same file is safe. Servers that are already registered do not count as a failure. A server that collides with another one, a batch where nothing was added, and an entry that was rejected all exit `1`.
 
@@ -149,7 +149,7 @@ PerformanceMonitor.Darling.Service.exe --set-collector-retention <collector> <da
 
 `--set-collector-frequency` takes a number of minutes. `0` means once, when the server loads. `--set-collector-retention` takes a number of days, at least `1`. Both have an upper limit, and the verb refuses a value past it. `--help` prints the limits.
 
-For both, `default` clears the stored value, so the next level applies. Without `--server`, the change is fleet-wide. Each verb writes only its own value. The running service applies the change within one sweep.
+For both, `default` clears the stored value, so the next level applies. Without `--server`, the change is fleet-wide. Retention is always fleet-wide: the purge reads one value for each collector, so `--set-collector-retention` with a number and `--server` is refused. `--server` with `default` still works, to remove a retention an older build stored for one server. Each verb writes only its own value. The running service applies the change within one sweep.
 
 ### Verbs that take a bare config path
 
@@ -190,7 +190,7 @@ Exit codes: see [Exit codes](#exit-codes). If the service log is not where the v
 
 ```
 PerformanceMonitor.Darling.Service.exe --grant-script <server-name> [--finops] [--azure] [--config <path>]
-PerformanceMonitor.Darling.Service.exe --grant-script --host <host> [--auth sql|integrated|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure]
+PerformanceMonitor.Darling.Service.exe --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure]
 ```
 
 The first form reads the server from the configuration. The second form is for a host that is not added yet. Both print T-SQL, and neither connects to a monitored server. The script is safe to run twice.

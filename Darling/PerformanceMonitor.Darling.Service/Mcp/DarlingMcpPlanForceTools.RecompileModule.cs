@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.Json;
 using System.Threading;
@@ -35,7 +36,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
     /// <summary>The recompile tool body (#6569), so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
     internal static async Task<string> RunRecompileAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, string? server_name,
-        string? database_name, string? module_name, string? agent_action, bool dry_run, CancellationToken ct, string? agentTokenName = null)
+        string? database_name, string? module_name, string? agent_action, bool dry_run, CancellationToken ct, string? agentTokenName = null, IReadOnlySet<string>? namedAgentNames = null)
     {
         const string tool = RecompileToolName;
         logger ??= NullLogger.Instance;
@@ -51,14 +52,14 @@ public sealed partial class DarlingMcpPlanForceTools
             if (!ModuleRecompileStatement.TryNormalize(module_name, out var module))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadModuleName,
-                    "module_name is the two-part schema.name of a procedure, function or trigger, as get_procedure_stats returns it. Nothing was run.", ct, agentTokenName);
+                    "module_name is the two-part schema.name of a procedure, function or trigger, as get_procedure_stats returns it. Nothing was run.", agentTokenName, namedAgentNames, ct);
             }
 
             var database = database_name?.Trim();
             if (string.IsNullOrEmpty(database) || database.Length > 128 || ContainsControlCharacter(database))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadDatabase,
-                    "database_name is the database the module is in, at most 128 characters. Nothing was run.", ct, agentTokenName);
+                    "database_name is the database the module is in, at most 128 characters. Nothing was run.", agentTokenName, namedAgentNames, ct);
             }
 
             /* 2: SQL Server only (an Azure SQL Database has sp_recompile too). */
@@ -66,7 +67,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
-                    $"{resolved.DisplayName} is a PostgreSQL target. Recompiling a module is SQL Server only; there is no PostgreSQL equivalent.", ct, agentTokenName);
+                    $"{resolved.DisplayName} is a PostgreSQL target. Recompiling a module is SQL Server only; there is no PostgreSQL equivalent.", agentTokenName, namedAgentNames, ct);
             }
 
             if (owner is null)
@@ -77,7 +78,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
             /* 3: the gate, for a dry run too. The permit's Id is the name in its one normal form and its Database is the database. */
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, module, database);
-            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.RecompileModule, agent_action, target, ct, agentTokenName);
+            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.RecompileModule, agent_action, target, ct, agentTokenName, namedAgentNames);
             if (decision.Refusal is { } gateRefusal)
                 return await GateRefusalAnswerAsync(gateRefusal, dry_run, owner, logger, resolved.ServerId, resolved.ServerName, ServerActionNames.RecompileModule, ct);
             var permit = decision.Permit!;
@@ -90,7 +91,7 @@ public sealed partial class DarlingMcpPlanForceTools
             /* 3b: a database the server's entry excludes is one Darling does not act in. Refused before the dry run reads anything, with the Azure kill's sentence. */
             if (IsExcludedDatabase(row.ExcludedDatabases, database))
             {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, ct);
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, agentTokenName, ct);
                 return DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database));
             }
 
@@ -107,7 +108,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (dry.Outcome != RemediationOutcome.Done)
             {
                 if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
-                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, ct);
+                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, agentTokenName, ct);
                 return Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message,
                     new { dry_run, statement = dry.Statement ?? statement, before });
             }
@@ -135,7 +136,7 @@ public sealed partial class DarlingMcpPlanForceTools
                         return JsonSerializer.Serialize(new { statement = written.Statement ?? statement, message = written.Message }, McpHelpers.JsonOptions);
                     },
                 };
-                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.ModuleRecompile, action!, target), hooks, ct);
+                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.ModuleRecompile, action!, target, agentTokenName), hooks, ct);
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
                 return WithWarnings(Answer("done", null,
@@ -180,5 +181,5 @@ public sealed partial class DarlingMcpPlanForceTools
         ILogger? logger = null,
         DarlingMcpServedPolicy? served = null,
         CancellationToken cancellationToken = default) =>
-        RunRecompileAsync(postgres, ownerSource?.Read(), logger, server_name, database_name, module_name, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName);
+        RunRecompileAsync(postgres, ownerSource?.Read(), logger, server_name, database_name, module_name, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName, served?.NamedAgentNames);
 }

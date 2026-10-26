@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -31,24 +32,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class ServerActionGate
 {
     /// <summary>
-    /// Checks one action on one server. <paramref name="ownerSource"/> is the store owner's data source: the remediation secret
-    /// column is not readable by the <c>mcp</c> role, and the gate only classifies the slot by its prefix, never resolving it.
-    /// Null means the action may run; otherwise the refusal (already journaled).
-    /// </summary>
-    internal static async Task<AgentActionRefusal?> CheckAsync(
-        InvestigationRequestStore store,
-        NpgsqlDataSource ownerSource,
-        ILogger logger,
-        string tool,
-        string serverAction,
-        string? agentAction,
-        AgentActionTarget target,
-        CancellationToken cancellationToken) =>
-        (await AuthorizeAsync(store, ownerSource, logger, tool, serverAction, agentAction, target, cancellationToken)).Refusal;
-
-    /// <summary>
-    /// <see cref="CheckAsync"/>, answering with the <see cref="ServerActionPermit"/> when every condition holds (#5632, step 7): the one value a
-    /// server write takes as its first argument. The checks, the refusal journaling and the order are unchanged.
+    /// Checks one action on one server and answers with the <see cref="ServerActionPermit"/> when every condition holds (#5632, step 7):
+    /// the one value a server write takes as its first argument. <paramref name="ownerSource"/> is the store owner's data source: the
+    /// remediation secret column is not readable by the <c>mcp</c> role, and the gate only classifies the slot by its prefix, never
+    /// resolving it. A refusal is already journaled.
     /// </summary>
     internal static async Task<ServerActionDecision> AuthorizeAsync(
         InvestigationRequestStore store,
@@ -59,7 +46,8 @@ internal static class ServerActionGate
         string? agentAction,
         AgentActionTarget target,
         CancellationToken cancellationToken,
-        string? agentTokenName = null)
+        string? agentTokenName = null,
+        IReadOnlySet<string>? namedAgentNames = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(ownerSource);
@@ -69,7 +57,9 @@ internal static class ServerActionGate
         var problem = InvestigationToolCore.ParseAgentAction(agentAction, out var action);
         if (problem is not null)
         {
-            await store.RecordAgentActionRefusalAsync(null, null, tool, problem.Reason, cancellationToken);
+            /* A refused argument still journals under the named token, or the agent_id it carried when it names one. */
+            await store.RecordAgentActionRefusalAsync(DarlingAgentActionGate.LooseRequestId(agentAction),
+                DarlingAgentActionGate.JournalActor(agentTokenName, namedAgentNames, DarlingAgentActionGate.LooseAgentId(agentAction)), tool, problem.Reason, agentTokenName, cancellationToken);
             return new ServerActionDecision(null, problem);
         }
 
@@ -77,9 +67,20 @@ internal static class ServerActionGate
         if (agentTokenName is not null && !string.Equals(action!.AgentId, agentTokenName, StringComparison.Ordinal))
         {
             await store.RecordAgentActionRefusalAsync(action.RequestId, agentTokenName, tool, DarlingMcpInvestigationTools.AgentIdNotToken,
-                cancellationToken);
+                agentTokenName, cancellationToken);
             return new ServerActionDecision(null, new AgentActionRefusal(DarlingMcpInvestigationTools.AgentIdNotToken,
                 DarlingMcpInvestigationTools.AgentIdNotTokenMessage(agentTokenName)));
+        }
+
+        /* The legacy token's agent_id is free text. One that is a served named agent's name would put the action in that agent's journal, and
+           one that is a reserved placeholder (invalid, unclaimed) would make its rows read as a refusal's, so it is refused and journaled
+           under no agent's name. */
+        if (agentTokenName is null && DarlingAgentActionGate.IsRefusedLegacyAgentId(namedAgentNames, action!.AgentId))
+        {
+            await store.RecordAgentActionRefusalAsync(action.RequestId, InvestigationRules.InvalidAgentId, tool,
+                DarlingMcpInvestigationTools.AgentIdIsNamedToken, null, cancellationToken);
+            return new ServerActionDecision(null, new AgentActionRefusal(DarlingMcpInvestigationTools.AgentIdIsNamedToken,
+                DarlingMcpInvestigationTools.AgentIdIsNamedTokenMessage(action.AgentId)));
         }
 
         var hooks = new ServerActionHooks
@@ -87,6 +88,6 @@ internal static class ServerActionGate
             LoadLevels = (connection, _, ct) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, ct),
             ReadCredential = (serverId, ct) => store.ReadServerCredentialStateAsync(ownerSource, serverId, ct),
         };
-        return await store.AuthorizeServerActionAsync(new ServerActionCall(tool, serverAction, action!, target), hooks, cancellationToken);
+        return await store.AuthorizeServerActionAsync(new ServerActionCall(tool, serverAction, action!, target, agentTokenName), hooks, cancellationToken);
     }
 }

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Storage;
@@ -33,12 +34,19 @@ public static partial class DarlingCliCommands
         "  --grant-script <server-name> [--finops] [--azure] [--service-account <account>] [--config <path>]" + Environment.NewLine +
         "      Print the T-SQL that creates the monitoring login and grants what Darling needs, for a server this install monitors." + Environment.NewLine +
         "      The principal follows the server entry: its SQL login, or for Windows authentication the account the service runs as." + Environment.NewLine +
-        "  --grant-script --host <host> [--auth sql|integrated|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--service-account <account>]" + Environment.NewLine +
+        "  --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--service-account <account>]" + Environment.NewLine +
         "      The same for a host not yet added. Connects to no monitored server." + Environment.NewLine +
         "  --finops adds the per-database grants the FinOps Index Analysis tab needs. --azure (implied by a *.database.windows.net host)" + Environment.NewLine +
         "  prints the Azure SQL Database form: a contained user and database-scoped grants. --service-account names the account the service" + Environment.NewLine +
         "  runs as when it is a domain account or a gMSA and this machine cannot tell. Run the output as a sysadmin; it is safe to run twice." + Environment.NewLine +
         "The script never holds a password: a SQL login gets a placeholder to replace.";
+
+    /// <summary>The <c>--auth</c> word as the registry stores it: lower case, with "windows" (the word <c>--add-server</c> takes) read as "integrated".</summary>
+    internal static string GrantScriptAuthWord(string value)
+    {
+        var word = value.Trim().ToLowerInvariant();
+        return word == "windows" ? "integrated" : word;
+    }
 
     /// <summary>Parses <c>--grant-script</c>'s arguments strictly: one bare server name or <c>--host</c>, the flags, and the options that take
     /// a value. Anything else that starts with '-' is refused.</summary>
@@ -73,7 +81,7 @@ public static partial class DarlingCliCommands
                             host = value;
                             break;
                         case "--auth":
-                            auth = value.ToLowerInvariant();
+                            auth = GrantScriptAuthWord(value);
                             break;
                         case "--username":
                             username = value;
@@ -112,7 +120,7 @@ public static partial class DarlingCliCommands
 
         if (auth is not null and not ("sql" or "integrated" or "serviceprincipal" or "managedidentity"))
         {
-            errorMessage = $"--auth must be sql, integrated, serviceprincipal or managedidentity; got '{auth}'.";
+            errorMessage = $"--auth must be sql, integrated (or windows), serviceprincipal or managedidentity; got '{auth}'.";
             return false;
         }
 
@@ -150,6 +158,17 @@ public static partial class DarlingCliCommands
     private static readonly RegistryListWording GrantScriptRegistryWording = new(
         "using darling.json's own server list instead.",
         "They are not part of this script; the store governs which servers actually run.");
+
+    /// <summary>Where <c>--grant-script</c> writes. A console shows Unicode as it is. A redirected stdout is encoded with the console's code page
+    /// (437, 850, 1252), and Windows maps some non-ASCII characters to ASCII look-alikes there (U+FF07 and U+02BC become a quote, U+FF3D a
+    /// closing bracket, U+FF0A U+FF0F the end of a comment) after the script has already doubled its quotes and brackets, so a login or display
+    /// name holding them would reach the file with an unescaped quote or bracket. UTF-8 never turns a non-ASCII character into an ASCII byte,
+    /// and SSMS and sqlcmd read a UTF-8 file. The only verb that prints SQL built from operator or registry text; <c>--drop-xe-sessions --print-sql</c>
+    /// prints a fixed script.</summary>
+    public static TextWriter OpenGrantScriptOutput() =>
+        Console.IsOutputRedirected
+            ? new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)) { AutoFlush = true }
+            : Console.Out;
 
     /// <summary>
     /// <c>--grant-script</c> (#6472): prints the login and grant script for a monitored server, or for a host not yet added. It connects to no monitored SQL Server (the <c>server-name</c> form reads the store registry)

@@ -108,13 +108,16 @@ internal static class DarlingQueryStoreRegressionReader
     /// and <see cref="QueryStoreRegressionBaseline.SuffixSql"/>, bound to this read's parameters: $1 server_id, $2 window start, $3 window
     /// end, $4 database filter (text[] or NULL), $5 row cap, $6 baseline start, $7 the baseline's days read from the daily
     /// totals (date[]), $8 and $9 the live half's <c>first_execution_time</c> bounds, $10 the databases left out (#6654, text[] or NULL). <paramref name="useDailyTotals"/> false
-    /// names no daily table (no run day was found, or the store has none).
+    /// names no daily table (no run day was found, or the store has none). <paramref name="regularFromLatest"/> (table arms only)
+    /// reads the three Regular arms from <c>query_store_interval_latest</c> (<see cref="QueryStoreRegressionBaseline.Plan.RegularFromLatest"/>).
+    /// <paramref name="recentFromDaily"/> (latest only) reads the recent window's whole days from the daily totals
+    /// (<see cref="QueryStoreRegressionBaseline.Plan.RecentDays"/>, #5506): $11 the days (date[]), $12 and $13 the recent arm's
+    /// live <c>first_execution_time</c> bounds.
     /// </summary>
-    internal static string BuildSql(bool wide, bool useDailyTotals) =>
+    internal static string BuildSql(bool wide, bool useDailyTotals, bool regularFromLatest = false, bool recentFromDaily = false) =>
         QueryStoreRegressionBaseline.Bind(
-            (wide ? QueryStoreRegressionBaseline.WideArmsSql : QueryStoreRegressionBaseline.RawArmsSql)
-            + "\n" + QueryStoreRegressionBaseline.AggregatesSql(useDailyTotals) + "\n" + QueryStoreRegressionBaseline.SuffixSql,
-            "$6", "$7", "$8", "$9", "$5", "$10");
+            QueryStoreRegressionBaseline.Statement(wide, useDailyTotals, regularFromLatest, recentFromDaily),
+            "$6", "$7", "$8", "$9", "$5", "$10", "$11", "$12", "$13");
 
     /// <summary>
     /// The viewer's regression read over raw <c>query_store_stats</c>, with the baseline's closed days from the daily totals
@@ -216,6 +219,26 @@ internal static class DarlingQueryStoreRegressionReader
     /// <summary>The table read with no run day.</summary>
     private static readonly string s_wideLiveSql = BuildSql(wide: true, useDailyTotals: false);
 
+    /// <summary>The table read with its Regular arms on <c>query_store_interval_latest</c> (#5506), with and without run days.</summary>
+    private static readonly string s_latestDailySql = BuildSql(wide: true, useDailyTotals: true, regularFromLatest: true);
+
+    private static readonly string s_latestLiveSql = BuildSql(wide: true, useDailyTotals: false, regularFromLatest: true);
+
+    /// <summary>The latest forms with the recent window's whole days from the daily totals (#5506), with and without baseline run days.</summary>
+    private static readonly string s_recentDailySql = BuildSql(wide: true, useDailyTotals: true, regularFromLatest: true, recentFromDaily: true);
+
+    private static readonly string s_recentLiveSql = BuildSql(wide: true, useDailyTotals: false, regularFromLatest: true, recentFromDaily: true);
+
+    /// <summary>The table form for a resolved baseline plan: daily totals when it has run days, and the Regular arms on
+    /// <c>query_store_interval_latest</c> when its gate allows (#5506), else on the wide table. With recent days, the recent
+    /// window's whole days come from the daily totals too.</summary>
+    internal static string TableSqlFor(QueryStoreRegressionBaseline.Plan plan) =>
+        QueryStoreRegressionBaseline.ReadsRecentDays(plan)
+            ? (plan.BuiltDayCount > 0 ? s_recentDailySql : s_recentLiveSql)
+            : plan.RegularFromLatest
+                ? (plan.BuiltDayCount > 0 ? s_latestDailySql : s_latestLiveSql)
+                : (plan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql);
+
     private static async Task SetReadOnlyAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken)
     {
         await using var readOnly = new NpgsqlCommand(DarlingDataReader.SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
@@ -271,8 +294,9 @@ internal static class DarlingQueryStoreRegressionReader
 
             gateDecided = true;
             var plan = await QueryStoreRegressionBaseline.ResolveAsync(
-                connection, transaction, serverId, wide.ClampedStart, startUtc, McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken);
-            var wideSql = plan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql;
+                connection, transaction, serverId, wide.ClampedStart, startUtc, McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken,
+                windowEnd: endUtc);
+            var wideSql = TableSqlFor(plan);
 
             /* #5506 step 2: the first_execution_time floors of the live arms reach PurgeEdgeMargin (26 hours) before their bound,
                because an interval may span a day. When the server's own intervals are shorter, the floors shrink to what they need
@@ -285,6 +309,10 @@ internal static class DarlingQueryStoreRegressionReader
             {
                 wideSql = QueryStoreIntervalWide.WithEdgeMargin(wideSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
             }
+
+            /* #5506: on the latest form the high live range starts at the next midnight minus the same margin, not at the last
+               run day's midnight, so that day's rows are not read only to be dropped. */
+            plan = QueryStoreRegressionBaseline.WithMeasuredHighStart(plan, edgeMargin);
 
             await using var command = new NpgsqlCommand(wideSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
             AddParameters(command, serverId, startUtc, endUtc, databases, limit, wide.ClampedStart, plan);
@@ -345,6 +373,13 @@ internal static class DarlingQueryStoreRegressionReader
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.LowEnd, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.HighStart, DateTimeKind.Unspecified) });
         command.Parameters.Add(databases.ExcludeParameter());
+        if (QueryStoreRegressionBaseline.ReadsRecentDays(plan))
+        {
+            /* #5506: $11 to $13, only on the recent-days form, the only text that names them. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RecentDays });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentLowEnd, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentHighStart, DateTimeKind.Unspecified) });
+        }
     }
 
     private static double? NullableDouble(NpgsqlDataReader reader, int ordinal) =>

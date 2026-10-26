@@ -525,14 +525,17 @@
     // Uncomment to serve local browsers with no token (see TOKEN above). Default off.
     // "allowTokenlessLoopback": true,
 
-    // On the managed store the dashboard reads as the read-only "viewer" login. Default true: a person signed in to
-    // the dashboard as an admin (the shared web token or an OIDC admin) can also make its Admin writes (routes and
-    // environment profiles, threshold overrides, report feedback, server actions, note decisions, undoing an agent
-    // change and the agent switch, closing a request, writing a note, practice requests, case export), through a
-    // second small connection pool that signs in as the managed "admin" login (the one the Viewer uses). Set false
-    // to keep the dashboard list-only on the managed store. Restart to change.
+    // On the managed store the dashboard reads as the read-only "viewer" login. A person signed in to the dashboard
+    // as an admin (the shared web token or an OIDC admin) can also make its Admin writes (routes and environment
+    // profiles, threshold overrides, report feedback, server actions, note decisions, undoing an agent change and
+    // the agent switch, closing a request, writing a note, practice requests, case export), when this is true:
+    // it opens a second small connection pool that signs in as the managed "admin" login (the one the Viewer uses).
+    // A darling.json WITHOUT this key keeps it false (the dashboard stays list-only on the managed store), so an
+    // upgrade from 3.11 changes nothing until you set it. The installer and the compose sample write true for a
+    // new install. With OIDC on and no role mapping every signed-in user is an admin, so map roles
+    // (network.oidc.roleClaim, adminRoles, viewerRoles) before you turn this on. Restart to change.
     // A store you bring yourself is not affected.
-    // "allowAdminWrites": false,
+    "allowAdminWrites": true,
 
     // The base URL RECIPIENTS can reach this dashboard on (e.g. "http://10.0.0.5:5153", or a DNS name
     // fronted by a proxy). Set it and every alert webhook (Teams/Slack/PagerDuty/generic {{triage_url}})
