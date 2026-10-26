@@ -261,10 +261,10 @@ function generateBar(server, signal) {
 
 /* ─────────────────────────── rendering ─────────────────────────── */
 
-/** The score after the label, or nothing when the row carries no numeric severity. */
+/** The score after the label, or nothing when the row carries no numeric severity. It is worded as a score and the category follows a dot, so "0.80 waits" cannot read as a count of waits. */
 function severityText(severity) {
   const n = severity == null || severity === "" ? NaN : Number(severity);
-  return Number.isFinite(n) ? " " + n.toFixed(2) : "";
+  return Number.isFinite(n) ? " (score " + n.toFixed(2) + ")" : "";
 }
 
 /* #6159: a lone finding's title is already on its group's summary line directly above, so its card does not repeat it as a heading. */
@@ -274,7 +274,7 @@ function card(server, f, showTitle) {
   const kids = [
     el("div", { class: "reco-head" }, [
       el("span", { class: badgeClass(label), text: label.toUpperCase() + severityText(f.severity) }),
-      f.category ? el("span", { class: "muted", text: " " + f.category }) : null,
+      f.category ? el("span", { class: "muted", text: " · " + f.category }) : null,
     ]),
     showTitle ? el("h4", { text: findingTitle(f) }) : null,
     advice.investigation ? el("p", { class: "reco-advice", text: advice.investigation }) : null,

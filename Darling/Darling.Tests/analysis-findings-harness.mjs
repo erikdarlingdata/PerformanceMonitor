@@ -129,6 +129,11 @@ try {
       const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: null })] });
       return { text: root.textContent };
     },
+    scoreWording: async () => {
+      /* The severity score is labelled as a score and the category follows a dot: "0.80 waits" read as a count of waits. */
+      const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: 0.8, category: "waits" })] });
+      return { text: root.textContent };
+    },
     truncation: async () => {
       const root = await run("srv-a", { findings: sample, truncated: true, truncation_note: "READ-CAP-NOTE", findings_truncated: true, findings_truncated_note: "PAGE-NOTE" });
       return { text: root.textContent };

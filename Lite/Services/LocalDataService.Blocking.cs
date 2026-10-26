@@ -1634,11 +1634,22 @@ public class BlockedProcessReportRow : BlockedProcessAlertRow
     public int BlockedPriority { get; set; }
     public int BlockingPriority { get; set; }
 
-    /* #5632, DMV-snapshot rows only: the head blocker's evidence. The two stamps are the monitored server's local clock, stored raw. */
+    /* #5632, DMV-snapshot rows only (null on an XE report row unless a same-minute DMV row for the pair was folded into it by
+       BlockedProcessReportMerge): the head blocker's evidence. The two stamps are the monitored server's local clock, stored raw. */
     public DateTime? BlockingLoginTime { get; set; }
     public DateTime? BlockingLastRequestEndTime { get; set; }
     public int? BlockingOpenTransactionCount { get; set; }
     public long? BlockingTranLogBytesUsed { get; set; }
+
+    /// <inheritdoc/>
+    public override void FillHeadEvidenceFrom(BlockedProcessAlertRow dmvRow)
+    {
+        if (dmvRow is not BlockedProcessReportRow dmv) return;
+        BlockingLoginTime ??= dmv.BlockingLoginTime;
+        BlockingLastRequestEndTime ??= dmv.BlockingLastRequestEndTime;
+        BlockingOpenTransactionCount ??= dmv.BlockingOpenTransactionCount;
+        BlockingTranLogBytesUsed ??= dmv.BlockingTranLogBytesUsed;
+    }
 
     /* #5632 part 4: the grid's text for the four. The two stamps are the monitored server's own clock, so they take the server-clock
        renderer (not the UTC one EventTime uses); a NULL is an empty cell, and the columns sort on the numbers above, not on this text. */
