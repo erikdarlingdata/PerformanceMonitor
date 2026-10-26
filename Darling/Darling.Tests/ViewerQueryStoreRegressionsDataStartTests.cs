@@ -149,7 +149,13 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
     /* The banner the tab's own step (ShowQueryStoreRegressionsDataStartAsync) raises for the probe's answer on the range that starts at
        RangeStart, read off the control; null when it is hidden. Seeded visible, so a no-op cannot pass as a hidden banner. */
     private static string? BannerFor(DateTime? coverageStartUtc) =>
-        ReadBanner(banner => ViewerServerTab.ShowQueryStoreRegressionsDataStartAsync(banner, Task.FromResult(coverageStartUtc), RangeStart).GetAwaiter().GetResult());
+        ReadBanner(banner =>
+        {
+            /* The two steps the tab runs, in its order (#6750). */
+            var probe = Task.FromResult(coverageStartUtc);
+            ViewerServerTab.ShowQueryStoreRegressionsDataStartAsync(banner, probe, RangeStart).GetAwaiter().GetResult();
+            ViewerServerTab.AddQueryStoreRegressionsEmptyBaselineNote(banner, probe, RangeStart);
+        });
 
     /* The same answer compared with the RANGE's start, which is the keying the step moves off: the premise of the first case below. */
     private static string? BannerComparedWithTheRangeStart(DateTime? coverageStartUtc) =>

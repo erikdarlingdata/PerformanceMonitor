@@ -197,7 +197,9 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
         Assert.DoesNotContain(PerformanceMonitor.Common.QueryStoreRegressionRules.BaselineWindowTail, note, StringComparison.Ordinal);
         Assert.Equal("timeouts", Assert.Single(hit.GetProperty("regressions").EnumerateArray()).GetProperty("regression_reason").GetString());
 
-        await SeedAsync(baseNow.AddHours(-2), 3, 1000, 1000, intervalId: 5, queryId: 7, executionType: "Aborted");
+        /* A 24-hour read of the same store: 3 timeouts in the 6 hours of baseline it holds (0.5 an hour) against 36 in the 24-hour window
+           (1.5 an hour). It must be a rise, or the answer is the empty envelope, which carries the note under hints, not at the top. */
+        await SeedAsync(baseNow.AddHours(-2), 30, 1000, 1000, intervalId: 5, queryId: 7, executionType: "Aborted");
         var day = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, 24));
         Assert.EndsWith(PerformanceMonitor.Common.QueryStoreRegressionRules.BaselineWindowTail, day.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
     }

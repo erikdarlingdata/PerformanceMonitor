@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -29,6 +30,9 @@ namespace Darling.Tests;
 /// understated and a timeout rate that had not moved was flagged as a rise. The rows read do not change: every row filter keeps
 /// the requested baseline start, so an interval collected after the floor whose last execution is before it is still counted.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. The test reaches DARLING_TEST_PG only to CREATE and DROP its own
+   database through ScratchPostgres and works entirely inside it. It shares the gap-cache collection with the other regressions table
+   tests, because the gate's cadence check reads a process-wide cache. */
 [Collection("gap-cache-serial")]
 public sealed class QueryStoreRegressionsHoursHeldLiveTests
 {
@@ -53,6 +57,9 @@ public sealed class QueryStoreRegressionsHoursHeldLiveTests
         public DateTime End { get; init; }
         public DateTime BaselineStart => Start.AddDays(-7);
         public DateTime RawFloor { get; set; }
+
+        /// <summary>Where THIS server's data starts: the per-server probe the answer's <c>effective_start</c> comes from.</summary>
+        public DateTime DataStart { get; set; }
 
         public async ValueTask DisposeAsync()
         {
@@ -156,10 +163,14 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
             Assert.True(rig.RawFloor <= rig.BaselineStart, $"raw's floor {rig.RawFloor:o} should be at or before the baseline start {rig.BaselineStart:o}");
         }
 
-        /* The baseline rows, seeded once the floor is known so the steady query's rate per hour over the hours held equals its
+        /* This server's own data start, the instant its answer reports as effective_start: the marker's collection time when the older
+           chunks are gone, the nine-day-old row's when raw holds the whole baseline. */
+        rig.DataStart = (await DarlingMcpWindowNotice.Probe(postgres, "query_store_stats", ServerName, rig.BaselineStart, rig.End, ct))!.Value;
+
+        /* The baseline rows, seeded once the data start is known so the steady query's rate per hour over the hours held equals its
            recent rate (15 in 24 hours): the count (the marker's 10 included) is the rate times the hours held. Over the 168 hours
            asked for, the old binding sees under half that rate and flags it. */
-        var heldHours = (rig.Start - (rig.RawFloor > rig.BaselineStart ? rig.RawFloor : rig.BaselineStart)).TotalHours;
+        var heldHours = (rig.Start - (rig.DataStart > rig.BaselineStart ? rig.DataStart : rig.BaselineStart)).TotalHours;
         var steadyBaseline = (long)Math.Round(15.0 / 24 * heldHours);
         Assert.InRange(steadyBaseline, 30, 200);
         await SnapshotAsync(SteadyQuery, now.AddHours(-25), now.AddHours(-25).AddMinutes(-20), steadyBaseline - 20);
@@ -167,8 +178,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         await SnapshotAsync(RisingQuery, now.AddHours(-25), now.AddHours(-25).AddMinutes(-20), 10);
         if (floorInsideBaseline)
         {
-            /* The edge interval: collected after the floor, last run before it. The requested baseline start still reaches it. */
-            await SnapshotAsync(RisingQuery, rig.RawFloor.AddMinutes(10), rig.RawFloor.AddHours(-1), 10);
+            /* The edge interval: collected after the data start, last run before it. The requested baseline start still reaches it. */
+            await SnapshotAsync(RisingQuery, rig.DataStart.AddMinutes(10), rig.DataStart.AddHours(-1), 10);
         }
 
         return rig;
@@ -181,7 +192,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         await using var rig = await StartAsync(floorInsideBaseline: true, ct);
 
         var served = await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(
-            rig.Postgres, ServerId, rig.Start, rig.End, DatabaseFilter.One(Db), 50, rig.BaselineStart, ct);
+            rig.Postgres, ServerId, rig.Start, rig.End, DatabaseFilter.One(Db), 50, rig.BaselineStart, rig.DataStart, ct);
         Assert.Equal("raw", served.Source);
 
         /* The steady query's rate per hour is the same on both sides over the hours held, so it is not a rise. */
@@ -192,13 +203,13 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         /* 20 baseline runs: the 10 collected after the floor and the edge interval's 10 (collected after the floor, last run before it). */
         Assert.Equal(20, rising.Aborted!.BaselineCount);
         Assert.Equal(120, rising.Aborted.RecentCount);
-        var held = (rig.Start - rig.RawFloor).TotalHours;
+        var held = (rig.Start - rig.DataStart).TotalHours;
         Assert.InRange(rising.Aborted.BaselinePerHour!.Value, (20 / held) - 0.001, (20 / held) + 0.001);
         Assert.InRange(rising.Aborted.RecentPerHour!.Value, (120 / 24.0) - 0.01, (120 / 24.0) + 0.01);
 
         /* The same statement bound to the REQUESTED start, which is what the read did before: the steady query is flagged as a rise. */
         var plan = await ResolveAsync(rig, ct);
-        Assert.Equal(rig.RawFloor, plan.HoursHeldStart);
+        Assert.Equal(rig.DataStart, plan.HoursHeldStart);
         var before = await RunAsync(rig.Connection, DarlingQueryStoreRegressionReader.BuildSql(wide: false, useDailyTotals: false), rig, plan, rig.BaselineStart, ct);
         Assert.Contains(before, line => line.Contains("query_id=" + SteadyQuery + "|", StringComparison.Ordinal) && line.Contains("regression_reason=timeouts", StringComparison.Ordinal));
         var after = await RunAsync(rig.Connection, DarlingQueryStoreRegressionReader.BuildSql(wide: false, useDailyTotals: false), rig, plan, plan.HoursHeldStart!.Value, ct);
@@ -221,7 +232,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.Equal(RisingQuery, rising.QueryId);
         Assert.Equal(20, rising.BaselineAbortedCount);
         Assert.Equal(120, rising.RecentAbortedCount);
-        var held = (rig.Start - rig.RawFloor).TotalHours;
+        var held = (rig.Start - rig.DataStart).TotalHours;
         Assert.InRange(rising.BaselineAbortedPerHour!.Value, (20 / held) - 0.001, (20 / held) + 0.001);
         Assert.InRange(rising.RecentAbortedPerHour!.Value, (120 / 24.0) - 0.01, (120 / 24.0) + 0.01);
     }
@@ -233,7 +244,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         await using var rig = await StartAsync(floorInsideBaseline: false, ct);
 
         var served = await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(
-            rig.Postgres, ServerId, rig.Start, rig.End, DatabaseFilter.One(Db), 50, rig.BaselineStart, ct);
+            rig.Postgres, ServerId, rig.Start, rig.End, DatabaseFilter.One(Db), 50, rig.BaselineStart, rig.DataStart, ct);
         Assert.Equal("raw", served.Source);
         Assert.NotEmpty(served.Rows);
 
@@ -251,6 +262,168 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.Contains(now, line => line.Contains("baseline_aborted_per_hour=", StringComparison.Ordinal) && !line.Contains("baseline_aborted_per_hour=NULL", StringComparison.Ordinal));
     }
 
+    private const int OtherServerId = ServerId - 1;
+    private const string OtherServerName = "qsheld-other";
+
+    /// <summary>
+    /// Two servers in one store, read at 24 hours. The server asked about (<see cref="ServerId"/>) holds 30 hours of data: a baseline
+    /// of 6 hours before the window (12 timeouts of the rising query) and 120 in the window. The OTHER server's rows reach nine days
+    /// back, before the 7 days the baseline asks for, so the store-wide raw chunk floor is at or before the baseline's start, and the
+    /// gate's clamp is the baseline's start. Neither says when THIS server's data starts. <paramref name="tablePath"/> sends the read
+    /// through the interval table (coverage forced back and a run log seeded for the server), false through raw.
+    /// </summary>
+    private static async Task<Rig> StartTwoServersAsync(bool tablePath, CancellationToken ct)
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #6750 live tests.");
+
+        var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "TimescaleDB must be enabled on the test cluster");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var now = LiveClock.Now();
+        var rig = new Rig { Scratch = scratch, Connection = connection, Postgres = postgres, End = now.AddSeconds(1), Start = now.AddSeconds(1).AddHours(-24) };
+
+        foreach (var (id, name) in new[] { (ServerId, ServerName), (OtherServerId, OtherServerName) })
+        {
+            await using var insert = new NpgsqlCommand(
+                "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) VALUES (@id, @name, @name, TRUE, 16, now(), now())", connection);
+            insert.Parameters.AddWithValue("id", id);
+            insert.Parameters.AddWithValue("name", name);
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        long intervalId = 9000;
+        async Task SnapshotAsync(int serverId, string serverName, long queryId, DateTime collected, long count)
+        {
+            intervalId++;
+            var context = new CollectorContext { ServerId = serverId, ServerName = serverName + "-host", CollectionTime = DateTime.SpecifyKind(now, DateTimeKind.Utc), Deltas = new CollectorDeltaCalculator() };
+            var server = new ServerRuntime
+            {
+                Config = new MonitoredServer { Name = serverName, Host = serverName + "-host" },
+                ConnectionString = "Server=" + serverName + "-host",
+                Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+                StorageName = serverName + "-host",
+                ServerId = serverId,
+                EngineEdition = 3,
+            };
+            var lastRun = collected.AddMinutes(-20);
+            var row = new QueryStoreCollector.Row
+            {
+                DatabaseName = Db,
+                QueryId = queryId,
+                PlanId = queryId + 91,
+                ExecutionTypeDesc = "Aborted",
+                FirstExecutionTime = lastRun.AddMinutes(-30),
+                LastExecutionTime = lastRun,
+                QueryHash = "0x" + queryId.ToString("X8", CultureInfo.InvariantCulture),
+                QueryPlanHash = "0x" + (queryId + 91).ToString("X8", CultureInfo.InvariantCulture),
+                QueryText = "SELECT " + queryId.ToString(CultureInfo.InvariantCulture),
+                ExecutionCount = count,
+                AvgCpuTimeUs = 40_000,
+                AvgDurationUs = 80_000,
+                AvgLogicalIoReads = 4_000,
+                IsForcedPlan = false,
+                ForceFailureCount = 0,
+                RuntimeStatsIntervalId = intervalId,
+                IntervalStartTimeUtc = lastRun.AddMinutes(-30),
+            };
+            await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, new List<QueryStoreCollector.Row> { row }, server, collected, context, ct);
+        }
+
+        /* The other server reaches nine days back, so the oldest chunk of the whole table is older than the baseline's start. */
+        await SnapshotAsync(OtherServerId, OtherServerName, 77, now.AddDays(-9), 5);
+        await SnapshotAsync(OtherServerId, OtherServerName, 77, now.AddDays(-3), 5);
+        await SnapshotAsync(OtherServerId, OtherServerName, 77, now.AddHours(-3), 5);
+        /* The server asked about: its first RAW row is 30 hours back. On the table path it also has a row six days back, which the table
+           keeps and raw's dropped chunks do not: the gate needs the table to start well before raw's floor. */
+        if (tablePath)
+        {
+            await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddDays(-6), 7);
+        }
+
+        await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddHours(-30), 12);
+        await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddHours(-3), 120);
+
+        if (tablePath)
+        {
+            await QueryStoreIntervalWideBelowFloorLiveTests.SeedQueryStoreLogAsync(connection, ServerId, now.AddDays(-20), now.AddHours(1), null, null, ct);
+            await QueryStoreIntervalWideBelowFloorLiveTests.ForceFilledSinceAsync(connection, now.AddDays(-16), ct);
+
+            /* Raw's chunks older than three days go, so the gate's clamp is raw's floor (the other server's row three days back),
+               inside the baseline and long before this server's first row. */
+            await QueryStoreIntervalWideBelowFloorLiveTests.DropRawChunksOlderThanAsync(
+                new QueryStoreIntervalWideBelowFloorLiveTests.Rig { Scratch = scratch, Connection = connection, Postgres = postgres }, now.AddDays(-3).AddMinutes(-1), ct);
+        }
+        else
+        {
+            await QueryStoreIntervalWideBelowFloorLiveTests.ForceFilledSinceAsync(connection, now.AddHours(-1), ct);
+        }
+
+        rig.RawFloor = (DateTime)(await QueryStoreIntervalWideBelowFloorLiveTests.ScalarAsync(connection, QueryStoreIntervalWideBelowFloorLiveTests.ChunkFloorSql, ct))!;
+        if (tablePath)
+        {
+            Assert.True(rig.RawFloor > rig.BaselineStart && rig.RawFloor < rig.Start.AddHours(-30), $"the table's clamp {rig.RawFloor:o} should sit inside the baseline, before this server's first raw row");
+        }
+        else
+        {
+            Assert.True(rig.RawFloor <= rig.BaselineStart, $"the other server's rows should put raw's floor {rig.RawFloor:o} at or before the baseline start {rig.BaselineStart:o}");
+        }
+
+        return rig;
+    }
+
+    /// <summary>The answer's own data start, and the baseline's rate per hour over the hours from it to the baseline's end.</summary>
+    private static void AssertDividesByTheHoursFromTheAnswersDataStart(JsonElement hit, string expectedSource)
+    {
+        Assert.Equal(expectedSource, hit.GetProperty("history_source").GetString());
+        var effective = DateTime.Parse(hit.GetProperty("effective_start").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
+        var baselineEnd = DateTime.Parse(hit.GetProperty("baseline_end").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
+        var baselineStart = DateTime.Parse(hit.GetProperty("baseline_start").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
+        Assert.True(effective > baselineStart && effective < baselineEnd, "this server's data starts inside the baseline");
+
+        var row = Assert.Single(hit.GetProperty("regressions").EnumerateArray());
+        Assert.Equal("timeouts", row.GetProperty("regression_reason").GetString());
+        var held = (baselineEnd - effective).TotalHours;
+        Assert.InRange(held, 5.9, 6.1);
+        Assert.InRange(row.GetProperty("baseline_aborted_per_hour").GetDouble(), (12 / held) - 0.001, (12 / held) + 0.001);
+        Assert.InRange(row.GetProperty("recent_aborted_per_hour").GetDouble(), (120 / 24.0) - 0.01, (120 / 24.0) + 0.01);
+    }
+
+    [Theory]
+    [InlineData(false, "raw")]
+    [InlineData(true, "interval_table")]
+    public async Task AnotherServersOlderRows_DoNotMoveThisServersDivisor_McpRead(bool tablePath, string expectedSource)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await StartTwoServersAsync(tablePath, ct);
+
+        var hit = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 24)).RootElement;
+        AssertDividesByTheHoursFromTheAnswersDataStart(hit, expectedSource);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnotherServersOlderRows_DoNotMoveThisServersDivisor_ViewerRead(bool tablePath)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await StartTwoServersAsync(tablePath, ct);
+
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+        var rising = Assert.Single(await viewer.GetQueryStoreRegressionsAsync(ServerId, rig.Start, rig.End, [Db], cancellationToken: ct));
+        Assert.Equal(12, rising.BaselineAbortedCount);
+        var data = await viewer.GetQueryStoreRegressionsDataStartAsync(ServerId, rig.Start, rig.End, ct);
+        var held = (rig.Start - data!.Value).TotalHours;
+        Assert.InRange(held, 5.9, 6.1);
+        Assert.InRange(rising.BaselineAbortedPerHour!.Value, (12 / held) - 0.001, (12 / held) + 0.001);
+        Assert.InRange(rising.RecentAbortedPerHour!.Value, (120 / 24.0) - 0.01, (120 / 24.0) + 0.01);
+    }
+
     private static string CountsOf(string line) => string.Join("|", line.Split('|').Where(c =>
         c.StartsWith("query_id=", StringComparison.Ordinal) || (c.Contains("_count=", StringComparison.Ordinal) && !c.StartsWith("total_count=", StringComparison.Ordinal))));
 
@@ -258,7 +431,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
     {
         await using var connection = await rig.Postgres.OpenConnectionAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct);
-        return await QueryStoreRegressionBaseline.ResolveAsync(connection, transaction, ServerId, rig.BaselineStart, rig.Start, 60, null, ct, clampToRawFloor: true);
+        var plan = await QueryStoreRegressionBaseline.ResolveAsync(connection, transaction, ServerId, rig.BaselineStart, rig.Start, 60, null, ct, clampToRawFloor: true);
+        return QueryStoreRegressionBaseline.WithHoursHeldStart(plan, rig.BaselineStart, rig.DataStart);
     }
 
     /// <summary>The statement run by hand, every column of every row in a text form. <paramref name="hoursHeldStart"/> is $11.</summary>

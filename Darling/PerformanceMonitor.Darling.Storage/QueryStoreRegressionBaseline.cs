@@ -119,16 +119,26 @@ public static class QueryStoreRegressionBaseline
         public DateTime RecentHighStart { get; init; }
 
         /// <summary>
-        /// The start of the hours the read HOLDS (#6750), the value of <see cref="HoursHeldStartToken"/>: the baseline start
-        /// <see cref="ResolveAsync"/> clamped to. On the raw arm (<c>clampToRawFloor</c>) that is raw's oldest chunk when it is
-        /// after the requested baseline start, so the per-hour divisors count the hours raw really holds. On the table arm it
-        /// is the start the caller passed (the gate's clamp), the same value the row filters bind. Null for a plan that did
-        /// not come from <see cref="ResolveAsync"/> (built by hand): callers then bind the start they bind for the row
-        /// filters, which is the read before this property existed. Used only by the <c>windows</c> CTE: every row filter keeps
-        /// the baseline start, so the rows read do not depend on it.
+        /// The start of the hours the read HOLDS (#6750), the value of <see cref="HoursHeldStartToken"/>: set by the caller
+        /// through <see cref="WithHoursHeldStart"/> to the later of the start the plan reads from and THIS SERVER's data start,
+        /// the same instant the answer reports as <c>effective_start</c> (the per-server <see cref="DataWindowFloor"/> probe).
+        /// The plan's start alone is the same for every server, and the store-wide chunk floor reads the oldest chunk of
+        /// every server, so neither says when this server's data begins. Null for a plan built by hand: callers then bind the
+        /// start they bind for the row filters, which is the read before this property existed. Used only by the
+        /// <c>windows</c> CTE: every row filter keeps the baseline start, so the rows read do not depend on it.
         /// </summary>
         public DateTime? HoursHeldStart { get; init; }
     }
+
+    /// <summary>
+    /// <paramref name="plan"/> with <see cref="Plan.HoursHeldStart"/> set (#6750): the later of <paramref name="planStart"/>, the
+    /// start the plan's statement reads from (the requested baseline start on the raw arm, the gate's clamp on the table arm),
+    /// and <paramref name="dataStart"/>, where this server's Query Store data starts. <paramref name="dataStart"/> is the value
+    /// the answer reports as <c>effective_start</c> (the <see cref="DataWindowFloor"/> probe over the baseline window), so the
+    /// note and the divisors name one instant. Null (no coverage, or the probe failed) keeps <paramref name="planStart"/>.
+    /// </summary>
+    public static Plan WithHoursHeldStart(Plan plan, DateTime planStart, DateTime? dataStart) =>
+        plan with { HoursHeldStart = dataStart is DateTime data && data > planStart ? data : planStart };
 
     /// <summary>Whether the plan's statement reads the recent window's days from the daily totals: latest arms and at least one
     /// recent day (#5506). Both readers pick the SQL text and bind the three extra parameters on this one answer.</summary>
@@ -239,7 +249,6 @@ public static class QueryStoreRegressionBaseline
         List<PlanRegressionDaily.BuiltDay> built;
         bool regularFromLatest;
         var recentAllowed = false;
-        DateTime? heldStart;
         await transaction.SaveAsync(savepoint, cancellationToken);
         try
         {
@@ -256,23 +265,10 @@ public static class QueryStoreRegressionBaseline
                 hasTimescale = reader.GetBoolean(2);
             }
 
-            /* #6750: raw's floor, read before the pending return so every raw plan names the hours held. It only DIVIDES (the
-               windows CTE): the row filters keep the start the caller passed. */
-            DateTime? rawFloorStart = null;
-            if (clampToRawFloor && hasTimescale)
-            {
-                await using var floors = new NpgsqlCommand(QueryStoreIntervalLatest.RawChunkFloorSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
-                if (await floors.ExecuteScalarAsync(cancellationToken) is DateTime rawFloor && rawFloor > baselineStart)
-                {
-                    rawFloorStart = rawFloor;
-                }
-            }
-
-            heldStart = rawFloorStart ?? baselineStart;
             if (hasPending)
             {
                 logger?.LogDebug("#5506 regressions read: server {ServerId} has a pending interval_latest batch, so its baseline is read live", serverId);
-                return AllLive(windowStart) with { HoursHeldStart = heldStart };
+                return AllLive(windowStart);
             }
 
             /* Decided on the start the caller passed (the wide gate's clamp on the table arm), before any raw clamp below:
@@ -288,9 +284,13 @@ public static class QueryStoreRegressionBaseline
                     && DateTime.SpecifyKind(end, DateTimeKind.Unspecified) >= appliedThrough;
             }
 
-            if (rawFloorStart is DateTime clamped)
+            if (clampToRawFloor && hasTimescale)
             {
-                baselineStart = clamped;
+                await using var floors = new NpgsqlCommand(QueryStoreIntervalLatest.RawChunkFloorSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
+                if (await floors.ExecuteScalarAsync(cancellationToken) is DateTime rawFloor && rawFloor > baselineStart)
+                {
+                    baselineStart = rawFloor;
+                }
             }
 
             built = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(
@@ -300,14 +300,14 @@ public static class QueryStoreRegressionBaseline
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(ex, "#5506 regressions read: the built-days gate failed for server {ServerId}; reading the baseline live", serverId);
-            return AllLive(windowStart) with { HoursHeldStart = baselineStart };
+            return AllLive(windowStart);
         }
         finally
         {
             await transaction.RollbackAsync(savepoint, CancellationToken.None);
         }
 
-        var plan = Choose(built, baselineStart, windowStart) with { RegularFromLatest = regularFromLatest, HoursHeldStart = heldStart };
+        var plan = Choose(built, baselineStart, windowStart) with { RegularFromLatest = regularFromLatest };
         return recentAllowed && windowEnd is DateTime windowEndValue
             ? WithRecentDays(plan, ChooseRecent(built, baselineStart, windowStart, windowEndValue))
             : plan;
@@ -415,7 +415,7 @@ public static class QueryStoreRegressionBaseline
     public const string HighStartToken = "@@HIGH";
 
     /// <summary>The start of the hours the read holds (#6750), a timestamp parameter used ONLY by the <c>windows</c> CTE
-    /// (<c>base_hours</c> and <c>recent_hours</c>); <see cref="Plan.HoursHeldStart"/> is its value. Every row filter keeps
+    /// (<c>base_hours</c> and <c>recent_hours</c>); <see cref="Plan.HoursHeldStart"/> is its value, this server's data start or the plan's start, whichever is later. Every row filter keeps
     /// <see cref="BaselineStartToken"/>. Bound right after the databases left out, on every form (MCP <c>$11</c>, viewer
     /// <c>$10</c>), so the recent days' three parameters follow it (MCP <c>$12</c> to <c>$14</c>, viewer <c>$11</c> to
     /// <c>$13</c>) and no number is left unbound.</summary>
@@ -876,12 +876,12 @@ public static class QueryStoreRegressionBaseline
 
     /// <summary>
     /// The suffix over the shared arms. <c>windows</c> holds the hours each side actually HOLDS (#6750), not the hours its window
-    /// names. The baseline holds <c>$2 - @@HELD</c>, and none when the start <c>@@HELD</c> (the raw floor on the raw arm, the gate's clamp
-    /// on the table arm: <see cref="Plan.HoursHeldStart"/>) sits at or after the recent window's start <c>$2</c>: <c>GREATEST(.., 0)</c> then gives 0, which the
+    /// names. The baseline holds <c>$2 - @@HELD</c>, and none when the start <c>@@HELD</c> (<see cref="Plan.HoursHeldStart"/>: the later
+    /// of the plan's start and this server's data start, the answer's <c>effective_start</c>) sits at or after the recent window's start <c>$2</c>: <c>GREATEST(.., 0)</c> then gives 0, which the
     /// <c>NULLIF(.., 0)</c> on every per-hour term turns into NULL, where a negative divisor gave a negative rate. The recent side
     /// holds <c>$3 - GREATEST($2, @@HELD)</c>. The row filters keep <c>@@B</c>, the requested start, not <c>@@HELD</c>: an interval
     /// whose last snapshot was collected after the raw floor but whose <c>last_execution_time</c> is before it is still read, so
-    /// raising the filters would drop it. Only the divisors use the hours held. Where the store holds the whole baseline
+    /// raising the filters would drop it. Only the divisors use the hours held. Where the server's data holds the whole baseline
     /// (<c>@@HELD = @@B</c>) both terms are what they were before, so those reads are unchanged.
     /// </summary>
     private static string Suffix(string flaggedSample, string rankedSample) => $$"""

@@ -30,7 +30,9 @@ namespace Darling.Tests;
 /// says so, the baseline's per-hour rates are NULL (not a negative divisor's), and the recent per-hour rate divides by the hours
 /// the recent side holds, not by 168. A 24-hour read of the same store is the old read, row for row.
 /// </summary>
-/* Own-store like QueryStoreRegressionsIntervalTableLiveTests: ScratchPostgres, and the gap-cache collection the gate's cadence check needs. */
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. The test reaches DARLING_TEST_PG only to CREATE and DROP its own
+   database through ScratchPostgres and works entirely inside it. It shares the gap-cache collection with the other regressions table
+   tests, because the gate's cadence check reads a process-wide cache. */
 [Collection("gap-cache-serial")]
 public sealed class QueryStoreRegressionsEmptyBaselineLiveTests
 {
@@ -163,8 +165,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.Equal(JsonValueKind.Null, row.GetProperty("baseline_aborted_per_hour").ValueKind);
         Assert.Equal(JsonValueKind.Null, row.GetProperty("baseline_regular_per_hour").ValueKind);
 
-        /* 90 runs over the hours from raw's floor to the window's end, not over 168. */
-        var held = (DateTime.UtcNow - rig.RawFloor).TotalHours;
+        /* 90 runs over the hours from the answer's own effective_start to the window's end, not over 168. */
+        var held = (DateTime.UtcNow - effective).TotalHours;
         var perHour = row.GetProperty("recent_aborted_per_hour").GetDouble();
         Assert.InRange(perHour, (90 / held) - 0.05, (90 / held) + 0.05);
         Assert.True(Math.Abs(perHour - (90.0 / 168)) > 0.2, $"the rate {perHour} still divides by 168 hours");
@@ -200,8 +202,10 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.True(now.Any(line => line.Contains("baseline_aborted_per_hour=1.", StringComparison.Ordinal)), string.Join("\n", now));
 
         /* And through the tool: the baseline starts before baseline_end, so the old sentence stays. */
+        /* The answer may be the empty envelope (nothing rose over the 6 hours of baseline the store holds), which carries the note under hints. */
         var hit = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 24)).RootElement;
-        Assert.EndsWith(QueryStoreRegressionRules.BaselineWindowTail, hit.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
+        var dayNote = hit.TryGetProperty("truncation_note", out var top) ? top : hit.GetProperty("hints").GetProperty("truncation_note");
+        Assert.EndsWith(QueryStoreRegressionRules.BaselineWindowTail, dayNote.GetString()!, StringComparison.Ordinal);
     }
 
     private static async Task<List<string>> RunAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, DateTime baselineStart, CancellationToken ct)

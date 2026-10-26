@@ -488,12 +488,14 @@ public partial class ViewerServerTab
            earlier start and the cap rule does not apply. */
         var floorTask = _dataService.GetQueryStoreRegressionsDataStartAsync(_server.ServerId, startUtc, endUtc);
         var floorReadTask = _dataService.GetQueryStoreRegressionsWithScopeAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter,
-            literalEndUtc: IsCustomRange ? endUtc : null); /* #5809: the interval table gate's clause 4, as the grid passes it (#3953). */
+            literalEndUtc: IsCustomRange ? endUtc : null, /* #5809: the interval table gate's clause 4, as the grid passes it (#3953). */
+            dataStartProbe: floorTask); /* #6750: the rates divide from the data start the banner names. */
         await AwaitReadWatchingProbeAsync(floorReadTask, floorTask, "Query Store Regressions");
         var read = floorReadTask.Result;
         _queryStoreRegressionsFilterMgr!.UpdateData(read.Rows);
         ShowDatabasesLeftOutBanner(QueryStoreRegressionsLeftOutBanner, read.DatabasesLeftOut);
         await ShowQueryStoreRegressionsDataStartAsync(QueryStoreRegressionsTruncationBanner, floorTask, startUtc);
+        AddQueryStoreRegressionsEmptyBaselineNote(QueryStoreRegressionsTruncationBanner, floorTask, startUtc);
         SetDefaultSortIfNone(QueryStoreRegressionsGrid, "DurationRegressionPercent", ListSortDirection.Descending);
     }
 
@@ -549,14 +551,21 @@ public partial class ViewerServerTab
     /// <param name="banner">The grid's banner.</param>
     /// <param name="probe">The grid's data-start probe, started beside its read.</param>
     /// <param name="startUtc">The start of the RANGE the grid just drew (not of its baseline).</param>
-    internal static async Task ShowQueryStoreRegressionsDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc)
-    {
-        var floor = await DataStartOrNullAsync(probe, "Query Store Regressions");
-        UpdateTruncationBanner(banner, floor, ViewerDataService.QueryStoreRegressionsBaselineStart(startUtc));
+    internal static async Task ShowQueryStoreRegressionsDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc) =>
+        UpdateTruncationBanner(
+            banner,
+            await DataStartOrNullAsync(probe, "Query Store Regressions"),
+            ViewerDataService.QueryStoreRegressionsBaselineStart(startUtc));
 
-        /* #6750: a store that starts at or after the range's start has an EMPTY baseline: nothing is compared for cost, and only
-           timeouts and errors can be listed. "Showing since" alone read as a shorter baseline, so the banner says so. */
-        if (banner.Visibility == Visibility.Visible && floor is DateTime since && since >= startUtc)
+    /// <summary>
+    /// #6750: after <see cref="ShowQueryStoreRegressionsDataStartAsync"/>, a store that starts at or after the range's start has an
+    /// EMPTY baseline: nothing is compared for cost, and only timeouts and errors can be listed. "Showing since" alone read as a
+    /// shorter baseline, so the banner says so. A separate step so the banner call above keeps its shape. The probe has been awaited by
+    /// then, so a probe that failed or was cancelled adds nothing (the first step already logged it).
+    /// </summary>
+    internal static void AddQueryStoreRegressionsEmptyBaselineNote(TextBlock banner, Task<DateTime?> probe, DateTime startUtc)
+    {
+        if (banner.Visibility == Visibility.Visible && probe.IsCompletedSuccessfully && probe.Result is DateTime since && since >= startUtc)
         {
             banner.Text += QueryStoreRegressionsEmptyBaselineSuffix;
         }

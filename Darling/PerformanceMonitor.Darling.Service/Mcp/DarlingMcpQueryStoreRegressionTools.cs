@@ -104,8 +104,26 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 happens to have exactly `limit` regressions and nothing more, which is a false positive in
                 the one field whose whole reason for existing is that the cap should not have to be inferred.
             */
+            /* #6750: where THIS server's query_store_stats start, probed once and ahead of the read. The notice below reports it as
+               effective_start, and the read divides each per-hour rate by the hours from the later of it and the plan's start, on the
+               raw path and the table path alike, so the two cannot name different instants. The store-wide chunk floor the raw row
+               clamp reads is not a per-server fact. A probe that throws is not rethrown here: the notice reads the same faulted task
+               and answers Unavailable, and the read keeps the plan's start. */
+            var floorTask = ProbeDataStartAsync();
+            async Task<DateTime?> ProbeDataStartAsync() =>
+                await DarlingMcpWindowNotice.Probe(postgres, "query_store_stats", resolved.ServerName, baselineStart, end, cancellationToken);
+            DateTime? dataStart = null;
+            try
+            {
+                dataStart = await floorTask;
+            }
+            catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
+            {
+                logger?.LogDebug(ex, "#6750 the data-start probe of query_store_stats failed; the rates divide by the plan's start");
+            }
+
             var (rows, historySource) = await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(
-                postgres, resolved.ServerId, start, end, databaseFilter, limit + 1, baselineStart, cancellationToken);
+                postgres, resolved.ServerId, start, end, databaseFilter, limit + 1, baselineStart, dataStart, cancellationToken);
 
             /* #4966: where this server's query_store_stats start, checked against the EARLIER of the two windows this tool
                compares: the baseline's start, not the recent window's. A store that began inside the baseline compares
@@ -113,14 +131,14 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                empty answers, which carry it too: "no query regressed" over a baseline the store only partly holds is not a true
                negative. Unfiltered by database_name (the floor is a property of the table). */
             var notice = await DarlingMcpWindowNotice.ReadAsync(
-                () => DarlingMcpWindowNotice.Probe(postgres, "query_store_stats", resolved.ServerName, baselineStart, end, cancellationToken),
+                () => floorTask,
                 baselineStart, end, "query_store_stats",
                 tail: null,
                 emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken,
                 /* #6750: the closing sentence follows where the data starts. Before baseline_end the baseline holds part of its span,
-                   at or after it the baseline is empty, and after recent_window_start the recent window is cut too. The table read
-                   starts at the raw floor, and the raw read's row filters keep the requested start, but both divide each per-hour rate
-                   by the hours their side holds (the windows CTE's hours-held start), so the note says so on either path. */
+                   at or after it the baseline is empty, and after recent_window_start the recent window is cut too. Both paths divide
+                   each per-hour rate by the hours from this server's data start (the windows CTE's hours-held start), the instant
+                   effective_start reports, so the note says so on either path. The row filters keep the requested start. */
                 tailFor: effectiveStart => QueryStoreRegressionRules.TailFor(effectiveStart, start));
 
             if (rows.Count == 0)
