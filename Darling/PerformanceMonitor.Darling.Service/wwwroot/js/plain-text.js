@@ -381,6 +381,15 @@ export function plainText(text) {
     /Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end\./g,
     "Here the window starts before the baseline period, so the baseline holds only the part the store has.",
   );
+  /* #6750: the empty-baseline sentence and the cut-recent-window sentences that follow it. */
+  t = t.replace(
+    /Here effective_start is at or after baseline_end, so the baseline holds no hours: timeouts and errors are flagged on recent runs alone, and a cost flag can come only from an interval that ran before baseline_end and was collected after it\./g,
+    "Here the store starts at or after the end of the baseline period, so the baseline holds no hours: timeouts and errors are flagged on recent runs alone, and a cost flag can come only from a run before the baseline period ended that was collected later.",
+  );
+  t = t.replace(
+    /effective_start is also after baseline_end, so the recent window holds only the part from effective_start\./g,
+    "The store also starts after the recent window began, so the recent window holds only the part the store has.",
+  );
   /* The memory clerk note has four arms (memory_clerk.note): two name latest_memory_mb, the Queries tab's "Latest MB" column,
      and two name the collector's own relation, memory_clerks. */
   t = t.replace(/\blatest_memory_mb\b/g, "Latest MB");

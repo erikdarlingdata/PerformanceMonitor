@@ -156,6 +156,8 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.LowEnd });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.HighStart });
         command.Parameters.Add(DatabaseFilter.All.ExcludeParameter());
+        /* #6750: the start of the hours held, the row filters' start here. */
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
     }
 
     /// <summary>
@@ -181,6 +183,8 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
                 command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.LowEnd });
                 command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.HighStart });
                 command.Parameters.Add(DatabaseFilter.All.ExcludeParameter());
+                /* #6750: the start of the hours held, the row filters' start here. */
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
             }
             else
             {

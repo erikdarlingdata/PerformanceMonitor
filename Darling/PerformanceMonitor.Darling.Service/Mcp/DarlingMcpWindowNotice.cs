@@ -62,11 +62,13 @@ internal static class DarlingMcpWindowNotice
     /// (<paramref name="emptyAnswer"/>) a null floor means the store holds no collection for the server in the window,
     /// and the notice says NOT covered: <c>window_truncated</c> true, no <c>effective_start</c>, and a note that says
     /// so. On an answer WITH rows a null floor means covered, at the start that was asked for.
-    /// <paramref name="tail"/> is one more sentence a truncated note carries.
+    /// <paramref name="tail"/> is one more sentence a truncated note carries. <paramref name="tailFor"/> (#6750) is the same
+    /// sentence chosen by where the data starts: it is given the effective start, and its answer replaces
+    /// <paramref name="tail"/>, so a tool whose closing sentence depends on that instant can choose it. Not read for a store subject.
     /// </summary>
     internal static McpWindowNotice Build(
         DateTime? floor, DateTime requestedStart, string table, string? tail = null, bool emptyAnswer = false, bool listOnly = false,
-        bool storeSubject = false)
+        bool storeSubject = false, Func<DateTime, string?>? tailFor = null)
     {
         if (storeSubject)
         {
@@ -93,8 +95,10 @@ internal static class DarlingMcpWindowNotice
         }
 
         var truncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+        var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
+        tail = tailFor?.Invoke(effectiveStart) ?? tail;
         return new McpWindowNotice(
-            McpHelpers.FormatEffectiveStart(RawWindowFloor.EffectiveStart(floor, requestedStart)),
+            McpHelpers.FormatEffectiveStart(effectiveStart),
             truncated,
             truncated
                 ? $"The window reaches further back than this server's raw {table} retains (or this server has been monitored for less time than that), so the older part of it was not read."
@@ -141,13 +145,13 @@ internal static class DarlingMcpWindowNotice
     /// </summary>
     internal static async Task<McpWindowNotice> ReadAsync(
         Func<Task<DateTime?>> probe, DateTime requestedStart, DateTime windowEnd, string table, string? tail = null, bool emptyAnswer = false,
-        bool listOnly = false, ILogger? logger = null, CancellationToken cancellationToken = default)
+        bool listOnly = false, Func<DateTime, string?>? tailFor = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(probe);
         try
         {
             var floor = emptyAnswer || listOnly || windowEnd - requestedStart > DurationTrendRouting.TruncationSlack ? await probe() : null;
-            return Build(floor, requestedStart, table, tail, emptyAnswer, listOnly);
+            return Build(floor, requestedStart, table, tail, emptyAnswer, listOnly, tailFor: tailFor);
         }
         catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
         {

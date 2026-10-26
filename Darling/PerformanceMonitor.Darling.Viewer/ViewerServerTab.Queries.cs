@@ -488,12 +488,14 @@ public partial class ViewerServerTab
            earlier start and the cap rule does not apply. */
         var floorTask = _dataService.GetQueryStoreRegressionsDataStartAsync(_server.ServerId, startUtc, endUtc);
         var floorReadTask = _dataService.GetQueryStoreRegressionsWithScopeAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter,
-            literalEndUtc: IsCustomRange ? endUtc : null); /* #5809: the interval table gate's clause 4, as the grid passes it (#3953). */
+            literalEndUtc: IsCustomRange ? endUtc : null, /* #5809: the interval table gate's clause 4, as the grid passes it (#3953). */
+            dataStartProbe: floorTask); /* #6750: the rates divide from the data start the banner names. */
         await AwaitReadWatchingProbeAsync(floorReadTask, floorTask, "Query Store Regressions");
         var read = floorReadTask.Result;
         _queryStoreRegressionsFilterMgr!.UpdateData(read.Rows);
         ShowDatabasesLeftOutBanner(QueryStoreRegressionsLeftOutBanner, read.DatabasesLeftOut);
         await ShowQueryStoreRegressionsDataStartAsync(QueryStoreRegressionsTruncationBanner, floorTask, startUtc);
+        AddQueryStoreRegressionsEmptyBaselineNote(QueryStoreRegressionsTruncationBanner, floorTask, startUtc);
         SetDefaultSortIfNone(QueryStoreRegressionsGrid, "DurationRegressionPercent", ListSortDirection.Descending);
     }
 
@@ -554,6 +556,25 @@ public partial class ViewerServerTab
             banner,
             await DataStartOrNullAsync(probe, "Query Store Regressions"),
             ViewerDataService.QueryStoreRegressionsBaselineStart(startUtc));
+
+    /// <summary>
+    /// #6750: after <see cref="ShowQueryStoreRegressionsDataStartAsync"/>, a store that starts at or after the range's start has a
+    /// baseline that holds no hours: timeouts and errors are flagged on recent runs alone, and cost only against a run from before the
+    /// window that was collected later. "Showing since" alone read as a
+    /// shorter baseline, so the banner says so. A separate step so the banner call above keeps its shape. The probe has been awaited by
+    /// then, so a probe that failed or was cancelled adds nothing (the first step already logged it).
+    /// </summary>
+    internal static void AddQueryStoreRegressionsEmptyBaselineNote(TextBlock banner, Task<DateTime?> probe, DateTime startUtc)
+    {
+        if (banner.Visibility == Visibility.Visible && probe.IsCompletedSuccessfully && probe.Result is DateTime since && since >= startUtc)
+        {
+            banner.Text += QueryStoreRegressionsEmptyBaselineSuffix;
+        }
+    }
+
+    /// <summary>What the regressions banner adds when the store starts at or after the range's start (#6750).</summary>
+    internal const string QueryStoreRegressionsEmptyBaselineSuffix =
+        " · the baseline holds no hours, so timeouts and errors are flagged on recent runs alone, and a cost flag can come only from a run before the window that was collected later";
 
     /// <summary>
     /// Loads the Plan Corrections grid (#1952) — the engine's own automatic plan correction recommendations
