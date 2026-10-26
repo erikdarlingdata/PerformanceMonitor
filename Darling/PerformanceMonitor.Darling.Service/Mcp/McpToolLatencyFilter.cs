@@ -139,7 +139,7 @@ public sealed class McpToolLatencyFilter
 
             /* #5506 part 3: a heavy cacheable read is answered from the read cache, joins an identical read running now,
                or runs once and is stored. A hit skips admission. */
-            /* #6800: a whole-fleet read of get_resource_use_by_tag (no server_name) is cached whatever its band, for its own TTL. */
+            /* #6800: a whole-fleet read of get_resource_use_by_tag (no server_name) in the 24-hour band or longer is cached for its own TTL. */
             var fleetRead = IsFleetRead(toolName, request.Params?.Arguments);
             if (_admission is { } admission && admission.IsCached(ReadSurface.Mcp, toolName, windowBand, fleetRead))
             {

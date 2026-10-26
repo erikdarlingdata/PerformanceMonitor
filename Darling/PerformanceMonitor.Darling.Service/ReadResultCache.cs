@@ -122,9 +122,10 @@ internal sealed class ReadResultCache : IDisposable
     };
 
     /// <summary>The TTL of an entry of <paramref name="route"/>: the route's own TTL for a whole-fleet read of a route in
-    /// <see cref="ReadAdmission.FleetCachedRoutes"/> (#6800), else the band's (<see cref="TtlOf(string?)"/>).</summary>
+    /// <see cref="ReadAdmission.FleetCachedRoutes"/> in the 24-hour band or longer (#6800,
+    /// <see cref="ReadAdmission.FleetTtlApplies"/>), else the band's (<see cref="TtlOf(string?)"/>).</summary>
     internal static TimeSpan TtlFor(string route, string? band, bool fleetRead) =>
-        fleetRead && ReadAdmission.FleetCachedRoutes.TryGetValue(route, out var own) ? own : TtlOf(band);
+        ReadAdmission.FleetTtlApplies(route, band, fleetRead) ? ReadAdmission.FleetCachedRoutes[route] : TtlOf(band);
 
     /// <summary>The TTL bucket of now, <c>floor(now / TTL)</c>, for a key with no <c>as_of</c>.</summary>
     internal long BucketOf(TimeSpan ttl) =>

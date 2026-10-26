@@ -22,8 +22,9 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #6800: the fleet <c>get_resource_use_by_tag</c> read (no server) is kept in the read cache for 5 minutes although its 24-hour
-/// band is light, so a repeat visit, a second user and the page's pickers do not run its Query Store section again. The web tests
+/// #6800: the fleet <c>get_resource_use_by_tag</c> read (no server) is kept in the read cache for 5 minutes from the 24-hour band up
+/// although that band is light, so a repeat visit, a second user and the page's pickers do not run its Query Store section again.
+/// A window under 24 hours keeps the band's TTL. The web tests
 /// run the real <c>/api/read</c> pipeline with a counting handler standing in for the store under the route's own name, on a clock
 /// the test moves.
 /// </summary>
@@ -83,6 +84,32 @@ public sealed class FleetTagReadCacheTests
     }
 
     [Fact(Timeout = 60_000)]
+    public async Task AFleetRead_OfAWindowUnder24Hours_KeepsTheBandRule_AndIsNotKept()
+    {
+        /* The page's 5m, 15m, 30m and 1h presets all arrive as hours=1, band 1h: light, so not cached, as before #6800. */
+        var (calls, _) = await RunAsync(
+            [$"/api/read/{Route}?hours=1", $"/api/read/{Route}?hours=1", $"/api/read/{Route}?hours=1&server_name=", $"/api/read/{Route}"],
+            [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero]);
+
+        /* hours=1 three times, and the default window (24 hours on this route) is a fleet read that runs once. */
+        Assert.Equal(4, calls);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task AOneServerRead_IsNeverKept_WhichArgumentNamesTheServer()
+    {
+        /* Two reads 4 minutes apart: a fleet entry would still be inside its 5 minutes, so a kept one-server read shows as one call. */
+        foreach (var query in new[] { "server=a", "server_name=a" })
+        {
+            var (calls, _) = await RunAsync(
+                [$"/api/read/{Route}?hours=24&{query}", $"/api/read/{Route}?hours=24&{query}"],
+                [TimeSpan.Zero, TimeSpan.FromMinutes(4)]);
+
+            Assert.Equal(2, calls);
+        }
+    }
+
+    [Fact(Timeout = 60_000)]
     public async Task AOneServerRead_IsNotCached_AndDoesNotShareAnEntryWithTheFleetRead()
     {
         var (calls, _) = await RunAsync(
@@ -127,22 +154,26 @@ public sealed class FleetTagReadCacheTests
     }
 
     [Fact]
-    public void TheFleetTtl_IsFiveMinutes_AndAnotherRouteKeepsItsBandTtl()
+    public void TheFleetTtl_IsFiveMinutesFrom24Hours_AndAShorterWindowOrAnotherRouteKeepsItsBandTtl()
     {
         Assert.Equal(TimeSpan.FromMinutes(5), ReadResultCache.TtlFor(Route, ReadWindowBand.OneDay, fleetRead: true));
+        Assert.Equal(TimeSpan.FromMinutes(5), ReadResultCache.TtlFor(Route, ReadWindowBand.SevenDays, fleetRead: true));
+        Assert.Equal(TimeSpan.FromMinutes(5), ReadResultCache.TtlFor(Route, ReadWindowBand.Longer, fleetRead: true));
+        Assert.Equal(TimeSpan.FromSeconds(15), ReadResultCache.TtlFor(Route, ReadWindowBand.OneHour, fleetRead: true));
+        Assert.Equal(TimeSpan.FromSeconds(15), ReadResultCache.TtlFor(Route, ReadWindowBand.None, fleetRead: true));
         Assert.Equal(TimeSpan.FromSeconds(30), ReadResultCache.TtlFor(Route, ReadWindowBand.OneDay, fleetRead: false));
         Assert.Equal(TimeSpan.FromSeconds(30), ReadResultCache.TtlFor("get_top_queries_by_cpu", ReadWindowBand.OneDay, fleetRead: true));
     }
 
     [Fact]
-    public void IsCached_HoldsForAFleetReadInAnyBand_ButNotForAOneServerReadOrAnotherRoute()
+    public void IsCached_HoldsForAFleetReadFrom24Hours_ButNotForAShorterWindow_AOneServerReadOrAnotherRoute()
     {
         var admission = LightAdmission(new TimerTimeProvider());
         foreach (var surface in new[] { ReadSurface.Web, ReadSurface.Mcp })
         {
             foreach (var band in new[] { ReadWindowBand.None, ReadWindowBand.OneHour, ReadWindowBand.OneDay })
             {
-                Assert.True(admission.IsCached(surface, Route, band, fleetRead: true));
+                Assert.Equal(band == ReadWindowBand.OneDay, admission.IsCached(surface, Route, band, fleetRead: true));
                 Assert.False(admission.IsCached(surface, Route, band, fleetRead: false));
                 Assert.False(admission.IsCached(surface, "get_top_queries_by_cpu", band, fleetRead: true));
             }
