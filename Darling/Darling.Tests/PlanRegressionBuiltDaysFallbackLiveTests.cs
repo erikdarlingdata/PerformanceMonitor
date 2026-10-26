@@ -82,6 +82,58 @@ public sealed class PlanRegressionBuiltDaysFallbackLiveTests
     }
 
     /// <summary>
+    /// #5506: the regressions read takes the recent window's whole days from the daily totals where it can. On a store without
+    /// the daily tables (before V168) the built-days read fails under its savepoint, the plan has no recent day, the
+    /// transaction stays usable, and the statement it then runs (which names no daily table) gives the same rows as the
+    /// recent-days form gave while the tables were there.
+    /// </summary>
+    [Fact]
+    public async Task OnAStoreWithoutTheDailyTables_TheRegressionsReadTakesNoRecentDay_AndAnswersTheSame()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5506 fallback test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var (periodStart, periodEnd) = await SeedAndBuildAsync(connection, ct);
+
+        /* The recent window starts four days before the pass window, so the cheap plan (five days before) is baseline and the
+           built day three days before the pass window's day is a whole recent day. */
+        var recentStart = periodStart.AddDays(-4);
+        var baselineStart = recentStart.AddDays(-7);
+
+        async Task<QueryStoreRegressionBaseline.Plan> ResolveAsync()
+        {
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct);
+            var plan = await QueryStoreRegressionBaseline.ResolveAsync(connection, transaction, ServerId, baselineStart, recentStart, 60, null, ct, windowEnd: periodEnd);
+            await using (var usable = new NpgsqlCommand("SELECT 1", connection, transaction))
+            {
+                Assert.Equal(1, await usable.ExecuteScalarAsync(ct));
+            }
+
+            await transaction.CommitAsync(ct);
+            return plan;
+        }
+
+        var withTables = await ResolveAsync();
+        Assert.True(withTables.RegularFromLatest);
+        Assert.NotEmpty(withTables.RecentDays);
+        var reference = await QueryStoreRegressionsDailyBaselineLiveTests.RunFullAsync(connection, ServerId, "fallbackdb", recentStart, periodEnd, baselineStart, withTables, ct);
+        Assert.Single(reference);
+
+        await ExecAsync(connection, "ALTER TABLE collect.plan_regression_daily_built RENAME TO plan_regression_daily_built_gone", ct);
+        await ExecAsync(connection, "ALTER TABLE collect.plan_regression_daily RENAME TO plan_regression_daily_gone", ct);
+        var without = await ResolveAsync();
+        Assert.True(without.RegularFromLatest);
+        Assert.Empty(without.RecentDays);
+        Assert.Empty(without.RunDays);
+        Assert.Equal(reference, await QueryStoreRegressionsDailyBaselineLiveTests.RunFullAsync(connection, ServerId, "fallbackdb", recentStart, periodEnd, baselineStart, without, ct));
+    }
+
+    /// <summary>
     /// The built-days read and the daily read share one REPEATABLE READ transaction (#5448). Between them, from another
     /// connection, the day totals are deleted and committed: the daily read must still see the totals that made those days
     /// built, so the fact equals the undisturbed one. At READ COMMITTED the second read would see no totals for days the
