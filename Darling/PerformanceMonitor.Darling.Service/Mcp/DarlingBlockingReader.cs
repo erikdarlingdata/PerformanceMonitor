@@ -141,6 +141,16 @@ internal static class DarlingBlockingReader
         /// 0 is a transaction that has written no log (a kill rolls back nothing); null is a session with no transaction row.</summary>
         public long? BlockingTranLogBytesUsed { get; set; }
 
+        /// <inheritdoc/>
+        public override void FillHeadEvidenceFrom(BlockedProcessAlertRow dmvRow)
+        {
+            if (dmvRow is not BlockedProcessReadRow dmv) return;
+            BlockingLoginTimeUtc ??= dmv.BlockingLoginTimeUtc;
+            BlockingLastRequestEndTimeUtc ??= dmv.BlockingLastRequestEndTimeUtc;
+            BlockingOpenTransactionCount ??= dmv.BlockingOpenTransactionCount;
+            BlockingTranLogBytesUsed ??= dmv.BlockingTranLogBytesUsed;
+        }
+
         /// <summary>The report's own <c>collection_time</c> (#5236): half of the store key that
         /// <see cref="ReadBlockedPlanFlagsAsync"/> re-reads a page's rows by. Null on a DMV-snapshot row, which has no key.</summary>
         public DateTime? CollectionTime { get; set; }

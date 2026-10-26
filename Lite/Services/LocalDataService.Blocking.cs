@@ -1640,6 +1640,16 @@ public class BlockedProcessReportRow : BlockedProcessAlertRow
     public int? BlockingOpenTransactionCount { get; set; }
     public long? BlockingTranLogBytesUsed { get; set; }
 
+    /// <inheritdoc/>
+    public override void FillHeadEvidenceFrom(BlockedProcessAlertRow dmvRow)
+    {
+        if (dmvRow is not BlockedProcessReportRow dmv) return;
+        BlockingLoginTime ??= dmv.BlockingLoginTime;
+        BlockingLastRequestEndTime ??= dmv.BlockingLastRequestEndTime;
+        BlockingOpenTransactionCount ??= dmv.BlockingOpenTransactionCount;
+        BlockingTranLogBytesUsed ??= dmv.BlockingTranLogBytesUsed;
+    }
+
     /* #5632 part 4: the grid's text for the four. The two stamps are the monitored server's own clock, so they take the server-clock
        renderer (not the UTC one EventTime uses); a NULL is an empty cell, and the columns sort on the numbers above, not on this text. */
     public string BlockingLoginTimeLocal => ServerTimeHelper.FormatServerClock(BlockingLoginTime);
