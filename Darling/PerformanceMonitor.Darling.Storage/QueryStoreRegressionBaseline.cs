@@ -715,7 +715,7 @@ public static class QueryStoreRegressionBaseline
             WHERE rn = 1
             GROUP BY database_name, query_id
         ),
-""";
+        """;
 
     /// <summary>
     /// <c>recent_performance</c> over the recent-days arm (#5506), whose rows are already weighted. The same numeric sums and
@@ -736,7 +736,7 @@ public static class QueryStoreRegressionBaseline
             FROM deduped_recent
             GROUP BY database_name, query_id
         ),
-""";
+        """;
 
     private static readonly string s_aggregatesTailPreWeightedSql = PreWeightedTail();
 
