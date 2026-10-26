@@ -53,11 +53,11 @@ public sealed class QueryStoreReadableSecondaryNotCollectedLiveTests
             "VALUES ($1, $2, $3, $4, 'Enterprise', '16.0.1000.6', 'RTM', 3, $5)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(DateTime.UtcNow), ServerId, ServerName, role);
 
-    private static Task SeedHealthAsync(NpgsqlConnection c, CancellationToken ct, string db, string state, int readonlyReason) =>
+    private static Task SeedHealthAsync(NpgsqlConnection c, CancellationToken ct, string db, string state, int readonlyReason, DateTime? at = null) =>
         DarlingMcpTestData.ExecAsync(c, ct,
             "INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason, interval_length_minutes) " +
             "VALUES ($1, $2, $3, $4, $5, $6, 'READ_WRITE', $7, 60)",
-            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-5)), ServerId, ServerName, db, state, readonlyReason);
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at ?? DateTime.UtcNow.AddMinutes(-5)), ServerId, ServerName, db, state, readonlyReason);
 
     private static Task SeedReplicaSettingAsync(NpgsqlConnection c, CancellationToken ct) =>
         DarlingMcpTestData.ExecAsync(c, ct,
@@ -148,6 +148,26 @@ public sealed class QueryStoreReadableSecondaryNotCollectedLiveTests
             Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(forced));
 
             var top = await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 24, 20, null, null, null, null, false, null, ct);
+            Assert.NotEqual("not_collected", DarlingMcpTestData.StatusOf(top));
+            return 0;
+        });
+    }
+
+    /// <summary>The on-prem capture always holds tempdb with Query Store OFF: on a Secondary role that is still a readable secondary, and a READ_WRITE database beside it still vetoes that.</summary>
+    [Fact]
+    public async Task SecondaryRole_WithTempdbOffInTheCapture_AnswersNotCollected_UnlessAReadWriteDatabaseIsThere()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            var capture = DateTime.UtcNow.AddMinutes(-5);
+            await SeedRoleAsync(c, ct, "Secondary");
+            await SeedHealthAsync(c, ct, "tempdb", "OFF", 0, capture);
+
+            var top = await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 24, 20, null, null, null, null, false, null, ct);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(top));
+
+            await SeedHealthAsync(c, ct, "Standalone", "READ_WRITE", 0, capture);
+            top = await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 24, 20, null, null, null, null, false, null, ct);
             Assert.NotEqual("not_collected", DarlingMcpTestData.StatusOf(top));
             return 0;
         });

@@ -136,6 +136,11 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,$12,0)",
             var whole = await DarlingForcedPlanStateReader.ReadAsync(rig.Postgres, ServerId, DatabaseFilter.All, null, T0.AddHours(-1), AsOf, 7, null, 30, null, ct);
             Assert.False(whole.ReadCapped);
             Assert.Equal(7, whole.Plans.Count);
+
+            /* captures[].forced_plan_count counts the whole capture, so a cut read does not under-report a database (as hint_count does). */
+            var wholeCounts = whole.Captures.ToDictionary(c => c.DatabaseName, c => c.ForcedPlanCount);
+            Assert.Equal(wholeCounts, capped.Captures.ToDictionary(c => c.DatabaseName, c => c.ForcedPlanCount));
+            Assert.True(capped.Captures.Sum(c => c.ForcedPlanCount) > capped.Plans.Count(p => p.State != ForcedPlanState.Removed));
             return 0;
         });
     }

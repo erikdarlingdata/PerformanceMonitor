@@ -94,6 +94,7 @@ public sealed record ForcedPlanFact(
 }
 
 /// <summary>The newest forced-plan capture of one database inside the window.</summary>
+/// <param name="ForcedPlanCount">Every force in that capture (counted in SQL over the whole capture, so a force the read cap cut still counts).</param>
 public sealed record ForcedPlanCapture(string DatabaseName, DateTime NewestCapture, int ForcedPlanCount);
 
 /// <summary>What <see cref="DarlingForcedPlanStateReader.ReadAsync"/> found.</summary>
@@ -179,34 +180,20 @@ LEFT JOIN query_plan_dim AS d
         return xml.Contains("UsePlan=\"1\"", StringComparison.Ordinal) ? (PlanKind.Variant, null) : (PlanKind.Plain, null);
     }
 
-    /// <summary>The newest collector capture of each force, read from the window. $1 server, $2 start, $3 end, $4 database filter, $5 query_id or NULL, $6 plan_id or NULL (#6560: both narrow the read itself, before the <see cref="MaxForces"/> cap, so a force past the cap is still found).</summary>
-    public static string ForcesSql(DatabaseFilter databases) => ForcesSql(databases, MaxForces);
-
     /// <summary>
-    /// <see cref="ForcesSql(DatabaseFilter)"/> with the row cap given. The cap cuts the LAST rows of this order: a force that fails (a failure count or
+    /// The newest collector capture of each force, read from the window, with the row cap given. $1 server, $2 start, $3 end, $4 database filter,
+    /// $5 query_id or NULL, $6 plan_id or NULL (#6560: both narrow the read itself, before the cap, so a force past the cap is still found). The cap cuts the LAST rows of this order: a force that fails (a failure count or
     /// a reason) in its database's newest capture first, then the other forces of the newest capture, then the removed ones, each by database and plan
     /// id, so a standing force that needs a person is never what a cap drops. It reads one row past the cap so the caller can tell the read was cut.
     /// </summary>
     internal static string ForcesSql(DatabaseFilter databases, int maxForces) => $@"
-WITH win AS (
-    SELECT database_name, collection_time, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason,
-           variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
-    FROM collect.query_store_forced_plans
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)}),
-plans AS (
-    SELECT * FROM win WHERE plan_id IS NOT NULL AND ($5::bigint IS NULL OR query_id = $5) AND ($6::bigint IS NULL OR plan_id = $6)),
+WITH {BaseCtes(databases)},
 absent AS (
     SELECT p.database_name, p.plan_id, MAX(m.collection_time) AS last_absent
     FROM (SELECT DISTINCT database_name, plan_id FROM plans) AS p
     JOIN win AS m ON m.database_name = p.database_name AND m.plan_id IS NULL
     WHERE NOT EXISTS (SELECT 1 FROM plans AS x WHERE x.database_name = p.database_name AND x.plan_id = p.plan_id AND x.collection_time = m.collection_time)
-    GROUP BY p.database_name, p.plan_id),
-newest AS (
-    SELECT database_name, MAX(collection_time) AS newest_capture FROM win WHERE plan_id IS NULL GROUP BY database_name),
-latest AS (
-    SELECT DISTINCT ON (database_name, plan_id) database_name, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason, collection_time,
-           variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
-    FROM plans ORDER BY database_name, plan_id, collection_time DESC)
+    GROUP BY p.database_name, p.plan_id)
 SELECT l.database_name, l.plan_id, l.query_id, l.plan_forcing_type, l.force_failure_count, l.last_force_failure_reason, l.collection_time,
        (SELECT MIN(x.collection_time) FROM plans AS x WHERE x.database_name = l.database_name AND x.plan_id = l.plan_id AND (a.last_absent IS NULL OR x.collection_time > a.last_absent)),
        n.newest_capture,
@@ -219,6 +206,31 @@ ORDER BY CASE WHEN l.collection_time >= n.newest_capture AND (l.force_failure_co
               ELSE 2 END,
          l.database_name, l.plan_id
 LIMIT {maxForces + 1}";
+
+    /// <summary>
+    /// How many forces each database's newest capture holds, over the whole set (no cap), so <c>captures[].forced_plan_count</c> stays the
+    /// database's real count when the read was cut. Same parameters as <see cref="ForcesSql(DatabaseFilter, int)"/>.
+    /// </summary>
+    public static string CountsSql(DatabaseFilter databases) => $@"
+WITH {BaseCtes(databases)}
+SELECT l.database_name, COUNT(*)
+FROM latest AS l
+JOIN newest AS n ON n.database_name = l.database_name AND l.collection_time >= n.newest_capture
+GROUP BY l.database_name";
+
+    private static string BaseCtes(DatabaseFilter databases) => $@"win AS (
+    SELECT database_name, collection_time, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason,
+           variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
+    FROM collect.query_store_forced_plans
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)}),
+plans AS (
+    SELECT * FROM win WHERE plan_id IS NOT NULL AND ($5::bigint IS NULL OR query_id = $5) AND ($6::bigint IS NULL OR plan_id = $6)),
+newest AS (
+    SELECT database_name, MAX(collection_time) AS newest_capture FROM win WHERE plan_id IS NULL GROUP BY database_name),
+latest AS (
+    SELECT DISTINCT ON (database_name, plan_id) database_name, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason, collection_time,
+           variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
+    FROM plans ORDER BY database_name, plan_id, collection_time DESC)";
 
     /// <summary>Each database's newest marker row in the window. $1 server, $2 start, $3 end, $4 database filter.</summary>
     public static string CapturesSql(DatabaseFilter databases) => $@"
@@ -479,8 +491,23 @@ LIMIT 50";
 
         var forces = new List<Force>();
         var readCapped = false;
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
         if (captures.Count > 0)
         {
+            await using (var countCommand = postgres.CreateCommand(CountsSql(databases)))
+            {
+                countCommand.CommandTimeout = commandTimeoutSeconds;
+                countCommand.Parameters.AddWithValue(serverId);
+                countCommand.Parameters.AddWithValue(NpgsqlDbType.Timestamp, from);
+                countCommand.Parameters.AddWithValue(NpgsqlDbType.Timestamp, to);
+                countCommand.Parameters.Add(databases.Parameter());
+                countCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = queryId.HasValue ? queryId.Value : DBNull.Value });
+                countCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = planId.HasValue ? planId.Value : DBNull.Value });
+                await using var countReader = await countCommand.ExecuteReaderAsync(cancellationToken);
+                while (await countReader.ReadAsync(cancellationToken))
+                    counts[countReader.GetString(0)] = checked((int)countReader.GetInt64(1));
+            }
+
             await using var command = postgres.CreateCommand(ForcesSql(databases, maxForces));
             command.CommandTimeout = commandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
@@ -608,10 +635,8 @@ LIMIT 50";
                 variants, guide, unknowns.Count == 0 ? null : unknowns, unknownReason));
         }
 
-        var perDatabase = facts.Where(f => f.State != ForcedPlanState.Removed).GroupBy(f => f.DatabaseName, StringComparer.Ordinal)
-            .ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
         var captureList = captures
-            .Select(c => new ForcedPlanCapture(c.Database, c.Newest, perDatabase.TryGetValue(c.Database, out var n) ? n : 0))
+            .Select(c => new ForcedPlanCapture(c.Database, c.Newest, counts.TryGetValue(c.Database, out var n) ? n : 0))
             .ToList();
         return new ForcedPlanRead(facts, captureList, floor, complete, readCapped);
     }

@@ -330,7 +330,7 @@ SELECT -($6 + g), $1, $2, $3, $4, $6 + g, $6 + g, 'OPTION (MAXDOP 1)', 0, 'USER'
     {
         await WithStoreAsync(16, async (connection, ct) =>
         {
-            foreach (var (db, state) in new[] { ("Sales", "OFF"), ("Hr", "ERROR") })
+            foreach (var (db, state) in new[] { ("Sales", "OFF"), ("Hr", "OFF") })
             {
                 await DarlingMcpTestData.ExecAsync(connection, ct,
                     "INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason, interval_length_minutes) " +
@@ -341,6 +341,30 @@ SELECT -($6 + g), $1, $2, $3, $4, $6 + g, $6 + g, 'OPTION (MAXDOP 1)', 0, 'USER'
         {
             var root = Parse(await Call(postgres, ct));
             Assert.Equal("precondition", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.Contains("Query Store is not enabled on", message, StringComparison.Ordinal);
+            Assert.Contains("ALTER DATABASE [name] SET QUERY_STORE = ON", message, StringComparison.Ordinal);
+            return 0;
+        });
+    }
+
+    [Fact]
+    public async Task NoCapture_WithQueryStoreInErrorInEveryDatabase_ReadsPrecondition_AndNamesTheConsistencyCheck()
+    {
+        await WithStoreAsync(16, async (connection, ct) =>
+        {
+            foreach (var (db, state) in new[] { ("Sales", "ERROR"), ("Hr", "ERROR") })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason, interval_length_minutes) " +
+                    "VALUES ($1, $2, $3, $4, $5, $6, 'READ_WRITE', 0, 60)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-5)), ServerId, ServerName, db, state);
+            }
+        }, async (postgres, ct) =>
+        {
+            var root = Parse(await Call(postgres, ct));
+            Assert.Equal("precondition", root.GetProperty("status").GetString());
+            Assert.Contains("sys.sp_query_store_consistency_check", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
             return 0;
         });
     }
