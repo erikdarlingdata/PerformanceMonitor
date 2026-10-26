@@ -1119,8 +1119,8 @@ public partial class AddServerDialog : Window
 
     /// <summary>
     /// #6472: copies the login and grant script for the server in the form. The principal follows the form's authentication: the SQL
-    /// login typed, the Entra identity placeholder, or, for Windows authentication, the service's virtual account when the host is this
-    /// machine (the viewer of a managed install runs beside the service) and the machine account placeholder otherwise. The script is
+    /// login typed, the Entra identity placeholder, or, for Windows authentication, the account the service runs as (read from the service's
+    /// registry key on this machine) and a clearly marked placeholder when the service is not on this machine. The script is
     /// built by <see cref="MonitoringGrantScript"/>, the same list the service's <c>--grant-script</c> command and the connection test read.
     /// </summary>
     private void CopyGrantScriptButton_Click(object sender, RoutedEventArgs e)
@@ -1177,14 +1177,21 @@ public partial class AddServerDialog : Window
             return;
         }
 
+        /* The service's account is in its registry key, which any user can read. No key means the service is on another machine: the script
+           then names a placeholder account instead of this machine's, and the status line says so. */
+        var serviceAccount = MonitoringGrantScript.ReadServiceAccountName();
         var principal = MonitoringGrantScript.ChoosePrincipal(new GrantPrincipalInputs(
-            auth, username, host, ServiceAccount: null, Environment.MachineName, Environment.UserDomainName));
+            auth, username, host, serviceAccount, Environment.MachineName, Environment.UserDomainName,
+            ServiceNotOnThisMachine: serviceAccount is null));
         var script = MonitoringGrantScript.Build(
             principal, GrantScriptFinOpsCheck.IsChecked == true, MonitoringGrantScript.IsAzureSqlDatabaseHost(host), host);
         /* The shared guard: another process can hold the clipboard, and the operator can click again. */
-        StatusText.Text = PerformanceMonitor.Ui.ClipboardText.TrySetText(script)
-            ? $"Copied the grant script for {principal.Name}. Review it, then run it on {host} as a sysadmin."
-            : "Could not reach the clipboard. Try again.";
+        StatusText.Text = !PerformanceMonitor.Ui.ClipboardText.TrySetText(script)
+            ? "Could not reach the clipboard. Try again."
+            : principal.IsPlaceholder
+                ? $"Copied the grant script with a placeholder account ({principal.Name}): the service is not on this machine, so its account is a guess. "
+                    + "Replace it, or run PerformanceMonitor.Darling.Service.exe --grant-script --host <host> on the service's machine for the real one."
+                : $"Copied the grant script for {principal.Name}. Review it, then run it on {host} as a sysadmin.";
     }
 
     private void CancelButton_Click(object sender, RoutedEventArgs e)

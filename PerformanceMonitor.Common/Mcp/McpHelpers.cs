@@ -63,6 +63,15 @@ internal static class McpHelpers
     public static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
 
     /// <summary>
+    /// What a <c>get_database_config</c> read says when its database filter matches nothing in a snapshot that does hold databases.
+    /// The data stays <c>database_count 0</c>; this only says why, because the snapshot is a connect-time reading and the collector
+    /// skips master, model and msdb. Shared by Lite and Darling.
+    /// </summary>
+    public const string DatabaseConfigFilterMissNote =
+        "No database in the snapshot taken at captured_at matches the filter. This tool reads that snapshot, not the live server: " +
+        "a database created since then appears after the next connect, and master, model and msdb are not collected.";
+
+    /// <summary>
     /// #6254: adds <c>read_source</c> to the runs of a <c>get_collection_log</c> page that have one, in page order. A run with none (every
     /// run of a server with the Query Store replica setting off, and every run from before the setting existed) gets no key at all, so a
     /// page with no <c>read_source</c> is returned as it is, byte for byte. Shared by Lite and Darling so the two tools carry the same field.

@@ -50,6 +50,8 @@ lite_shard:
   # DmvResourceDatabaseSentinelTests reads install/56). A PR that edits only an install script fires `installer`
   # and `sql-validation`, neither of which runs Lite.Tests, so the nightly would be the first to catch drift.
   - 'install/**/!(*.md)'
+  # Lite.Tests.csproj compiles tools/ui-smoke-wpf/LiteSeedGuard.cs into its own assembly and tests it, so an edit to that tree has to reach the Lite suite.
+  - 'tools/ui-smoke-wpf/**/!(*.md)'
   # #5669: this file decides whether the Lite shards start at all, so an edit to it has to reach the suite.
   - '.github/lite-paths-filter.yml'
 # The rest of the build job's `lite` set: the three Darling trees Lite.Tests reads as source.

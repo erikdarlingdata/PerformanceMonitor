@@ -1074,8 +1074,23 @@ public sealed class McpQueryTools
 
         if (!hasAny)
         {
-            return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, "query_stats")
-                ?? McpHelpers.Status(
+            var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, "query_stats");
+            if (gated != null)
+            {
+                return gated;
+            }
+
+            /* #6453: nothing ever stored, but the query_stats collector's newest run completed clean: the plan cache had
+               nothing to read, which collection health calls HEALTHY, so this is a true negative and not "unavailable".
+               Darling's twin does the same. */
+            var healthyEmpty = await McpRuntimePrecondition.HealthyEmptyMessageAsync(
+                dataService, serverId, serverName, "query_stats", "query stats");
+            if (healthyEmpty != null)
+            {
+                return McpHelpers.Status("empty", healthyEmpty);
+            }
+
+            return McpHelpers.Status(
                     "unavailable",
                     $"No query stats have EVER been collected for {serverName}, so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.");
         }

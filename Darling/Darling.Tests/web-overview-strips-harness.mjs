@@ -215,6 +215,12 @@ if (scenario === "crosshair") {
   out.afterFill = sizes();
   observers.forEach((o) => o.cb([]));
   out.afterObserver = sizes();
+} else if (scenario === "waitsaxis") {
+  /* the waits sample runs 100..220 ms/sec; the strip's lower axis label must be 0, not the series minimum */
+  const drawn = strips.drawStrips(strips.buildStrips(reads), domain, 1000, null);
+  const labels = (key) => find(find(drawn.node, (n) => n.attrs["data-strip"] === key)[0], (n) => n.tag === "text" && n.parent && n.parent.attrs.class === "axis").map((n) => n.textContent);
+  out.waits = labels("waits");
+  out.memory = labels("memory");
 } else if (scenario === "empty") {
   const none = {
     cpu: { kind: "empty", message: "No CPU samples in this window." },

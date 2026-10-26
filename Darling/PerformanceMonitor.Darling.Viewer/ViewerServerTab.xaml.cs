@@ -118,6 +118,10 @@ public partial class ViewerServerTab : UserControl
     public ViewerServerTab(ViewerDataService dataService, DarlingServer server, ViewerPreferences? preferences = null, ViewerServerStore? serverStore = null)
     {
         _dataService = dataService;
+        _scheduleOverrides = new ViewerScheduleOverridesCache(
+            async () => await dataService.GetCollectorSchedulesAsync(),
+            () => DateTime.UtcNow,
+            ex => ViewerLogger.Warn("ViewerServerTab", $"collector schedule read failed, notes use the shipped cadence | {ex.GetType().Name}: {ex.Message}"));
         _server = server;
         _serverStore = serverStore;
         /* #1319: seed the per-server database filter from the viewer registry (viewer-servers.json). */

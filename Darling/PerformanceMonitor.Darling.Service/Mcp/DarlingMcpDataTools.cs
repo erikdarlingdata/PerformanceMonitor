@@ -109,7 +109,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_wait_stats"), Description("Gets the top SQL Server wait types over a time period ending at as_of, heaviest total wait first. Bounded by limit: wait_types_returned is how many you got; truncated means the window held more. The page holds only the heaviest waits — a sum over the page is not a sum over the server. <<GUIDE>> Gets the top SQL Server wait types aggregated over a time period, heaviest total wait first. Wait stats reveal what SQL Server spends time waiting on — high signal waits indicate CPU pressure, high resource waits indicate I/O or lock contention. Use this first to identify the dominant wait category, then drill into specific tools based on the wait type. THE PAGE IS BOUNDED BY limit: wait_types_returned is how many wait types you got and truncated says the window observed more than limit — the rows you have are the heaviest, and the ones past the cap are lighter, but a sum over the page is a sum over the page rather than over the server.")]
+    [McpServerTool(Name = "get_wait_stats"), Description("Gets the top SQL Server wait types over a time period ending at as_of, heaviest total wait first. Bounded by limit: wait_types_returned is how many you got; truncated means the window held more. The page holds only the heaviest waits — a sum over the page is not a sum over the server. <<GUIDE>> Gets the top SQL Server wait types aggregated over a time period, heaviest total wait first. Wait stats reveal what SQL Server spends time waiting on — high signal waits indicate CPU pressure, high resource waits indicate I/O or lock contention. Use this first to identify the dominant wait category, then drill into specific tools based on the wait type. THE PAGE IS BOUNDED BY limit: wait_types_returned is how many wait types you got and truncated says the window observed more than limit — the rows you have are the heaviest, and the ones past the cap are lighter, but a sum over the page is a sum over the page rather than over the server. A wait is counted in sys.dm_os_wait_stats only when it ends, so a wait still in progress (a long blocking incident, for example) reads zero until it finishes. For waits happening now use get_waiting_tasks or get_current_waits_trend.")]
     public static async Task<string> GetWaitStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -242,7 +242,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_wait_trend"), Description("Gets one wait type's wait time per second over time, in time buckets. Use get_wait_stats first to discover the dominant wait types." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_wait_trend"), Description("Gets one wait type's wait time per second over time, in time buckets. Use get_wait_stats first to discover the dominant wait types. A wait is counted in sys.dm_os_wait_stats only when it ends, so a wait still in progress (a long blocking incident, for example) reads zero until it finishes. For waits happening now use get_waiting_tasks or get_current_waits_trend." + BaselineDiscontinuities.DescriptionSentence)]
     public static Task<string> GetWaitTrend(
         NpgsqlDataSource postgres,
         [Description("The exact wait type name, e.g. CXPACKET, PAGEIOLATCH_SH.")] string wait_type,

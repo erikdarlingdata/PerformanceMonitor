@@ -134,26 +134,6 @@ public static partial class DarlingCliCommands
         return true;
     }
 
-    /// <summary>The account the Darling Windows service is configured to run as (<c>sc qc</c>'s SERVICE_START_NAME), or null when this is
-    /// not the service's machine, not Windows, or the key cannot be read. A read of one registry value; it never throws.</summary>
-    internal static string? ReadServiceAccountName()
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return null;
-        }
-
-        try
-        {
-            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\" + ServiceName);
-            return key?.GetValue("ObjectName") as string;
-        }
-        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
-        {
-            return null;
-        }
-    }
-
     /// <summary>The wording for the registry list <c>--grant-script</c> reads: it needs the entry's login and auth, nothing more.</summary>
     private static readonly RegistryListWording GrantScriptRegistryWording = new(
         "using darling.json's own server list instead.",
@@ -237,11 +217,15 @@ public static partial class DarlingCliCommands
             username = args.Username;
         }
 
+        /* No --service-account and no registry key: the service is not installed on this machine, so its account is unknown here and the script
+           names a placeholder (as the Viewer's Add Server dialog does) rather than this machine's own account. */
+        var serviceAccount = args.ServiceAccount ?? (readServiceAccount ?? MonitoringGrantScript.ReadServiceAccountName)();
         var inputs = new GrantPrincipalInputs(
             auth, username, host,
-            args.ServiceAccount ?? (readServiceAccount ?? ReadServiceAccountName)(),
+            serviceAccount,
             machineName ?? Environment.MachineName,
-            domainName ?? Environment.UserDomainName);
+            domainName ?? Environment.UserDomainName,
+            ServiceNotOnThisMachine: serviceAccount is null);
         var azure = args.Azure || MonitoringGrantScript.IsAzureSqlDatabaseHost(host);
         output.Write(MonitoringGrantScript.Build(MonitoringGrantScript.ChoosePrincipal(inputs), args.FinOps, azure, label));
         return 0;
