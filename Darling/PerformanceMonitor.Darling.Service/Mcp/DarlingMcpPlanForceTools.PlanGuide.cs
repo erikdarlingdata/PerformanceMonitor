@@ -61,13 +61,13 @@ public sealed partial class DarlingMcpPlanForceTools
             /* 1: arguments that cannot make a guide are refused before the gate, and journaled as a block is. */
             var (definition, badCode, badMessage) = PlanGuideDefinition.TryCreate(name, statement, type, module_or_batch, parameters, hints);
             if (definition is null)
-                return await RefuseBeforeGateAsync(store, agent_action, tool, badCode!, badMessage!, ct, agentTokenName);
+                return await RefuseBeforeGateAsync(store, agent_action, tool, badCode!, badMessage!, agentTokenName, namedAgentNames, ct);
 
             var database = database_name?.Trim();
             if (string.IsNullOrEmpty(database) || database.Length > 128 || ContainsControlCharacter(database))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadDatabase,
-                    "database_name is the database the guide is created in, at most 128 characters. Nothing was run.", ct, agentTokenName);
+                    "database_name is the database the guide is created in, at most 128 characters. Nothing was run.", agentTokenName, namedAgentNames, ct);
             }
 
             /* 2: SQL Server only. Microsoft's sp_create_plan_guide page lists Azure SQL Database and Managed Instance, but the sp_control_plan_guide page, which the
@@ -76,13 +76,13 @@ public sealed partial class DarlingMcpPlanForceTools
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
-                    $"{resolved.DisplayName} is a PostgreSQL target. A plan guide is SQL Server only; there is no PostgreSQL equivalent.", ct, agentTokenName);
+                    $"{resolved.DisplayName} is a PostgreSQL target. A plan guide is SQL Server only; there is no PostgreSQL equivalent.", agentTokenName, namedAgentNames, ct);
             }
 
             if (engineEdition is AzureSqlDatabaseEdition or AzureManagedInstanceEdition)
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, EngineNotSupported,
-                    $"{resolved.DisplayName} is an Azure SQL target. Darling creates plan guides on SQL Server only: Microsoft documents sp_control_plan_guide, which the drop of an invalid guide and the Undo use, for SQL Server alone. Nothing was run.", ct, agentTokenName);
+                    $"{resolved.DisplayName} is an Azure SQL target. Darling creates plan guides on SQL Server only: Microsoft documents sp_control_plan_guide, which the drop of an invalid guide and the Undo use, for SQL Server alone. Nothing was run.", agentTokenName, namedAgentNames, ct);
             }
 
             if (owner is null)
@@ -322,13 +322,13 @@ public sealed partial class DarlingMcpPlanForceTools
             /* 1: arguments that cannot name a guide are refused before the gate, and journaled as a block is. */
             var guideName = PlanGuideDefinition.TryName(name);
             if (guideName is null)
-                return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadGuideName, PlanGuideDefinition.BadNameMessage, ct, agentTokenName);
+                return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadGuideName, PlanGuideDefinition.BadNameMessage, agentTokenName, namedAgentNames, ct);
 
             var database = database_name?.Trim();
             if (string.IsNullOrEmpty(database) || database.Length > 128 || ContainsControlCharacter(database))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadDatabase,
-                    "database_name is the database the guide is dropped from, at most 128 characters. Nothing was run.", ct, agentTokenName);
+                    "database_name is the database the guide is dropped from, at most 128 characters. Nothing was run.", agentTokenName, namedAgentNames, ct);
             }
 
             /* 2: SQL Server only, as the create is: sp_control_plan_guide is documented for SQL Server alone. */
@@ -336,13 +336,13 @@ public sealed partial class DarlingMcpPlanForceTools
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
-                    $"{resolved.DisplayName} is a PostgreSQL target. A plan guide is SQL Server only; there is no PostgreSQL equivalent.", ct, agentTokenName);
+                    $"{resolved.DisplayName} is a PostgreSQL target. A plan guide is SQL Server only; there is no PostgreSQL equivalent.", agentTokenName, namedAgentNames, ct);
             }
 
             if (engineEdition is AzureSqlDatabaseEdition or AzureManagedInstanceEdition)
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, EngineNotSupported,
-                    $"{resolved.DisplayName} is an Azure SQL target. Darling drops plan guides on SQL Server only: Microsoft documents sp_control_plan_guide for SQL Server alone. Nothing was run.", ct, agentTokenName);
+                    $"{resolved.DisplayName} is an Azure SQL target. Darling drops plan guides on SQL Server only: Microsoft documents sp_control_plan_guide for SQL Server alone. Nothing was run.", agentTokenName, namedAgentNames, ct);
             }
 
             if (owner is null)
