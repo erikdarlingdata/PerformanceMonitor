@@ -82,9 +82,10 @@ internal static class DarlingAgentActionGate
                 DarlingMcpInvestigationTools.AgentIdNotTokenMessage(tokenName)));
         }
 
-        /* The legacy token's agent_id is free text. One that is a served named agent's name would put the change in that agent's journal, so
-           it is refused and journaled under no agent's name. */
-        if (policy.AgentTokenName is null && namedAgentNames is { Count: > 0 } && namedAgentNames.Contains(action!.AgentId))
+        /* The legacy token's agent_id is free text. One that is a served named agent's name would put the change in that agent's journal, and
+           one that is a reserved placeholder (invalid, unclaimed) would make its rows read as a refusal's, so it is refused and journaled
+           under no agent's name. */
+        if (policy.AgentTokenName is null && IsRefusedLegacyAgentId(namedAgentNames, action!.AgentId))
         {
             await store.RecordAgentActionRefusalAsync(action.RequestId, InvestigationRules.InvalidAgentId, tool,
                 DarlingMcpInvestigationTools.AgentIdIsNamedToken, null, cancellationToken);
@@ -129,13 +130,22 @@ internal static class DarlingAgentActionGate
     internal static string? LooseAgentId(string? agentAction) => LooseText(agentAction, "agent_id");
 
     /// <summary>
+    /// True when the legacy token passed an agent_id the gates and the claim tool refuse: the name of a served named agent token (its rows
+    /// would land in that agent's journal) or a reserved placeholder, <c>invalid</c> or <c>unclaimed</c>, compared case-insensitively (its rows
+    /// would read as a refusal's). The placeholder check holds whether or not named tokens are served; the name check needs at least one.
+    /// </summary>
+    internal static bool IsRefusedLegacyAgentId(IReadOnlySet<string>? namedAgentNames, string? agentId) =>
+        agentId is not null
+        && (DarlingMcpTokenSet.IsReservedName(agentId) || (namedAgentNames is { Count: > 0 } && namedAgentNames.Contains(agentId)));
+
+    /// <summary>
     /// The agent id a refusal made before the gate (or on a bad argument) is journaled under: the named token's own name when there is one;
-    /// <see cref="InvestigationRules.InvalidAgentId"/> when the caller is the legacy token, named tokens are served and the id it passed is one of
-    /// their names (the gates refuse that id the same way, so a refusal row never lands in a named agent's journal); otherwise the id it passed.
+    /// <see cref="InvestigationRules.InvalidAgentId"/> when the caller is the legacy token and the id it passed is one the gates refuse
+    /// (<see cref="IsRefusedLegacyAgentId"/>), so a refusal row never lands in a named agent's journal; otherwise the id it passed.
     /// </summary>
     internal static string? JournalActor(string? agentTokenName, IReadOnlySet<string>? namedAgentNames, string? passedAgentId) =>
         agentTokenName
-        ?? (passedAgentId is not null && namedAgentNames is { Count: > 0 } && namedAgentNames.Contains(passedAgentId)
+        ?? (IsRefusedLegacyAgentId(namedAgentNames, passedAgentId)
             ? InvestigationRules.InvalidAgentId
             : passedAgentId);
 

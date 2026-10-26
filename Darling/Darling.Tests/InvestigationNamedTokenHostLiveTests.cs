@@ -218,7 +218,7 @@ public sealed class InvestigationNamedTokenHostLiveTests
     }
 
     /// <summary>Each refusal a tool makes before the gate: a mute with no metric, a kill with a bad session id, a force on a PostgreSQL target,
-    /// and an agent_action the gate cannot parse (at the Level 2 gate and at the server action gate). Returns the reasons the answers carried.</summary>
+    /// and an agent_action the gate cannot parse (at the Level 2 gate, at the server action gate and in the PostgreSQL force). Returns the reasons the answers carried.</summary>
     private static async Task<string[]> PreGateRefusalsAsync(Ctx c, string agentId, string bearer)
     {
         var action = AgentActionArgumentTests.Arg(c.RequestId, c.ClaimId, agentId: agentId, reason: "identity check");
@@ -234,10 +234,18 @@ public sealed class InvestigationNamedTokenHostLiveTests
             }, bearer),
             await CallAsync(c.Server, "create_custom_alert_rule",
                 new JsonObject { ["name"] = "pregate-rule", ["definition"] = "{}", ["agent_action"] = noEvidence }, bearer),
-            await CallAsync(c.Server, DarlingMcpPlanForceTools.KillToolName,
-                new JsonObject { ["server_name"] = "HostLiveSrv", ["session_id"] = 87, ["agent_action"] = noEvidence, ["dry_run"] = true }, bearer),
+            /* A valid login_time, so the kill gets past the argument checks and the unparseable agent_action is refused by the server action gate. */
+            await CallAsync(c.Server, DarlingMcpPlanForceTools.KillToolName, new JsonObject
+            {
+                ["server_name"] = "HostLiveSrv", ["session_id"] = 87, ["login_time"] = "2026-10-01T12:00:00.0000000Z", ["agent_action"] = noEvidence, ["dry_run"] = true,
+            }, bearer),
+            /* A PostgreSQL-target force whose agent_action does not parse is refused in the force tool itself, before any gate. */
+            await CallAsync(c.Server, DarlingMcpPlanForceTools.ForceToolName, new JsonObject
+            {
+                ["server_name"] = "HostLivePg", ["database_name"] = "db", ["query_id"] = 1, ["plan_id"] = 1, ["agent_action"] = noEvidence, ["dry_run"] = true,
+            }, bearer),
         };
-        var reasons = answers.Select(a => a.GetProperty("reason").GetString()!).ToArray();
+        var reasons = answers.Select(a => a.TryGetProperty("reason", out var r) ? r.GetString()! : a.GetRawText()).ToArray();
         Assert.Equal(DarlingMcpAgentActions.MuteNeedsMetric, reasons[0]);
         Assert.Equal(PerformanceMonitor.Darling.Remediation.RemediationResult.Reasons.BadSession, reasons[1]);
         Assert.Equal(DarlingMcpPlanForceTools.PostgresTarget, reasons[2]);
@@ -255,7 +263,7 @@ public sealed class InvestigationNamedTokenHostLiveTests
             await PreGateRefusalsAsync(c, First, LegacyBearer);
 
             Assert.Equal("0", await JournalRowsAsync(c, First));
-            Assert.Equal("5", await JournalRowsAsync(c, InvestigationRules.InvalidAgentId));
+            Assert.Equal("6", await JournalRowsAsync(c, InvestigationRules.InvalidAgentId));
         });
     }
 
@@ -266,7 +274,7 @@ public sealed class InvestigationNamedTokenHostLiveTests
         {
             await PreGateRefusalsAsync(c, First, FirstBearer);
 
-            Assert.Equal("5", await JournalRowsAsync(c, First));
+            Assert.Equal("6", await JournalRowsAsync(c, First));
             Assert.Equal("0", await JournalRowsAsync(c, InvestigationRules.InvalidAgentId));
         });
     }
@@ -278,8 +286,41 @@ public sealed class InvestigationNamedTokenHostLiveTests
         {
             await PreGateRefusalsAsync(c, First, LegacyBearer);
 
-            Assert.Equal("5", await JournalRowsAsync(c, First));
+            Assert.Equal("6", await JournalRowsAsync(c, First));
             Assert.Equal("0", await JournalRowsAsync(c, InvestigationRules.InvalidAgentId));
         }, serveNamed: false);
+    }
+
+    [Theory]
+    [InlineData("invalid", true)]
+    [InlineData("invalid", false)]
+    [InlineData("unclaimed", true)]
+    [InlineData("unclaimed", false)]
+    public async Task TheLegacyToken_UsingAReservedPlaceholderAsItsAgentId_IsRefused_AndJournaledAsInvalid(string reserved, bool serveNamed)
+    {
+        await RunAsync(async c =>
+        {
+            var claim = await CallAsync(c.Server, "claim_investigation_request",
+                new JsonObject { ["request_id"] = c.RequestId, ["agent_id"] = reserved }, LegacyBearer);
+            Assert.Equal(DarlingMcpInvestigationTools.AgentIdIsNamedToken, claim.GetProperty("status").GetString());
+            Assert.Contains("reserved", claim.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+            var action = AgentActionArgumentTests.Arg(c.RequestId, c.ClaimId, agentId: reserved, reason: "identity check");
+            var mute = await CallAsync(c.Server, "create_mute_rule",
+                new JsonObject { ["server_id"] = ServerId, ["metric_name"] = "Blocking", ["agent_action"] = action }, LegacyBearer);
+            Assert.Equal(DarlingMcpInvestigationTools.AgentIdIsNamedToken, mute.GetProperty("reason").GetString());
+            var kill = await CallAsync(c.Server, DarlingMcpPlanForceTools.KillToolName, new JsonObject
+            {
+                ["server_name"] = "HostLiveSrv", ["session_id"] = 87, ["login_time"] = "2026-10-01T12:00:00.0000000Z", ["agent_action"] = action, ["dry_run"] = true,
+            }, LegacyBearer);
+            Assert.Contains(DarlingMcpInvestigationTools.AgentIdIsNamedToken, kill.GetRawText(), StringComparison.Ordinal);
+
+            await PreGateRefusalsAsync(c, reserved, LegacyBearer);
+
+            /* The claim, the two gates and the six pre-gate refusals all land under the invalid placeholder, none under the id passed. */
+            Assert.Equal("9", await JournalRowsAsync(c, InvestigationRules.InvalidAgentId));
+            Assert.Equal("0", await ScalarAsync(c.Connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE actor = 'agent:unclaimed' AND event IN ('refused', 'claimed')", c.Ct));
+        }, serveNamed);
     }
 }
