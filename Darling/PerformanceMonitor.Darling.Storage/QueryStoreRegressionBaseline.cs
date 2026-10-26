@@ -104,6 +104,19 @@ public static class QueryStoreRegressionBaseline
         /// <summary>The table arms' three Regular arms read <c>query_store_interval_latest</c> instead of the wide table
         /// (#5506, <see cref="LatestCoversRegularArms"/>). False on every fallback, so the arms read the wide table as before.</summary>
         public bool RegularFromLatest { get; init; }
+
+        /// <summary>The recent window's whole built days read from the daily totals (#5506), one run of consecutive days.
+        /// Empty by default and on every fallback, so the recent arm reads every row live, today's read.</summary>
+        public DateOnly[] RecentDays { get; init; } = Array.Empty<DateOnly>();
+
+        /// <summary>The recent arm's live low range is <c>first_execution_time &lt; RecentLowEnd</c>: the first recent day's
+        /// midnight. Bound only when <see cref="RecentDays"/> is not empty.</summary>
+        public DateTime RecentLowEnd { get; init; }
+
+        /// <summary>The recent arm's live high range is <c>first_execution_time &gt;= RecentHighStart</c>: the last recent day's
+        /// midnight, raised by <see cref="WithMeasuredHighStart"/> to the next midnight minus the measured margin. Bound only
+        /// when <see cref="RecentDays"/> is not empty.</summary>
+        public DateTime RecentHighStart { get; init; }
     }
 
     /// <summary>
@@ -139,13 +152,32 @@ public static class QueryStoreRegressionBaseline
     /// </summary>
     public static Plan WithMeasuredHighStart(Plan plan, TimeSpan edgeMargin)
     {
-        if (!plan.RegularFromLatest || plan.BuiltDayCount == 0)
+        if (!plan.RegularFromLatest)
         {
             return plan;
         }
 
-        var raised = plan.HighStart.AddDays(1) - edgeMargin;
-        return raised > plan.HighStart ? plan with { HighStart = raised } : plan;
+        if (plan.BuiltDayCount > 0)
+        {
+            var raised = plan.HighStart.AddDays(1) - edgeMargin;
+            if (raised > plan.HighStart)
+            {
+                plan = plan with { HighStart = raised };
+            }
+        }
+
+        /* The recent arm's high range, by the same argument: a row of it has its last execution at or after the last recent
+           day's next midnight, and its first execution within one interval before that. */
+        if (plan.RecentDays.Length > 0)
+        {
+            var raised = plan.RecentHighStart.AddDays(1) - edgeMargin;
+            if (raised > plan.RecentHighStart)
+            {
+                plan = plan with { RecentHighStart = raised };
+            }
+        }
+
+        return plan;
     }
 
     /// <summary>The plan that reads nothing from the daily totals: the whole baseline is live.</summary>
@@ -176,14 +208,22 @@ public static class QueryStoreRegressionBaseline
     /// <para><b>The Regular arms' table.</b> The same inputs also decide <see cref="Plan.RegularFromLatest"/>
     /// (<see cref="LatestCoversRegularArms"/>): a pending batch, or latest's coverage starting after the baseline start, sends
     /// the table arms back to the wide table, and so does any fault here (the all-live plan).</para>
+    ///
+    /// <para><b>The recent window's whole days (#5506).</b> With <paramref name="windowEnd"/> given, the same built days also
+    /// give <see cref="Plan.RecentDays"/> (<see cref="ChooseRecent"/>), only where every gate holds: the Regular arms read
+    /// latest (no pending batch, coverage at or before the baseline start), this is not the raw arm, and the window end is at
+    /// or after latest's <c>applied_through</c>, read here in the same snapshot. The daily totals have no upper
+    /// <c>collection_time</c> bound, so a window that ends before a row of the day was collected must read that day live.
+    /// Any fault leaves no recent day.</para>
     /// </summary>
     public static async Task<Plan> ResolveAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime baselineStart, DateTime windowStart,
-        int commandTimeoutSeconds, ILogger? logger, CancellationToken cancellationToken, bool clampToRawFloor = false)
+        int commandTimeoutSeconds, ILogger? logger, CancellationToken cancellationToken, bool clampToRawFloor = false, DateTime? windowEnd = null)
     {
         const string savepoint = "qs_regression_built_days";
         List<PlanRegressionDaily.BuiltDay> built;
         bool regularFromLatest;
+        var recentAllowed = false;
         await transaction.SaveAsync(savepoint, cancellationToken);
         try
         {
@@ -209,6 +249,16 @@ public static class QueryStoreRegressionBaseline
             /* Decided on the start the caller passed (the wide gate's clamp on the table arm), before any raw clamp below:
                the raw arm reads no latest rows. */
             regularFromLatest = LatestCoversRegularArms(filledSince, hasPending, baselineStart);
+
+            /* Read before the built days: that read swallows its own fault, which leaves the transaction aborted. */
+            if (regularFromLatest && !clampToRawFloor && windowEnd is DateTime end)
+            {
+                await using var applied = new NpgsqlCommand(QueryStoreIntervalLatest.AppliedThroughSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
+                applied.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = serverId });
+                recentAllowed = await applied.ExecuteScalarAsync(cancellationToken) is DateTime appliedThrough
+                    && DateTime.SpecifyKind(end, DateTimeKind.Unspecified) >= appliedThrough;
+            }
+
             if (clampToRawFloor && hasTimescale)
             {
                 await using var floors = new NpgsqlCommand(QueryStoreIntervalLatest.RawChunkFloorSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
@@ -232,7 +282,10 @@ public static class QueryStoreRegressionBaseline
             await transaction.RollbackAsync(savepoint, CancellationToken.None);
         }
 
-        return Choose(built, baselineStart, windowStart) with { RegularFromLatest = regularFromLatest };
+        var plan = Choose(built, baselineStart, windowStart) with { RegularFromLatest = regularFromLatest };
+        return recentAllowed && windowEnd is DateTime windowEndValue
+            ? WithRecentDays(plan, ChooseRecent(built, baselineStart, windowStart, windowEndValue))
+            : plan;
     }
 
     /// <summary>The selection of <see cref="ResolveAsync"/>, over the built days it read.</summary>
@@ -240,16 +293,71 @@ public static class QueryStoreRegressionBaseline
     {
         var start = DateTime.SpecifyKind(baselineStart, DateTimeKind.Unspecified);
         var end = DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified);
-        var days = built
-            .Where(b => b.Through is null)
-            .Select(b => b.Day)
-            .Where(d => d.ToDateTime(TimeOnly.MinValue) >= start && d.ToDateTime(TimeOnly.MinValue).AddDays(1) <= end)
-            .Distinct()
-            .OrderBy(d => d)
-            .ToList();
-        if (days.Count == 0)
+        var run = LongestRun(WholeDays(built)
+            .Where(d => d.ToDateTime(TimeOnly.MinValue) >= start && d.ToDateTime(TimeOnly.MinValue).AddDays(1) <= end));
+        if (run.Count == 0)
         {
             return AllLive(windowStart);
+        }
+
+        var first = DateTime.SpecifyKind(run[0].ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+        var last = DateTime.SpecifyKind(run[^1].ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+        /* A row of a day after the run last_execution_time >= (last day + 1), and its first execution is within a day before it
+           (BuildDaySql's own bound): first_execution_time >= the last run day's midnight. A row of a day before the run has a
+           first execution below the first run day's midnight. */
+        return new Plan(run.ToArray(), first, last);
+    }
+
+    /// <summary>
+    /// The recent window's days to read from the daily totals (#5506): the whole valid builds D with D at or after the first
+    /// midnight at or after <paramref name="windowStart"/>, D + 1 day at or before <paramref name="windowEnd"/>, and D - 1 day
+    /// at or after <paramref name="baselineStart"/>, the longest run of consecutive days (the later on a tie), or none.
+    ///
+    /// <para><b>Why each bound.</b> The daily row of D holds the latest rows with <c>last_execution_time</c> in [D, D + 1),
+    /// <c>first_execution_time</c> in [D - 1, D + 1) and <c>collection_time &gt;= D - 1</c> (<see cref="PlanRegressionDaily.BuildDaySql"/>).
+    /// The recent arm keeps <c>last_execution_time &gt;= window start</c> (the first bound),
+    /// <c>first_execution_time &lt;= window end + slack</c> (the second), and <c>collection_time &gt;= baseline start</c>:
+    /// with D - 1 at or after the baseline start the build's collection bound is the tighter one, so the two keep the same
+    /// rows. With D - 1 below it, a row of D collected in [D - 1, baseline start) would be in the totals and not in the live
+    /// read. The recent arm's upper <c>collection_time</c> bound is the caller's <c>applied_through</c> gate.</para>
+    /// </summary>
+    internal static DateOnly[] ChooseRecent(IEnumerable<PlanRegressionDaily.BuiltDay> built, DateTime baselineStart, DateTime windowStart, DateTime windowEnd)
+    {
+        var baseline = DateTime.SpecifyKind(baselineStart, DateTimeKind.Unspecified);
+        var start = DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified);
+        var end = DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified);
+        var firstMidnight = start == start.Date ? start : start.Date.AddDays(1);
+        return LongestRun(WholeDays(built).Where(d =>
+        {
+            var midnight = d.ToDateTime(TimeOnly.MinValue);
+            return midnight >= firstMidnight && midnight.AddDays(1) <= end && midnight.AddDays(-1) >= baseline;
+        })).ToArray();
+    }
+
+    /// <summary>The plan with <paramref name="recentDays"/> as its recent days and their live range bounds: the low range ends
+    /// at the first day's midnight, the high range starts at the last day's midnight (a row of a later day has its first
+    /// execution within a day before its last, at or after the last day's next midnight).</summary>
+    internal static Plan WithRecentDays(Plan plan, DateOnly[] recentDays) =>
+        recentDays.Length == 0
+            ? plan with { RecentDays = Array.Empty<DateOnly>() }
+            : plan with
+            {
+                RecentDays = recentDays,
+                RecentLowEnd = DateTime.SpecifyKind(recentDays[0].ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified),
+                RecentHighStart = DateTime.SpecifyKind(recentDays[^1].ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified),
+            };
+
+    /// <summary>The whole builds (no watermark), each day once, in order.</summary>
+    private static IEnumerable<DateOnly> WholeDays(IEnumerable<PlanRegressionDaily.BuiltDay> built) =>
+        built.Where(b => b.Through is null).Select(b => b.Day);
+
+    /// <summary>The longest run of consecutive days among <paramref name="candidates"/> (the later run on a tie), or none.</summary>
+    private static List<DateOnly> LongestRun(IEnumerable<DateOnly> candidates)
+    {
+        var days = candidates.Distinct().OrderBy(d => d).ToList();
+        if (days.Count == 0)
+        {
+            return days;
         }
 
         var bestFrom = 0;
@@ -270,13 +378,7 @@ public static class QueryStoreRegressionBaseline
             }
         }
 
-        var run = days.GetRange(bestFrom, bestLength);
-        var first = DateTime.SpecifyKind(run[0].ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
-        var last = DateTime.SpecifyKind(run[^1].ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
-        /* A row of a day after the run last_execution_time >= (last day + 1), and its first execution is within a day before it
-           (BuildDaySql's own bound): first_execution_time >= the last run day's midnight. A row of a day before the run has a
-           first execution below the first run day's midnight. */
-        return new Plan(run.ToArray(), first, last);
+        return days.GetRange(bestFrom, bestLength);
     }
 
     /// <summary>The tokens of the shared statements: the baseline start parameter, the run days (date[]), and the two bounds
@@ -287,6 +389,13 @@ public static class QueryStoreRegressionBaseline
     public const string LowEndToken = "@@LOW";
     public const string HighStartToken = "@@HIGH";
 
+    /// <summary>The recent window's tokens (#5506): its days read from the daily totals (date[]), and the end of its live low
+    /// range and the start of its live high range (timestamp). Only the recent-days form names them
+    /// (<see cref="Statement"/> with <c>recentFromDaily</c>); MCP binds them as $11 to $13, the viewer as $10 to $12.</summary>
+    public const string RecentDaysToken = "@@RDAYS";
+    public const string RecentLowEndToken = "@@RLOW";
+    public const string RecentHighStartToken = "@@RHIGH";
+
     /// <summary>The row cap: <c>$5</c> in the MCP read (a parameter), the literal 50 in the viewer's (#5506).</summary>
     public const string LimitToken = "@@LIMIT";
 
@@ -296,13 +405,37 @@ public static class QueryStoreRegressionBaseline
 
     /// <summary>The statement with its tokens bound to the twin's parameter numbers, for example <c>$6</c>, <c>$7</c>,
     /// <c>$8</c>, <c>$9</c>.</summary>
-    public static string Bind(string sql, string baselineStart, string runDays, string lowEnd, string highStart, string limit, string exclude) =>
-        sql.Replace(LimitToken, limit, StringComparison.Ordinal)
+    public static string Bind(
+        string sql, string baselineStart, string runDays, string lowEnd, string highStart, string limit, string exclude,
+        string? recentDays = null, string? recentLowEnd = null, string? recentHighStart = null)
+    {
+        if (recentDays is not null && recentLowEnd is not null && recentHighStart is not null)
+        {
+            sql = sql.Replace(RecentDaysToken, "(" + recentDays + "::date[])", StringComparison.Ordinal)
+                     .Replace(RecentLowEndToken, "(" + recentLowEnd + "::timestamp)", StringComparison.Ordinal)
+                     .Replace(RecentHighStartToken, "(" + recentHighStart + "::timestamp)", StringComparison.Ordinal);
+        }
+
+        return sql.Replace(LimitToken, limit, StringComparison.Ordinal)
            .Replace(ExcludeToken, exclude, StringComparison.Ordinal)
            .Replace(BaselineStartToken, baselineStart, StringComparison.Ordinal)
            .Replace(RunDaysToken, "(" + runDays + "::date[])", StringComparison.Ordinal)
            .Replace(LowEndToken, "(" + lowEnd + "::timestamp)", StringComparison.Ordinal)
            .Replace(HighStartToken, "(" + highStart + "::timestamp)", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The whole statement both twins run, before <see cref="Bind"/> (#5506): the arms, the aggregates and the suffix, one
+    /// factory so the twins cannot drift. <paramref name="recentFromDaily"/> (table arms on latest only) is the form that reads
+    /// the recent window's whole days from the daily totals (<see cref="RecentDaysArmsSql"/>); every other form is the text
+    /// it was before.
+    /// </summary>
+    public static string Statement(bool wide, bool useDailyTotals, bool regularFromLatest = false, bool recentFromDaily = false)
+    {
+        var recent = wide && regularFromLatest && recentFromDaily;
+        return (wide ? TableArmsSql(regularFromLatest, recent) : RawArmsSql)
+            + "\n" + AggregatesSql(useDailyTotals, recent) + "\n" + (recent ? RecentDaysSuffixSql : SuffixSql);
+    }
 
     /// <summary>
     /// The raw read's arms (#5506). ONE dedupe over every Regular snapshot collected from the baseline start to the window end
@@ -388,10 +521,63 @@ public static class QueryStoreRegressionBaseline
     /// </summary>
     public static readonly string LatestArmsSql = TableArms(regularFromLatest: true);
 
-    /// <summary><see cref="LatestArmsSql"/> or <see cref="WideArmsSql"/>.</summary>
-    public static string TableArmsSql(bool regularFromLatest) => regularFromLatest ? LatestArmsSql : WideArmsSql;
+    /// <summary>
+    /// <see cref="LatestArmsSql"/> with the recent window's whole days read from <c>plan_regression_daily</c> (#5506), used
+    /// where <see cref="Plan.RecentDays"/> is not empty. Measured cold at 168 hours on a production store, the recent arm was
+    /// almost all of the read: it read every Regular interval of the window. Here it reads two live ranges, the rows before
+    /// the first recent day (<c>first_execution_time &lt; @@RLOW</c>) and the rows from the last one on
+    /// (<c>&gt;= @@RHIGH</c>), each without the rows dated on a recent day, plus the days' per-plan totals. Each row has one
+    /// <c>last_execution_time</c>, so it is in exactly one part (the seam argument of <see cref="ChooseRecent"/>). All three
+    /// parts emit pre-weighted <c>execs</c>, <c>cpu_us</c> and <c>dur_us</c>, and the totals carry no <c>query_text</c>
+    /// (<see cref="RecentDaysSuffixSql"/> reads the days' sample where the text table has none).
+    /// </summary>
+    public static readonly string RecentDaysArmsSql = TableArms(regularFromLatest: true, recentFromDaily: true);
 
-    private static string TableArms(bool regularFromLatest)
+    /// <summary><see cref="LatestArmsSql"/> or <see cref="WideArmsSql"/>, or <see cref="RecentDaysArmsSql"/> on latest with
+    /// <paramref name="recentFromDaily"/>.</summary>
+    public static string TableArmsSql(bool regularFromLatest, bool recentFromDaily = false) =>
+        regularFromLatest ? (recentFromDaily ? RecentDaysArmsSql : LatestArmsSql) : WideArmsSql;
+
+    /// <summary>The recent arm of <see cref="RecentDaysArmsSql"/>: two live ranges and the daily totals of the recent days.</summary>
+    private static string RecentFromDailyCte => $$"""
+        deduped_recent AS MATERIALIZED (
+            SELECT database_name, query_id, plan_id, query_text, CAST(execution_count AS numeric) AS execs,
+                   CAST(avg_cpu_time_us AS numeric) * execution_count AS cpu_us, CAST(avg_duration_us AS numeric) * execution_count AS dur_us, last_execution_time
+            FROM {{QueryStoreIntervalLatest.TableName}}
+            WHERE server_id = $1
+            AND   collection_time >= @@B
+            AND   collection_time <= $3
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time < @@RLOW
+            AND   last_execution_time >= $2
+            AND   NOT (CAST(last_execution_time AS date) = ANY(@@RDAYS))
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+
+            UNION ALL
+
+            SELECT database_name, query_id, plan_id, query_text, CAST(execution_count AS numeric) AS execs,
+                   CAST(avg_cpu_time_us AS numeric) * execution_count AS cpu_us, CAST(avg_duration_us AS numeric) * execution_count AS dur_us, last_execution_time
+            FROM {{QueryStoreIntervalLatest.TableName}}
+            WHERE server_id = $1
+            AND   collection_time >= @@B
+            AND   collection_time <= $3
+            AND   first_execution_time >= @@RHIGH
+            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+            AND   last_execution_time >= $2
+            AND   NOT (CAST(last_execution_time AS date) = ANY(@@RDAYS))
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+
+            UNION ALL
+
+            SELECT d.database_name, d.query_id, d.plan_id, CAST(NULL AS text) AS query_text, d.execs, d.cpu_us_sum AS cpu_us, d.dur_us_sum AS dur_us, d.last_exec AS last_execution_time
+            FROM plan_regression_daily AS d
+            WHERE d.server_id = $1
+            AND   d.day = ANY(@@RDAYS)
+            AND   ($4::text[] IS NULL OR d.database_name = ANY($4))
+        ),
+        """;
+
+    private static string TableArms(bool regularFromLatest, bool recentFromDaily = false)
     {
         var regular = regularFromLatest ? QueryStoreIntervalLatest.TableName : QueryStoreIntervalWide.TableName;
         /* Latest holds Regular rows only, so its arms carry no outcome filter. */
@@ -401,7 +587,7 @@ public static class QueryStoreRegressionBaseline
            in key order, one random heap read per row: a cold 168-hour read took 60.6 s. Materialized, it scans the
            (server_id, first_execution_time) range and sorts, the wide table's plan shape: 10.9 s. The wide text is unchanged. */
         var recentCte = regularFromLatest ? "deduped_recent AS MATERIALIZED (" : "deduped_recent AS (";
-        return $$"""
+        var arms = $$"""
         WITH deduped_baseline AS (
             SELECT database_name, query_id, plan_id, execution_count, avg_duration_us, avg_cpu_time_us, 1 AS rn
             FROM {{regular}}
@@ -453,6 +639,20 @@ public static class QueryStoreRegressionBaseline
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ),
         """;
+        if (!recentFromDaily)
+        {
+            return arms;
+        }
+
+        /* The recent-days form swaps the recent arm whole; the baseline arms and nonregular_rows are the latest text's. */
+        var from = arms.IndexOf(recentCte, StringComparison.Ordinal);
+        var to = arms.IndexOf("nonregular_rows AS (", StringComparison.Ordinal);
+        if (from < 0 || to < from)
+        {
+            throw new InvalidOperationException("#5506: the recent arm of the latest text was not found");
+        }
+
+        return arms[..from] + RecentFromDailyCte + "\n" + arms[to..];
     }
 
     /// <summary>The run days' per-plan totals from <c>plan_regression_daily</c> (#5448), as <c>baseline_parts</c>' first part.
@@ -495,8 +695,60 @@ public static class QueryStoreRegressionBaseline
     /// (before this the baseline was an average of interval averages). Cost is CPU and duration only: logical reads are not
     /// read.
     /// </summary>
-    public static string AggregatesSql(bool useDailyTotals) =>
-        "        baseline_parts AS (\n" + (useDailyTotals ? DailyPartSql : "") + LivePartSql + "        ),\n" + AggregatesTailSql;
+    public static string AggregatesSql(bool useDailyTotals, bool recentPreWeighted = false) =>
+        "        baseline_parts AS (\n" + (useDailyTotals ? DailyPartSql : "") + LivePartSql + "        ),\n"
+        + (recentPreWeighted ? s_aggregatesTailPreWeightedSql : AggregatesTailSql);
+
+    /// <summary>Today's <c>recent_performance</c>, which weights each interval's averages by its count.</summary>
+    private const string RecentPerformanceSql = """
+        recent_performance AS (
+            SELECT
+                database_name,
+                query_id,
+                MAX(query_text) AS query_text_sample,
+                CAST(SUM(CAST(avg_duration_us AS numeric) * execution_count) AS double precision) / NULLIF(SUM(execution_count), 0) / 1000.0 AS avg_duration_ms,
+                CAST(SUM(CAST(avg_cpu_time_us AS numeric) * execution_count) AS double precision) / NULLIF(SUM(execution_count), 0) / 1000.0 AS avg_cpu_time_ms,
+                CAST(SUM(execution_count) AS bigint) AS exec_count,
+                CAST(COUNT(DISTINCT plan_id) AS integer) AS plan_count,
+                MAX(last_execution_time) AS last_execution_time
+            FROM deduped_recent
+            WHERE rn = 1
+            GROUP BY database_name, query_id
+        ),
+        """;
+
+    /// <summary>
+    /// <c>recent_performance</c> over the recent-days arm (#5506), whose rows are already weighted. The same numeric sums and
+    /// the same casts as <see cref="RecentPerformanceSql"/>: the sum of <c>CAST(avg AS numeric) * execution_count</c> per
+    /// interval and the daily <c>cpu_us_sum</c>, built by that expression, add up exactly, so the output is the same.
+    /// </summary>
+    private const string RecentPerformancePreWeightedSql = """
+        recent_performance AS (
+            SELECT
+                database_name,
+                query_id,
+                MAX(query_text) AS query_text_sample,
+                CAST(SUM(dur_us) AS double precision) / NULLIF(SUM(execs), 0) / 1000.0 AS avg_duration_ms,
+                CAST(SUM(cpu_us) AS double precision) / NULLIF(SUM(execs), 0) / 1000.0 AS avg_cpu_time_ms,
+                CAST(SUM(execs) AS bigint) AS exec_count,
+                CAST(COUNT(DISTINCT plan_id) AS integer) AS plan_count,
+                MAX(last_execution_time) AS last_execution_time
+            FROM deduped_recent
+            GROUP BY database_name, query_id
+        ),
+        """;
+
+    private static readonly string s_aggregatesTailPreWeightedSql = PreWeightedTail();
+
+    private static string PreWeightedTail()
+    {
+        if (!AggregatesTailSql.Contains(RecentPerformanceSql, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("#5506: recent_performance was not found in the aggregates");
+        }
+
+        return AggregatesTailSql.Replace(RecentPerformanceSql, RecentPerformancePreWeightedSql, StringComparison.Ordinal);
+    }
 
     private const string AggregatesTailSql = """
         baseline_performance AS (
@@ -568,7 +820,28 @@ public static class QueryStoreRegressionBaseline
     /// error rows cannot push the cost rows past the cap, and a store with no cost regression still shows its failures. Cost rows
     /// come first in the output.</para>
     /// </summary>
-    public static readonly string SuffixSql = $$"""
+    public static readonly string SuffixSql = Suffix("f.query_text_sample", "r.query_text_sample");
+
+    /// <summary>
+    /// <see cref="SuffixSql"/> for the recent-days form (#5506). The daily totals hold no <c>query_text</c>, so the
+    /// <c>MAX(query_text)</c> sample covers only the live ranges. Where the text table has no row for the key (the only
+    /// place the sample is read: the self-statement test and the projection), the recent days' own <c>MAX(query_text)</c>
+    /// is probed from latest and the larger kept. <c>GREATEST</c> and <c>MAX</c> both ignore NULLs, so this is
+    /// <c>MAX</c> over the whole recent set, today's sample. <c>COALESCE</c> runs the probe only when the lookup is NULL.
+    /// </summary>
+    public static readonly string RecentDaysSuffixSql =
+        Suffix($"GREATEST(f.query_text_sample, {RecentDaysTextProbe("f")})", $"GREATEST(r.query_text_sample, {RecentDaysTextProbe("r")})");
+
+    /// <summary>The recent days' <c>MAX(query_text)</c> for one key, over exactly the rows today's recent arm keeps on those
+    /// days (its own predicates plus the date test): a probe of latest's <c>(server_id, database_name, query_id,
+    /// first_execution_time)</c> index.</summary>
+    private static string RecentDaysTextProbe(string alias) =>
+        $"(SELECT MAX(l.query_text) FROM {QueryStoreIntervalLatest.TableName} AS l WHERE l.server_id = $1 AND l.database_name = {alias}.database_name AND l.query_id = {alias}.query_id"
+        + $" AND l.first_execution_time >= $2 - {QueryStoreIntervalWide.PurgeEdgeMarginSql} AND l.first_execution_time <= $3 + {QueryStoreIntervalWide.FirstExecUpperSlackSql}"
+        + " AND CAST(l.last_execution_time AS date) = ANY(@@RDAYS) AND l.last_execution_time >= $2"
+        + " AND l.collection_time >= @@B AND l.collection_time <= $3)";
+
+    private static string Suffix(string flaggedSample, string rankedSample) => $$"""
         ,
         windows AS (
             SELECT
@@ -662,7 +935,7 @@ public static class QueryStoreRegressionBaseline
                flags come from, so the probe runs only on rows that already pass them. The result is the same: a row the flags
                drop was dropped by the WHERE above anyway. */
             AND   CASE WHEN (f.is_cost OR f.is_timeouts OR f.is_errors)
-                       THEN {{QueryStoreSelfStatement.NotSelfOfKeyedText("$1", "f.database_name", "f.query_id", "f.query_text_sample")}}
+                       THEN {{QueryStoreSelfStatement.NotSelfOfKeyedText("$1", "f.database_name", "f.query_id", flaggedSample)}}
                        ELSE false END
         ),
         ranked AS (
@@ -718,7 +991,7 @@ public static class QueryStoreRegressionBaseline
                       FROM query_store_text AS x
                       WHERE x.server_id = $1
                       AND   x.database_name = r.database_name
-                      AND   x.query_id = r.query_id), r.query_text_sample) AS query_text_sample,
+                      AND   x.query_id = r.query_id), {{rankedSample}}) AS query_text_sample,
             r.last_execution_time,
             /* #5506: why the row is here: cost, timeouts, errors, or a combination in that order, comma separated. */
             array_to_string(ARRAY_REMOVE(ARRAY[
