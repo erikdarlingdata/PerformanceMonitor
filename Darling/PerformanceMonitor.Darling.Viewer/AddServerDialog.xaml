@@ -227,6 +227,16 @@
                     <ComboBoxItem Content="Per-event — one notification per incident"/>
                 </ComboBox>
             </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                <TextBlock Text="Capture execution plans:" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="110"
+                           TextWrapping="Wrap"/>
+                <ComboBox x:Name="CapturePlansBox" Width="240" SelectedIndex="0"
+                          ToolTip="Whether the service fetches execution-plan XML for THIS server. 'Use the service setting' follows Settings, Collection, Capture execution plans (all servers). On or Off overrides it for just this server: Off collects query and procedure statistics without plan XML, On keeps plans even when the service setting is off.">
+                    <ComboBoxItem Content="Use the service setting"/>
+                    <ComboBoxItem Content="On"/>
+                    <ComboBoxItem Content="Off"/>
+                </ComboBox>
+            </StackPanel>
         </StackPanel>
 
             </Grid>

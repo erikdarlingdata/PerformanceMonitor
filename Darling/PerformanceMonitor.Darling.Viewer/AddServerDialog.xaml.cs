@@ -143,6 +143,8 @@ public partial class AddServerDialog : Window
             AlertNotificationMode.PerEvent => 2,
             _ => 0
         };
+        /* #6771: prefill the per-server plan-capture choice (null = "Use the service setting"). */
+        CapturePlansBox.SelectedIndex = CapturePlansIndexOf(existing.CapturePlans);
         FavoriteCheckBox.IsChecked = isFavorite;
 
         EncryptModeComboBox.SelectedIndex = existing.EncryptMode switch
@@ -767,7 +769,7 @@ public partial class AddServerDialog : Window
             /* Preserve the excluded-databases (edited via the dedicated dialog), not lost on a plain save. */
             ExcludedDatabases = _existing?.ExcludedDatabases ?? new System.Collections.Generic.List<string>(),
             MonthlyCostUsd = monthlyCost,
-            CapturePlans = _existing?.CapturePlans,
+            CapturePlans = CapturePlansOfIndex(CapturePlansBox.SelectedIndex),
             AlertDeliveryModeOverride = GetSelectedDeliveryOverride(),
             IsEnabled = EnabledCheckBox.IsChecked == true,
         };
@@ -823,6 +825,22 @@ public partial class AddServerDialog : Window
     {
         1 => AlertNotificationMode.Summary,
         2 => AlertNotificationMode.PerEvent,
+        _ => null
+    };
+
+    /// <summary>#6771: the "Capture execution plans" combo for a stored value: 0 = use the service setting (null), 1 = On (true), 2 = Off (false).</summary>
+    internal static int CapturePlansIndexOf(bool? capturePlans) => capturePlans switch
+    {
+        true => 1,
+        false => 2,
+        _ => 0
+    };
+
+    /// <summary>#6771: the stored value for a "Capture execution plans" combo index (the inverse of <see cref="CapturePlansIndexOf"/>).</summary>
+    internal static bool? CapturePlansOfIndex(int index) => index switch
+    {
+        1 => true,
+        2 => false,
         _ => null
     };
 

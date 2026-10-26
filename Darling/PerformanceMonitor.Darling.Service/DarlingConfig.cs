@@ -2638,6 +2638,15 @@ public sealed class MonitoredServer
     [JsonConverter(typeof(JsonStringEnumConverter))]
     public AlertNotificationMode? AlertDeliveryModeOverride { get; set; }
 
+    /// <summary>
+    /// #6771: this server's own plan-capture setting, read from <c>config_monitored_servers.capture_plans</c>. Null means "use the
+    /// service-wide setting" (<see cref="DarlingConfig.CapturePlans"/>), true keeps plan XML for this server whatever the service-wide
+    /// setting says, false collects this server's statistics without plan XML. Store-only: darling.json has no per-server counterpart,
+    /// so it is not read from or written to the file.
+    /// </summary>
+    [JsonIgnore]
+    public bool? CapturePlans { get; set; }
+
     [JsonIgnore]
     public bool UsesSqlAuth => string.Equals(Auth, "sql", StringComparison.OrdinalIgnoreCase);
 

@@ -7189,6 +7189,18 @@ LIMIT 1";
                ServerDefinitionEquals) drops the runtime to reconnect through the startup path. */
             var connectionChanged = !ServerDefinitionEquals(state.Config, desiredServer);
             state.Config = desiredServer;
+            /* #6771: the plan-capture setting is not a connection field, so an edit must reach the next cycle without a reconnect.
+               The collectors read the runtime (set at connect, init-only Config), so the new value goes onto the live runtime too. */
+            if (state.Runtime is { } liveRuntime)
+            {
+                liveRuntime.CapturePlans = desiredServer.CapturePlans;
+            }
+
+            if (state.LastKnownRuntime is { } lastRuntime)
+            {
+                lastRuntime.CapturePlans = desiredServer.CapturePlans;
+            }
+
             if (connectionChanged)
             {
                 _logger.LogInformation(

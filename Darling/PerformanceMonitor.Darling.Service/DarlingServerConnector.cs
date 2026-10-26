@@ -40,6 +40,13 @@ public sealed class ServerRuntime
     public required int ServerId { get; init; }
 
     /// <summary>
+    /// #6771: this server's own plan-capture setting (<see cref="MonitoredServer.CapturePlans"/>): null uses the service-wide
+    /// setting. Settable, unlike <see cref="Config"/>, because the worker refreshes it on every registry reload; a plan-capture edit
+    /// is not a connection change and must not reconnect the server, so it reaches the next cycle through this property.
+    /// </summary>
+    public bool? CapturePlans { get; set; }
+
+    /// <summary>
     /// The database this connection ACTUALLY landed in — <c>DB_NAME()</c>, or <c>current_database()</c> on
     /// PostgreSQL — or null when the probe did not return it (#2228).
     ///
@@ -524,6 +531,7 @@ SELECT
         return new ServerRuntime
         {
             Config = config,
+            CapturePlans = config.CapturePlans,
             ConnectionString = connectionString,
             Target = new CollectorTargetInfo
             {
@@ -652,6 +660,7 @@ SELECT
         return new ServerRuntime
         {
             Config = config,
+            CapturePlans = config.CapturePlans,
             ConnectionString = connectionString,
             Target = new CollectorTargetInfo
             {

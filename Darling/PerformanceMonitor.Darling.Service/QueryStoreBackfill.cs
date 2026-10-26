@@ -393,6 +393,10 @@ public sealed class QueryStoreBackfill
     /// tail, shrunk-and-saved for a hole. An empty slice means Query Store retains nothing in the
     /// window: the tail marks done, the hole record deletes.
     /// </summary>
+    /// <summary>#6771: whether a slice for this server fetches plan XML: the server's own <c>capture_plans</c> when it has one, else the
+    /// service-wide setting, read live. The same rule as <see cref="DarlingCollectorRunner.CapturePlansFor"/>.</summary>
+    internal bool CapturePlanXmlFor(ServerRuntime server) => server.CapturePlans ?? _capturePlans();
+
     private async Task RunSliceAsync(
         ServerRuntime server, string databaseName, DateTime floorUtc, DateTime ceilingUtc, bool isHole, CancellationToken cancellationToken)
     {
@@ -421,7 +425,7 @@ public sealed class QueryStoreBackfill
             Deltas = _deltas,
             Target = server.Target,
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
-            CapturePlanXml = _capturePlans(),
+            CapturePlanXml = CapturePlanXmlFor(server),
             /* #2164: 0 from the default provider means "no override" — the collector keeps its constant. */
             TextByteBudgetOverride = _textBudgetMb() > 0 ? _textBudgetMb() * 1024 * 1024 : null,
         };
