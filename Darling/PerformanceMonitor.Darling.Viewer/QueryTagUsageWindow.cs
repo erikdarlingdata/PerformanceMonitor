@@ -88,7 +88,7 @@ public sealed class QueryTagUsageWindow : Window
             var hours = _hours.SelectedIndex switch { 0 => 1, 2 => 168, _ => 24 };
             var scope = allServers ? await _fleet() : [_here];
             var end = DateTime.UtcNow;
-            var data = await _data.GetQueryTagRollupDataAsync(scope.Select(s => s.Id).ToList(), end.AddHours(-hours), end, fleet: allServers);
+            var data = await _data.GetQueryTagRollupDataAsync(scope.Select(s => s.Id).ToList(), end.AddHours(-hours), end);
 
             if (_tag.Items.Count <= 1)
             {

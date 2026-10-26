@@ -77,10 +77,12 @@ public static class QueryTagRollupSql
     /// server's read start in the same order (<c>timestamp[]</c>), $3 window end, $4 the earliest read start, which repeats the
     /// <c>first_execution_time</c> floor as a constant so the day partitions below it are pruned (the table is partitioned on that column).
     /// <para>The per-server start on <c>collection_time</c> is written <c>collection_time - read_start &gt;= interval '0'</c> on purpose, and
-    /// there is no constant <c>collection_time</c> bound: either one lets the planner AND the partition's <c>collection_time</c> index into
+    /// there is no constant <c>collection_time</c> floor: either one lets the planner AND the partition's <c>collection_time</c> index into
     /// every server's scan, and that index is not keyed by server, so each of the 42 loops walked the whole day's entries (about 10 million
     /// per loop). Measured on one production store with 42 servers over 24 hours, warm: 13.0 s with the index, 6.0 s without; each server's
-    /// scan is the <c>(server_id, first_execution_time)</c> range instead.</para>
+    /// scan is the <c>(server_id, first_execution_time)</c> range instead. The constant upper bound <c>q.collection_time &lt;= $3</c> stays
+    /// and is harmless: $3 is the window end, at or near now, so it keeps almost every row of the window's partitions and the planner has no
+    /// reason to scan the <c>collection_time</c> index for it. It filters the rows the per-server range already found.</para>
     /// </summary>
     public static readonly string QueryStoreSql = $$"""
         SELECT q.server_id, m.tag_id,
