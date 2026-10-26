@@ -126,8 +126,10 @@ internal static class DarlingQueryStoreRegressionReader
     /// its own per-hour rates divide by. <see cref="BelowRawFloor"/> is true only when the table read reached below raw's floor (raw's
     /// floor is after the requested baseline start): the answer then names these starts and the tables that served them. Otherwise
     /// (raw served, or raw holds the whole baseline) the answer keeps raw's notice, and both starts are raw's effective start.
+    /// <see cref="EdgeMargin"/> is the first_execution_time margin the read itself used (the measured one when the read resolved it,
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> otherwise), so the coverage probe scans no wider than the read.
     /// </summary>
-    public sealed record RegressionSpans(DateTime CostStart, DateTime FailureStart, bool BelowRawFloor, bool CostFromLatest);
+    public sealed record RegressionSpans(DateTime CostStart, DateTime FailureStart, bool BelowRawFloor, bool CostFromLatest, TimeSpan EdgeMargin);
 
     /// <summary>A regressions read with the tier that answered and, on the table path, where each arm started (#6750).</summary>
     public sealed record RegressionRead(List<RegressionRow> Rows, string Source, RegressionSpans? Spans);
@@ -253,7 +255,7 @@ internal static class DarlingQueryStoreRegressionReader
         var rows = await ReadRowsAsync(reader, cancellationToken);
         ReadScope.NoteSource(ReadScope.SourceRaw);
         var held = plan.HoursHeldStart ?? baselineStartUtc;
-        return new RegressionRead(rows, ReadScope.SourceRaw, new RegressionSpans(held, held, false, false));
+        return new RegressionRead(rows, ReadScope.SourceRaw, new RegressionSpans(held, held, false, false, QueryStoreIntervalWide.PurgeEdgeMargin));
     }
 
     /// <summary>The raw read with no run day: the baseline is all live and the daily table is not named (#5506).</summary>
@@ -390,7 +392,7 @@ internal static class DarlingQueryStoreRegressionReader
             var clamp = DateTime.SpecifyKind(wide.ClampedStart, DateTimeKind.Unspecified);
             var belowRawFloor = spans.RegularStart < clamp || spans.FailureStart < clamp;
             return new RegressionRead(rows, ReadScope.SourceIntervalTable, new RegressionSpans(
-                plan.HoursHeldStart ?? spans.RegularStart, plan.FailureHoursHeldStart ?? spans.FailureStart, belowRawFloor, plan.RegularFromLatest));
+                plan.HoursHeldStart ?? spans.RegularStart, plan.FailureHoursHeldStart ?? spans.FailureStart, belowRawFloor, plan.RegularFromLatest, edgeMargin));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -512,38 +514,80 @@ internal static class DarlingQueryStoreRegressionReader
     /// <see cref="RegressionCoverageSql"/> over the interval table that served a table read's cost arms (#6750): latest when it did,
     /// the wide table otherwise. $1 server_id, $2 window start, $3 window end, $4 the cost arm's start, $5 database filter. A row is on
     /// the baseline side when its last run is in [$4, $2), on the recent side when it is at or after $2, the line the read itself
-    /// splits on. The <c>first_execution_time</c> bounds are the read's own, so each EXISTS is an index probe of that table.
+    /// splits on. <paramref name="margin"/> is the first_execution_time margin the read used (<see cref="RegressionSpans.EdgeMargin"/>),
+    /// written the way the read writes it: <see cref="QueryStoreIntervalWide.EdgeMarginSqlFor"/> when it is below
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/>, the full <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> otherwise.
+    /// <para>
+    /// Measured on the large production store at 168 hours (cold): with both ranges starting the full 26 hours before their bound, this
+    /// probe took 6.6 s and read 135 MB, on top of the read. <c>has_baseline</c> scanned the whole partition of the day before the cost
+    /// start (151,349 rows that all failed the <c>last_execution_time</c> bound) and <c>has_recent</c> walked about 155,000 index rows
+    /// that failed it. So each answer is two EXISTS joined by OR, the witness arm first: the arm whose rows start inside the side
+    /// itself (a row that started and last ran there), then the edge arm for rows that started in the margin before it and last ran
+    /// inside. OR is left to right, so the cheap arm usually answers and the edge arm is read only when it does not. The two
+    /// <c>first_execution_time</c> ranges together equal the one range they replace, and both arms keep the <c>last_execution_time</c>
+    /// lower bound, the one the index walk is filtered by.
+    /// </para>
     /// </summary>
-    internal static string TableCoverageSql(string table) => $$"""
+    internal static string TableCoverageSql(string table, TimeSpan margin)
+    {
+        var marginSql = margin < QueryStoreIntervalWide.PurgeEdgeMargin
+            ? QueryStoreIntervalWide.EdgeMarginSqlFor(margin)
+            : QueryStoreIntervalWide.PurgeEdgeMarginSql;
+        return $$"""
         SELECT
-            EXISTS (
-                SELECT 1
-                FROM collect.{{table}}
-                WHERE server_id = $1
-                AND   first_execution_time >= $4 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-                AND   first_execution_time < $2
-                AND   last_execution_time >= $4
-                AND   last_execution_time < $2
-                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            (
+                EXISTS (
+                    SELECT 1
+                    FROM collect.{{table}}
+                    WHERE server_id = $1
+                    AND   first_execution_time >= $4
+                    AND   first_execution_time < $2
+                    AND   last_execution_time >= $4
+                    AND   last_execution_time < $2
+                    AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM collect.{{table}}
+                    WHERE server_id = $1
+                    AND   first_execution_time >= $4 - {{marginSql}}
+                    AND   first_execution_time < $4
+                    AND   last_execution_time >= $4
+                    AND   last_execution_time < $2
+                    AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                )
             ) AS has_baseline,
-            EXISTS (
-                SELECT 1
-                FROM collect.{{table}}
-                WHERE server_id = $1
-                AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-                AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
-                AND   last_execution_time >= $2
-                AND   collection_time <= $3
-                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            (
+                EXISTS (
+                    SELECT 1
+                    FROM collect.{{table}}
+                    WHERE server_id = $1
+                    AND   first_execution_time >= $2
+                    AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+                    AND   last_execution_time >= $2
+                    AND   collection_time <= $3
+                    AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM collect.{{table}}
+                    WHERE server_id = $1
+                    AND   first_execution_time >= $2 - {{marginSql}}
+                    AND   first_execution_time < $2
+                    AND   last_execution_time >= $2
+                    AND   collection_time <= $3
+                    AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                )
             ) AS has_recent
         """;
+    }
 
     /// <summary>Runs <see cref="TableCoverageSql"/> for the table that served <paramref name="spans"/>' cost arms.</summary>
     public static async Task<(bool HasBaseline, bool HasRecent)> GetTableCoverageAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, RegressionSpans spans,
         DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
-        await using var command = postgres.CreateCommand(TableCoverageSql(spans.CostFromLatest ? QueryStoreIntervalLatest.TableName : QueryStoreIntervalWide.TableName));
+        await using var command = postgres.CreateCommand(TableCoverageSql(spans.CostFromLatest ? QueryStoreIntervalLatest.TableName : QueryStoreIntervalWide.TableName, spans.EdgeMargin));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(spans.CostStart, DateTimeKind.Unspecified) });
