@@ -168,6 +168,7 @@ public sealed class ServerHostBindingTests : IDisposable
 
         /* The first start: nothing there yet. The database is created next, and the record cannot be written. */
         Assert.False(ServerHostBindings.IsFirstStartInUsedFolder(database, config));
+        Directory.CreateDirectory(dataDir);
         File.WriteAllText(database, "");
         WriteSharedServers(Server("a", "sql01", AuthenticationTypes.Windows));
         Directory.CreateDirectory(recordPath);
