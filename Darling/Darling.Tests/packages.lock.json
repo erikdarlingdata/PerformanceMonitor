@@ -4,9 +4,9 @@
     "net10.0-windows7.0": {
       "Microsoft.AspNetCore.TestHost": {
         "type": "Direct",
-        "requested": "[10.0.13, )",
-        "resolved": "10.0.13",
-        "contentHash": "8xzbDfEOWg5GRp5byA42Axr4TbockbxCvdHTYk27ZIdst79DO0CLBp/Zw5sduK2goRii7of4EeuTjG/yPH4tsg=="
+        "requested": "[10.0.14, )",
+        "resolved": "10.0.14",
+        "contentHash": "u4AX1M5Uzmw7V3NCdJJO4ITwH0DDDufyzmVlksE4QguVd23Co8adaREMp2VahlRB5f/rmtaFYVJIA1iIFnchmQ=="
       },
       "Microsoft.CodeAnalysis.BannedApiAnalyzers": {
         "type": "Direct",
@@ -25,15 +25,15 @@
       },
       "AWSSDK.Core": {
         "type": "Transitive",
-        "resolved": "4.0.102.11",
-        "contentHash": "K9PP9/qHQ7pqSB0lYwStJrpXQ8P1xc7Fbn3CyPg8EX78p4+yz8dhIiwiRc3aVbVrUZxmPAPRvmZm+ey1euIXGg=="
+        "resolved": "4.0.102.13",
+        "contentHash": "vaYs/kwfB+Lv9PeVKYE4g2mQlzVtHImXLWgfTG8UgeCybUAPkew5kwb8GS6RhuzwvImbolyLHT+IM34WoM9lJg=="
       },
       "AWSSDK.Extensions.CborProtocol": {
         "type": "Transitive",
-        "resolved": "4.0.100.19",
-        "contentHash": "fFR80NxmBhnDe+f45pRSV0I65LePzChOeGYzCIBJuHM6gDqZAbzDlDMVZ93W6XiAtFAg6MGmUDnmWyem/Z3u6A==",
+        "resolved": "4.0.100.21",
+        "contentHash": "nsQBblG03gCQMGH46xFAXh4LdjXMpR7CqI83pJzGho7V0XMSWHXhB1uaiGkJBPDSXXmb9rHSt5gZjxt/nUzKHg==",
         "dependencies": {
-          "AWSSDK.Core": "4.0.102.11",
+          "AWSSDK.Core": "4.0.102.13",
           "System.Formats.Cbor": "9.0.5"
         }
       },
@@ -753,20 +753,20 @@
       "performancemonitor.alerting": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.10.0, )",
-          "PerformanceMonitor.Notifications": "[3.10.0, )"
+          "PerformanceMonitor.Common": "[3.11.0, )",
+          "PerformanceMonitor.Notifications": "[3.11.0, )"
         }
       },
       "performancemonitor.analysis": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.10.0, )"
+          "PerformanceMonitor.Common": "[3.11.0, )"
         }
       },
       "performancemonitor.collectors": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.10.0, )"
+          "PerformanceMonitor.Common": "[3.11.0, )"
         }
       },
       "performancemonitor.common": {
@@ -783,12 +783,12 @@
           "Microsoft.Data.SqlClient": "[7.1.1, )",
           "Microsoft.Data.SqlClient.Extensions.Azure": "[7.1.1, )",
           "ModelContextProtocol": "[2.2.0, )",
-          "PerformanceMonitor.Analysis": "[3.10.0, )",
-          "PerformanceMonitor.Collectors": "[3.10.0, )",
-          "PerformanceMonitor.Common": "[3.10.0, )",
-          "PerformanceMonitor.Darling.Storage": "[3.10.0, )",
-          "PerformanceMonitor.Notifications": "[3.10.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.10.0, )"
+          "PerformanceMonitor.Analysis": "[3.11.0, )",
+          "PerformanceMonitor.Collectors": "[3.11.0, )",
+          "PerformanceMonitor.Common": "[3.11.0, )",
+          "PerformanceMonitor.Darling.Storage": "[3.11.0, )",
+          "PerformanceMonitor.Notifications": "[3.11.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.11.0, )"
         }
       },
       "performancemonitor.darling.remediation": {
@@ -797,16 +797,16 @@
           "Microsoft.Data.SqlClient": "[7.1.1, )",
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.13, )",
           "Npgsql": "[10.0.3, )",
-          "PerformanceMonitor.Common": "[3.10.0, )",
-          "PerformanceMonitor.Darling.Storage": "[3.10.0, )"
+          "PerformanceMonitor.Common": "[3.11.0, )",
+          "PerformanceMonitor.Darling.Storage": "[3.11.0, )"
         }
       },
       "performancemonitor.darling.service": {
         "type": "Project",
         "dependencies": {
-          "AWSSDK.PI": "[4.0.101.2, )",
-          "AWSSDK.RDS": "[4.0.106.4, )",
-          "AWSSDK.SecurityToken": "[4.0.101.4, )",
+          "AWSSDK.PI": "[4.0.101.4, )",
+          "AWSSDK.RDS": "[4.0.107.1, )",
+          "AWSSDK.SecurityToken": "[4.0.101.6, )",
           "BlackwellSystems.Gcf": "[1.1.0, )",
           "Microsoft.Data.SqlClient": "[7.1.1, )",
           "Microsoft.Data.SqlClient.Extensions.Azure": "[7.1.1, )",
@@ -814,14 +814,14 @@
           "Microsoft.Extensions.Hosting.WindowsServices": "[10.0.13, )",
           "ModelContextProtocol": "[2.2.0, )",
           "ModelContextProtocol.AspNetCore": "[2.2.0, )",
-          "PerformanceMonitor.Alerting": "[3.10.0, )",
-          "PerformanceMonitor.Collectors": "[3.10.0, )",
-          "PerformanceMonitor.Common": "[3.10.0, )",
-          "PerformanceMonitor.Darling.Analysis": "[3.10.0, )",
-          "PerformanceMonitor.Darling.Remediation": "[3.10.0, )",
-          "PerformanceMonitor.Darling.Storage": "[3.10.0, )",
-          "PerformanceMonitor.Notifications": "[3.10.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.10.0, )",
+          "PerformanceMonitor.Alerting": "[3.11.0, )",
+          "PerformanceMonitor.Collectors": "[3.11.0, )",
+          "PerformanceMonitor.Common": "[3.11.0, )",
+          "PerformanceMonitor.Darling.Analysis": "[3.11.0, )",
+          "PerformanceMonitor.Darling.Remediation": "[3.11.0, )",
+          "PerformanceMonitor.Darling.Storage": "[3.11.0, )",
+          "PerformanceMonitor.Notifications": "[3.11.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.11.0, )",
           "System.IO.FileSystem.AccessControl": "[5.0.0, )"
         }
       },
@@ -830,27 +830,27 @@
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.13, )",
           "Npgsql": "[10.0.3, )",
-          "PerformanceMonitor.Alerting": "[3.10.0, )",
-          "PerformanceMonitor.Analysis": "[3.10.0, )",
-          "PerformanceMonitor.Collectors": "[3.10.0, )",
-          "PerformanceMonitor.Common": "[3.10.0, )",
-          "PerformanceMonitor.Notifications": "[3.10.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.10.0, )"
+          "PerformanceMonitor.Alerting": "[3.11.0, )",
+          "PerformanceMonitor.Analysis": "[3.11.0, )",
+          "PerformanceMonitor.Collectors": "[3.11.0, )",
+          "PerformanceMonitor.Common": "[3.11.0, )",
+          "PerformanceMonitor.Notifications": "[3.11.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.11.0, )"
         }
       },
       "performancemonitor.darling.viewer": {
         "type": "Project",
         "dependencies": {
           "Hardcodet.NotifyIcon.Wpf": "[2.0.1, )",
-          "PerformanceMonitor.Alerting": "[3.10.0, )",
-          "PerformanceMonitor.Analysis": "[3.10.0, )",
-          "PerformanceMonitor.Collectors": "[3.10.0, )",
-          "PerformanceMonitor.Common": "[3.10.0, )",
-          "PerformanceMonitor.Darling.Analysis": "[3.10.0, )",
-          "PerformanceMonitor.Darling.Storage": "[3.10.0, )",
-          "PerformanceMonitor.Notifications": "[3.10.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.10.0, )",
-          "PerformanceMonitor.Ui": "[3.10.0, )",
+          "PerformanceMonitor.Alerting": "[3.11.0, )",
+          "PerformanceMonitor.Analysis": "[3.11.0, )",
+          "PerformanceMonitor.Collectors": "[3.11.0, )",
+          "PerformanceMonitor.Common": "[3.11.0, )",
+          "PerformanceMonitor.Darling.Analysis": "[3.11.0, )",
+          "PerformanceMonitor.Darling.Storage": "[3.11.0, )",
+          "PerformanceMonitor.Notifications": "[3.11.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.11.0, )",
+          "PerformanceMonitor.Ui": "[3.11.0, )",
           "ScottPlot.WPF": "[5.1.59, )",
           "Velopack": "[1.2.161, )"
         }
@@ -859,50 +859,50 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.13, )",
-          "PerformanceMonitor.Analysis": "[3.10.0, )"
+          "PerformanceMonitor.Analysis": "[3.11.0, )"
         }
       },
       "performancemonitor.plananalysis": {
         "type": "Project",
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.1.1, )",
-          "PerformanceMonitor.Common": "[3.10.0, )"
+          "PerformanceMonitor.Common": "[3.11.0, )"
         }
       },
       "performancemonitor.ui": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.10.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.10.0, )",
+          "PerformanceMonitor.Common": "[3.11.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.11.0, )",
           "ScottPlot.WPF": "[5.1.59, )"
         }
       },
       "AWSSDK.PI": {
         "type": "CentralTransitive",
-        "requested": "[4.0.101.2, )",
-        "resolved": "4.0.101.2",
-        "contentHash": "kD2SMcNimr3NIMYaoJ+i4sal9Ij16Sy/cl2A8wuQoBgXWzBzJ62brx03K1Fq0tFuoKmtk5HtaHFbVJHXAXTf9A==",
+        "requested": "[4.0.101.4, )",
+        "resolved": "4.0.101.4",
+        "contentHash": "i5MlS3NB1KPJrB30t4ktyT4wacW+LHA22JfkBeN2U6SbHjSpCz9mbVxORw4far4kgf+PQZcxdj2wAWdIh2JLBw==",
         "dependencies": {
-          "AWSSDK.Core": "[4.0.102.11, 5.0.0)",
-          "AWSSDK.Extensions.CborProtocol": "[4.0.100.19, 5.0.0)"
+          "AWSSDK.Core": "[4.0.102.13, 5.0.0)",
+          "AWSSDK.Extensions.CborProtocol": "[4.0.100.21, 5.0.0)"
         }
       },
       "AWSSDK.RDS": {
         "type": "CentralTransitive",
-        "requested": "[4.0.106.4, )",
-        "resolved": "4.0.106.4",
-        "contentHash": "3ZwcZEfQaqQnpChZvNXv/1n8wBL1v367HUX4LCSg6jB1EbAZwXdLRYdMXkwonpEHAyAZSlkgRzqbY0YzXV8Z8Q==",
+        "requested": "[4.0.107.1, )",
+        "resolved": "4.0.107.1",
+        "contentHash": "4oYTugiBauVzmvBbmCss6NtcfBzLaExBN+16+kkJ043+OLP2RBdtbf6AjzqRoE4C+WQ5L9pIxCNjYRfHyUYsnA==",
         "dependencies": {
-          "AWSSDK.Core": "[4.0.102.11, 5.0.0)"
+          "AWSSDK.Core": "[4.0.102.13, 5.0.0)"
         }
       },
       "AWSSDK.SecurityToken": {
         "type": "CentralTransitive",
-        "requested": "[4.0.101.4, )",
-        "resolved": "4.0.101.4",
-        "contentHash": "vjha/QlWaemVuL4A81mwxqGRR52meo+naCp1ELk/UTxrUiSn4fltXMCLlooZKURzwfdHd6dDDQHUL8cjT8xW3w==",
+        "requested": "[4.0.101.6, )",
+        "resolved": "4.0.101.6",
+        "contentHash": "v/9v1tYkmvVgH9KCQBUfEi9j0TxUfpQBSJrDfA1Z0fzrJDhtG5W4TaaIvqZrcNTYSrgHyFEY5jKel/ebDY4XfA==",
         "dependencies": {
-          "AWSSDK.Core": "[4.0.102.11, 5.0.0)"
+          "AWSSDK.Core": "[4.0.102.13, 5.0.0)"
         }
       },
       "BlackwellSystems.Gcf": {

@@ -15,7 +15,9 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="ModelContextProtocol" />
     <PackageReference Include="Npgsql" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" VersionOverride="10.0.13" />
   </ItemGroup>
 
