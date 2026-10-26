@@ -385,7 +385,7 @@ export function plainText(text) {
     "Here the store starts at or after the end of the baseline period, so the baseline is empty: no query can be flagged for cost, and only timeouts and errors were tested.",
   );
   t = t.replace(
-    /effective_start is also after recent_window_start, so the recent window holds only the part from effective_start\./g,
+    /effective_start is also after baseline_end, so the recent window holds only the part from effective_start\./g,
     "The store also starts after the recent window began, so the recent window holds only the part the store has.",
   );
   /* The memory clerk note has four arms (memory_clerk.note): two name latest_memory_mb, the Queries tab's "Latest MB" column,

@@ -882,7 +882,7 @@ public static class QueryStoreRegressionBaseline
     /// holds <c>$3 - GREATEST($2, @@HELD)</c>. The row filters keep <c>@@B</c>, the requested start, not <c>@@HELD</c>: an interval
     /// whose last snapshot was collected after the raw floor but whose <c>last_execution_time</c> is before it is still read, so
     /// raising the filters would drop it. Only the divisors use the hours held. Where the server's data holds the whole baseline
-    /// (<c>@@HELD = @@B</c>) both terms are what they were before, so those reads are unchanged.
+    /// (<c>@@HELD = @@B</c>) both terms are what they were before, so those reads are unchanged. A baseline that holds no hours (<c>base_hours = 0</c>) counts as empty: its timeout and error counts are not compared, so a row with enough recent runs is listed as it is against an empty baseline (rank 3), and the wire keeps <c>baseline_*_per_hour</c> NULL.
     /// </summary>
     private static string Suffix(string flaggedSample, string rankedSample) => $$"""
         ,
@@ -938,10 +938,10 @@ public static class QueryStoreRegressionBaseline
                 (j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) AS cpu_regression_percent,
                 COALESCE((j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) > {{CostGatePercent}}, false) AS is_cost,
                 COALESCE(j.recent_aborted_execs >= {{FailureMinRecentRuns}}
-                    AND (j.base_aborted_execs = 0
+                    AND (j.base_aborted_execs = 0 OR j.base_hours = 0
                          OR (j.recent_aborted_execs / NULLIF(j.recent_hours, 0)) >= {{FailureRateMultiple}} * (j.base_aborted_execs / NULLIF(j.base_hours, 0))), false) AS is_timeouts,
                 COALESCE(j.recent_exception_execs >= {{FailureMinRecentRuns}}
-                    AND (j.base_exception_execs = 0
+                    AND (j.base_exception_execs = 0 OR j.base_hours = 0
                          OR (j.recent_exception_execs / NULLIF(j.recent_hours, 0)) >= {{FailureRateMultiple}} * (j.base_exception_execs / NULLIF(j.base_hours, 0))), false) AS is_errors
             FROM joined AS j
         ),
@@ -957,11 +957,11 @@ public static class QueryStoreRegressionBaseline
                 END AS cost_rank,
                 GREATEST(
                     CASE WHEN NOT f.is_timeouts THEN 0
-                         WHEN f.base_aborted_execs = 0
+                         WHEN f.base_aborted_execs = 0 OR f.base_hours = 0
                               OR (f.recent_aborted_execs / NULLIF(f.recent_hours, 0)) >= {{FailureHighMultiple}} * (f.base_aborted_execs / NULLIF(f.base_hours, 0)) THEN 3
                          ELSE 2 END,
                     CASE WHEN NOT f.is_errors THEN 0
-                         WHEN f.base_exception_execs = 0
+                         WHEN f.base_exception_execs = 0 OR f.base_hours = 0
                               OR (f.recent_exception_execs / NULLIF(f.recent_hours, 0)) >= {{FailureHighMultiple}} * (f.base_exception_execs / NULLIF(f.base_hours, 0)) THEN 3
                          ELSE 2 END) AS failure_rank,
                 (f.recent_dur_ms - f.base_dur_ms) * f.recent_execs AS additional_duration_ms

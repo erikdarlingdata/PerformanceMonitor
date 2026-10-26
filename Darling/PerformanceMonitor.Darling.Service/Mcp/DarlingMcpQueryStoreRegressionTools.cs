@@ -136,7 +136,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 tail: null,
                 emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken,
                 /* #6750: the closing sentence follows where the data starts. Before baseline_end the baseline holds part of its span,
-                   at or after it the baseline is empty, and after recent_window_start the recent window is cut too. Both paths divide
+                   at or after it the baseline is empty, and after baseline_end (the recent window's start) the recent window is cut too. Both paths divide
                    each per-hour rate by the hours from this server's data start (the windows CTE's hours-held start), the instant
                    effective_start reports, so the note says so on either path. The row filters keep the requested start. */
                 tailFor: effectiveStart => QueryStoreRegressionRules.TailFor(effectiveStart, start));

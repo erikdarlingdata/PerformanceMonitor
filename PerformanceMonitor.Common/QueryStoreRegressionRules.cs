@@ -36,10 +36,11 @@ public static class QueryStoreRegressionRules
     public const string EmptyBaselineTail =
         "Here effective_start is at or after baseline_end, so the baseline is empty: no query can be flagged for cost, and only timeouts and errors were tested.";
 
-    /// <summary>The sentence that follows <see cref="EmptyBaselineTail"/> when the store starts after <c>recent_window_start</c>
-    /// too (#6750): the recent window is cut as well. True for both products.</summary>
+    /// <summary>The sentence that follows <see cref="EmptyBaselineTail"/> when the store starts after <c>baseline_end</c>, the
+    /// recent window's start (#6750): the recent window is cut as well. It names only keys both
+    /// payloads carry (Darling's also names that instant <c>recent_window_start</c>, Lite's does not).</summary>
     public const string RecentCutTail =
-        "effective_start is also after recent_window_start, so the recent window holds only the part from effective_start.";
+        "effective_start is also after baseline_end, so the recent window holds only the part from effective_start.";
 
     /// <summary>The sentence that follows <see cref="RecentCutTail"/> (#6750): both products divide each recent per-hour rate by the
     /// hours the recent window holds, from the instant the store's data starts, on every read path.</summary>

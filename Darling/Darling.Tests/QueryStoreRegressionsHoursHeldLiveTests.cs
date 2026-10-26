@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -272,7 +273,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
     /// gate's clamp is the baseline's start. Neither says when THIS server's data starts. <paramref name="tablePath"/> sends the read
     /// through the interval table (coverage forced back and a run log seeded for the server), false through raw.
     /// </summary>
-    private static async Task<Rig> StartTwoServersAsync(bool tablePath, CancellationToken ct)
+    private static async Task<Rig> StartTwoServersAsync(bool tablePath, CancellationToken ct, bool baselineHoldsNoHours = false)
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #6750 live tests.");
@@ -298,7 +299,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
 
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
         long intervalId = 9000;
-        async Task SnapshotAsync(int serverId, string serverName, long queryId, DateTime collected, long count)
+        async Task SnapshotAsync(int serverId, string serverName, long queryId, DateTime collected, long count, DateTime? lastRunAt = null)
         {
             intervalId++;
             var context = new CollectorContext { ServerId = serverId, ServerName = serverName + "-host", CollectionTime = DateTime.SpecifyKind(now, DateTimeKind.Utc), Deltas = new CollectorDeltaCalculator() };
@@ -311,7 +312,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
                 ServerId = serverId,
                 EngineEdition = 3,
             };
-            var lastRun = collected.AddMinutes(-20);
+            var lastRun = lastRunAt ?? collected.AddMinutes(-20);
             var row = new QueryStoreCollector.Row
             {
                 DatabaseName = Db,
@@ -346,8 +347,21 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
             await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddDays(-6), 7);
         }
 
-        await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddHours(-30), 12);
-        await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddHours(-3), 120);
+        if (baselineHoldsNoHours)
+        {
+            /* The reviewer's state (#6750): this server's FIRST collection is ten hours back, inside the 24 hour window, and carries an
+               interval whose last run was 26 hours back, before the window start. The row filters (collected and last run at or after
+               the requested baseline start) keep it, so the baseline counts 12 runs, while the server's data starts after the window
+               start, so the baseline holds no hours. The other server's nine-day-old row anchors the store-wide chunk floor before the
+               baseline start, whatever the time of day. */
+            await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddHours(-10), 12, lastRunAt: now.AddHours(-26));
+            await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddHours(-3), 120);
+        }
+        else
+        {
+            await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddHours(-30), 12);
+            await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddHours(-3), 120);
+        }
 
         if (tablePath)
         {
@@ -404,6 +418,34 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
 
         var hit = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 24)).RootElement;
         AssertDividesByTheHoursFromTheAnswersDataStart(hit, expectedSource);
+    }
+
+    /// <summary>
+    /// A baseline that holds no hours counts as empty (#6750). The server's first collection lands inside the window and carries an
+    /// interval last run before the window start, so the baseline counts 12 timeouts over no hours. Its rate is NULL, and the
+    /// comparison with it is not made: the row is listed as against an empty baseline (before the hours-held divisor the negative
+    /// hours gave a true comparison and listed it; a NULL comparison alone dropped it).
+    /// </summary>
+    [Fact]
+    public async Task ABaselineThatHoldsNoHours_ButCountsRuns_ListsTheTimeoutsRowAsAgainstAnEmptyBaseline_McpRead()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await StartTwoServersAsync(tablePath: false, ct, baselineHoldsNoHours: true);
+
+        var hit = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 24)).RootElement;
+        Assert.Equal("raw", hit.GetProperty("history_source").GetString());
+        var effective = DateTime.Parse(hit.GetProperty("effective_start").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
+        var baselineEnd = DateTime.Parse(hit.GetProperty("baseline_end").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
+        Assert.True(effective > baselineEnd, "this server's data starts after the baseline's end, so the baseline holds no hours");
+        Assert.EndsWith(QueryStoreRegressionRules.EmptyBaselineTail + " " + QueryStoreRegressionRules.RecentCutTail + " " + QueryStoreRegressionRules.RecentHoursHeldTail,
+            hit.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
+
+        var row = Assert.Single(hit.GetProperty("regressions").EnumerateArray());
+        Assert.Equal(RisingQuery, row.GetProperty("query_id").GetInt64());
+        Assert.Equal("timeouts", row.GetProperty("regression_reason").GetString());
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("baseline_aborted_per_hour").ValueKind);
+        Assert.Equal(12, row.GetProperty("baseline_aborted_count").GetInt64());
+        Assert.Equal(120, row.GetProperty("recent_aborted_count").GetInt64());
     }
 
     [Theory]
