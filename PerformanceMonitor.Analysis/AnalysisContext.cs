@@ -179,6 +179,15 @@ public class AnalysisContext
     public IReadOnlyDictionary<string, DateTime>? LatestValueStarts { get; set; }
 
     /// <summary>
+    /// How often, in minutes, this server's blocking collectors (the blocked-process-report read and the DMV
+    /// blocking snapshot) sample: the slower of the two EFFECTIVE schedules, stamped once per pass beside
+    /// <see cref="LatestValueStarts"/>. The BLOCKING_CHAIN fact asks whether a chain's newest sample is within a
+    /// couple of these of <see cref="TimeRangeEnd"/> to say it was still blocking when the window ended. Null
+    /// until stamped; the fact collector then uses the shipped default cadence.
+    /// </summary>
+    public int? BlockingCollectionIntervalMinutes { get; set; }
+
+    /// <summary>
     /// The lower bound a latest-value read over <paramref name="collectorName"/>'s table binds: the stamped
     /// <see cref="LatestValueStarts"/> entry, else <see cref="TimeRangeEnd"/> less
     /// <see cref="LatestValueLookback"/> — the stamp's own answer for every shipped default cadence. Anchored
