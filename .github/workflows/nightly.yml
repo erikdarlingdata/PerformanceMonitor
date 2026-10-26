@@ -1435,7 +1435,7 @@ jobs:
           ref: ${{ github.sha }}
 
       - name: Download the shard reports
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           pattern: test-map-shard-*
           path: shards
@@ -1645,25 +1645,25 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
 
       - name: Download windows release assets
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: windows-release-assets
           path: releases
 
       - name: Download the nightly version string
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: windows-version
           path: .
 
       - name: Download linux release assets
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: linux-release-assets
           path: releases
 
       - name: Download container image
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: darling-container-image
           path: releases
