@@ -453,7 +453,9 @@ function redrawPanels() {
   setPanelSignal(panelAbort.signal);
 
   applyDatabaseFilter();
-  mount(gridNode, current.tab.build(current.server, { ...rangeContext(), offline: serverIsOffline(current.server) }));
+  /* #6793: the batch's signal rides in the tab's ctx too, for the tab files that read `ctx.signal` (the memory-grant charts, the overview strips,
+     the recommendations list, the clerk and named trend draws). Without it each of them read on no signal on this page. */
+  mount(gridNode, current.tab.build(current.server, { ...rangeContext(), offline: serverIsOffline(current.server), signal: panelAbort.signal }));
 }
 
 /* The page's database filter (#5245), set before every panel redraw the way the custom range is: the chosen names for the card's

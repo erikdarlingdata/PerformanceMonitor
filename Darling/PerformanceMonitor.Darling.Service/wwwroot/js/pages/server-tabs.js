@@ -229,8 +229,11 @@ function fanout(read, params, specs, intro = null) {
     if (s.hideWhenNoRows && !panelHadRows.get(keys[i])) shells[i].panel.style.display = "none";
   });
   const introNode = intro ? el("div", { class: "panel-intro" }, []) : null;
+  /* #6793: the batch's signal, captured while the tab is built (setPanelSignal holds it then), so leaving the page or a redraw cancels this read. */
+  const signal = getPanelSignal();
   (async () => {
-    const res = await readToolWithinKeptHistory(read, params);
+    const res = await readToolWithinKeptHistory(read, params, signal);
+    if (res.kind === "aborted") return;
     if (introNode && res.kind === "data" && intro.when(res.data)) {
       mount(introNode, [noticeStrip(intro.text)]);
     }
@@ -285,8 +288,10 @@ const WAIT_METRICS = [
  */
 export function waitsPanel(server, ctx) {
   const { panel, body } = panelShell("Wait Stats", ctx.label + ", with a trend for the waits you check", 2, "get_wait_stats");
+  const signal = getPanelSignal();
   (async () => {
-    const res = await readToolWithinKeptHistory("get_wait_stats", { server, hours: ctx.hours, limit: 20 });
+    const res = await readToolWithinKeptHistory("get_wait_stats", { server, hours: ctx.hours, limit: 20 }, signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
@@ -442,8 +447,10 @@ function perfmonDefaults(available, max) {
  */
 export function perfmonPanel(server, ctx) {
   const { panel, body } = panelShell("Perfmon Counters", "latest snapshot, with a trend for the counters you check", 2, "get_perfmon_stats");
+  const signal = getPanelSignal();
   (async () => {
-    const res = await readTool("get_perfmon_stats", { server });
+    const res = await readTool("get_perfmon_stats", { server }, signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
 
@@ -622,11 +629,14 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
     null,
     picker
   );
+  const signal = getPanelSignal();
   (async () => {
     const res = await readToolWithinKeptHistory(
       "get_top_queries_by_cpu",
-      rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "queries")
+      rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "queries"),
+      signal
     );
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
@@ -669,9 +679,9 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
         value: String(i),
         label: "#" + t.rank + " · " + t.query.database_name + " · " + truncate(t.query.query_text || "(no statement text captured)", 60),
       }));
-      const picker = pickerControl("Query", options, (i) => drawQueryTrend(chartSlot, server, ctx, trendable[Number(i)].query));
+      const picker = pickerControl("Query", options, (i) => drawQueryTrend(chartSlot, server, ctx, trendable[Number(i)].query, signal));
       parts.push(el("div", { class: "picker-row" }, [picker]), chartSlot);
-      drawQueryTrend(chartSlot, server, ctx, trendable[0].query);
+      drawQueryTrend(chartSlot, server, ctx, trendable[0].query, signal);
     } else if (queries.length) {
       parts.push(
         emptyStrip(
@@ -685,14 +695,15 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
   return panel;
 }
 
-async function drawQueryTrend(slot, server, ctx, query) {
+async function drawQueryTrend(slot, server, ctx, query, signal) {
   mount(slot, loadingStrip());
   const trend = await readToolWithinKeptHistory("get_query_trend", {
     server,
     query_hash: query.query_hash,
     database_name: query.database_name,
     hours: ctx.hours,
-  });
+  }, signal);
+  if (trend.kind === "aborted") return;
   if (trend.kind !== "data") {
     mount(slot, trend.kind === "empty" ? [keptWindowStrip(trend), emptyStrip(trend.message)] : readErrorStrip(trend.message));
     return;
@@ -1285,8 +1296,10 @@ export function fileIoGrain(server) {
  */
 export function fileIoPanel(server, ctx) {
   const { panel, body } = panelShell("File I/O Latency", "avg read and write latency " + fileIoGrain(server) + ", " + ctx.label, 2, "get_file_io_trend");
+  const signal = getPanelSignal();
   (async () => {
-    const res = await readToolWithinKeptHistory("get_file_io_trend", { server, hours: ctx.hours });
+    const res = await readToolWithinKeptHistory("get_file_io_trend", { server, hours: ctx.hours }, signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
@@ -1347,9 +1360,11 @@ export function fileIoPanel(server, ctx) {
 export function dailySummaryPanels(server) {
   const tile = panelShell("Daily Summary", "today (UTC)", 2, "get_daily_summary_range");
   const calendar = panelShell("Daily Health Calendar", "month (UTC)", 2, "get_daily_summary_range");
+  const signal = getPanelSignal();
   (async () => {
     /* 31 days, not 30 (#6294): the month calendar's current month starts on the 1st, which is up to 30 days before today. */
-    const res = await readTool("get_daily_summary_range", { server, days_back: 31 });
+    const res = await readTool("get_daily_summary_range", { server, days_back: 31 }, signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") {
       mount(tile.body, readErrorStrip(res.message));
       return mount(calendar.body, readErrorStrip(res.message));
@@ -5094,8 +5109,10 @@ export function sessionStatsTrendPanel(server, ctx) {
 export function memoryPressurePanels(server, ctx) {
   const chart = panelShell("Memory Pressure Events per Hour", ctx.label, 2, "get_memory_pressure_events");
   const grid = panelShell("Memory Pressure Events", ctx.label, 1, "get_memory_pressure_events");
+  const signal = getPanelSignal();
   (async () => {
-    const res = await readToolWithinKeptHistory("get_memory_pressure_events", { server, hours: ctx.hours });
+    const res = await readToolWithinKeptHistory("get_memory_pressure_events", { server, hours: ctx.hours }, signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") {
       mount(chart.body, readErrorStrip(res.message));
       return mount(grid.body, readErrorStrip(res.message));
@@ -5202,8 +5219,10 @@ const SCOPED_CONFIG_COLUMNS = [
    rows live in the panel's closure, not module state, so the 60 s repaint rebuilds them from the read. */
 function scopedConfigPanel(server) {
   const { panel, body } = panelShell("Database Scoped Configuration", "sys.database_scoped_configurations, newest connect-time snapshot", 2, "get_database_scoped_config");
+  const signal = getPanelSignal();
   (async () => {
-    const res = await readTool("get_database_scoped_config", { server });
+    const res = await readTool("get_database_scoped_config", { server }, signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
     const rows = [];

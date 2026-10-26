@@ -97,6 +97,7 @@ export function memoryGrantChartPanels(server, ctx) {
   const activity = chartPanel("Memory Grant Activity", ctx.label + ", every snapshot in the window, per resource pool");
   (async () => {
     const res = await readToolWithinKeptHistory("get_memory_grants", { server, hours: ctx.hours, chart: true }, ctx && ctx.signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") {
       mount(sizing.body, readErrorStrip(res.message));
       mount(activity.body, readErrorStrip(res.message));

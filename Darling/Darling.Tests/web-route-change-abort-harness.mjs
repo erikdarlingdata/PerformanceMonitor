@@ -85,9 +85,11 @@ globalThis.clearTimeout = () => {};
 let fetches = 0; let serverRenders = 0;
 const fetchLog = [];        // { at, url, signal, abortedAtStart, aborted }
 let slowReadMs = 140_000;
-const isSlow = (url) => url.includes("get_job_history") || url.includes("get_resource_use_by_tag") || (slowRegistry && url.includes("list_servers")) || (slowTrend && url.includes("get_server_trend")) || (slowPanels && url.includes("/api/read/") && !url.includes("list_investigation_requests"));
+const isSlow = (url) => url.includes("get_job_history") || url.includes("get_resource_use_by_tag") || (slowRegistry && url.includes("list_servers")) || (slowTrend && url.includes("get_server_trend")) || (slowFanout && url.includes("get_memory_grants")) || (slowDatabases && url.includes("/api/server-databases")) || (slowPanels && url.includes("/api/read/") && !url.includes("list_investigation_requests"));
 let slowPanels = false;     // a scenario sets this to leave every server panel read out
 let slowTrend = false;      // a scenario sets this to leave the server page's trend reads out
+let slowFanout = false;     // a scenario sets this to leave the Memory tab's fanout() read (get_memory_grants) out
+let slowDatabases = false;  // a scenario sets this to leave the FinOps Database box's name list read out
 let slowRegistry = false;   // a scenario sets this to leave the list_servers read out
 let holdFleet = false;      // a scenario sets this to leave /api/fleet out until landFleet()
 let fleetBody = null;       // a body for /api/fleet, or null for the default 500
@@ -288,6 +290,31 @@ const scenarios = {
     const before = { reads: trends().length, abortedAtStart: trends().some((r) => r.abortedAtStart), aborted: trends().some((r) => r.aborted) };
     await go("#/investigations"); await settle();
     return { before, reads: trends().length, allAborted: trends().length > 0 && trends().every((r) => r.aborted) };
+  },
+  /* The Memory tab's Memory Grants panels are built by fanout(), one shared read, and carried no signal: the read stayed out on the store after the leave. */
+  async leaveServerWithFanoutReadOut() {
+    slowFanout = true;
+    await boot("#/server/alpha/memory");
+    await advance(2);
+    const grants = () => fetchLog.filter((r) => r.url.includes("get_memory_grants"));
+    const before = { reads: grants().length, aborted: grants().some((r) => r.aborted) };
+    const { readErrorCount } = await import(pathToFileURL(path.join(jsDir, "util.js")).href);
+    const strips0 = readErrorCount();
+    /* The strips are counted right after the leave and before anything is released: an aborted read that drew "Could not render" would show here, and the next page's own answers have not landed yet. */
+    await go("#/investigations");
+    const errorStripsDrawn = readErrorCount() - strips0;
+    await settle();
+    return { before, reads: grants().length, perRead: grants().map((r) => (r.url.includes("chart") ? "chart" : "fanout") + ":" + r.aborted), allAborted: grants().length > 0 && grants().every((r) => r.aborted), errorStripsDrawn };
+  },
+  /* The FinOps Locking tab's Database box reads the server's database names with the tab's own signal. */
+  async finopsDatabaseBoxReadOut() {
+    slowDatabases = true;
+    await boot("#/finops/alpha/locking");
+    await advance(2);
+    const names = () => fetchLog.filter((r) => r.url.includes("/api/server-databases"));
+    const before = { reads: names().length, aborted: names().some((r) => r.aborted) };
+    await go("#/investigations"); await settle();
+    return { before, reads: names().length, allAborted: names().length > 0 && names().every((r) => r.aborted) };
   },
   /* Query Tag Usage stamps the footer's "Updated" time when its read lands, not when the page starts to render. */
   async tagUsageFooterStamp() {

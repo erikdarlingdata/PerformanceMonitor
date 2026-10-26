@@ -87,7 +87,7 @@ export const tab = {
   build(server, ctx) {
     const choice = choiceFor(server);
     const content = el("div", {});
-    const box = databaseBox(choice, { onCommit: () => show(), server });
+    const box = databaseBox(choice, { onCommit: () => show(), server, signal: ctx && ctx.signal });
     const controls = el("div", { class: "sort-control" }, box.nodes);
     const pane = el("div", { class: "locking-detail" });
 

@@ -9,6 +9,7 @@
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Linq;
 using System.Text.Json;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -54,7 +55,7 @@ public sealed class WebRouteChangeAbortBehaviourTests
             }
 
             Assert.True(proc.ExitCode == 0, "the route change harness failed for scenario " + scenario + ": " + error.Result);
-            using var doc = JsonDocument.Parse(output.Split('\n')[0]);
+            using var doc = JsonDocument.Parse(output.Split('\n').First(l => l.StartsWith('{')));
             return doc.RootElement.Clone();
         }
     }
@@ -159,6 +160,27 @@ public sealed class WebRouteChangeAbortBehaviourTests
         var before = r.GetProperty("before");
         Assert.True(before.GetProperty("reads").GetInt32() > 0);
         Assert.False(before.GetProperty("abortedAtStart").GetBoolean());
+        Assert.False(before.GetProperty("aborted").GetBoolean());
+        Assert.True(r.GetProperty("allAborted").GetBoolean());
+    }
+
+    [Fact]
+    public void LeavingTheServerPage_AbortsTheFanoutReads_AndDrawsNoErrorStrip()
+    {
+        var r = Run("leaveServerWithFanoutReadOut");
+        var before = r.GetProperty("before");
+        Assert.True(before.GetProperty("reads").GetInt32() > 0);
+        Assert.False(before.GetProperty("aborted").GetBoolean());
+        Assert.True(r.GetProperty("allAborted").GetBoolean());
+        Assert.Equal(0, r.GetProperty("errorStripsDrawn").GetInt32());
+    }
+
+    [Fact]
+    public void LeavingFinops_AbortsTheDatabaseBoxNameRead()
+    {
+        var r = Run("finopsDatabaseBoxReadOut");
+        var before = r.GetProperty("before");
+        Assert.True(before.GetProperty("reads").GetInt32() > 0);
         Assert.False(before.GetProperty("aborted").GetBoolean());
         Assert.True(r.GetProperty("allAborted").GetBoolean());
     }

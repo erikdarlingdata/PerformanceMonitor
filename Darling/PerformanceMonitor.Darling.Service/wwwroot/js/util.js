@@ -889,7 +889,9 @@ let pageReads = { n: 0 };
    It aborts the reads of the page being left through the hooks the page modules registered with onPageLeave, and it opens
    a fresh count, so a read of the page left (one that has no signal, or one that has not yet ended after its abort) never
    holds the next page's poll, Refresh button, tab-return refresh or render-time back-off. A poll or Refresh re-render of
-   the same page does not call it: that page aborts its own older load, as before. */
+   the same page does not call it: that page aborts its own older load, as before. One exception: readWithinKeptHistory's retry
+   starts after an await, so it counts on the scope current at the retry. A read with no signal that is refused for its window
+   while the user leaves holds the new page for that one round trip. */
 const pageLeaveHooks = [];
 
 /** Register what a page module aborts when the user goes to another page (its module-level AbortControllers). */
