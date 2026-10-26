@@ -75,7 +75,12 @@ public static class QueryTagRollupSql
     /// 42-server store. Each server keeps its own lower bound, the gate's <c>ReadStart</c>, so a server's rows are exactly the rows the
     /// per-server statement returned. Parameters differ from the other statements: $1 the allowed server ids (<c>integer[]</c>), $2 each
     /// server's read start in the same order (<c>timestamp[]</c>), $3 window end, $4 the earliest read start, which repeats the
-    /// per-server bounds as plain parameters so the partition and chunk pruning a constant bound gets still applies.
+    /// <c>first_execution_time</c> floor as a constant so the day partitions below it are pruned (the table is partitioned on that column).
+    /// <para>The per-server start on <c>collection_time</c> is written <c>collection_time - read_start &gt;= interval '0'</c> on purpose, and
+    /// there is no constant <c>collection_time</c> bound: either one lets the planner AND the partition's <c>collection_time</c> index into
+    /// every server's scan, and that index is not keyed by server, so each of the 42 loops walked the whole day's entries (about 10 million
+    /// per loop). Measured on one production store with 42 servers over 24 hours, warm: 13.0 s with the index, 6.0 s without; each server's
+    /// scan is the <c>(server_id, first_execution_time)</c> range instead.</para>
     /// </summary>
     public static readonly string QueryStoreSql = $$"""
         SELECT q.server_id, m.tag_id,
@@ -88,12 +93,11 @@ public static class QueryTagRollupSql
         FROM unnest($1::integer[], $2::timestamp[]) AS s(server_id, read_start)
         JOIN collect.query_store_interval_wide AS q
                ON q.server_id = s.server_id
-              AND q.collection_time >= s.read_start
+              AND q.collection_time - s.read_start >= interval '0'
               AND q.first_execution_time >= s.read_start - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
         LEFT JOIN config.query_tag_map AS m
                ON m.server_id = q.server_id AND m.key_kind = 'hash' AND m.key = q.query_hash
         WHERE q.server_id = ANY($1)
-        AND   q.collection_time >= $4
         AND   q.collection_time <= $3
         AND   q.first_execution_time >= $4 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
         AND   q.first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
