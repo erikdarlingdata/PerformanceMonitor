@@ -39,7 +39,7 @@ jobs:
   signatures:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Covers the PE parse and the release guard's allowlist. The allowlist cases are the ones
       # worth naming: the two allowed names also appear as the portable zip's root launcher and

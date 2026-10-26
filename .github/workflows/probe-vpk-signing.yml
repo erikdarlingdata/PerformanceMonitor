@@ -64,9 +64,9 @@ jobs:
         # this brackets the accepted range. 0 means "omit the flag" (the default).
         sign_parallel: [0, 35, 50, 100]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
