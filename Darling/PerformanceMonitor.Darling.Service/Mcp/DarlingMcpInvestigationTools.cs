@@ -411,10 +411,11 @@ public sealed partial class DarlingMcpInvestigationTools
                     return McpHelpers.Refusal("agent_id", AgentIdNotTokenMessage(tokenName));
                 }
             }
-            else if (namedAgentNames is { Count: > 0 } && namedAgentNames.Contains(agent_id))
+            else if (DarlingAgentActionGate.IsRefusedLegacyAgentId(namedAgentNames, agent_id))
             {
                 /* The legacy token's agent_id is free text. One that is a named agent's name would put the claim, and the plan changes after it,
-                   in that agent's journal, so it is refused and journaled under no agent's name. */
+                   in that agent's journal, and one that is a reserved placeholder (invalid, unclaimed) would make the claim's rows read as a
+                   refusal's, so it is refused and journaled under no agent's name. */
                 await store.RecordRefusalAsync(requestId, InvestigationRules.InvalidAgentId, "claim", AgentIdIsNamedToken, null, cancellationToken);
                 return InvestigationToolCore.Status(AgentIdIsNamedToken, AgentIdIsNamedTokenMessage(agent_id));
             }
@@ -908,5 +909,7 @@ public sealed partial class DarlingMcpInvestigationTools
         $"That claim_id belongs to the named agent token {holder}, which this host serves. Only that token can act under it; claim the request again with a different agent_id.";
 
     internal static string AgentIdIsNamedTokenMessage(string agentId) =>
-        $"agent_id {agentId} is the name of a named agent token this host serves. Use a different agent_id on this token.";
+        DarlingMcpTokenSet.IsReservedName(agentId)
+            ? $"agent_id {agentId} is a reserved name the journal uses when no agent made a call. Use a different agent_id on this token."
+            : $"agent_id {agentId} is the name of a named agent token this host serves. Use a different agent_id on this token.";
 }
