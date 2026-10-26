@@ -46,6 +46,7 @@ public sealed partial class DuckDbInvestigationStore : IInvestigationRequestStor
     private static readonly string GroupingWindowCapSql = string.Create(CultureInfo.InvariantCulture,
         $"INTERVAL {(int)InvestigationRules.GroupingWindowCap.TotalMinutes} MINUTE");
 
+    /* #6778: a reported request takes a quiet re-fire (same metric, severity not above max_severity, no resolved journal row, inside the window and cap); the claim deadline applies to open and claimed rows only. */
     /* #5632: the window slides (Darling's twin): window_until is the latest alert + 30 minutes, held to the first alert + 4 hours, and
        the alert-time test ($4 <= window_until) is the sliding bound. The wall-clock test stays on the open time ($3 is now), widened to
        the 4-hour cap, so an alert stamped more than 30 minutes before it reached the store still joins. */
@@ -57,8 +58,11 @@ SELECT r.request_id,
 FROM investigation_requests AS r
 WHERE r.server_id = $1
   AND r.family = $2
-  AND r.state IN ('open', 'claimed')
-  AND r.expires_at > $3
+  AND (r.state IN ('open', 'claimed') AND r.expires_at > $3
+       OR r.state = 'reported'
+          AND EXISTS (SELECT 1 FROM investigation_request_alerts AS a2 WHERE a2.request_id = r.request_id AND a2.metric_name = $5)
+          AND (CASE WHEN $6 = 'critical' THEN 1 ELSE 0 END) <= (CASE WHEN r.max_severity = 'critical' THEN 1 ELSE 0 END)
+          AND NOT EXISTS (SELECT 1 FROM investigation_journal AS j WHERE j.request_id = r.request_id AND j.event = 'resolved'))
   AND r.opened_at >= $3 - " + GroupingWindowCapSql + @"
   AND $4 <= r.window_until
 ORDER BY r.opened_at DESC
@@ -457,7 +461,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         Guid? joinId = null;
         string? maxSeverity = null;
         var newMetric = false;
-        using (var find = Command(connection, FindJoinSql, alert.ServerId, alert.Family, now, alertTime, alert.MetricName))
+        using (var find = Command(connection, FindJoinSql, alert.ServerId, alert.Family, now, alertTime, alert.MetricName, severity))
         using (var found = await find.ExecuteReaderAsync(cancellationToken))
         {
             if (await found.ReadAsync(cancellationToken))

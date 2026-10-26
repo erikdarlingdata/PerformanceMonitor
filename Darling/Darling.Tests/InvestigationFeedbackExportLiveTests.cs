@@ -72,7 +72,9 @@ public sealed class InvestigationFeedbackExportLiveTests
         Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
             requestId, claim.ClaimId!.Value, "agent-a", 1, "real", $"slow WHERE name = '{Secret}'" + (credential is null ? "" : $" because {credential}"), true, "summary",
             queries), ct));
-        await using var command = owner.CreateCommand($"UPDATE config.investigation_requests SET opened_at = now() - make_interval(mins => {(int)(hoursAgo * 60)}) WHERE request_id = '{requestId}'");
+        /* The case's grouping window ended 30 minutes after it opened, as a real one hoursAgo hours old did. Left open, a later case of the
+           same server, family and metric would join this reported request quietly (#6778) instead of opening its own. */
+        await using var command = owner.CreateCommand($"UPDATE config.investigation_requests SET opened_at = now() - make_interval(mins => {(int)(hoursAgo * 60)}), window_until = now() - make_interval(mins => {(int)(hoursAgo * 60)}) + interval '30 minutes' WHERE request_id = '{requestId}'");
         await command.ExecuteNonQueryAsync(ct);
         return requestId;
     }

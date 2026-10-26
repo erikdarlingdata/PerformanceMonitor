@@ -27,7 +27,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// test can move the clock.
 ///
 /// <para><b>Open or join is one transaction.</b> It takes a transaction-scoped advisory lock on the server and family, so two
-/// alerts of one incident cannot both open a request; joins an open or claimed request of that server and family only while
+/// alerts of one incident cannot both open a request; joins an open or claimed request, or a reported request that takes a quiet re-fire (#6778), of that server and family only while
 /// the alert fires within 30 minutes of the request's latest alert and no later than 4 hours after its first (#5632: the
 /// window slides, see <see cref="InvestigationRules.GroupingWindow"/> and <see cref="InvestigationRules.GroupingWindowCap"/>); and otherwise takes
 /// <c>pg_advisory_xact_lock(5632, route_id)</c> over the count of the route's requests and the INSERT (ruling R6), so two
@@ -77,8 +77,11 @@ WHERE r.server_id = $1
   AND r.practice_of IS NULL
   AND r.force_check_of IS NULL
   AND r.trigger_kind = 'alert'
-  AND r.state IN ('open', 'claimed')
-  AND r.expires_at > $3
+  AND (r.state IN ('open', 'claimed') AND r.expires_at > $3
+       OR r.state = 'reported'
+          AND EXISTS (SELECT 1 FROM config.investigation_request_alerts AS a2 WHERE a2.request_id = r.request_id AND a2.metric_name = $5)
+          AND (CASE WHEN $6 = 'critical' THEN 1 ELSE 0 END) <= (CASE WHEN r.max_severity = 'critical' THEN 1 ELSE 0 END)
+          AND NOT EXISTS (SELECT 1 FROM config.investigation_journal AS j WHERE j.request_id = r.request_id AND j.event = 'resolved'))
   AND r.opened_at >= $3 - " + GroupingWindowCapSql + @"
   AND $4 <= r.window_until
 ORDER BY r.opened_at DESC
@@ -624,7 +627,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     private DateTime Now() => DateTime.SpecifyKind(_utcNow(), DateTimeKind.Utc);
 
     /// <summary>
-    /// Opens a request for <paramref name="alert"/>, joins it to an open or claimed request of the same server and family,
+    /// Opens a request for <paramref name="alert"/>, joins it to an open or claimed request (or a reported one, #6778) of the same server and family,
     /// or refuses at the route's limit, in one transaction. See the class remarks for the locks.
     /// </summary>
     /// <remarks>
@@ -633,9 +636,15 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     /// the send path's key falls back to the constant <c>{server}:{metric}</c> for an alert with no incidents, so a key arm
     /// would join every later alert of that metric for the request's whole life, after its brief was composed. The keys are
     /// recorded as the request's alert rows only.</para>
-    /// <para><b>A reported or closed request is final.</b> A later alert of the same server and family opens a NEW request,
-    /// even inside the same grouping window, and that request counts against the route's hourly and daily limits. This is
-    /// intended: the agent's report answered the alerts it was briefed on, and a condition that fires again is a new question.</para>
+    /// <para><b>A closed request is final. A reported request takes a quiet re-fire (#6778).</b> An alert joins a reported
+    /// request only when its metric is already on the request, its severity is not above the request's <c>max_severity</c>, the
+    /// request has no <c>resolved</c> journal row (#6003, D7), and the alert is inside the grouping window and the 4-hour cap.
+    /// Such a join brings no new metric and no higher severity, so <see cref="InvestigationEvents.JoinIsEvent"/> is false and it
+    /// is journaled <c>joined_quiet</c> (<see cref="InvestigationEvents.QuietJoin"/>), which no reader delivers. The state and the report do not change, and a join never counts
+    /// against a limit. Anything else opens a NEW request, as before. The claim deadline (<c>expires_at</c>) applies to open and
+    /// claimed requests only, because a reported request is past its claim and the 4-hour cap bounds it. The send path's
+    /// cooldown cannot decide this: the request is opened or joined before the throttle runs, because the generic webhook's
+    /// <c>{{investigation_json}}</c> needs it (#5821), so the store cannot know whether the page will be throttled.</para>
     /// </remarks>
     public async Task<InvestigationOpenResult> OpenOrJoinAsync(InvestigationAlert alert, CancellationToken cancellationToken = default)
     {
@@ -657,7 +666,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         if (string.Equals(alert.TriggerKind, InvestigationTriggerKinds.Alert, StringComparison.Ordinal))
         {
             await using var find = Command(connection, transaction, FindJoinSql,
-                P(alert.ServerId), P(alert.Family), P(now), P(alertTime), P(alert.MetricName));
+                P(alert.ServerId), P(alert.Family), P(now), P(alertTime), P(alert.MetricName), P(severity));
             await using var found = await find.ExecuteReaderAsync(cancellationToken);
             if (await found.ReadAsync(cancellationToken))
             {
