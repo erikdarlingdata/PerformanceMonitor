@@ -1418,6 +1418,8 @@ pre.code {
 .finops-tabs { flex-wrap: wrap; overflow-x: visible; }
 .finops-body { display: block; }
 .finops-panel { min-width: 0; }
+/* FinOps > Recommendations: the Finding and Detail prose cells keep a readable width; the grid's .table-wrap scrolls sideways, as Job History's message column does. */
+table.data td.rec-text { min-width: 16rem; }
 
 /* Locking & Contention index detail pane (#5311): opens above the table on a row click. */
 .locking-detail:empty { display: none; }

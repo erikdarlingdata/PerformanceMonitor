@@ -269,4 +269,20 @@ public sealed class WebOverviewStripsBehaviourTests
         Assert.Equal("328", after.GetProperty("width").GetString());
         Assert.StartsWith("0 0 328 ", after.GetProperty("viewBox").GetString());
     }
+
+    /// <summary>
+    /// The Waits strip's axis starts at 0 like the other strips. It used to start at the series minimum, so a window whose waits ran
+    /// from 292 to 500 ms/sec was drawn on a 292-500 axis and a small swing looked like a spike. The harness waits run 100 to 220.
+    /// </summary>
+    [Fact]
+    public void TheWaitsAxis_StartsAtZero_NotAtTheLowestSample()
+    {
+        var r = Run("waitsaxis");
+
+        var waits = r.GetProperty("waits").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal(2, waits.Length);
+        Assert.Equal("0", waits[1]);
+        var memory = r.GetProperty("memory").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal("0", memory[1]);
+    }
 }
