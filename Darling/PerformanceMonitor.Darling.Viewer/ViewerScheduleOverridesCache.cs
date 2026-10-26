@@ -52,12 +52,15 @@ internal sealed class ViewerScheduleOverridesCache
         }
         catch (Exception ex)
         {
+            /* Every caller that shared this read lands here. The first one to resume clears it and reports the failure; the
+               rest find it already cleared (or replaced by a newer read) and only return null, so one failed read is one
+               report, not one per waiting panel (#6766). */
             if (ReferenceEquals(_pending, pending))
             {
                 _pending = null;
+                _onFailure(ex);
             }
 
-            _onFailure(ex);
             return null;
         }
     }
