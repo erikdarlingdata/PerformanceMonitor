@@ -15,7 +15,7 @@ namespace Darling.Tests;
 /// <summary>
 /// The job-history statement moved from the viewer into Darling.Storage. These pins hold the no-filter text to a saved
 /// copy of the statement the viewer ran before the move, so the move cannot have changed the viewer's SQL, and pin the
-/// end-instant clauses to the filter that adds them. #6798 changed <c>job_stats</c> to one aggregate per (server, job), so
+/// end-instant clauses to the filter that adds them. #6798 changed <c>job_stats</c> to seek the listed jobs as an array, so
 /// the saved copies carry that change; <c>JobHistoryJobStatsSeekLiveTests</c> checks the rows it returns against the old text.
 /// </summary>
 [Trait("Stage", "Guard")]
@@ -98,25 +98,26 @@ base AS (
 ),
 job_stats AS (
     SELECT
-        b.server_id,
-        b.job_id,
+        so.server_id,
+        js.job_id,
         js.avg_success_duration,
         js.last_success_run_local
-    FROM (SELECT DISTINCT server_id, job_id FROM base) AS b
+    FROM (SELECT server_id, array_agg(DISTINCT job_id) AS job_ids FROM base GROUP BY server_id) AS b
     JOIN server_offsets AS so ON so.server_id = b.server_id
     CROSS JOIN LATERAL (
         SELECT
+            jh.job_id,
             AVG(jh.run_duration_seconds) AS avg_success_duration,
             MAX(jh.run_datetime) AS last_success_run_local
         FROM job_history AS jh
         WHERE jh.server_id = b.server_id
-        AND   jh.job_id = b.job_id
+        AND   jh.job_id = ANY (b.job_ids)
         AND   jh.step_id = 0
         AND   jh.run_status = 1
         AND   jh.collection_time >= $2
         AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes)
+        GROUP BY jh.job_id
     ) AS js
-    WHERE js.last_success_run_local IS NOT NULL
 )
 SELECT
     base.server_id,
@@ -226,25 +227,26 @@ base AS (
 ),
 job_stats AS (
     SELECT
-        b.server_id,
-        b.job_id,
+        so.server_id,
+        js.job_id,
         js.avg_success_duration,
         js.last_success_run_local
-    FROM (SELECT DISTINCT server_id, job_id FROM base) AS b
+    FROM (SELECT server_id, array_agg(DISTINCT job_id) AS job_ids FROM base GROUP BY server_id) AS b
     JOIN server_offsets AS so ON so.server_id = b.server_id
     CROSS JOIN LATERAL (
         SELECT
+            jh.job_id,
             AVG(jh.run_duration_seconds) AS avg_success_duration,
             MAX(jh.run_datetime) AS last_success_run_local
         FROM job_history AS jh
         WHERE jh.server_id = b.server_id
-        AND   jh.job_id = b.job_id
+        AND   jh.job_id = ANY (b.job_ids)
         AND   jh.step_id = 0
         AND   jh.run_status = 1
         AND   jh.collection_time >= $3
         AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes)
+        GROUP BY jh.job_id
     ) AS js
-    WHERE js.last_success_run_local IS NOT NULL
 )
 SELECT
     base.server_id,

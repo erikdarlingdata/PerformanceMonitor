@@ -2411,8 +2411,9 @@ END $do$;";
     /// outcomes and finds its last one. Through V150's <c>idx_job_history_server_run</c> it read the server's whole run-time range and
     /// dropped the step rows and the other jobs after fetching them from scattered heap pages: on a 210-server copy of a production
     /// store, 13.2 s of a 16.3 s cold read. This partial index holds only the successful outcomes (about 23% of the rows on one
-    /// production store), and its INCLUDE columns cover the aggregate and the <c>collection_time</c> floor, so the read seeks one job and
-    /// never visits the heap.
+    /// production store), and its INCLUDE columns cover the aggregate and the <c>collection_time</c> floor, so the read seeks the listed
+    /// jobs and never visits the heap. A compressed chunk keeps no rows in this index (past 7 days for <c>job_history</c>), so the read
+    /// takes those chunks through the compressed batches' <c>server_id</c> segment-by index, once per listed server, as it did before.
     ///
     /// <para><b>Cost, measured on PostgreSQL 17 with TimescaleDB 2.31</b> (42 servers, 9.8M rows in 101 twelve-hour chunks, 98 of them
     /// compressed, the step and status mix of one production store): the build took 0.18 s, because a compressed chunk's index is an

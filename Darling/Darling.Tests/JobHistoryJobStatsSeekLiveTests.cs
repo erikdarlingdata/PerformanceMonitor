@@ -24,8 +24,8 @@ namespace Darling.Tests;
 /// #6798: the Job History read's per-job statistics (<c>job_stats</c> in <see cref="DarlingJobHistoryReader.BuildJobHistorySql"/>)
 /// read each listed server's whole run-time range through <c>idx_job_history_server_run</c> and dropped the step rows, the
 /// failures and the other jobs after fetching them from the heap. V220 adds <c>idx_job_history_job_success</c>, a partial index on
-/// the successful job outcomes keyed by (server_id, job_id, run_datetime), and <c>job_stats</c> now aggregates one (server, job)
-/// pair at a time so the job is a seek key. This file pins three things: the rung builds the index on a migrated store, the
+/// the successful job outcomes keyed by (server_id, job_id, run_datetime), and <c>job_stats</c> now hands each server's listed
+/// jobs in as an array (<c>job_id = ANY (...)</c>) so the job is a seek key. This file pins three things: the rung builds the index on a migrated store, the
 /// shipped read seeks that index on the job, and the rows are the same as the pre-#6798 text's rows.
 /// </summary>
 [Collection("live-postgres")]
@@ -131,7 +131,7 @@ job_stats AS (
         await PgMigrations.MigrateAsync(connection, ct);
         await PrepareAsync(connection, scratch.ConnectionString, ct);
 
-        var now = DarlingMcpTestData.TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
+        var now = AnchoredNow();
         var sinceUtc = now.AddHours(-24);
         await SeedAsync(connection, now, ct);
 
@@ -143,7 +143,7 @@ job_stats AS (
     /// <summary>
     /// The rows the shipped read returns equal the rows the pre-#6798 <c>job_stats</c> gives on the same store: every column, the
     /// order, the last success and the long-running flag. The store holds what the CTE change could get wrong: a job with no
-    /// successful run in the window (NULL stats, and no stats row from the per-pair aggregate), a job whose only successes lack a
+    /// successful run in the window (NULL stats, and no stats row), a job whose only successes lack a
     /// duration (a last success with a NULL average), a long run, a success before the window, step rows and failures, and three
     /// server offsets. Checked at the 100-row cap and at a cap larger than the store, with and without an end instant.
     /// </summary>
@@ -161,7 +161,7 @@ job_stats AS (
         await PgMigrations.MigrateAsync(connection, ct);
         await PrepareAsync(connection, scratch.ConnectionString, ct);
 
-        var now = DarlingMcpTestData.TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
+        var now = AnchoredNow();
         var sinceUtc = now.AddHours(-24);
         await SeedAsync(connection, now, ct);
 
@@ -208,19 +208,34 @@ job_stats AS (
         return false;
     }
 
-    /// <summary>The shipped statement with its <c>job_stats</c> swapped for dev's (plus the end-instant clause when one is set).</summary>
+    /// <summary>
+    /// The shipped statement with its <c>job_stats</c> swapped for dev's (plus the end-instant clause when one is set). Both sides
+    /// are cut to LF first: <c>.gitattributes</c> checks the reader out CRLF on Windows, so the shipped literal carries CRLF there
+    /// and LF here, and a search for an LF anchor in CRLF text finds nothing (the round 1 CI failure).
+    /// </summary>
     private static string WithOldJobStats(string shipped, string statsUntilSql = "")
     {
+        shipped = ToLf(shipped);
         var start = shipped.IndexOf("job_stats AS (", StringComparison.Ordinal);
-        var end = shipped.IndexOf("\nSELECT\n    base.server_id", start, StringComparison.Ordinal);
+        var end = start < 0 ? -1 : shipped.IndexOf("\nSELECT\n    base.server_id", start, StringComparison.Ordinal);
         Assert.True(start >= 0 && end > start, "the shipped statement no longer has the job_stats CTE this test swaps");
-        var old = OldJobStatsCte.Replace("\r\n", "\n", StringComparison.Ordinal).TrimEnd();
-        old = old.Replace(
-            "AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes)\n",
-            "AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes)" + statsUntilSql + "\n",
-            StringComparison.Ordinal);
-        return shipped[..start] + old + shipped[end..];
+        var old = ToLf(OldJobStatsCte).TrimEnd();
+        const string WindowLine = "AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes)\n";
+        Assert.Contains(WindowLine, old, StringComparison.Ordinal);
+        old = old.Replace(WindowLine, WindowLine[..^1] + statsUntilSql + "\n", StringComparison.Ordinal);
+        var swapped = shipped[..start] + old + shipped[end..];
+        Assert.Contains("GROUP BY jh.job_id", swapped, StringComparison.Ordinal);
+        Assert.NotEqual(shipped, swapped);
+        return swapped;
     }
+
+    private static string ToLf(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
+
+    /// <summary>
+    /// The seed's "now" (#5608): <see cref="LiveClock.AnchoredEnd"/>, so the 30 hours of rows cross a chunk boundary at the same place
+    /// whatever hour the test runs. The read takes its window from the bound <c>$1</c>, never from the database clock.
+    /// </summary>
+    private static DateTime AnchoredNow() => DateTime.SpecifyKind(LiveClock.AnchoredEnd(), DateTimeKind.Utc);
 
     private static async Task PrepareAsync(NpgsqlConnection connection, string connectionString, CancellationToken ct)
     {
