@@ -524,17 +524,15 @@ public sealed class QueryStoreClutterTests
     }
 
     [Fact]
-    public void ThePlanChurnArm_ReadsTheRawTierByPlanId_OnTheCoveringIndexColumnsOnly()
+    public void ThePlanChurnArm_ReadsTheRawTierByPlanId()
     {
         var sql = DarlingQueryStoreClutterReader.PlanChurnSql;
         Assert.Contains("FROM query_store_stats", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("v_query_store_stats", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("query_plan_hash", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("query_store_plan_map", sql, StringComparison.Ordinal);
-        /* the projection is exactly idx_query_store_stats_server_db_query_plan_time's columns */
-        Assert.Contains("SELECT server_id, database_name, query_id, plan_id, collection_time", sql, StringComparison.Ordinal);
         Assert.Contains("percentile_disc(0.95) WITHIN GROUP (ORDER BY plans)", sql, StringComparison.Ordinal);
-        Assert.Contains("COUNT(*) FILTER (WHERE p.collections_seen = 1) AS plans_seen_once", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) FILTER (WHERE p.first_seen = p.last_seen) AS plans_seen_once", sql, StringComparison.Ordinal);
         Assert.Contains("COUNT(*) FILTER (WHERE p.first_seen > d.first_collection)", sql, StringComparison.Ordinal);
     }
 

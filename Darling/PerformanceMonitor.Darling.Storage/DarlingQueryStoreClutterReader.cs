@@ -280,8 +280,10 @@ public static class DarlingQueryStoreClutterReader
     /// <summary>
     /// Per (server, database): plan cardinality and churn over the window's raw <c>query_store_stats</c> rows.
     /// Reads the base table, not <c>v_query_store_stats</c>, for the reason <c>get_query_store_top</c> does —
-    /// the raw tier is the only tier that carries <c>plan_id</c>. The projection is exactly the columns of
-    /// <c>idx_query_store_stats_server_db_query_plan_time</c>, so the walk can be index-only.
+    /// the raw tier is the only tier that carries <c>plan_id</c>. The statement reads only the columns of
+    /// <c>idx_query_store_stats_server_db_query_plan_time</c>, so the walk can be index-only. It aggregates straight from the
+    /// table (#6808): <c>MIN</c>/<c>MAX</c> per plan and a <c>DISTINCT</c> over (server, database, collection_time), so no
+    /// <c>COUNT(DISTINCT)</c> sorts a materialised copy of every raw row in the window.
     ///
     /// <para>The cumulative-interval mechanics make "seen once" mean what the tool says it means: the
     /// collector re-fetches an OPEN interval every cycle while its <c>last_execution_time</c> advances
@@ -296,7 +298,7 @@ public static class DarlingQueryStoreClutterReader
     /// every figure here is per database, so the predicate narrows the source rows).
     /// </summary>
     public const string PlanChurnSql = """
-        WITH rows_in_window AS
+        WITH rows_in_window AS NOT MATERIALIZED
         (
             SELECT server_id, database_name, query_id, plan_id, collection_time
             FROM query_store_stats
@@ -312,8 +314,8 @@ public static class DarlingQueryStoreClutterReader
                 database_name,
                 query_id,
                 plan_id,
-                COUNT(DISTINCT collection_time) AS collections_seen,
-                MIN(collection_time) AS first_seen
+                MIN(collection_time) AS first_seen,
+                MAX(collection_time) AS last_seen
             FROM rows_in_window
             GROUP BY server_id, database_name, query_id, plan_id
         ),
@@ -330,8 +332,12 @@ public static class DarlingQueryStoreClutterReader
                 database_name,
                 MIN(collection_time) AS first_collection,
                 MAX(collection_time) AS last_collection,
-                COUNT(DISTINCT collection_time) AS collections_observed
-            FROM rows_in_window
+                COUNT(*) AS collections_observed
+            FROM
+            (
+                SELECT DISTINCT server_id, database_name, collection_time
+                FROM rows_in_window
+            ) AS collections
             GROUP BY server_id, database_name
         ),
         plan_facts AS
@@ -340,7 +346,7 @@ public static class DarlingQueryStoreClutterReader
                 p.server_id,
                 p.database_name,
                 COUNT(*) AS distinct_plans,
-                COUNT(*) FILTER (WHERE p.collections_seen = 1) AS plans_seen_once,
+                COUNT(*) FILTER (WHERE p.first_seen = p.last_seen) AS plans_seen_once,
                 COUNT(*) FILTER (WHERE p.first_seen > d.first_collection) AS plans_first_seen_after_first_collection
             FROM per_plan AS p
             JOIN per_database AS d
