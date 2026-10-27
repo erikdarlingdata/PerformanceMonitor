@@ -388,7 +388,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
         {
             /* #6829: a server monitored since before the baseline window whose kept data starts after it has a baseline that retention
                dropped, not one that was never collected, so the two causes below would both be false. */
-            var kept = await RetentionCause.ForServerAsync(postgres, serverId, baselineStart, start, end, floor, tableSpans is not null, cancellationToken);
+            var kept = await RetentionCause.ForServerAsync(postgres, serverId, baselineStart, start, floor, tableSpans is not null, cancellationToken);
             return McpHelpers.Status(
                 "unavailable",
                 $"{serverName} has no Query Store capture in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline window before this window, so there is no baseline to compare against and no regression can be detected however badly one regressed. This is NOT a clean bill of health. "
@@ -431,7 +431,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
 
             if (!filteredBaseline)
             {
-                var keptSome = await RetentionCause.ForDatabaseAsync(postgres, serverId, baselineStart, start, end, floor, tableSpans is not null, one, cancellationToken);
+                var keptSome = await RetentionCause.ForDatabaseAsync(postgres, serverId, baselineStart, start, floor, tableSpans is not null, one, cancellationToken);
                 return McpHelpers.Status(
                     "unavailable",
                     $"{serverName} has no Query Store capture of {scope} in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline window before this window, so there is no baseline for {that} to compare against and no regression of {(one ? "its" : "their")} queries can be detected however badly one regressed. This is NOT a clean bill of health: no query in {that} was compared. " + (keptSome ?? $"Either {thatPossessive} whole collected history falls inside the last {hours_back} hour(s), or {(one ? "it has" : "they have")} none older than the baseline lookback yet."),

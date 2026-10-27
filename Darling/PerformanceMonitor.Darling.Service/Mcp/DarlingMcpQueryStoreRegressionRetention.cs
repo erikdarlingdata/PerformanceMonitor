@@ -21,14 +21,17 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// The answer's two stock causes (the server's whole history sits inside the window, or it has nothing older than the baseline
 /// lookback) are both false for a server whose collector ran before the baseline window began and whose Query Store data starts after it: on a store that keeps 4 days of raw <c>query_store_stats</c> a 168 hour read compares a baseline of days 14 to 7
 /// back, which the store dropped. The collection log says whether the collector ran then; the floor is where the read's data starts
-/// (the same instant the answer's <c>effective_start</c> reports).
+/// (the same instant the answer's <c>effective_start</c> reports). The floor is the oldest surviving row, which equals the store's
+/// retention only on unbroken collection, so the sentences report where the data starts and never a retention figure. Both checks
+/// allow <see cref="DurationTrendRouting.TruncationSlack"/> (90 minutes): the floor may sit that much before the baseline window's end
+/// and still count as after it, and a collector run that much after the baseline window's start still counts as before it.
 /// </summary>
 internal static class RetentionCause
 {
     /// <summary>The server-wide answer. Null (keep the stock causes) unless the collector ran before the baseline window began and
-    /// the data starts at or after the baseline window's end, so the whole baseline window is older than what is kept.</summary>
+    /// the data starts at or after the baseline window's end (less the slack), so the whole baseline window is older than what is kept.</summary>
     internal static async Task<string?> ForServerAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime baselineStart, DateTime baselineEnd, DateTime windowEnd, DateTime? floor, bool fromTables,
+        NpgsqlDataSource postgres, int serverId, DateTime baselineStart, DateTime baselineEnd, DateTime? floor, bool fromTables,
         CancellationToken cancellationToken)
     {
         if (floor is not { } kept || floor.Value + DurationTrendRouting.TruncationSlack < baselineEnd)
@@ -41,15 +44,17 @@ internal static class RetentionCause
             return null;
         }
 
-        return $"The baseline window ({Date(baselineStart)} to {Date(baselineEnd)}) is older than the {DaysKept(kept, windowEnd, fromTables)} this store keeps, "
-            + "so there is no baseline to compare against. A smaller hours_back puts the baseline window inside the data that is kept.";
+        /* A smaller hours_back moves the baseline window's END later (it ends where the recent window starts), so the end can pass the
+           data's start. The baseline is then the partial span from there, never the whole 7 days, which the kept data cannot hold. */
+        return $"The baseline window ({Date(baselineStart)} to {Date(baselineEnd)}) is older than this server's {DataKind(fromTables)}, which starts {Date(kept)}, "
+            + $"so there is no baseline to compare against. An hours_back shorter than the time since {Date(kept)} moves the baseline's end past that date, and the read then compares against the partial baseline from {Date(kept)} to that end.";
     }
 
     /// <summary>The answer for a database filter, reached only when the server has a baseline. The kept data starts inside the baseline
     /// window, so a database's older baseline may have been dropped, and the sentence says it may be that rather than that it is. Null
     /// unless the collector ran before the baseline window began and the data starts after its start.</summary>
     internal static async Task<string?> ForDatabaseAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime baselineStart, DateTime baselineEnd, DateTime windowEnd, DateTime? floor, bool fromTables,
+        NpgsqlDataSource postgres, int serverId, DateTime baselineStart, DateTime baselineEnd, DateTime? floor, bool fromTables,
         bool singleDatabase, CancellationToken cancellationToken)
     {
         if (!RawWindowFloor.IsTruncated(floor, baselineStart) || floor is not { } kept)
@@ -62,16 +67,12 @@ internal static class RetentionCause
             return null;
         }
 
-        return $"This store keeps {DaysKept(kept, windowEnd, fromTables)} and the baseline window ({Date(baselineStart)} to {Date(baselineEnd)}) reaches back past that, "
+        return $"This server's {DataKind(fromTables)} starts {Date(kept)} and the baseline window ({Date(baselineStart)} to {Date(baselineEnd)}) reaches back past that, "
             + $"so either {(singleDatabase ? "that database's" : "those databases'")} older baseline was dropped by retention or {(singleDatabase ? "it has" : "they have")} none older than what is kept.";
     }
 
-    /// <summary>"4 days of raw Query Store data", from the kept data's start to the window's end (at least one day).</summary>
-    private static string DaysKept(DateTime floor, DateTime windowEnd, bool fromTables)
-    {
-        var days = Math.Max(1, (int)Math.Round((windowEnd - floor).TotalDays, MidpointRounding.AwayFromZero));
-        return $"{days} {(days == 1 ? "day" : "days")} of {(fromTables ? "Query Store history" : "raw Query Store data")}";
-    }
+    /// <summary>What the floor is the start of: "raw Query Store data" on the raw path, "Query Store history" where the per-interval tables served.</summary>
+    private static string DataKind(bool fromTables) => fromTables ? "Query Store history" : "raw Query Store data";
 
     private static string Date(DateTime value) => value.ToString("MMM d", CultureInfo.InvariantCulture);
 
