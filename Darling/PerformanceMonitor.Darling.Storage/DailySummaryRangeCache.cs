@@ -21,7 +21,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// though every day but today (and yesterday, briefly after midnight) is closed and its rows do not change.
 /// This holds the CLOSED portion of one range as one block until the next UTC day boundary plus
 /// <see cref="ClosedGrace"/> (#6809; it was one hour, which made the first load of every hour a cold read of
-/// about 30 closed days); every refresh inside that window re-runs the statement only over the days still open
+/// about 30 closed days), except the days before the retention horizon, which are re-read once per
+/// <see cref="SubHorizonTtl"/> so a purge shows within the hour; every refresh inside that window re-runs the statement only over the days still open
 /// and joins them to the block. After that, one refresh recomputes the whole range and repopulates it. Expired
 /// blocks are dropped on the next miss, and the cache never holds more than <see cref="MaxBlocks"/> blocks at once, evicting the oldest
 /// first (#4232 follow-up: the key carries the range, so every distinct server/range/day combination otherwise
@@ -66,6 +67,12 @@ public sealed class DailySummaryRangeCache<TRow>
     /// not a tuned limit.</summary>
     public const int MaxBlocks = 1024;
 
+    /// <summary>#6809: how long the days before the trust floor (the retention horizon) are served from a block.
+    /// One hour is the pre-#6809 lifetime of every block, so a purge shows as fast as it did before, and a window
+    /// that reaches past the horizon re-reads those days once per hour (as before) and never once per call.
+    /// The rest of the block lives until <see cref="BlockExpiryUtc"/>.</summary>
+    public static readonly TimeSpan SubHorizonTtl = TimeSpan.FromHours(1);
+
     private readonly Func<DateTime> _clock;
     private readonly ConcurrentDictionary<BlockKey, CachedBlock> _blocks = new();
 
@@ -80,9 +87,11 @@ public sealed class DailySummaryRangeCache<TRow>
 
     private readonly record struct BlockKey(object StoreKey, int ServerId, DateTime FromDate, DateTime ToDate, string RoutedSql, string ScopeKey);
 
-    /// <summary><paramref name="ClosedRows"/> holds the days in [<paramref name="TrustFromUtc"/>, <paramref name="ClosedEndUtc"/>).
-    /// <paramref name="ExpiresAtUtc"/> is the next UTC day boundary plus <see cref="ClosedGrace"/> after the block was built.</summary>
-    private sealed record CachedBlock(List<TRow> ClosedRows, DateTime ClosedEndUtc, DateTime TrustFromUtc, DateTime ComputedAtUtc, DateTime ExpiresAtUtc);
+    /// <summary><paramref name="ClosedRows"/> holds every closed day in the range, oldest first. The rows before
+    /// <paramref name="TrustFromUtc"/> are the sub-horizon segment: they are re-read once <paramref name="SubHorizonExpiresAtUtc"/>
+    /// passes (<see cref="SubHorizonTtl"/>), the rest live until <paramref name="ExpiresAtUtc"/>, the next UTC day
+    /// boundary plus <see cref="ClosedGrace"/> after the block was built.</summary>
+    private sealed record CachedBlock(List<TRow> ClosedRows, DateTime ClosedEndUtc, DateTime TrustFromUtc, DateTime SubHorizonExpiresAtUtc, DateTime ComputedAtUtc, DateTime ExpiresAtUtc);
 
     /// <summary>#6809: the <c>trustFromUtc</c> both callers pass: the day after the retention horizon. The horizon
     /// day itself can be half-deleted on the DELETE purge path, so it is read live too. One definition for the
@@ -116,11 +125,13 @@ public sealed class DailySummaryRangeCache<TRow>
     /// <param name="scopeKey">#4925: names the scope the rows were read under (see
     /// <see cref="DailySummaryAzureMasterScope.CacheScopeKey"/>); a read under another scope never shares a block.</param>
     /// <param name="day">Reads a row's UTC day, to split a freshly-read whole range into its closed/open rows.</param>
-    /// <param name="trustFromUtc">#6809: days before this UTC day (the retention horizon) are never served from a
-    /// block and are re-read on every call. A purge is an event that can land any time after the horizon moves, or
-    /// after an operator shortens retention, and a closed day kept for up to a day would keep showing rows the
-    /// store no longer holds (and judge it past_horizon, not purged). Those days are cheap to read: their signal
-    /// tables are what the purge removes. Null means no floor.</param>
+    /// <param name="trustFromUtc">#6809: days before this UTC day (the retention horizon) are served from the block
+    /// for at most <see cref="SubHorizonTtl"/>, not for the whole block lifetime. A purge can land any time after the
+    /// horizon moves, or after an operator shortens retention, and a closed day kept for up to a day would keep
+    /// showing rows the store no longer holds (and judge it past_horizon, not purged). They are NOT re-read per call:
+    /// the day spine reads nine sources for them (the collection log at 60 days, the alert log at 90, the query
+    /// rollup), so a per-call read would cost a Viewer calendar on an older month 27 to 30 days on every refresh
+    /// tick. Null means no floor.</param>
     /// <param name="runRange">Runs the statement for an arbitrary half-open [start, end) sub-range and returns its
     /// rows, oldest day first. Called with the WHOLE [<paramref name="fromDate"/>, <paramref name="toDate"/>) on a
     /// cache miss, and with only the open sub-range on a hit.</param>
@@ -170,37 +181,45 @@ public sealed class DailySummaryRangeCache<TRow>
         var key = new BlockKey(storeKey, serverId, fromDate, toDate, routedSql, scopeKey ?? "");
         var floorUtc = trustFromUtc is { } trust && trust > fromDate ? trust : fromDate;
 
-        /* A block is served until it expires (next UTC day boundary plus ClosedGrace, #6809) and only if it
-           covers what "now" asks for: its own closed end must not be LATER than this call's (clock moved back) and
-           its trust floor not HIGHER (a retention raised since the build would leave a hole). A block built before yesterday's two-hour grace expired
-           has an EARLIER closed end: that is not a miss, the days from its closed end onward are read now and the
-           newly closed ones are folded into the block, so the grace crossing costs one short read, not the range. */
+        /* A block is served until it expires (next UTC day boundary plus ClosedGrace, #6809) and only if its own
+           closed end is not LATER than this call's (clock moved back). A block built before yesterday's two-hour
+           grace expired has an EARLIER closed end: that is not a miss, the days from its closed end onward are read
+           now and the newly closed ones are folded into the block, so the grace crossing costs one short read, not
+           the range. */
         if (_blocks.TryGetValue(key, out var cached)
             && nowUtc < cached.ExpiresAtUtc
-            && cached.ClosedEndUtc <= closedEndUtc
-            && cached.TrustFromUtc <= floorUtc)
+            && cached.ClosedEndUtc <= closedEndUtc)
         {
-            var joined = new List<TRow>(cached.ClosedRows.Count + 8);
+            var block = cached;
 
-            /* Days before the trust floor (older than the retention horizon) are read live every time. */
-            var liveEnd = floorUtc < cached.ClosedEndUtc ? floorUtc : cached.ClosedEndUtc;
-            if (liveEnd > fromDate)
+            /* #6809: the sub-horizon segment is re-read once per SubHorizonTtl, or at once when the floor rose past
+               the block's (retention shortened, or the horizon moved). A floor that fell (retention raised) needs
+               nothing: the block holds every closed day. */
+            var trustUtc = floorUtc > block.TrustFromUtc ? floorUtc : block.TrustFromUtc;
+            var subEndUtc = trustUtc < block.ClosedEndUtc ? trustUtc : block.ClosedEndUtc;
+            if (subEndUtc > fromDate && (nowUtc >= block.SubHorizonExpiresAtUtc || trustUtc > block.TrustFromUtc))
             {
-                joined.AddRange(await runRange(fromDate, liveEnd, cancellationToken).ConfigureAwait(false));
+                var subRows = await runRange(fromDate, subEndUtc, cancellationToken).ConfigureAwait(false);
+                var refreshed = new List<TRow>(subRows.Count + block.ClosedRows.Count);
+                refreshed.AddRange(subRows);
+                refreshed.AddRange(block.ClosedRows.Where(row => day(row) >= subEndUtc));
+                block = block with { ClosedRows = refreshed, TrustFromUtc = trustUtc, SubHorizonExpiresAtUtc = nowUtc + SubHorizonTtl };
+                _blocks[key] = block;
             }
 
-            joined.AddRange(cached.ClosedRows.Where(row => day(row) >= floorUtc));
+            var joined = new List<TRow>(block.ClosedRows.Count + 8);
+            joined.AddRange(block.ClosedRows);
 
-            if (cached.ClosedEndUtc < toDate)
+            if (block.ClosedEndUtc < toDate)
             {
-                var tailRows = await runRange(cached.ClosedEndUtc, toDate, cancellationToken).ConfigureAwait(false);
+                var tailRows = await runRange(block.ClosedEndUtc, toDate, cancellationToken).ConfigureAwait(false);
                 joined.AddRange(tailRows);
 
-                if (closedEndUtc > cached.ClosedEndUtc)
+                if (closedEndUtc > block.ClosedEndUtc)
                 {
-                    var grown = new List<TRow>(cached.ClosedRows);
+                    var grown = new List<TRow>(block.ClosedRows);
                     grown.AddRange(tailRows.Where(row => day(row) < closedEndUtc));
-                    _blocks[key] = cached with { ClosedRows = grown, ClosedEndUtc = closedEndUtc };
+                    _blocks[key] = block with { ClosedRows = grown, ClosedEndUtc = closedEndUtc };
                 }
             }
 
@@ -208,7 +227,7 @@ public sealed class DailySummaryRangeCache<TRow>
         }
 
         var full = await runRange(fromDate, toDate, cancellationToken).ConfigureAwait(false);
-        var closedRows = full.Where(row => day(row) < closedEndUtc && day(row) >= floorUtc).ToList();
+        var closedRows = full.Where(row => day(row) < closedEndUtc).ToList();
 
         /* #4232 follow-up: the key carries the range, so nothing ever replaces a block for a range nobody asks
            for again (a one-off days_back value, a server that's gone). Trim on every miss rather than on a
@@ -230,7 +249,7 @@ public sealed class DailySummaryRangeCache<TRow>
             }
         }
 
-        _blocks[key] = new CachedBlock(closedRows, closedEndUtc, floorUtc, nowUtc, BlockExpiryUtc(nowUtc));
+        _blocks[key] = new CachedBlock(closedRows, closedEndUtc, floorUtc, nowUtc + SubHorizonTtl, nowUtc, BlockExpiryUtc(nowUtc));
         return full;
     }
 

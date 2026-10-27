@@ -436,15 +436,21 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
     /// method. Keyed inside <see cref="DailySummaryRangeCache{TRow}"/> by (store, server, range, routed
     /// statement); <see cref="NpgsqlDataSource"/> has no value-equality override, so distinct stores — including
     /// a live test's own <c>ScratchPostgres</c> database — never collide on one store's cached block.</summary>
-    internal static readonly DailySummaryRangeCache<DailySummaryReadRow> RangeCache = new();
+    internal static DailySummaryRangeCache<DailySummaryReadRow> RangeCache { get; private set; } = new();
 
-    /// <summary>#4232: test-only reset for <see cref="RangeCache"/>. This cache is by design stale (until the next UTC day plus the grace) for
-    /// a closed day -- a row that lands late for a closed day (an outage catch-up, a backfill) shows within the
-    /// hour, not immediately (the #4232 ruling). A live test that mutates a closed day's rows and reads the same
+    /// <summary>#4232: test-only reset for <see cref="RangeCache"/>. This cache is by design stale for a closed day -- a row that lands late for
+    /// a closed day (an outage catch-up, a backfill) shows once the block expires (the next UTC day boundary plus
+    /// ClosedGrace, #6809), not immediately (the #4232 ruling). A day before the retention horizon is re-read after
+    /// <see cref="DailySummaryRangeCache{TRow}.SubHorizonTtl"/> instead, so a purge shows within the hour. A live test that mutates a closed day's rows and reads the same
     /// server/range again through the same store object is testing THAT contract, not a product bug, unless it
     /// calls this between the mutation and the re-read to force the re-read to hit the store. Never call this
     /// from product code -- only <c>Darling.Tests</c> can even see it (Service's own <c>InternalsVisibleTo</c>).</summary>
-    internal static void ResetRangeCacheForTests() => RangeCache.Clear();
+    internal static void ResetRangeCacheForTests() => RangeCache = new();
+
+    /// <summary>#6809: test-only. Replaces <see cref="RangeCache"/> with an empty one that reads <paramref name="clock"/>,
+    /// so a live test can move time past the sub-horizon bound without a sleep. <see cref="ResetRangeCacheForTests"/>
+    /// puts the wall clock back.</summary>
+    internal static void UseRangeCacheClockForTests(Func<DateTime> clock) => RangeCache = new(clock);
 
     /// <summary>One <see cref="DailySummaryReadRow"/> per collected day in the half-open [fromDate, toDate)
     /// window (the viewer's <c>GetDailySummaryRangeAsync</c>).
@@ -556,7 +562,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
             runRange: (start, end, ct) => RunRangeAsync(sql, scope, start, end, ct),
             scopeKey: DailySummaryAzureMasterScope.CacheScopeKey(scope),
             cancellationToken: cancellationToken,
-            trustFromUtc: DailySummaryRangeCache<DailySummaryReadRow>.TrustFloorFor(horizon)); // #6809: the horizon day and older are re-read, never served from a day-long block
+            trustFromUtc: DailySummaryRangeCache<DailySummaryReadRow>.TrustFloorFor(horizon)); // #6809: the horizon day and older are re-read within the hour, never held for a day
 
         /* #4925: an Azure SQL Database master with separately monitored databases counts only its own blocking and
            deadlocks. A scoping fault (the statement drifted, a graph read timed out) must not take the day away: it

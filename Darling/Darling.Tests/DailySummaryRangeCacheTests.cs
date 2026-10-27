@@ -372,12 +372,39 @@ public sealed class DailySummaryRangeCacheTests
     }
 
     [Fact]
-    public async Task DaysAtOrBeforeTheRetentionHorizon_AreReadLive_SoAPurgeShowsAtOnce()
+    public async Task PastHorizonDays_AreReadOncePerSubHorizonTtl_NotOncePerCall()
+    {
+        /* A Viewer calendar on an older month: most of the window is before the retention horizon. */
+        var now = new DateTime(2026, 9, 25, 10, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var store = Month();
+        var trustFrom = D(21); // the 20th is the horizon day
+
+        Task<List<TestRow>> Read() => cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day,
+            store.Run, "", CancellationToken.None, trustFrom);
+
+        await Read();
+        store.Reads.Clear();
+
+        /* Ten auto-refresh ticks inside the hour: not one of them touches a closed day, past the horizon or not. */
+        for (var i = 1; i <= 10; i++)
+        {
+            now = new DateTime(2026, 9, 25, 10, 5 * i, 0, DateTimeKind.Utc);
+            var rows = await Read();
+            Assert.Equal(25, rows.Count);
+        }
+
+        Assert.Equal(10, store.Reads.Count);
+        Assert.All(store.Reads, read => Assert.Equal((D(25), D(26)), read));
+    }
+
+    [Fact]
+    public async Task PurgeOfPastHorizonDays_ShowsAfterTheSubHorizonTtl_ReadingOnlyThoseDays()
     {
         var now = new DateTime(2026, 9, 25, 10, 0, 0, DateTimeKind.Utc);
         var cache = new DailySummaryRangeCache<TestRow>(() => now);
         var store = Month();
-        var trustFrom = D(3).AddDays(1); // horizon is the 3rd
+        var trustFrom = D(4); // horizon is the 3rd
 
         Task<List<TestRow>> Read() => cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day,
             store.Run, "", CancellationToken.None, trustFrom);
@@ -388,13 +415,45 @@ public sealed class DailySummaryRangeCacheTests
         store.Days.Remove(D(10)); // inside retention: not a purge target, so the block still holds it
         store.Reads.Clear();
 
-        now = now.AddHours(2);
+        now = now.AddMinutes(59);
+        var early = await Read();
+        Assert.Contains(early, r => r.Day == D(2)); // still inside the sub-horizon bound: served, no read
+        Assert.DoesNotContain(store.Reads, read => read.Start < D(25));
+
+        now = now.AddMinutes(1);
+        store.Reads.Clear();
         var rows = await Read();
 
         Assert.DoesNotContain(rows, r => r.Day == D(2) || r.Day == D(3));
         Assert.Contains(rows, r => r.Day == D(10)); // cached
         Assert.Contains((D(1), D(4)), store.Reads); // the purge-exposed days are read, only they
         Assert.DoesNotContain(store.Reads, read => read.Start >= D(4) && read.Start < D(25));
+
+        /* And the next tick is cached again. */
+        store.Reads.Clear();
+        now = now.AddMinutes(5);
+        await Read();
+        Assert.Equal((D(25), D(26)), Assert.Single(store.Reads));
+    }
+
+    [Fact]
+    public async Task RetentionShortenedAfterBlockBuilt_ReadsTheNewlyUntrustedDaysAtOnce()
+    {
+        var now = new DateTime(2026, 9, 25, 10, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var store = Month();
+
+        Task<List<TestRow>> Read(DateTime? trustFrom) => cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day,
+            store.Run, "", CancellationToken.None, trustFrom);
+
+        await Read(D(4));
+        store.Days.Remove(D(8)); // the shorter retention purged it
+        store.Reads.Clear();
+
+        now = now.AddMinutes(5);
+        var rows = await Read(D(10)); // the floor rose to the 10th inside the hour
+        Assert.DoesNotContain(rows, r => r.Day == D(8));
+        Assert.Contains((D(1), D(10)), store.Reads);
     }
 
     [Fact]
