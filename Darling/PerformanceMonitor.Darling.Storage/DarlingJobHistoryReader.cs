@@ -345,9 +345,10 @@ ORDER BY jh.category_name";
     /// the <c>collection_time</c> floor, so a cold read no longer visits the heap. Before, the per-server
     /// aggregate read the server's whole run-time range through <c>idx_job_history_server_run</c> and dropped
     /// the step rows, the failures and the other jobs after reading them from scattered heap pages. An
-    /// aggregate with no GROUP BY returns one row even when nothing matches, so the <c>WHERE
-    /// js.last_success_run_local IS NOT NULL</c> drops a pair with no successful run in the window, which the old
-    /// GROUP BY never produced. <c>MAX(run_datetime)</c> is the test, not the average, because the window
+    /// aggregate with no GROUP BY returns one row even when nothing matches. The <c>WHERE
+    /// js.last_success_run_local IS NOT NULL</c> drops that row so the CTE's own row set matches the old GROUP BY, which never
+    /// produced one. The output does not need it: the one LEFT JOIN reads both columns NULL-tolerantly, so a pair with no
+    /// success lands on NULL and false either way. <c>MAX(run_datetime)</c> is the test, not the average, because the window
     /// predicate already requires a non-null <c>run_datetime</c> while <c>run_duration_seconds</c> is nullable:
     /// a job whose successful runs all lack a duration keeps its last success and a NULL average, as before. The
     /// values, the window predicates and the LEFT JOIN are unchanged, so the rows are identical.

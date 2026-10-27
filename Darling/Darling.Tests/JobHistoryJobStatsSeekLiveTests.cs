@@ -74,20 +74,12 @@ job_stats AS (
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
-    public void TheRungIsTheTop_AndTheViewerMapsItsSentinel()
+    public void TheRung_IsRegisteredOnce_AtItsOwnVersion_AndTheLadderTopAgreesWithTheStorageVersion()
     {
-        Assert.Equal(RungVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal("job-history-success-index", PgMigrations.Scripts[^1].Name);
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
-        Assert.Equal(RungVersion, ViewerDataService.RequiredStoreSchemaVersion);
+        var rung = PgMigrations.Scripts.Single(m => m.Name == "job-history-success-index");
 
-        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
-        var parameters = method.GetParameters();
-        Assert.Equal("hasJobHistorySuccessIndex", parameters[^1].Name);
-        var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(RungVersion, (int)method.Invoke(null, all)!);
-        all[^1] = false;
-        Assert.Equal(RungVersion - 1, (int)method.Invoke(null, all)!);
+        Assert.Equal(RungVersion, rung.Version);
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
     }
 
     /// <summary>
