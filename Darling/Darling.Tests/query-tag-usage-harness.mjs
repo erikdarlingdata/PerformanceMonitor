@@ -85,10 +85,12 @@ const answerFor = (name, q) => {
     const tagOnly = !!q.get("tag");
     const fleet = !q.get("server");
     const sections = fleet
-      ? [{ section: "plan_cache", status: "ok", source: "collect.query_stats_io_hourly (hourly rollup)", tier: "hourly", window_end: "2026-10-26T21:00:00Z", window_edges_note: HOURLY_NOTE, servers: [planCache("a", tagOnly), planCache("b", tagOnly)], fleet_total: fig(18, 8) }, { section: "query_store", status: "empty", source: "collect.query_store_hash_hourly + collect.query_store_interval_wide", tier: "hourly+tail", window_edges_note: QS_NOTE }, deadlocks()]
+      ? [{ section: "plan_cache", status: "ok", source: "collect.query_stats_io_hourly (hourly rollup)", tier: "hourly", window_end: "2026-10-26T21:00:00Z", window_edges_note: HOURLY_NOTE, served_start: "2026-10-26T13:00:00.0000000Z", start_dropped_from: "2026-10-26T12:50:01.0234751Z", materialized_to: "2026-10-26T21:00:00Z", end_hour_counted_whole: false, servers: [planCache("a", tagOnly), planCache("b", tagOnly)], fleet_total: fig(18, 8) }, { section: "query_store", status: "empty", source: "collect.query_store_hash_daily + collect.query_store_hash_hourly + collect.query_store_interval_wide", tier: "daily+hourly+tail", window_edges_note: QS_NOTE, served_start: "2026-10-26T23:00:00.0000000Z", start_dropped_from: "2026-10-26T22:17:00.0000000Z" }, deadlocks()]
       : [planCache(null, tagOnly), deadlocks()];
     return { scope: fleet ? "fleet" : "server", hours_back: 24, sections_additive: false, sections };
   }
+  /* #6831: the empty Query Store regressions answer, with the shared cut-window sentence the service sends (the test passes it in). */
+  if (name === "get_query_store_regressions") return { status: "empty", message: process.env.HARNESS_CUT_WINDOW_MESSAGE, hints: { effective_start: "2026-10-22T20:02:00Z" } };
   if (name === "get_top_queries_by_cpu") {
     const tag = q.get("tag");
     const rows = !tag ? ROWS : tag === "untagged" ? ROWS.filter((r) => !r.tag) : ROWS.filter((r) => r.tag === tag || (r.tag || "").startsWith(tag + " / "));
@@ -144,6 +146,7 @@ const out = {};
   out.fleetRead = out.firstRead;
   out.fleetText = cardOfSection("plan_cache").textContent;
   /* #6794: the hourly fleet section shows the read's own edges note. */
+  out.fleetPageText = main.textContent;
   out.fleetHourlyNote = all(cardOfSection("plan_cache")).filter((n) => n.className === "muted").map((n) => n.textContent);
   out.fleetQueryStoreNote = all(cardOfSection("query_store")).filter((n) => n.className === "muted").map((n) => n.textContent);
   /* #6157: a server's heading is its display name; a server with none keeps its key. */
@@ -166,6 +169,21 @@ const out = {};
   await flush();
   out.tagRead = readsOf("get_resource_use_by_tag")[0];
   out.tagRows = rowsOf(cardOfSection("plan_cache"));
+}
+
+/* #6831: the other edge cases, said from the fields. */
+out.edgeCases = [
+  { tier: "hourly", window_edges_note: "n", served_start: "2026-10-26T13:00:00Z", window_end: "2026-10-27T11:00:00Z", start_dropped_from: "2026-10-26T12:59:00Z", materialized_to: null, end_hour_counted_whole: true },
+  { tier: "hourly", window_edges_note: "n", served_start: "2026-10-26T13:00:00Z", window_end: null, start_dropped_from: null, materialized_to: null, end_hour_counted_whole: false },
+  { tier: "hourly", window_edges_note: null, window_end: "2026-10-27T11:00:00Z" },
+].map((b) => modules.page.edgesText(b));
+out.sources = ["collect.query_stats", "collect.query_stats_io_hourly (hourly rollup)", "collect.query_store_interval_wide", "collect.query_store_hash_hourly + collect.query_store_interval_wide", "collect.dmv_blocking_snapshots"].map((x) => modules.page.sourceText(x));
+
+/* #6831: the page's empty-panel sentence names the time the store's data starts, not the field and the hints it came from. */
+{
+  const res = await modules.util.readTool("get_query_store_regressions", { server: "a", hours: 24 });
+  out.regressionsEmptyKind = res.kind;
+  out.regressionsEmptyMessage = res.message;
 }
 
 /* #6800: a by-tag read refused busy shows a "retrying" note, not an error, and is sent once more after the Retry-After it names.

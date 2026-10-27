@@ -160,6 +160,14 @@ const FIELD_WORDS = [
 /* The rewrites that name one known internal token each (a hints pointer, a window parameter, a denial flag). They are the
    parameter names the service's own sentences write, never a field or table name: those can be real object names in a
    store error (pg_wraparound_stats, last_error), so they stay out of this list and are rewritten only by plainText. */
+/* #6831: what each system_health event type the health parser reads is called on the page. */
+const SYSTEM_HEALTH_EVENT_WORDS = {
+  sp_server_diagnostics_component_result: "server diagnostics",
+  scheduler_monitor_system_health_ring_buffer_recorded: "scheduler monitor",
+  memory_broker_ring_buffer_recorded: "memory broker",
+  memory_node_oom_ring_buffer_recorded: "memory node out-of-memory",
+};
+
 function namedTokenText(text) {
   let t = text;
 
@@ -356,6 +364,18 @@ export function plainText(text) {
     /\btop_application_name, top_application_connections, top_host_name and top_host_connections are\b/g,
     "the top application, its connection count, the top host and its connection count are",
   );
+  /* #6831: the system_health event names ("1431 scheduler_monitor_system_health_ring_buffer_recorded event(s) were captured") in words, with
+     the count's own plural. The same words say the name inside "No ... events were captured". */
+  t = t.replace(
+    /(?<![\w.])(\d[\d,]*) (sp_server_diagnostics_component_result|scheduler_monitor_system_health_ring_buffer_recorded|memory_broker_ring_buffer_recorded|memory_node_oom_ring_buffer_recorded) event\(s\)( were)?/g,
+    (m, n, type, were) => n + " " + SYSTEM_HEALTH_EVENT_WORDS[type] + (n === "1" ? " event" + (were ? " was" : "") : " events" + (were || "")),
+  );
+  t = t.replace(
+    /\b(sp_server_diagnostics_component_result|scheduler_monitor_system_health_ring_buffer_recorded|memory_broker_ring_buffer_recorded|memory_node_oom_ring_buffer_recorded)\b/g,
+    (m, type) => SYSTEM_HEALTH_EVENT_WORDS[type],
+  );
+  /* #6831: the empty cut-window sentence's pointer at hints.effective_start, when the page has no instant to put there (util.js names it when it has one). */
+  t = t.replace(/\bstarts at effective_start \(see hints\)/g, "starts partway into the window");
   /* "24 hour(s)", "288 collector run(s)": the count is known, so the word agrees with it ("1 hour", "24 hours", "2 queries"). */
   t = t.replace(/(?<![\w.])(\d[\d,]*) ((?:[a-z]+ )?[a-z]+)\(s\)/g, (m, n, word) => n + " " + (n === "1" ? word : /[^aeiou]y$/.test(word) ? word.slice(0, -1) + "ies" : word + "s"));
 

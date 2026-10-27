@@ -589,6 +589,18 @@ export function rowsUnder(data, key) {
   return [];
 }
 
+/**
+ * #6831: an empty answer's sentence for the page. The shared "cut window" sentence says the store's data starts at `effective_start (see
+ * hints)`, which points an MCP caller at a field the page never shows, so the time itself goes in its place, in the page's own clock, from the
+ * `effective_start` the same answer carries under `hints`. With no readable instant the clause says the data starts partway into the window.
+ */
+export function emptyMessageText(body) {
+  const said = String(body.message);
+  const at = body.hints && typeof body.hints.effective_start === "string" ? body.hints.effective_start : null;
+  if (!(at && parseUtc(at))) return plainText(said);
+  return plainText(said.replace(/\beffective_start \(see hints\)/g, localTime(at)));
+}
+
 /** Full localized date-time, or an em dash for null/unparseable. */
 export function localTime(s) {
   const d = parseUtc(s);
@@ -1266,7 +1278,7 @@ async function classifyResponse(resp) {
     }
     /* The message is the one the page shows: the service wrote it for an MCP client, so its internal names are put into
        words here (click-through 3 and 4). The envelope itself, in `data`, stays as the service sent it. */
-    return { kind: "empty", status: body.status, message: plainText(body.message), hints: body.hints || null, data: body };
+    return { kind: "empty", status: body.status, message: emptyMessageText(body), hints: body.hints || null, data: body };
   }
 
   if (resp.ok && raw && body === null) {

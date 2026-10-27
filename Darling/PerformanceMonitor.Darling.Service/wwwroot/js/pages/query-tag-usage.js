@@ -16,7 +16,7 @@
  * All server text reaches the DOM through el()/textContent.
  */
 
-import { el, mount, clear, onPageLeave, readTool, readToolWithinKeptHistory, keptWindowStrip, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, makeActivatable, fmtInt, fmtNum, retryOnceWhenBusy, busyRetryStrip } from "../util.js";
+import { el, mount, clear, onPageLeave, readTool, readToolWithinKeptHistory, keptWindowStrip, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, makeActivatable, fmtInt, fmtNum, retryOnceWhenBusy, busyRetryStrip, localTime, parseUtc } from "../util.js";
 
 import { pageRangePicker, windowOfSpec } from "../page-range.js";
 import { plainText } from "../plain-text.js";
@@ -133,6 +133,49 @@ function statusLine(block) {
   return el("div", { class: "muted", text: plainText(block.message) });
 }
 
+/** The section's source in words: the read names the relations it read, which the page has no use for (#6831). */
+export function sourceText(source) {
+  if (typeof source !== "string" || !source) return "";
+  const s = source.trim();
+  if (/^collect\.query_store_hash_daily \+ /.test(s)) return "daily and hourly Query Store tables, raw intervals for the edges";
+  if (/^collect\.query_store_hash_hourly \+ /.test(s)) return "hourly Query Store table, raw intervals for the edges";
+  if (s === "collect.query_store_interval_wide") return "Query Store intervals";
+  if (/_io_hourly \(hourly rollup\)$/.test(s)) return "hourly rollup";
+  if (s === "collect.query_stats" || s === "collect.procedure_stats") return "raw collections";
+  return plainText(s.replace(/collect\./g, "").replace(/_/g, " "));
+}
+
+/** "10 minutes", "1 minute": the gap between two instants, in whole minutes (a dropped first partial hour is under an hour). */
+function minutesBetween(fromIso, toIso) {
+  const a = parseUtc(fromIso);
+  const b = parseUtc(toIso);
+  if (!a || !b || b <= a) return null;
+  const m = Math.round((b.getTime() - a.getTime()) / 60000);
+  return m < 1 ? "under a minute" : m + (m === 1 ? " minute" : " minutes");
+}
+
+/**
+ * #6831: what the hour buckets moved at a section's edges, said in the page's own clock and words. The read sends the same edges as a note
+ * for an MCP caller (raw UTC stamps) and as fields (served_start, window_end, start_dropped_from, materialized_to, end_hour_counted_whole,
+ * tier); this is built from the fields. Null when the section is not an hourly read or its edges did not move.
+ */
+export function edgesText(block) {
+  if (!block || !block.window_edges_note || !(typeof block.tier === "string" && block.tier.includes("hourly"))) return null;
+  const at = (v) => (typeof v === "string" && parseUtc(v) ? localTime(v) : null);
+  const start = at(block.served_start);
+  const end = at(block.window_end);
+  const lead = (block.tier.includes("daily") ? "Daily and hourly data" : "Hourly data") + (block.tier.endsWith("+tail") ? ", with the raw intervals for the edges," : "");
+  const sentences = [];
+  if (start) sentences.push(lead + " from " + start + (end ? " to " + end : "") + ".");
+  const gap = minutesBetween(block.start_dropped_from, block.served_start);
+  if (gap) sentences.push("The " + gap + " before the first full hour " + (gap.startsWith("1 ") ? "is" : "are") + " not included.");
+  const built = at(block.materialized_to);
+  if (built) sentences.push("The hourly rollup is built only up to " + built + ", so nothing after that is included.");
+  else if (block.end_hour_counted_whole && end) sentences.push("The last hour is counted whole, so the data runs to " + end + ", past the end of the window.");
+  else if (!end && !block.materialized_to && block.tier === "hourly") sentences.push("How far the hourly rollup is built is not known, so its end is not checked.");
+  return sentences.length ? sentences.join(" ") : null;
+}
+
 /** A section with no rows in the window says so in one line; the table of zeros under it is not drawn. */
 function isEmptyBlock(block) {
   return !!block && block.status === "empty";
@@ -140,15 +183,16 @@ function isEmptyBlock(block) {
 
 /** One section: its heading, then one table (a server) or one table per server with the fleet line (Fleet). */
 export function sectionCard(section, block, onTag, range = "this time range", servers = []) {
-  const parts = [el("h3", {}, [section.title, el("span", { class: "panel-sub", text: block && block.source ? " " + block.source : "" })])];
+  const parts = [el("h3", {}, [section.title, el("span", { class: "panel-sub", text: block && block.source ? " " + sourceText(block.source) : "" })])];
   if (!block) {
     parts.push(emptyStrip("The read sent no " + section.title + " section."));
     return el("div", { class: "panel", "data-section": section.name }, parts);
   }
   if (section.name === "deadlocks") parts.push(el("div", { class: "muted", text: DEADLOCK_NOTE }));
   /* #6794: an hourly-rollup section says which edges the hour buckets moved (the note names the materialization ceiling). */
-  if (block.window_edges_note) parts.push(el("div", { class: "muted", text: plainText(block.window_edges_note) }));
-  else if (block.tier === "hourly" && block.window_end) parts.push(el("div", { class: "muted", text: "Read from the hourly rollup up to " + block.window_end + "." }));
+  const edges = edgesText(block);
+  if (edges) parts.push(el("div", { class: "muted", text: edges }));
+  else if (block.tier === "hourly" && block.window_end && parseUtc(block.window_end)) parts.push(el("div", { class: "muted", text: "Read from the hourly rollup up to " + localTime(block.window_end) + "." }));
   if (isEmptyBlock(block) && !Array.isArray(block.servers)) {
     parts.push(emptyStrip("None in " + range + "."));
     return el("div", { class: "panel", "data-section": section.name }, parts);

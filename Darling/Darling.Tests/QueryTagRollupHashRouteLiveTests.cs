@@ -329,6 +329,9 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             Assert.Equal("hourly+tail", section.GetProperty("tier").GetString());
             Assert.Equal(HourlyWindowEdges.StartNote(toolStart, snappedStart), section.GetProperty("window_edges_note").GetString());
             Assert.Equal(McpHelpers.FormatEffectiveStart(snappedStart), section.GetProperty("effective_start").GetString());
+            /* #6831: the dropped start and the first instant read, as fields for the page's own words. */
+            Assert.Equal(McpHelpers.FormatEffectiveStart(snappedStart), section.GetProperty("served_start").GetString());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(toolStart), section.GetProperty("start_dropped_from").GetString());
 
             /* The Viewer's section reads through the same reader and shows the same sentence in its note. */
             await using var viewer = new ViewerDataService(a.Scratch.ConnectionString);

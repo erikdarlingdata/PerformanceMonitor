@@ -59,11 +59,17 @@ internal static class DarlingQueryTagRollupRouting
             {
                 var (_, servedEnd) = HourlyWindowEdges.ServedSpan(windowStart, null, windowEnd, ceiling);
                 var edges = HourlyWindowEdges.Note(windowStart, null, windowEnd, ceiling);
+                var fields = HourlyWindowEdges.Describe(windowStart, null, windowEnd, ceiling);
                 return new StatsRoute(true, ceiling, new Dictionary<string, object?>
                 {
                     ["tier"] = "hourly",
                     ["window_end"] = servedEnd is DateTime end ? McpHelpers.FormatEffectiveStart(end) : null,
                     ["window_edges_note"] = string.IsNullOrEmpty(edges) ? null : edges,
+                    /* #6831: the same edges as fields, so the page says them in its own clock and words instead of reading the note. */
+                    ["served_start"] = McpHelpers.FormatEffectiveStart(fields.ServedStart),
+                    ["start_dropped_from"] = fields.StartDroppedFrom is DateTime dropped ? McpHelpers.FormatEffectiveStart(dropped) : null,
+                    ["materialized_to"] = fields.MaterializedTo is DateTime built ? McpHelpers.FormatEffectiveStart(built) : null,
+                    ["end_hour_counted_whole"] = fields.EndCountedWhole,
                 });
             }
 

@@ -237,6 +237,42 @@ public sealed class WebPlainTextTests
         Assert.Equal("3 queries failed, 1 query retried, 2 policies skipped.", o[6]);
     }
 
+    /* #6831: System Events says what was captured in words, with the count's own plural, for every event type the health parser reads. */
+    [Fact]
+    public void TheSystemHealthEventNames_AreSaidInWords_WithTheCountsPlural()
+    {
+        string[] types =
+        [
+            SystemHealthParser.SchedulerMonitorEvent, SystemHealthParser.SpServerDiagnosticsEvent,
+            SystemHealthParser.MemoryBrokerEvent, SystemHealthParser.MemoryNodeOomEvent,
+        ];
+        var inputs = types.SelectMany(t => new[]
+        {
+            $"1431 {t} event(s) were captured for SQL2025 in the last 24 hour(s) and none qualified.",
+            $"1 {t} event(s) were captured for SQL2025 in the last 1 hour(s) and none qualified.",
+            $"No {t} events were captured for SQL2025 in the last 24 hour(s).",
+        }).ToArray();
+        var o = Run(inputs, out _);
+        Assert.StartsWith("1431 scheduler monitor events were captured for SQL2025 in the last 24 hours", o[0]);
+        Assert.StartsWith("1 scheduler monitor event was captured", o[1]);
+        Assert.StartsWith("No scheduler monitor events were captured", o[2]);
+        foreach (var line in o)
+        {
+            Assert.DoesNotContain("_", line);
+            Assert.DoesNotContain("event(s)", line);
+        }
+    }
+
+    /* #6831: the cut-window sentence with no instant to name (util.js puts the time in when the answer carries one). */
+    [Fact]
+    public void TheCutWindowSentence_WithNoInstantToName_DoesNotPointAtHints()
+    {
+        var o = Run([McpHelpers.CutWindowNothingMessage], out _);
+        Assert.DoesNotContain("effective_start", o[0]);
+        Assert.DoesNotContain("see hints", o[0]);
+        Assert.Contains("starts partway into the window, so", o[0]);
+    }
+
     /* #5644 W8: the clauses that point an MCP caller at a parameter the page has no control for. */
     [Fact]
     public void ParameterClauses_ForAnMcpCaller_AreDroppedOrSaidInThePagesWords()
