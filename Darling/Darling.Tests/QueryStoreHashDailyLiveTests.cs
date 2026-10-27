@@ -125,7 +125,10 @@ GROUP BY w.server_id, w.query_hash";
         }
         finally
         {
-            await ComposeStampLiveSupport.CleanupAsync(scratch, connection, source, bodySucceeded);
+            await source.DisposeAsync();
+            await connection.DisposeAsync();
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+            await scratch.DisposeAsync();
         }
     }
 
@@ -179,7 +182,10 @@ GROUP BY w.server_id, w.query_hash";
         }
         finally
         {
-            await ComposeStampLiveSupport.CleanupAsync(scratch, connection, source, bodySucceeded);
+            await source.DisposeAsync();
+            await connection.DisposeAsync();
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+            await scratch.DisposeAsync();
         }
     }
 
@@ -220,7 +226,10 @@ GROUP BY w.server_id, w.query_hash";
         }
         finally
         {
-            await ComposeStampLiveSupport.CleanupAsync(scratch, connection, source, bodySucceeded);
+            await source.DisposeAsync();
+            await connection.DisposeAsync();
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+            await scratch.DisposeAsync();
         }
     }
 
@@ -262,7 +271,10 @@ GROUP BY w.server_id, w.query_hash";
         }
         finally
         {
-            await ComposeStampLiveSupport.CleanupAsync(scratch, connection, source, bodySucceeded);
+            await source.DisposeAsync();
+            await connection.DisposeAsync();
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+            await scratch.DisposeAsync();
         }
     }
 
