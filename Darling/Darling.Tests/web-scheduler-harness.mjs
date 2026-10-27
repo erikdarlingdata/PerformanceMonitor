@@ -14,8 +14,8 @@ const policy = await import(pathToFileURL(policyPath).href);
 
 const stripped = fs.readFileSync(appPath, "utf8")
   .replace(/^import .*;[ \t]*\r?$/gm, "")
-  .replace(/^start\(\);[ \t]*\r?$/m, "");
-if (/^import /m.test(stripped) || /^start\(\);/m.test(stripped)) {
+  .replace(/^startFrontDoor\(\)\.catch\(\(\) => \{\}\)\.then\(start\);[ \t]*\r?$/m, "");
+if (/^import /m.test(stripped) || /^startFrontDoor\(/m.test(stripped)) {
   throw new Error("app.js layout changed: the harness cannot separate its imports and its start() call");
 }
 
@@ -122,6 +122,22 @@ const sandbox = {
   initSeverityColorSettings() {},
   readTool: async () => ({ kind: "empty" }),
   getSession: async () => null,
+  /* #6840: no front door here, so the address is the route and every link is the one it was. */
+  frontDoor: () => false,
+  currentStore: () => null,
+  routeHash: () => sandbox.location.hash,
+  splitStoreHash: (h) => ({ store: null, hash: h }),
+  storeHash: (h) => h,
+  storeHeaders: (h) => h,
+  loadingStrip: () => ({}),
+  initFrontDoor: async () => {},
+  refreshPicker() {},
+  frontDoorStores: () => [],
+  isKnownStore: () => false,
+  locateServer: async () => ({ kind: "error", message: "" }),
+  ambiguousStrip: () => ({}),
+  locateFailureStrip: () => ({}),
+  paintStoreServerLists() {},
   listViews: async () => [],
   onViewsChanged() {},
 };

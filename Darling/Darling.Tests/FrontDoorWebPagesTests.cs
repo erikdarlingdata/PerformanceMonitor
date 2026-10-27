@@ -163,7 +163,7 @@ public sealed class FrontDoorWebPagesTests
 
         // the choice: one link per store, each opening the same route in that store
         Assert.Contains("web02 is in use1 and use2.", r.GetProperty("message").GetString());
-        var links = r.GetProperty("links").EnumerateArray().Select(l => (l.GetProperty("text").GetString(), l.GetProperty("href").GetString())).ToArray();
+        var links = r.GetProperty("links").EnumerateArray().Select(l => (l.GetProperty("text").GetString()!, l.GetProperty("href").GetString()!)).ToArray();
         Assert.Equal(new[] { ("use1", "#/s/use1/server/web02/queries"), ("use2", "#/s/use2/server/web02/queries") }, links);
 
         // a store name that looks like markup is text in the strip and encoded in the link
@@ -226,7 +226,7 @@ public sealed class FrontDoorWebPagesTests
         Assert.Equal(new[] { "use2 is not answering" }, r.GetProperty("errors").EnumerateArray().Select(e => e.GetString()).ToArray());
 
         // only the current store's server lights up as the open page
-        var items = r.GetProperty("items").EnumerateArray().Select(i => (i.GetProperty("server").GetString(), i.GetProperty("active").GetBoolean())).ToArray();
+        var items = r.GetProperty("items").EnumerateArray().Select(i => (i.GetProperty("server").GetString()!, i.GetProperty("active").GetBoolean())).ToArray();
         Assert.Equal(new[] { ("alpha", true), ("charlie", false) }, items);
 
         Assert.Equal("#/s/%3Ci%3Euse3%3C%2Fi%3E/server/charlie", r.GetProperty("otherHash").GetString());
