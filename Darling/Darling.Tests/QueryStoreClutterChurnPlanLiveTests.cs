@@ -47,7 +47,7 @@ public sealed class QueryStoreClutterChurnPlanLiveTests
         /* the whole seed, then a window that starts in the middle of it (the 24 h shape: older collections fall out and
            the arrivals, the first collection and the seen-once count all move) */
         var whole = anchor.AddDays(-7);
-        var cut = QueryStoreClutterChurnProbe.CollectionTime(anchor, 12);
+        var cut = QueryStoreClutterChurnProbe.CollectionTime(anchor, 4);
         var end = anchor;
 
         foreach (var start in new[] { whole, cut })

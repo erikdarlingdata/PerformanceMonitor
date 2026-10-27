@@ -298,7 +298,16 @@ public static class DarlingQueryStoreClutterReader
     /// every figure here is per database, so the predicate narrows the source rows).
     /// </summary>
     public const string PlanChurnSql = """
-        WITH per_plan AS
+        WITH rows_in_window AS NOT MATERIALIZED
+        (
+            SELECT server_id, database_name, query_id, plan_id, collection_time
+            FROM query_store_stats
+            WHERE server_id = ANY($1::int[])
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        ),
+        per_plan AS
         (
             SELECT
                 server_id,
@@ -307,11 +316,7 @@ public static class DarlingQueryStoreClutterReader
                 plan_id,
                 MIN(collection_time) AS first_seen,
                 MAX(collection_time) AS last_seen
-            FROM query_store_stats
-            WHERE server_id = ANY($1::int[])
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+            FROM rows_in_window
             GROUP BY server_id, database_name, query_id, plan_id
         ),
         per_query AS
@@ -331,11 +336,7 @@ public static class DarlingQueryStoreClutterReader
             FROM
             (
                 SELECT DISTINCT server_id, database_name, collection_time
-                FROM query_store_stats
-                WHERE server_id = ANY($1::int[])
-                AND   collection_time >= $2
-                AND   collection_time <= $3
-                AND   ($4::text[] IS NULL OR database_name = ANY($4))
+                FROM rows_in_window
             ) AS collections
             GROUP BY server_id, database_name
         ),

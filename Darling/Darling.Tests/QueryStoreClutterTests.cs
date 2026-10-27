@@ -524,7 +524,7 @@ public sealed class QueryStoreClutterTests
     }
 
     [Fact]
-    public void ThePlanChurnArm_ReadsTheRawTierByPlanId_OnTheCoveringIndexColumnsOnly()
+    public void ThePlanChurnArm_ReadsTheRawTierByPlanId()
     {
         var sql = DarlingQueryStoreClutterReader.PlanChurnSql;
         Assert.Contains("FROM query_store_stats", sql, StringComparison.Ordinal);

@@ -44,7 +44,7 @@ internal static class QueryStoreClutterChurnProbe
     private readonly record struct Raw(string Database, long Query, long Plan, int Index);
 
     /// <summary>The seed. db_big: 4000 plans, three to a query. Every fourth plan is seen in one collection only, the rest in 25 consecutive ones.
-    /// db_small: 6 plans of one query, collection indexes 3 to 5, one of them seen once.</summary>
+    /// db_small: 6 plans of one query, collection indexes 3 to 5, two of them seen once.</summary>
     private static List<Raw> Model()
     {
         var rows = new List<Raw>();
