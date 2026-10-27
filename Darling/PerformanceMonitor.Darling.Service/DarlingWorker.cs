@@ -2141,6 +2141,34 @@ LIMIT 1";
             return;
         }
 
+        /* #6840: a front door has no store of its own, so nothing below applies: no store connection, no migration, no collector,
+           no alerting, no retention and no heartbeat. The MCP and web hosts and the directory service are separate hosted
+           services and keep running; this worker has nothing left to do. Validate runs first (it does not ask a front door for
+           a postgres section) so a broken frontDoor block is reported the same way any other broken block is. */
+        if (config.IsFrontDoor)
+        {
+            foreach (var warning in config.FrontDoor.Warnings())
+            {
+                _logger.LogWarning("{Warning}", warning);
+            }
+
+            _logger.LogInformation(
+                "Front door mode: routing to {StoreCount} store(s). This process holds no store and runs no collectors, alerting, retention or heartbeat.",
+                config.FrontDoor.Stores.Count);
+
+            /* The worker task stays pending until shutdown instead of completing: this is a deliberate rest, not a stand-down
+               after a failure, so it publishes no collector verdict (the ping body keeps its start-up answer). Shutdown
+               cancels the wait, and that is the one silent exit. */
+            try
+            {
+                await Task.Delay(Timeout.Infinite, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
+
         /* #2339: publish the declared peer stores as soon as a VALIDATED config is in hand, so the web
            dashboard's read dispatch (which reuses the MCP tool methods) discloses the same peers even when
            the MCP endpoint is disabled. The MCP host publishes the identical snapshot from its own load;
