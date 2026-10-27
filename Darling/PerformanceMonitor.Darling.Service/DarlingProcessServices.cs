@@ -114,5 +114,13 @@ internal static class DarlingProcessServices
     services.AddSingleton<DarlingFrontDoorDirectory>();
     services.AddSingleton<IFrontDoorDirectory>(provider => provider.GetRequiredService<DarlingFrontDoorDirectory>());
     services.AddHostedService<DarlingFrontDoorDirectoryService>();
+
+    /* #6840 P2: the MCP peer client. It takes the directory lazily because the directory calls it for list_servers and it calls
+       the directory back to hold a store that refused its token. */
+    services.AddSingleton<IFrontDoorMcpPeers>(provider => new DarlingFrontDoorMcpPeers(
+        provider.GetRequiredService<FrontDoorConfig>(),
+        provider.GetRequiredService<IFrontDoorSecrets>(),
+        () => provider.GetRequiredService<IFrontDoorDirectory>(),
+        provider.GetRequiredService<ILogger<DarlingFrontDoorMcpPeers>>()));
     }
 }
