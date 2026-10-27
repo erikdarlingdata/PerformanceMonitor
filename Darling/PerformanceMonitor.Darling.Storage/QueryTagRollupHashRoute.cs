@@ -27,7 +27,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// done, for a pair whose <c>hash_built_seq</c> equals its <c>late_seq</c>. Everything else is a wide range: the partial first hour (the
 /// read start stays exact), every unbuilt hour (the open hour and the newest two or three included), every stale pair and the tail. Wide
 /// hours that touch are merged into one range. A later source (the daily table of step 3) adds a third list to <see cref="Plan"/> and a
-/// third arm to <see cref="QueryTagRollupSql.QueryStoreRoutedSql"/>: this class only decides which hours each source answers.</para>
+/// third arm to <see cref="QueryTagRollupSql.QueryStoreRoutedSqlFor"/>: this class only decides which hours each source answers.</para>
 /// </summary>
 public static class QueryTagRollupHashRoute
 {
@@ -159,16 +159,30 @@ public static class QueryTagRollupHashRoute
         return plan.TablePairs.Count == 0 ? null : plan;
     }
 
-    /// <summary>The routed statement's command (<see cref="QueryTagRollupSql.QueryStoreRoutedSql"/>): the table pairs and the wide ranges as parallel arrays, and the window end.</summary>
+    /// <summary>
+    /// The routed statement's command (<see cref="QueryTagRollupSql.QueryStoreRoutedSqlFor"/>): the table pairs as parallel arrays, the
+    /// window end, and one (servers, from, to) triple per DISTINCT wide range, each range with the servers that share it. The statement has
+    /// one arm for each, so the planner sees every range's own bounds (#6800 part 2, step 2b).
+    /// </summary>
     public static NpgsqlCommand Command(NpgsqlConnection connection, Plan plan, DateTime windowEnd, int readSeconds)
     {
-        var command = new NpgsqlCommand(QueryTagRollupSql.QueryStoreRoutedSql, connection) { CommandTimeout = readSeconds };
+        var groups = plan.WideRanges
+            .GroupBy(r => (r.From, r.To))
+            .OrderBy(g => g.Key.From)
+            .ThenBy(g => g.Key.To)
+            .Select(g => (g.Key.From, g.Key.To, Servers: g.Select(r => r.ServerId).OrderBy(s => s).ToArray()))
+            .ToList();
+        var command = new NpgsqlCommand(QueryTagRollupSql.QueryStoreRoutedSqlFor(groups.Count), connection) { CommandTimeout = readSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = plan.TablePairs.Select(p => p.Hour).ToArray() });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = plan.TablePairs.Select(p => p.ServerId).ToArray() });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = plan.WideRanges.Select(r => r.ServerId).ToArray() });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = plan.WideRanges.Select(r => r.From).ToArray() });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = plan.WideRanges.Select(r => r.To).ToArray() });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified) });
+        foreach (var group in groups)
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = group.Servers });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(group.From, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(group.To, DateTimeKind.Unspecified) });
+        }
+
         return command;
     }
 }

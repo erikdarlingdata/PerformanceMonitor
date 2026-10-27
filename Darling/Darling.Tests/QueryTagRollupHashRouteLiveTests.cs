@@ -53,7 +53,7 @@ public sealed class QueryTagRollupHashRouteLiveTests
     /// The shared seed anchored at <see cref="LiveClock.AnchoredEnd"/> (#5608), measures added, tags mapped, hours built, and a table-floor row
     /// 72 hours back per server (a plain store's gate wants the table's own floor a purge margin below the window).
     /// </summary>
-    private static async Task<Arranged> ArrangeAsync(CancellationToken ct)
+    private static async Task<Arranged> ArrangeAsync(CancellationToken ct, bool collectionTimeOrder = false)
     {
         var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct, build: false, at: LiveClock.AnchoredEnd());
         await ExecAsync(connection, @"
@@ -67,6 +67,17 @@ INSERT INTO config.query_tag_map (server_id, key_kind, key, tag_id, source)
 SELECT m.server_id, 'hash', m.key, t.id, 'hand_hash'
 FROM t
 JOIN (VALUES (1, 'hash1', 'tag-a'), (1, 'hash2', 'tag-b'), (2, 'hash1', 'tag-a'), (2, 'hash3', 'tag-b')) AS m (server_id, key, name) ON m.name = t.name", ct);
+        if (collectionTimeOrder)
+        {
+            /* The store appends rows in the order they are collected, so its heap runs in collection_time order, which is what the BRIN
+               index on collection_time is for. The seed is inserted in whatever order its joins produce, which would make that index useless
+               in a test that reads a plan. A btree on the column lets CLUSTER lay the heap out in order, and goes again so the plan has
+               the indexes the store has. */
+            await ExecAsync(connection, "CREATE INDEX ix_zz_cluster_collection_time ON collect.query_store_interval_wide (collection_time)", ct);
+            await ExecAsync(connection, "CLUSTER collect.query_store_interval_wide USING ix_zz_cluster_collection_time", ct);
+            await ExecAsync(connection, "DROP INDEX collect.ix_zz_cluster_collection_time", ct);
+        }
+
         Assert.Equal(28, await ComposeStampLiveSupport.BuildAllAsync(source, ct, ComposeStampLiveSupport.ClockWithin(hourNow)));
         foreach (var server in Servers)
         {
@@ -323,6 +334,156 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
         finally
         {
             await CleanupAsync(a, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// #6800 part 2, step 2b: the wide side of the routed statement. A window of 24 hours whose wide ranges are the partial first hour and
+    /// the unbuilt tail (about 2 of the 24 hours) must scan about those rows of <c>collect.query_store_interval_wide</c>, not the window's.
+    /// Found by what the nodes do: every scan of the wide table or one of its partitions, plus every bitmap index scan of one of their
+    /// indexes (a plan that ANDs the <c>first_execution_time</c> index into the scan reads every entry of the window from it, and the heap
+    /// then only shows the few rows that survive the AND). Per node the rows it examined are Actual Rows plus Rows Removed by Filter plus
+    /// Rows Removed by Index Recheck, times Actual Loops. The heap is laid out in collection_time order, as the store's is, so the BRIN
+    /// index on collection_time can do what it is for, and sequential scans are turned off (the seed is a few thousand rows, where any
+    /// plan scans), so the plan shows the paths the statement allows.
+    /// </summary>
+    [Fact]
+    public async Task TheRoutedStatementsWideArms_ExamineAboutTheirRangesRows_NotTheWindows()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), "Set DARLING_TEST_PG to run this.");
+        var ct = TestContext.Current.CancellationToken;
+        var a = await ArrangeAsync(ct, collectionTimeOrder: true);
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(a.Connection, "CREATE INDEX IF NOT EXISTS ix_query_store_interval_wide_server_first_exec ON collect.query_store_interval_wide (server_id, first_execution_time)", ct);
+            await ExecAsync(a.Connection, "CREATE INDEX IF NOT EXISTS ix_query_store_interval_wide_collection_time_brin ON collect.query_store_interval_wide USING brin (collection_time) WITH (pages_per_range = 4)", ct);
+            await ExecAsync(a.Connection, "ANALYZE collect.query_store_interval_wide; ANALYZE collect.query_store_hash_hourly", ct);
+
+            var windowRows = await ComposeStampLiveSupport.CountAsync(
+                a.Connection, $"SELECT count(*) FROM collect.query_store_interval_wide WHERE collection_time >= TIMESTAMP '{At(a.Start)}' AND collection_time <= TIMESTAMP '{At(a.End)}'", ct);
+            Assert.True(windowRows > 10_000, "the window must hold many wide rows, got " + windowRows);
+
+            var window = Servers.ToDictionary(s => s, _ => a.Start);
+            await using var transaction = await a.Connection.BeginTransactionAsync(ct);
+            await ExecAsync(a.Connection, "SET LOCAL enable_seqscan = off", ct);
+            var plan = await QueryTagRollupHashRoute.TryPlanAsync(a.Connection, window, a.End, 120, ct);
+            Assert.NotNull(plan);
+            var wideHours = plan.WideRanges.Select(r => (r.To - r.From).TotalHours).Max();
+            Assert.InRange(wideHours, 0.5, 3.5);
+            await using var explain = QueryTagRollupHashRoute.Command(a.Connection, plan, a.End, 120);
+            explain.Transaction = transaction;
+            explain.CommandText = "EXPLAIN (ANALYZE, FORMAT JSON) " + explain.CommandText;
+            var json = Convert.ToString(await explain.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture)!;
+            using var document = JsonDocument.Parse(json);
+            var nodes = new List<JsonElement>();
+            void Walk(JsonElement node)
+            {
+                nodes.Add(node);
+                if (node.TryGetProperty("Plans", out var children))
+                {
+                    foreach (var child in children.EnumerateArray())
+                    {
+                        Walk(child);
+                    }
+                }
+            }
+
+            Walk(document.RootElement[0].GetProperty("Plan"));
+            string Text(JsonElement n, string name) => n.TryGetProperty(name, out var v) ? v.GetString() ?? string.Empty : string.Empty;
+            double Num(JsonElement n, string name) => n.TryGetProperty(name, out var v) ? v.GetDouble() : 0;
+
+            var wideScans = nodes.Where(n =>
+                Text(n, "Relation Name").StartsWith("query_store_interval_wide", StringComparison.Ordinal)
+                || (Text(n, "Node Type") == "Bitmap Index Scan" && Text(n, "Index Name").Contains("query_store_interval_wide", StringComparison.Ordinal))).ToList();
+            Assert.NotEmpty(wideScans);
+            var examined = wideScans.Sum(n => (Num(n, "Actual Rows") + Num(n, "Rows Removed by Filter") + Num(n, "Rows Removed by Index Recheck")) * Num(n, "Actual Loops"));
+            Assert.True(examined > 0, "the wide arms must have read rows");
+            Assert.True(
+                examined < windowRows / 2.0,
+                "the wide arms examined " + examined.ToString("0", CultureInfo.InvariantCulture) + " rows of a window that holds " + windowRows + "; nodes: "
+                + string.Join(" | ", wideScans.Select(n => Text(n, "Node Type") + " " + Text(n, "Relation Name") + Text(n, "Index Name") + " rows " + Num(n, "Actual Rows") + " loops " + Num(n, "Actual Loops"))));
+
+            await transaction.RollbackAsync(ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(a, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// The batched Query Store commands bind their servers and each server's own start (or stale pairs) as parallel arrays, and nothing
+    /// else would show a mis-pairing: when every server resolves to the same start, reversing one array changes no figure. Here the three
+    /// servers read from three different starts and each has stale hours of its own. Both batched commands are reached through the
+    /// reader's read after the gate (<see cref="DarlingQueryTagRollupReader.ReadAllowedAsync"/>, which <c>ReadQueryStoreAsync</c> calls),
+    /// the routed one and today's (reached by taking every built hour away), and each server's figures must equal that same server's
+    /// one-server read from the same start over the same window.
+    /// </summary>
+    [Fact]
+    public async Task TheBatchedCommands_PairEachServerWithItsOwnStartAndItsOwnStalePairs()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), "Set DARLING_TEST_PG to run this.");
+        var ct = TestContext.Current.CancellationToken;
+        var a = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            /* Stale pairs of each server's own: server 1 moves an interval between hours 20 and 21 back, server 2 two intervals at hour 12
+               (and changes a measure), server 3 gets one late row into hour 6 back. Every stale hour is after the server's own start. */
+            await ExecAsync(a.Connection, $@"
+UPDATE collect.query_store_interval_wide
+SET collection_time = collection_time - interval '1 hour', avg_cpu_time_us = 77777777
+WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIMESTAMP '{At(a.HourNow.AddHours(-20))}' AND collection_time < TIMESTAMP '{At(a.HourNow.AddHours(-20).AddMinutes(30))}'", ct);
+            await ExecAsync(a.Connection, $@"
+UPDATE collect.query_store_interval_wide
+SET collection_time = collection_time + interval '1 hour', avg_logical_io_reads = 4000
+WHERE server_id = 2 AND query_id IN (1, 2) AND collection_time >= TIMESTAMP '{At(a.HourNow.AddHours(-12))}' AND collection_time < TIMESTAMP '{At(a.HourNow.AddHours(-11))}'", ct);
+            await ComposeStampLiveSupport.InsertRowAsync(a.Connection, 3, a.HourNow.AddHours(-6).AddMinutes(7), 700_001, ct);
+
+            var starts = new Dictionary<int, DateTime>
+            {
+                [1] = a.Start,
+                [2] = a.HourNow.AddHours(-16).AddMinutes(41),
+                [3] = a.HourNow.AddHours(-9).AddMinutes(13),
+            };
+
+            await AssertEachServerEqualsItsOwnReadAsync(a, starts, expectRouted: true, ct);
+
+            /* No built hour left: the same three servers go through today's batched statement. */
+            var routed = await FleetFromAsync(a, starts, ct);
+            await ExecAsync(a.Connection, "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);
+            await AssertEachServerEqualsItsOwnReadAsync(a, starts, expectRouted: false, ct);
+            Assert.Equal(Canon(routed.Facts), Canon((await FleetFromAsync(a, starts, ct)).Facts));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(a, bodySucceeded);
+        }
+    }
+
+    /// <summary>The reader's read after the gate, on its own read-only snapshot, for the servers and starts given.</summary>
+    private static async Task<DarlingQueryTagRollupReader.QueryStoreRead> FleetFromAsync(Arranged a, Dictionary<int, DateTime> starts, CancellationToken ct)
+    {
+        await using var transaction = await a.Connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct);
+        var read = await DarlingQueryTagRollupReader.ReadAllowedAsync(a.Connection, new Dictionary<int, DateTime>(starts), [], a.End, 120, ct);
+        await transaction.CommitAsync(ct);
+        return read;
+    }
+
+    private static async Task AssertEachServerEqualsItsOwnReadAsync(Arranged a, Dictionary<int, DateTime> starts, bool expectRouted, CancellationToken ct)
+    {
+        var fleet = await FleetFromAsync(a, starts, ct);
+        Assert.Equal(expectRouted, fleet.UsedHashHourly);
+        Assert.Equal(3, starts.Values.Distinct().Count());
+        foreach (var (server, start) in starts)
+        {
+            var own = await FleetFromAsync(a, new Dictionary<int, DateTime> { [server] = start }, ct);
+            Assert.False(own.UsedHashHourly, "a one-server read uses today's statement");
+            Assert.NotEmpty(own.Facts);
+            Assert.Equal(Canon(own.Facts), Canon(fleet.Facts.Where(f => f.ServerId == server)));
         }
     }
 }
