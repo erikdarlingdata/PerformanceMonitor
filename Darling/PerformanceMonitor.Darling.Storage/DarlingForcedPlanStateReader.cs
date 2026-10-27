@@ -185,6 +185,8 @@ LEFT JOIN query_plan_dim AS d
     /// $5 query_id or NULL, $6 plan_id or NULL (#6560: both narrow the read itself, before the cap, so a force past the cap is still found). The cap cuts the LAST rows of this order: a force that fails (a failure count or
     /// a reason) in its database's newest capture first, then the other forces of the newest capture, then the removed ones, each by database and plan
     /// id, so a standing force that needs a person is never what a cap drops. It reads one row past the cap so the caller can tell the read was cut.
+    /// First seen (#6833) comes from one grouped pass over the plan rows (<c>firsts</c>): the earliest row after the force's last absence. A correlated
+    /// per-force minimum scanned every captured row once per force (500 forces over 24 hours of captures took 11 seconds).
     /// </summary>
     internal static string ForcesSql(DatabaseFilter databases, int maxForces) => $@"
 WITH {BaseCtes(databases)},
@@ -193,13 +195,19 @@ absent AS (
     FROM (SELECT DISTINCT database_name, plan_id FROM plans) AS p
     JOIN win AS m ON m.database_name = p.database_name AND m.plan_id IS NULL
     WHERE NOT EXISTS (SELECT 1 FROM plans AS x WHERE x.database_name = p.database_name AND x.plan_id = p.plan_id AND x.collection_time = m.collection_time)
-    GROUP BY p.database_name, p.plan_id)
+    GROUP BY p.database_name, p.plan_id),
+firsts AS (
+    SELECT x.database_name, x.plan_id, MIN(x.collection_time) AS first_seen
+    FROM plans AS x
+    LEFT JOIN absent AS a ON a.database_name = x.database_name AND a.plan_id = x.plan_id
+    WHERE a.last_absent IS NULL OR x.collection_time > a.last_absent
+    GROUP BY x.database_name, x.plan_id)
 SELECT l.database_name, l.plan_id, l.query_id, l.plan_forcing_type, l.force_failure_count, l.last_force_failure_reason, l.collection_time,
-       (SELECT MIN(x.collection_time) FROM plans AS x WHERE x.database_name = l.database_name AND x.plan_id = l.plan_id AND (a.last_absent IS NULL OR x.collection_time > a.last_absent)),
+       f.first_seen,
        n.newest_capture,
        l.variant_plan_ids, l.plan_guide_name, l.plan_guide_enabled, l.plan_guide_scope
 FROM latest AS l
-LEFT JOIN absent AS a ON a.database_name = l.database_name AND a.plan_id = l.plan_id
+LEFT JOIN firsts AS f ON f.database_name = l.database_name AND f.plan_id = l.plan_id
 LEFT JOIN newest AS n ON n.database_name = l.database_name
 ORDER BY CASE WHEN l.collection_time >= n.newest_capture AND (l.force_failure_count > 0 OR btrim(COALESCE(l.last_force_failure_reason, '')) <> '') THEN 0
               WHEN l.collection_time >= n.newest_capture THEN 1
