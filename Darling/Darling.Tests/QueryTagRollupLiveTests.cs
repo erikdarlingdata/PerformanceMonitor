@@ -7,12 +7,14 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -539,6 +541,68 @@ public sealed class QueryTagRollupLiveTests
             Assert.True(result.Allowed.ContainsKey(ServerOne));
             var executions = QueryTagRollupSection.QueryStore.Measures.ToList().FindIndex(m => m.Name == "executions");
             Assert.Equal(7, result.Facts.Sum(f => f.Values[executions]));
+        });
+    }
+
+    /// <summary>#6794: the Query Store section is ONE statement for every server the gate allows, not one per server, and each server's
+    /// figures are still its own. Two covered servers: one statement runs, and each server's executions are the ones planted for it.</summary>
+    [Fact]
+    public async Task AFleetQueryStoreRead_RunsOneStatementForEveryAllowedServer_AndKeepsEachServersFigures()
+    {
+        await WithStoreAsync(async c =>
+        {
+            var now = DateTime.UtcNow;
+            await CoverQueryStoreAsync(c, ServerOne);
+            await CoverQueryStoreAsync(c, ServerTwo);
+            await QueryStoreAsync(c, ServerOne, "0xA1", 1, 4_000_000, 7);
+            await QueryStoreAsync(c, ServerTwo, "0xB1", 2, 4_000_000, 5);
+
+            var database = new NpgsqlConnectionStringBuilder(c.Store.ConnectionString).Database!;
+            using var counter = new NpgsqlCommandCounter(database, "query_store_interval_wide AS q", "GROUP BY q.server_id, m.tag_id");
+            var result = await DarlingQueryTagRollupReader.ReadQueryStoreAsync(c.Source, [ServerOne, ServerTwo], now.AddHours(-24), now, null, c.Ct);
+
+            Assert.Equal(1L, counter.Count);
+            Assert.Equal([ServerOne, ServerTwo], result.Allowed.Keys.Order());
+            var executions = QueryTagRollupSection.QueryStore.Measures.ToList().FindIndex(m => m.Name == "executions");
+            Assert.Equal(7, result.Facts.Where(f => f.ServerId == ServerOne).Sum(f => f.Values[executions]));
+            Assert.Equal(5, result.Facts.Where(f => f.ServerId == ServerTwo).Sum(f => f.Values[executions]));
+        });
+    }
+
+    /// <summary>#6794: the batched Query Store statement binds each server's own read start. Server two's start is an hour ago, so its row
+    /// from two hours ago is not read, while server one's row of the same age (its start is the window's) is.</summary>
+    [Fact]
+    public async Task TheBatchedQueryStoreStatement_BindsEachServersOwnReadStart()
+    {
+        await WithStoreAsync(async c =>
+        {
+            var now = DateTime.UtcNow;
+            foreach (var (server, queryId) in new[] { (ServerOne, 1L), (ServerTwo, 2L) })
+            {
+                await ExecAsync(c.Store,
+                    "INSERT INTO query_store_interval_wide (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, max_query_max_used_memory, runtime_stats_interval_id, interval_start_time_utc) VALUES ($1, $2, 'db1', $3, $3, 'Regular', $4, '0xAA', 3, 10, 10, 5, 1, 64, $3, $4)",
+                    c.Ct, now.AddHours(-2), server, queryId, now.AddHours(-2).AddMinutes(-10));
+            }
+
+            await using var command = new NpgsqlCommand(QueryTagRollupSql.QueryStoreSql, c.Store);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = new[] { ServerOne, ServerTwo } });
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp,
+                Value = new[] { DateTime.SpecifyKind(now.AddHours(-24), DateTimeKind.Unspecified), DateTime.SpecifyKind(now.AddHours(-1), DateTimeKind.Unspecified) },
+            });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(now, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(now.AddHours(-24), DateTimeKind.Unspecified) });
+            var servers = new List<int>();
+            await using (var reader = await command.ExecuteReaderAsync(c.Ct))
+            {
+                while (await reader.ReadAsync(c.Ct))
+                {
+                    servers.Add(reader.GetInt32(0));
+                }
+            }
+
+            Assert.Equal([ServerOne], servers);
         });
     }
 

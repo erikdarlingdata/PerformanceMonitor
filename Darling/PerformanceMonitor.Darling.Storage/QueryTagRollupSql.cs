@@ -17,7 +17,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// returns <c>server_id</c>, <c>tag_id</c> (NULL = no map row, the "untagged" bucket) and then the section's measures in the
 /// order <see cref="QueryTagRollupSection"/> lists them. Nothing evaluates a rule here: the map is the only thing joined.
 ///
-/// <para>Parameters: $1 server ids (<c>integer[]</c>), $2 window start and $3 window end (naive UTC <c>timestamp</c>). The hourly
+/// <para>Parameters: $1 server ids (<c>integer[]</c>), $2 window start and $3 window end (naive UTC <c>timestamp</c>), except <see cref="QueryStoreSql"/>, which binds a start per server. The hourly
 /// statements also take $4, the rollup's materialisation ceiling, through <see cref="CeilingPlaceholder"/>.</para>
 /// <para>The sections are never added together: the plan cache and Query Store count the same executions, and procedures overlap
 /// both. A caller key (blocking and deadlock rows) is <c>application, login, host, database</c> joined by <c>U+001F</c>, the key
@@ -69,7 +69,21 @@ public static class QueryTagRollupSql
         GROUP BY f.server_id, m.tag_id
         """;
 
-    /// <summary>Query Store: <c>collect.query_store_interval_wide</c> (the latest snapshot per interval), averages weighted by executions.</summary>
+    /// <summary>
+    /// Query Store: <c>collect.query_store_interval_wide</c> (the latest snapshot per interval), averages weighted by executions. ONE
+    /// statement for every server the gate allowed (#6794): it took one statement per server before, run in sequence, 42 of them on a
+    /// 42-server store. Each server keeps its own lower bound, the gate's <c>ReadStart</c>, so a server's rows are exactly the rows the
+    /// per-server statement returned. Parameters differ from the other statements: $1 the allowed server ids (<c>integer[]</c>), $2 each
+    /// server's read start in the same order (<c>timestamp[]</c>), $3 window end, $4 the earliest read start, which repeats the
+    /// <c>first_execution_time</c> floor as a constant so the day partitions below it are pruned (the table is partitioned on that column).
+    /// <para>The per-server start on <c>collection_time</c> is written <c>collection_time - read_start &gt;= interval '0'</c> on purpose, and
+    /// there is no constant <c>collection_time</c> floor: either one lets the planner AND the partition's <c>collection_time</c> index into
+    /// every server's scan, and that index is not keyed by server, so each of the 42 loops walked the whole day's entries (about 10 million
+    /// per loop). Measured on one production store with 42 servers over 24 hours, warm: 13.0 s with the index, 6.0 s without; each server's
+    /// scan is the <c>(server_id, first_execution_time)</c> range instead. The constant upper bound <c>q.collection_time &lt;= $3</c> stays
+    /// and is harmless: $3 is the window end, at or near now, so it keeps almost every row of the window's partitions and the planner has no
+    /// reason to scan the <c>collection_time</c> index for it. It filters the rows the per-server range already found.</para>
+    /// </summary>
     public static readonly string QueryStoreSql = $$"""
         SELECT q.server_id, m.tag_id,
                CAST(COALESCE(SUM(q.avg_cpu_time_us * q.execution_count), 0) AS double precision) AS cpu_ms,
@@ -78,13 +92,16 @@ public static class QueryTagRollupSql
                CAST(COALESCE(SUM(q.avg_logical_io_writes * q.execution_count), 0) AS double precision) AS logical_writes,
                CAST(COALESCE(SUM(q.execution_count), 0) AS double precision) AS executions,
                CAST(COALESCE(MAX(q.max_query_max_used_memory), 0) AS double precision) AS peak_memory_pages
-        FROM collect.query_store_interval_wide AS q
+        FROM unnest($1::integer[], $2::timestamp[]) AS s(server_id, read_start)
+        JOIN collect.query_store_interval_wide AS q
+               ON q.server_id = s.server_id
+              AND q.collection_time - s.read_start >= interval '0'
+              AND q.first_execution_time >= s.read_start - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
         LEFT JOIN config.query_tag_map AS m
                ON m.server_id = q.server_id AND m.key_kind = 'hash' AND m.key = q.query_hash
         WHERE q.server_id = ANY($1)
-        AND   q.collection_time >= $2
         AND   q.collection_time <= $3
-        AND   q.first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+        AND   q.first_execution_time >= $4 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
         AND   q.first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
         GROUP BY q.server_id, m.tag_id
         """;
