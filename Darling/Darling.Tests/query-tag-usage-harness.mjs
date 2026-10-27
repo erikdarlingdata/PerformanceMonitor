@@ -176,6 +176,7 @@ out.edgeCases = [
   { tier: "hourly", window_edges_note: "n", served_start: "2026-10-26T13:00:00Z", window_end: "2026-10-27T11:00:00Z", start_dropped_from: "2026-10-26T12:59:00Z", materialized_to: null, end_hour_counted_whole: true },
   { tier: "hourly", window_edges_note: "n", served_start: "2026-10-26T13:00:00Z", window_end: null, start_dropped_from: null, materialized_to: null, end_hour_counted_whole: false },
   { tier: "hourly", window_edges_note: null, window_end: "2026-10-27T11:00:00Z" },
+  { tier: "hourly", window_edges_note: "n", served_start: "2026-10-26T13:00:00Z", window_end: "2026-10-27T11:00:00Z", start_dropped_from: "2026-10-26T12:59:40Z", materialized_to: null, end_hour_counted_whole: false },
 ].map((b) => modules.page.edgesText(b));
 out.sources = ["collect.query_stats", "collect.query_stats_io_hourly (hourly rollup)", "collect.query_store_interval_wide", "collect.query_store_hash_hourly + collect.query_store_interval_wide", "collect.dmv_blocking_snapshots"].map((x) => modules.page.sourceText(x));
 

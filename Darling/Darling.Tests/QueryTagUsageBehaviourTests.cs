@@ -135,6 +135,8 @@ public sealed class QueryTagUsageBehaviourTests
         Assert.Contains("The last hour is counted whole, so the data runs to ", edges[0]);
         Assert.Contains("How far the hourly rollup is built is not known", edges[1]);
         Assert.Null(edges[2]);
+        Assert.Contains("Less than a minute before the first full hour is not included.", edges[3]);
+        Assert.DoesNotContain("under a minute", edges[3]);
         var sources = run.GetProperty("sources").EnumerateArray().Select(n => n.GetString()).ToArray();
         Assert.Equal(["raw collections", "hourly rollup", "Query Store intervals", "hourly Query Store table, raw intervals for the edges", "dmv blocking snapshots"], sources);
 

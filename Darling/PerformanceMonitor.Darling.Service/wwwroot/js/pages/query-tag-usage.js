@@ -168,7 +168,7 @@ export function edgesText(block) {
   const sentences = [];
   if (start) sentences.push(lead + " from " + start + (end ? " to " + end : "") + ".");
   const gap = minutesBetween(block.start_dropped_from, block.served_start);
-  if (gap) sentences.push("The " + gap + " before the first full hour " + (gap.startsWith("1 ") ? "is" : "are") + " not included.");
+  if (gap) sentences.push(gap === "under a minute" ? "Less than a minute before the first full hour is not included." : "The " + gap + " before the first full hour " + (gap.startsWith("1 ") ? "is" : "are") + " not included.");
   const built = at(block.materialized_to);
   if (built) sentences.push("The hourly rollup is built only up to " + built + ", so nothing after that is included.");
   else if (block.end_hour_counted_whole && end) sentences.push("The last hour is counted whole, so the data runs to " + end + ", past the end of the window.");
