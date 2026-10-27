@@ -121,9 +121,13 @@ public sealed class PgStatementStatsCollector : PostgresCollectorDefinitionBase<
         long? OrcacheBlocksHit,
         double? StorageBlockReadTimeMs,
         double? OrcacheBlockReadTimeMs,
-        long WalRecords,
-        long WalFpi,
-        long WalBytes,
+        /* Nullable from #6836 on: pg_stat_statements before 1.8 (PostgreSQL 12 and older) has no WAL counters, so the
+           query projects NULL for them. NULL means "this version does not report it", not zero.
+           wal_records and wal_fpi are stored NULL on those targets too, and no read projects either column yet
+           (only wal_bytes is read, by the top-queries and bad-actor reads), so nothing shows them. */
+        long? WalRecords,
+        long? WalFpi,
+        long? WalBytes,
         long? TotalExecPeakMemBytes,
         long? MaxExecPeakMemBytes,
         /* Computed in ReadAsync, not WritePayload — see the class remarks on why the delta decides
@@ -712,9 +716,10 @@ WHERE calls > 0";
                 OrcacheBlocksHit: NullableLong(reader, 19),
                 StorageBlockReadTimeMs: NullableDbl(reader, 20),
                 OrcacheBlockReadTimeMs: NullableDbl(reader, 21),
-                WalRecords: reader.GetInt64(22),
-                WalFpi: reader.GetInt64(23),
-                WalBytes: reader.GetInt64(24),
+                /* #6836: NULL on a target whose pg_stat_statements has no WAL counters. */
+                WalRecords: NullableLong(reader, 22),
+                WalFpi: NullableLong(reader, 23),
+                WalBytes: NullableLong(reader, 24),
                 TotalExecPeakMemBytes: NullableLong(reader, 25),
                 MaxExecPeakMemBytes: NullableLong(reader, 26),
                 DeltaCalls: deltaCalls,

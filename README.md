@@ -13,7 +13,7 @@ If you pay for a monitoring tool now, read the comparison for yours.
 
 [Redgate SQL Monitor](https://erikdarling.com/redgate-sql-monitor-renewal-free-alternative/) · [SQL Sentry](https://erikdarling.com/solarwinds-sql-sentry-renewal-free-alternative/) · [SolarWinds DPA](https://erikdarling.com/solarwinds-dpa-renewal-free-alternative/) · [Idera SQL Diagnostic Manager](https://erikdarling.com/idera-sql-diagnostic-manager-renewal-free-alternative/) · [Quest Spotlight](https://erikdarling.com/your-quest-spotlight-on-sql-server-enterprise-renewal-is-coming-up-heres-what-free-looks-like-in-2026/) · [Datadog Database Monitoring](https://erikdarling.com/datadog-database-monitoring-cost-free-alternative/) · [Database Health Monitor](https://erikdarling.com/database-health-monitor-renewal-free-alternative/)
 
-It supports SQL Server 2016 SP2 to 2025. SQL Server 2017 needs CU3 or later. It also supports Azure SQL Managed Instance, AWS RDS for SQL Server, and Azure SQL Database (Lite and Darling). Darling also monitors PostgreSQL, including AWS RDS and Aurora.
+It supports SQL Server 2016 SP2 to 2025. SQL Server 2017 needs CU3 or later. It also supports Azure SQL Managed Instance, AWS RDS for SQL Server, and Azure SQL Database (Lite and Darling). Darling also monitors PostgreSQL. It supports PostgreSQL 14 to 18, plus Amazon RDS, Aurora and Azure Database for PostgreSQL, and makes a best effort on PostgreSQL 10 to 13. See [Supported PostgreSQL versions](docs/darling/postgresql-targets.md#supported-postgresql-versions).
 
 ![Fleet overview: nine servers at a glance, one flagged Critical with live blocking and deadlocks](Screenshots/fleet-overview.jpg)
 

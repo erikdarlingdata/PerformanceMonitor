@@ -209,8 +209,9 @@ public sealed class DarlingMcpPgWaitSamplingTools
             wait_event = r.Event,
             /* String, like every other queryid on this surface: it is a signed 64-bit value and a
                JSON number would round it in any double-decoding parser, silently producing an id
-               that joins to nothing. */
-            queryid = r.QueryId.ToString(CultureInfo.InvariantCulture),
+               that joins to nothing. NULL (#6836) is a target that does not report a query id (PostgreSQL 10 to
+               13 on the service sampler): "not reported", which must not read as the 0 of "no statement". */
+            queryid = r.QueryId?.ToString(CultureInfo.InvariantCulture),
             samples = r.SampleCount,
             estimated_wait_ms = r.EstimatedWaitMs,
             backends = r.BackendCount,

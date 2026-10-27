@@ -5197,8 +5197,9 @@
                         <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         <DataGridTextColumn Header="Backends" Binding="{Binding BackendCount}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         <!-- Zero means the wait belonged to no statement - a background process -
-                             rather than an unknown query. Joins pg_statement_stats.queryid. -->
-                        <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="180"/>
+                             rather than an unknown query. Joins pg_statement_stats.queryid. A dash is a target that
+                             does not report a query id (PostgreSQL 10 to 13, #6836). -->
+                        <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId, TargetNullValue='—'}" Width="180"/>
                         <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="110"/>
                         <DataGridTextColumn Header="Last Seen" Binding="{Binding CaptureTime}" Width="*" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>

@@ -230,6 +230,111 @@ public sealed class PgWaitSamplerLiveTests
         }
     }
 
+    /// <summary>
+    /// #6836: the sampler on a target that reports itself as PostgreSQL 13 sends <c>NULL::bigint</c> for the query id,
+    /// because <c>pg_stat_activity</c> has no <c>query_id</c> before 14. The query is valid on any server (it never names
+    /// the column), so it runs live here: the stored rows must carry NULL, not the 0 that means "belongs to no
+    /// statement", and the read must report the same NULL, with its rows intact (the oldest-to-newest join is on
+    /// query_id, and NULL does not equal NULL).
+    /// </summary>
+    [Fact]
+    public async Task OneCycleAgainstAPre14Target_StoresNullQueryId_AndTheReadReportsItNotReported()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live sampler test.");
+
+        const int pre14ServerId = 6836_13;
+        var ct = TestContext.Current.CancellationToken;
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var targetBuilder = new NpgsqlConnectionStringBuilder(connectionString) { ApplicationName = "pm6836-target", Pooling = false };
+        var workloadBuilder = new NpgsqlConnectionStringBuilder(connectionString) { ApplicationName = "pm6836-workload", Pooling = false };
+
+        var bodySucceeded = false;
+        try
+        {
+            using var workloadStop = new CancellationTokenSource();
+            var burner = Task.Run(async () =>
+            {
+                await using var c = new NpgsqlConnection(workloadBuilder.ConnectionString);
+                await c.OpenAsync(workloadStop.Token);
+                while (!workloadStop.IsCancellationRequested)
+                {
+                    await using var q = new NpgsqlCommand("SELECT count(*) FROM generate_series(1, 20000000)", c) { CommandTimeout = 120 };
+                    try { await q.ExecuteScalarAsync(workloadStop.Token); } catch (OperationCanceledException) { }
+                }
+            }, CancellationToken.None);
+
+            await Task.Delay(TimeSpan.FromSeconds(1), ct);
+
+            var runtime = new ServerRuntime
+            {
+                Config = new MonitoredServer { Name = "pm6836-pre14", Host = targetBuilder.Host ?? "localhost", Engine = "postgres" },
+                ConnectionString = targetBuilder.ConnectionString,
+                Target = new CollectorTargetInfo
+                {
+                    Engine = CollectorTargetEngine.PostgreSql,
+                    PostgresMajorVersion = 13,
+                    PostgresVersionNum = 130000,
+                    HasPgWaitSamplingExtension = false,
+                },
+                StorageName = "pm6836-pre14",
+                ServerId = pre14ServerId,
+            };
+
+            var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator(), NullLogger<DarlingCollectorRunner>.Instance);
+            var result = await runner.RunAsync(PgWaitSamplingCollector.Instance, runtime, ct);
+            workloadStop.Cancel();
+            await burner;
+
+            Assert.True(result.Rows > 0, $"the sampler wrote no rows; note={result.HostNote}");
+
+            long stored;
+            long storedNull;
+            await using (var count = postgres.CreateCommand("SELECT count(*), count(*) FILTER (WHERE query_id IS NULL) FROM pg_wait_sampling WHERE server_id = $1"))
+            {
+                count.Parameters.AddWithValue(pre14ServerId);
+                await using var reader = await count.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                stored = reader.GetInt64(0);
+                storedNull = reader.GetInt64(1);
+            }
+
+            Assert.True(stored > 0);
+            Assert.Equal(stored, storedNull);
+
+            var page = await DarlingPgWaitSamplingReader.GetPgWaitSamplingPageAsync(
+                postgres, pre14ServerId, DateTime.UtcNow.AddHours(-1), DateTime.UtcNow.AddMinutes(1), 21, ct);
+            Assert.NotEmpty(page.Rows);
+            Assert.All(page.Rows, r => Assert.Null(r.QueryId));
+            /* One cycle stores one row per series, so the window's difference is 0 for every series. A join that
+               cannot match a NULL query_id to itself finds no oldest row and reports the whole cumulative count. */
+            Assert.All(page.Rows, r => Assert.Equal(0L, r.SampleCount));
+            Assert.Equal(0L, page.WindowTotalSamples);
+            var json = JsonDocument.Parse(DarlingMcpPgWaitSamplingTools.BuildWaitSamplingJson("pm6836-pre14", 1, page, 20, null)).RootElement;
+            Assert.All(json.GetProperty("waits").EnumerateArray(), w => Assert.Equal(JsonValueKind.Null, w.GetProperty("queryid").ValueKind));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                foreach (var sql in new[]
+                {
+                    "DELETE FROM pg_wait_sampling WHERE server_id = $1",
+                    "DELETE FROM collector_state WHERE server_id = $1",
+                    "DELETE FROM collection_log WHERE server_id = $1",
+                })
+                {
+                    await using var command = new NpgsqlCommand(sql, cleanup);
+                    command.Parameters.AddWithValue(6836_13);
+                    await command.ExecuteNonQueryAsync(cleanupCt);
+                }
+            });
+        }
+    }
+
     private static async Task<string?> ReadStateAsync(NpgsqlDataSource postgres, string key, CancellationToken ct)
     {
         await using var command = postgres.CreateCommand(
