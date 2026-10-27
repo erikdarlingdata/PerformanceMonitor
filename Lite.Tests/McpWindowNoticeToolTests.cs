@@ -864,6 +864,44 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #6829: the no-baseline answer is <c>unavailable</c> and carries the window-floor hints the missing-window answers carry, so a caller
+    /// can see the store's data starts inside the window (collection began there, or older data was dropped) instead of guessing.
+    /// </summary>
+    [Fact]
+    public async Task GetQueryStoreRegressions_TheNoBaselineAnswer_CarriesTheWindowFloorHints()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var now = DateTime.UtcNow;
+        var floor = now.AddHours(-40);
+        await SeedRegressionAsync(floor, queryId: 1, avgUs: 1000, intervalId: 1);
+        await SeedRegressionAsync(now.AddHours(-1), queryId: 1, avgUs: 3000, intervalId: 2);
+
+        /* 48 hours: every row sits inside the window, so the 7-day baseline before it holds nothing. */
+        var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 48));
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        Assert.Contains("no baseline", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        AssertTruncatedAt(root.GetProperty("hints"), floor, "query_store_stats");
+    }
+
+    /// <summary>#6829: the same for the database form, where the filtered database has captures in the window and none in the baseline.</summary>
+    [Fact]
+    public async Task GetQueryStoreRegressions_TheFilteredNoBaselineAnswer_CarriesTheWindowFloorHints()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var now = DateTime.UtcNow;
+        var floor = now.AddDays(-3);
+        await SeedRegressionAsync(floor, queryId: 2, avgUs: 1000, intervalId: 1, database: "Other");
+        await SeedRegressionAsync(now.AddHours(-1), queryId: 1, avgUs: 3000, intervalId: 2);
+
+        var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24, database_name: "Db"));
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        Assert.Contains("database_name 'Db'", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        AssertTruncatedAt(root.GetProperty("hints"), floor, "query_store_stats");
+    }
+
     [Fact]
     public async Task GetQueryStoreRegressions_AnEmptyRecentSide_CarriesTheSameKeys()
     {
