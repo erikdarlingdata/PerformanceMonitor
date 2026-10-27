@@ -338,13 +338,28 @@ ON CONFLICT (server_id, database_name, query_id) DO NOTHING";
         return found;
     }
 
-    private static async Task<List<string>> TextScansOfAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    /// <summary>The scan nodes of the text table in the plan of <paramref name="sql"/>. With <paramref name="sortOff"/> the EXPLAIN runs in a
+    /// transaction under <c>SET LOCAL enable_sort = off</c>, which prices the sort out: a statement that must return rows in key order
+    /// then has one sort-free path, the primary key walk, whatever the platform's costs for a 20,000-row table are. One command per
+    /// statement (Npgsql refuses several in a parameterized command, and the SET must not leak past the transaction).</summary>
+    private static async Task<List<string>> TextScansOfAsync(NpgsqlConnection connection, string sql, bool sortOff, CancellationToken ct)
     {
-        await using var explain = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + sql, connection);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        if (sortOff)
+        {
+            await using var set = new NpgsqlCommand("SET LOCAL enable_sort = off", connection, transaction);
+            await set.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var explain = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + sql, connection, transaction);
         var json = (string)(await explain.ExecuteScalarAsync(ct))!;
         using var document = System.Text.Json.JsonDocument.Parse(json);
-        return ScanNodesOfTextTable(document.RootElement[0].GetProperty("Plan"));
+        var scans = ScanNodesOfTextTable(document.RootElement[0].GetProperty("Plan"));
+        await transaction.RollbackAsync(ct);
+        return scans;
     }
+
+    private static bool WalksAnIndex(List<string> scans) => scans.Any(s => s.StartsWith("Index", StringComparison.Ordinal));
 
     private static async Task<List<long>> KeyIdsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
@@ -363,9 +378,10 @@ ON CONFLICT (server_id, database_name, query_id) DO NOTHING";
     /// #6750 part 3, the plan. The backfill filters on the marker, so it has to read the text table in one sequential pass and sort only
     /// the matches. With the <c>ORDER BY</c> on the same <c>SELECT</c> as the filter the planner walks the primary key in key order over
     /// every row (measured on a large store: 452.9 s and 2.2 million blocks cold, against 157.8 s and 1.4 million for the sequential
-    /// form). The seed is 20,000 rows with the table ANALYZEd and every planner setting at its default: that is enough for the planner
-    /// to choose the index walk for <see cref="BackfillBeforeTheFilterFirstFix"/>, which the test proves first, so the assertion on the
-    /// shipped statement cannot pass for want of rows. It also checks the two statements record the same keys, over a NULL text, a text
+    /// form). The seed is 20,000 rows with the table ANALYZEd. At that size the planner's choice for <see cref="BackfillBeforeTheFilterFirstFix"/>
+    /// at default settings is a near tie that differs by platform (CI's Windows PostgreSQL picked a Seq Scan and a sort), so the plans are read
+    /// with <c>enable_sort = off</c>: the old statement then has only the primary key walk, which the test proves first, and the shipped
+    /// statement, which sorts a CTE's output, still has to read the text table with a Seq Scan. The shipped one is also read at default settings. It also checks the two statements record the same keys, over a NULL text, a text
     /// with the marker in the middle, and ordinary text.
     /// </summary>
     [Fact]
@@ -410,14 +426,21 @@ FROM generate_series(1, 20000) AS q", connection))
 
         Assert.Equal(0L, await KeysAsync(connection, ct));
 
-        /* The defect: the planner picks the primary key walk for the old statement. */
-        var before = await TextScansOfAsync(connection, BackfillBeforeTheFilterFirstFix, ct);
-        Assert.True(before.Contains("Index Scan") || before.Contains("Index Only Scan"),
-            "the seed no longer makes the planner choose the primary key walk for the old statement (" + string.Join(", ", before) + "), so the plan assertion below proves nothing");
+        /* The probe can see the defect. With the sort priced out, the old statement's only path that returns rows in key order is the primary
+           key walk, so its plan must show one on any planner. (At default settings the choice between that walk and a Seq Scan plus a sort
+           is a near tie at this size and falls either way by platform, so the default plan proves nothing.) */
+        var before = await TextScansOfAsync(connection, BackfillBeforeTheFilterFirstFix, sortOff: true, ct);
+        Assert.True(WalksAnIndex(before),
+            "the old statement did not plan as a primary key walk even with the sort priced out (" + string.Join(", ", before) + "), so the plan assertions below prove nothing");
 
-        /* The fix: the shipped statement reads the text table with a Seq Scan and no index walk. */
-        var after = await TextScansOfAsync(connection, QueryStoreSelfKeys.BackfillSql, ct);
-        Assert.Equal(["Seq Scan"], after);
+        /* The fix: the shipped statement reads the text table with a Seq Scan and no index walk, with the sort priced out (the walk is the
+           only way the old shape avoids the sort, and the CTE cannot use it) and at default settings. */
+        foreach (var sortOff in new[] { true, false })
+        {
+            var after = await TextScansOfAsync(connection, QueryStoreSelfKeys.BackfillSql, sortOff, ct);
+            Assert.True(after.Contains("Seq Scan") && !WalksAnIndex(after),
+                "the shipped backfill must read the text table with a sequential scan and no index walk (sort off: " + sortOff + "), got " + string.Join(", ", after));
+        }
 
         /* Same keys. The old statement first, then the shipped one over an emptied key table. */
         await using (var old = new NpgsqlCommand(BackfillBeforeTheFilterFirstFix, connection))
