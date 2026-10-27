@@ -14,7 +14,12 @@ using System.Net;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Linq;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using ModelContextProtocol.Server;
+using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
@@ -22,9 +27,9 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #6800: the fleet <c>get_resource_use_by_tag</c> read (no server) is kept in the read cache for 5 minutes from the 24-hour band up
-/// although that band is light, so a repeat visit, a second user and the page's pickers do not run its Query Store section again.
-/// A window under 24 hours keeps the band's TTL. The web tests
+/// #6800: the fleet <c>get_resource_use_by_tag</c> read (no server) is kept in the read cache for 5 minutes when the window asked for is 24 hours or more
+/// although its band is light, so a repeat visit, a second user and the page's pickers do not run its Query Store section again.
+/// A window under 24 hours (including 2 to 23, which the 24h band covers) keeps the band's TTL. The web tests
 /// run the real <c>/api/read</c> pipeline with a counting handler standing in for the store under the route's own name, on a clock
 /// the test moves.
 /// </summary>
@@ -83,16 +88,45 @@ public sealed class FleetTagReadCacheTests
         Assert.NotEqual(bodies[0], bodies[2]);
     }
 
-    [Fact(Timeout = 60_000)]
-    public async Task AFleetRead_OfAWindowUnder24Hours_KeepsTheBandRule_AndIsNotKept()
+    [Theory(Timeout = 60_000)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(4)]
+    [InlineData(12)]
+    [InlineData(23)]
+    public async Task AFleetRead_OfAWindowUnder24Hours_IsNotKeptForFiveMinutes(int hours)
     {
-        /* The page's 5m, 15m, 30m and 1h presets all arrive as hours=1, band 1h: light, so not cached, as before #6800. */
+        /* hours=4 is the page's own Past 4 hours preset, in the 24h band. Four minutes apart is inside the 5 minute TTL and past the
+           band's 15 and 30 seconds, so a call total of 2 says the long TTL was not applied. */
+        var path = $"/api/read/{Route}?hours={hours}";
+        var (calls, _) = await RunAsync([path, path], [TimeSpan.Zero, TimeSpan.FromMinutes(4)]);
+
+        Assert.Equal(2, calls);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task AFleetRead_OfAWindowUnder24Hours_KeepsTheBandRule_NotCachedWhenTheBandIsLight()
+    {
+        /* Two identical reads at the same instant: a cached read would run once. A light band is not cached, as before #6800. */
         var (calls, _) = await RunAsync(
-            [$"/api/read/{Route}?hours=1", $"/api/read/{Route}?hours=1", $"/api/read/{Route}?hours=1&server_name=", $"/api/read/{Route}"],
+            [$"/api/read/{Route}?hours=4", $"/api/read/{Route}?hours=4", $"/api/read/{Route}?hours=1&server_name=", $"/api/read/{Route}?hours=1&server_name="],
             [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero]);
 
-        /* hours=1 three times, and the default window (24 hours on this route) is a fleet read that runs once. */
         Assert.Equal(4, calls);
+    }
+
+    [Theory(Timeout = 60_000)]
+    [InlineData("hours=24")]
+    [InlineData("hours=168")]
+    [InlineData("hours=720")]
+    [InlineData("")]
+    public async Task AFleetRead_OfAWindowOf24HoursOrMore_IsKeptForFiveMinutes(string query)
+    {
+        /* The last row names no window: the route's declared default is 24 hours. */
+        var path = $"/api/read/{Route}" + (query.Length == 0 ? "" : "?" + query);
+        var (calls, _) = await RunAsync([path, path, path], [TimeSpan.Zero, TimeSpan.FromMinutes(4), TimeSpan.FromMinutes(6)]);
+
+        Assert.Equal(2, calls);
     }
 
     [Fact(Timeout = 60_000)]
@@ -153,27 +187,42 @@ public sealed class FleetTagReadCacheTests
         Assert.Equal(1, calls);
     }
 
+    [Theory]
+    [InlineData(24, true)]
+    [InlineData(168, true)]
+    [InlineData(23.9, false)]
+    [InlineData(23, false)]
+    [InlineData(4, false)]
+    [InlineData(1, false)]
+    [InlineData(0, false)]
+    public void IsFleetRead_NeedsAWindowOf24HoursOrMore_WhateverTheBand(double hours, bool expected)
+    {
+        Assert.Equal(expected, ReadAdmission.IsFleetRead(Route, null, hours));
+        Assert.False(ReadAdmission.IsFleetRead(Route, "a", hours));
+        Assert.False(ReadAdmission.IsFleetRead("get_top_queries_by_cpu", null, hours));
+        Assert.False(ReadAdmission.IsFleetRead(Route, null, null));
+    }
+
     [Fact]
-    public void TheFleetTtl_IsFiveMinutesFrom24Hours_AndAShorterWindowOrAnotherRouteKeepsItsBandTtl()
+    public void TheFleetTtl_IsFiveMinutesForAFleetRead_AndTheBandTtlForAnythingElse()
     {
         Assert.Equal(TimeSpan.FromMinutes(5), ReadResultCache.TtlFor(Route, ReadWindowBand.OneDay, fleetRead: true));
         Assert.Equal(TimeSpan.FromMinutes(5), ReadResultCache.TtlFor(Route, ReadWindowBand.SevenDays, fleetRead: true));
         Assert.Equal(TimeSpan.FromMinutes(5), ReadResultCache.TtlFor(Route, ReadWindowBand.Longer, fleetRead: true));
-        Assert.Equal(TimeSpan.FromSeconds(15), ReadResultCache.TtlFor(Route, ReadWindowBand.OneHour, fleetRead: true));
-        Assert.Equal(TimeSpan.FromSeconds(15), ReadResultCache.TtlFor(Route, ReadWindowBand.None, fleetRead: true));
         Assert.Equal(TimeSpan.FromSeconds(30), ReadResultCache.TtlFor(Route, ReadWindowBand.OneDay, fleetRead: false));
+        Assert.Equal(TimeSpan.FromSeconds(15), ReadResultCache.TtlFor(Route, ReadWindowBand.OneHour, fleetRead: false));
         Assert.Equal(TimeSpan.FromSeconds(30), ReadResultCache.TtlFor("get_top_queries_by_cpu", ReadWindowBand.OneDay, fleetRead: true));
     }
 
     [Fact]
-    public void IsCached_HoldsForAFleetReadFrom24Hours_ButNotForAShorterWindow_AOneServerReadOrAnotherRoute()
+    public void IsCached_HoldsForAFleetRead_ButNotForAOneServerReadOrAnotherRoute()
     {
         var admission = LightAdmission(new TimerTimeProvider());
         foreach (var surface in new[] { ReadSurface.Web, ReadSurface.Mcp })
         {
             foreach (var band in new[] { ReadWindowBand.None, ReadWindowBand.OneHour, ReadWindowBand.OneDay })
             {
-                Assert.Equal(band == ReadWindowBand.OneDay, admission.IsCached(surface, Route, band, fleetRead: true));
+                Assert.True(admission.IsCached(surface, Route, band, fleetRead: true));
                 Assert.False(admission.IsCached(surface, Route, band, fleetRead: false));
                 Assert.False(admission.IsCached(surface, "get_top_queries_by_cpu", band, fleetRead: true));
             }
@@ -183,18 +232,47 @@ public sealed class FleetTagReadCacheTests
         Assert.False(admission.IsHeavy(ReadSurface.Mcp, Route, ReadWindowBand.OneDay, out _));
     }
 
+    private static McpToolParameterTypes RealTypes()
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton(typeof(NpgsqlDataSource), _ => null!);
+        services.AddMcpServer().WithGeminiCompatibleTools<DarlingMcpQueryTagRollupTools>();
+        using var provider = services.BuildServiceProvider();
+        _ = provider.GetServices<McpServerTool>().ToList();
+        return provider.GetRequiredService<McpToolParameterTypes>();
+    }
+
     [Theory]
     [InlineData("{}", true)]
     [InlineData("{\"server_name\":null}", true)]
     [InlineData("{\"server_name\":\"\"}", true)]
     [InlineData("{\"server_name\":\"  \"}", true)]
     [InlineData("{\"hours_back\":24}", true)]
+    [InlineData("{\"hours_back\":168}", true)]
+    [InlineData("{\"hours_back\":4}", false)]
+    [InlineData("{\"hours_back\":23}", false)]
+    [InlineData("{\"hours_back\":1}", false)]
+    [InlineData("{\"hours_back\":168,\"server_name\":\"a\"}", false)]
     [InlineData("{\"server_name\":\"a\"}", false)]
     [InlineData("{\"server_name\":7}", false)]
-    public void AnMcpCall_IsAFleetRead_WhenItNamesNoServer(string arguments, bool expected)
+    public void AnMcpCall_IsAFleetRead_WhenItNamesNoServerAndAsksFor24HoursOrMore(string arguments, bool expected)
     {
         var parsed = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(arguments)!;
-        Assert.Equal(expected, McpToolLatencyFilter.IsFleetRead(Route, parsed));
-        Assert.False(McpToolLatencyFilter.IsFleetRead("get_top_queries_by_cpu", parsed));
+        var types = RealTypes();
+
+        /* A call that leaves hours_back out reads the tool's declared default, 24. */
+        Assert.Equal(expected, McpToolLatencyFilter.IsFleetRead(Route, parsed, types));
+        Assert.False(McpToolLatencyFilter.IsFleetRead("get_top_queries_by_cpu", parsed, types));
+    }
+
+    [Fact]
+    public void AnMcpCall_WithAnAsOfAnchor_IsMeasuredBySpan_NotByAnchor()
+    {
+        var types = RealTypes();
+        var shortSpan = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("{\"hours_back\":4,\"as_of\":\"2026-01-01T00:00:00Z\"}")!;
+        var longSpan = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("{\"hours_back\":48,\"as_of\":\"2026-01-01T00:00:00Z\"}")!;
+
+        Assert.False(McpToolLatencyFilter.IsFleetRead(Route, shortSpan, types));
+        Assert.True(McpToolLatencyFilter.IsFleetRead(Route, longSpan, types));
     }
 }

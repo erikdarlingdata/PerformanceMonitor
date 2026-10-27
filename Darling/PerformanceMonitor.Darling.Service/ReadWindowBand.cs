@@ -84,9 +84,13 @@ internal static class ReadWindowBand
     /// <summary>The window of an MCP tool call: the arguments the caller sent, else the default the tool method declares
     /// for that argument. <paramref name="declaredDefault"/> reads the method's parameter default, never the served input
     /// schema: the schema the host serves has every <c>default</c> keyword stripped for Gemini (#5506).</summary>
-    internal static string OfToolCall(System.Collections.Generic.IDictionary<string, JsonElement>? arguments, Func<string, string?>? declaredDefault)
+    internal static string OfToolCall(System.Collections.Generic.IDictionary<string, JsonElement>? arguments, Func<string, string?>? declaredDefault) =>
+        Of(HoursOfToolCall(arguments, declaredDefault));
+
+    /// <summary>The window in hours of an MCP tool call, before it is banded (<see cref="OfToolCall"/>).</summary>
+    internal static double? HoursOfToolCall(System.Collections.Generic.IDictionary<string, JsonElement>? arguments, Func<string, string?>? declaredDefault)
     {
-        return Of(HoursOf(key =>
+        return HoursOf(key =>
         {
             if (arguments is null || !arguments.TryGetValue(key, out var value))
             {
@@ -94,7 +98,7 @@ internal static class ReadWindowBand
             }
 
             return value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.Undefined ? null : ElementText(value);
-        }, declaredDefault));
+        }, declaredDefault);
     }
 
     /// <summary>A declared default as argument text, read the way a sent number is: invariant culture. Null for no default
