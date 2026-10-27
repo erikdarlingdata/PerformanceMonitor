@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
@@ -24,6 +25,17 @@ namespace PerformanceMonitorLite.Tests;
 /// </summary>
 public sealed class LiteQueryTagMissingSourceTests : IDisposable
 {
+    /// <summary>The sentence each section must say when its source is missing: the same words in Lite and the Viewer (#6850).</summary>
+    private static readonly IReadOnlyDictionary<string, string> Expected = new Dictionary<string, string>
+    {
+        ["plan_cache"] = "This store has no query stats data yet.",
+        ["query_store"] = "This store has no Query Store data yet.",
+        ["procedures"] = "This store has no procedure stats data yet.",
+        ["blocking_reports"] = "This store has no blocked process report data yet.",
+        ["blocking_snapshots"] = "This store has no blocking snapshot data yet.",
+        ["deadlocks"] = "This store has no deadlock data yet.",
+    };
+
     private readonly string _tempDir;
 
     public LiteQueryTagMissingSourceTests()
@@ -93,12 +105,12 @@ public sealed class LiteQueryTagMissingSourceTests : IDisposable
 
         var data = await new LocalDataService(initializer).GetQueryTagRollupDataAsync([1], now.AddHours(-2), now);
 
-        foreach (var (section, sentence) in LiteQueryTagSourceWordsTests.Expected)
+        foreach (var (section, sentence) in Expected)
         {
             Assert.True(data.Unavailable.TryGetValue(section, out var reason), $"section {section} was served with its source dropped");
             Assert.Equal(sentence, reason);
         }
 
-        Assert.Equal(LiteQueryTagSourceWordsTests.Expected.Count, data.Unavailable.Count);
+        Assert.Equal(Expected.Count, data.Unavailable.Count);
     }
 }

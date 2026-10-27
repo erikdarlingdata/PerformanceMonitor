@@ -29,9 +29,6 @@ public static class QueryTagSourceWords
         ["deadlocks"] = "deadlock",
     };
 
-    /// <summary>Every section name with words, in the order the windows show the sections.</summary>
-    public static IReadOnlyCollection<string> SectionNames { get; } = [.. Words.Keys];
-
     /// <summary>The words for one section, for example "query stats". Throws for a section with no entry.</summary>
     public static string For(string sectionName) =>
         Words.TryGetValue(sectionName, out var words)

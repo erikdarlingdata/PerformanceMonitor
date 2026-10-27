@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -27,6 +28,17 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class QueryTagUsageViewLiveTests
 {
+    /// <summary>The sentence each section must say when its source is missing: the same words in Lite and the Viewer (#6850).</summary>
+    private static readonly IReadOnlyDictionary<string, string> Expected = new Dictionary<string, string>
+    {
+        ["plan_cache"] = "This store has no query stats data yet.",
+        ["query_store"] = "This store has no Query Store data yet.",
+        ["procedures"] = "This store has no procedure stats data yet.",
+        ["blocking_reports"] = "This store has no blocked process report data yet.",
+        ["blocking_snapshots"] = "This store has no blocking snapshot data yet.",
+        ["deadlocks"] = "This store has no deadlock data yet.",
+    };
+
     private const int ServerOne = 7801;
     private const int ServerTwo = 7802;
 
@@ -167,7 +179,7 @@ public sealed class QueryTagUsageViewLiveTests
             /* Query Store is the one section the gate answers first: with its table gone no server passes the gate, so the reason is the gate's
                refusal, which names no table either. The "no ... data yet" sentence there is only for a table that vanishes after the gate passed. */
             var queryStore = QueryTagRollupSection.QueryStore.Name;
-            foreach (var (section, sentence) in QueryTagSourceWordsTests.Expected.Where(e => e.Key != queryStore))
+            foreach (var (section, sentence) in Expected.Where(e => e.Key != queryStore))
             {
                 Assert.True(data.Unavailable.TryGetValue(section, out var reason), $"the viewer served {section} with its source dropped");
                 Assert.Equal(sentence, reason);
@@ -177,7 +189,7 @@ public sealed class QueryTagUsageViewLiveTests
 
             await using var source = NpgsqlDataSource.Create(store.ConnectionString);
             var tool = await PerformanceMonitor.Darling.Service.Mcp.DarlingMcpQueryTagRollupTools.GetResourceUseByTagCore(source, null, 24, null, 25, null, null, ct);
-            foreach (var (section, sentence) in QueryTagSourceWordsTests.Expected.Where(e => e.Key != queryStore))
+            foreach (var (section, sentence) in Expected.Where(e => e.Key != queryStore))
             {
                 Assert.Contains($"{section} is unavailable: {sentence}", tool, StringComparison.Ordinal);
             }
