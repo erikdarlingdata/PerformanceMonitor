@@ -47,7 +47,7 @@ public static class HourlyWindowEdges
         var startMoved = served != requestedStart;
         if (startHour != requestedStart)
         {
-            parts.Add($"hourly buckets start on the hour: no bucket before {Utc(served)}: the data from {Utc(requestedStart)} to {Utc(served)} is not included");
+            parts.Add(StartSentence(requestedStart, served));
         }
 
         var endHour = FloorHour(requestedEnd);
@@ -67,6 +67,15 @@ public static class HourlyWindowEdges
 
         return string.Join("; ", parts);
     }
+
+    /// <summary>The start edge's sentence alone, for a read whose END is exact (the Query Store route reads the wide table up to the window end,
+    /// #6800), so <see cref="Note"/>'s end clauses, which describe an hourly rollup's end bucket, do not apply. Null when the start is on the hour.
+    /// The words are <see cref="Note"/>'s own.</summary>
+    public static string? StartNote(DateTime requestedStart, DateTime firstBucket) =>
+        FloorHour(requestedStart) == requestedStart ? null : StartSentence(requestedStart, firstBucket);
+
+    private static string StartSentence(DateTime requestedStart, DateTime served) =>
+        $"hourly buckets start on the hour: no bucket before {Utc(served)}: the data from {Utc(requestedStart)} to {Utc(served)} is not included";
 
     /// <summary>
     /// An instant as <c>McpHelpers.FormatEffectiveStart</c> prints it: UTC, with the Z. Only the kind is set; the instant is

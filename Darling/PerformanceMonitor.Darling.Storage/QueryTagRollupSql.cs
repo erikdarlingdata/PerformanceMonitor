@@ -80,9 +80,13 @@ public static class QueryTagRollupSql
     /// there is no constant <c>collection_time</c> floor: either one lets the planner AND the partition's <c>collection_time</c> index into
     /// every server's scan, and that index is not keyed by server, so each of the 42 loops walked the whole day's entries (about 10 million
     /// per loop). Measured on one production store with 42 servers over 24 hours, warm: 13.0 s with the index, 6.0 s without; each server's
-    /// scan is the <c>(server_id, first_execution_time)</c> range instead. The constant upper bound <c>q.collection_time &lt;= $3</c> stays
-    /// and is harmless: $3 is the window end, at or near now, so it keeps almost every row of the window's partitions and the planner has no
-    /// reason to scan the <c>collection_time</c> index for it. It filters the rows the per-server range already found.</para>
+    /// scan is the <c>(server_id, first_execution_time)</c> range instead. The upper bound is written the same way,
+    /// <c>$3 - collection_time &gt;= interval '0'</c> (#6800 part 2, step 3a). It was a plain <c>collection_time &lt;= $3</c> once, on the
+    /// belief that $3 is at or near now and keeps almost every row, so the planner has no reason to use the index for it. Step 2b measured
+    /// otherwise: with the window end 6 hours back the planner chose the <c>collection_time</c> index for that bound alone, the bitmap went
+    /// lossy, and the run took 367 ms against 330 ms at now on a 30-server seed. That index inside the per-server loop is the 13.0 s case
+    /// above, and this statement serves every one-server read and every fleet read the route falls back from (a store before the backfill,
+    /// an <c>as_of</c> older than the built hours). The two forms keep the same rows.</para>
     /// </summary>
     public static readonly string QueryStoreSql = $$"""
         SELECT q.server_id, m.tag_id,
@@ -100,11 +104,111 @@ public static class QueryTagRollupSql
         LEFT JOIN config.query_tag_map AS m
                ON m.server_id = q.server_id AND m.key_kind = 'hash' AND m.key = q.query_hash
         WHERE q.server_id = ANY($1)
-        AND   q.collection_time <= $3
+        AND   $3 - q.collection_time >= interval '0'
         AND   q.first_execution_time >= $4 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
         AND   q.first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
         GROUP BY q.server_id, m.tag_id
         """;
+
+    /// <summary>
+    /// The fleet form of <see cref="QueryStoreSql"/> (#6800 part 2, step 2): the same six measures per <c>(server_id, tag_id)</c>, with the
+    /// whole hours the hourly builder has done read from <c>collect.query_store_hash_hourly</c> and the rest from the wide table.
+    /// <see cref="QueryTagRollupHashRoute"/> decides which is which. Parameters: $1 and $2 the table pairs as parallel arrays (hour start
+    /// <c>timestamp[]</c>, server <c>integer[]</c>), $3 the window end, then three per wide range: the servers that share it
+    /// (<c>integer[]</c>), its <c>from</c> and its <c>to</c> (each range <c>[from, to)</c>), the first range at $4, $5 and $6.
+    /// With <paramref name="days"/> (#6800 step 3c) the day pairs come next as $4 (day start <c>timestamp[]</c>) and $5 (server <c>integer[]</c>), probed in
+    /// <c>collect.query_store_hash_daily</c> with the same partials, and the first range moves to $6, $7 and $8.
+    /// <para>Both arms yield six partials per <c>(server_id, query_hash)</c> (sums of the weighted products and of the counts, the maximum of
+    /// the memory), exact <c>numeric</c> sums, so adding the hours gives the wide statement's total. The tag map is joined once, on the
+    /// partials, and the final GROUP BY is by <c>(server_id, tag_id)</c>: the aggregate stays at that size. The COALESCE and the cast to
+    /// <c>double precision</c> are today's, applied after the hours are added.</para>
+    /// <para>The table arm is one probe of <c>(hour, server_id)</c> per listed pair. The wide side is one arm per DISTINCT <c>[from, to)</c>
+    /// (<paramref name="wideRanges"/>: every server that shares the tail shares one scan of it), and each arm carries its own numbered
+    /// parameters. Its bounds on <c>collection_time</c> are written plainly so a scan by <c>collection_time</c> is possible, which a
+    /// per-server loop must not use (<see cref="QueryStoreSql"/> explains the 13.0 s it cost), and its <c>first_execution_time</c> floor is
+    /// the range's own start less the purge margin, the same floor the builder uses for the hour and the wide statement's own for the first
+    /// range. Why one arm each and not one <c>CROSS JOIN LATERAL</c> over the ranges: inside a lateral the bounds are the outer row's values,
+    /// so the planner cannot see how wide a range is (the head of a window and its tail look alike), takes the range for selective, and adds
+    /// the <c>first_execution_time</c> index to the scan by <c>collection_time</c>; that index returns every row of the window and its
+    /// servers, so each range paid for the whole window's index entries and the bitmap went lossy. With the values in the arm the planner
+    /// sees the real range and scans <c>collection_time</c> alone. A constant floor shared by all ranges was tried first and did not stop
+    /// it (PR notes).</para>
+    ///
+    /// <para>The wide arms bound <c>first_execution_time</c> above by the window end plus <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>,
+    /// as <see cref="QueryStoreSql"/> does. The table arm and the day arm have no such bound, because the hour and day rows do not carry the
+    /// column. So the routed answer equals <see cref="QueryStoreSql"/> except for a row whose first execution is more than 12 hours after the
+    /// window end (a monitored server whose clock runs more than 12 hours fast): the statement drops it from a window it would count in a
+    /// wider one, and the tables keep it every time.</para>
+    /// </summary>
+    public static string QueryStoreRoutedSqlFor(int wideRanges, bool days = false)
+    {
+        var first = days ? 6 : 4;
+        var text = new System.Text.StringBuilder();
+        text.Append("""
+            WITH partials AS
+            (
+                SELECT t.server_id, t.query_hash, t.ec_sum, t.cpu_wsum, t.dur_wsum, t.reads_wsum, t.writes_wsum, t.mem_max
+                FROM unnest($1::timestamp[], $2::integer[]) AS p(hour, server_id)
+                JOIN collect.query_store_hash_hourly AS t
+                       ON t.hour = p.hour
+                      AND t.server_id = p.server_id
+
+            """);
+        if (days)
+        {
+            text.Append("""
+                    UNION ALL
+                    SELECT t.server_id, t.query_hash, t.ec_sum, t.cpu_wsum, t.dur_wsum, t.reads_wsum, t.writes_wsum, t.mem_max
+                    FROM unnest($4::timestamp[], $5::integer[]) AS p(day, server_id)
+                    JOIN collect.query_store_hash_daily AS t
+                           ON t.day = p.day
+                          AND t.server_id = p.server_id
+
+                """);
+        }
+
+        for (var arm = 0; arm < wideRanges; arm++)
+        {
+            var servers = "$" + (first + (3 * arm)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var from = "$" + (first + 1 + (3 * arm)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var to = "$" + (first + 2 + (3 * arm)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            text.Append($$"""
+                    UNION ALL
+                    SELECT q.server_id, q.query_hash,
+                           SUM(q.execution_count) AS ec_sum,
+                           SUM(q.avg_cpu_time_us * q.execution_count) AS cpu_wsum,
+                           SUM(q.avg_duration_us * q.execution_count) AS dur_wsum,
+                           SUM(q.avg_logical_io_reads * q.execution_count) AS reads_wsum,
+                           SUM(q.avg_logical_io_writes * q.execution_count) AS writes_wsum,
+                           MAX(q.max_query_max_used_memory) AS mem_max
+                    FROM collect.query_store_interval_wide AS q
+                    WHERE q.server_id = ANY({{servers}}::integer[])
+                    AND   q.collection_time >= {{from}}::timestamp
+                    AND   q.collection_time < {{to}}::timestamp
+                    AND   q.collection_time <= $3
+                    AND   q.first_execution_time >= {{from}}::timestamp - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+                    AND   q.first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+                    GROUP BY q.server_id, q.query_hash
+
+                """);
+        }
+
+        text.Append("""
+            )
+            SELECT p.server_id, m.tag_id,
+                   CAST(COALESCE(SUM(p.cpu_wsum), 0) AS double precision) AS cpu_ms,
+                   CAST(COALESCE(SUM(p.dur_wsum), 0) AS double precision) AS duration_ms,
+                   CAST(COALESCE(SUM(p.reads_wsum), 0) AS double precision) AS logical_reads,
+                   CAST(COALESCE(SUM(p.writes_wsum), 0) AS double precision) AS logical_writes,
+                   CAST(COALESCE(SUM(p.ec_sum), 0) AS double precision) AS executions,
+                   CAST(COALESCE(MAX(p.mem_max), 0) AS double precision) AS peak_memory_pages
+            FROM partials AS p
+            LEFT JOIN config.query_tag_map AS m
+                   ON m.server_id = p.server_id AND m.key_kind = 'hash' AND m.key = p.query_hash
+            GROUP BY p.server_id, m.tag_id
+            """);
+        return text.ToString();
+    }
 
     /// <summary>Procedures, raw tier: <c>collect.procedure_stats</c> deltas keyed by <c>database.schema.name</c>.</summary>
     public static readonly string ProceduresRawSql = $"""

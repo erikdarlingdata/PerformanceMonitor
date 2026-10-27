@@ -213,15 +213,15 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
     /// <summary>The 'now' a builder tick is given: half past <paramref name="hourNow"/>, taken from the same clock read as the seed's hour so a run that crosses an hour boundary mid-test cannot move the builder's cut-off past the seeded data.</summary>
     internal static DateTime ClockWithin(DateTime hourNow) => hourNow.AddMinutes(30);
 
-    /// <summary>A migrated scratch store with the three servers enrolled, the 30-hour seed, and every due hour built (28).</summary>
+    /// <summary>A migrated scratch store with the three servers enrolled, the 30-hour seed, and every due hour built (28). <paramref name="at"/>: the seed's hour (a whole hour), default this hour.</summary>
     internal static async Task<(ScratchPostgres Scratch, NpgsqlConnection Connection, NpgsqlDataSource Source, DateTime HourNow)> ArrangeAsync(
-        CancellationToken ct, int servers = 3, bool build = true)
+        CancellationToken ct, int servers = 3, bool build = true, DateTime? at = null)
     {
         var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
         var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        var hourNow = ThisHour();
+        var hourNow = at ?? ThisHour();
         for (var s = 1; s <= servers; s++)
         {
             await EnrollAsync(connection, s, hourNow, ct);

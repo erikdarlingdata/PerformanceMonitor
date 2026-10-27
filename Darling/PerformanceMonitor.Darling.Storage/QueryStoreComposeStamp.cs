@@ -121,7 +121,7 @@ public static class QueryStoreComposeStamp
     /// <summary>PostgreSQL's SQLSTATE for a statement cancelled by <c>statement_timeout</c> (<c>query_canceled</c>).</summary>
     public const string StatementTimeoutSqlState = "57014";
 
-    private static string StatementTimeoutSql(int seconds) =>
+    internal static string StatementTimeoutSql(int seconds) =>
         "SET LOCAL statement_timeout = '" + seconds.ToString(System.Globalization.CultureInfo.InvariantCulture) + "s'";
 
     /// <summary>The alias the compiler gives the fact relation in a partial's text (<c>ComposeCompiler.FactAlias</c>). The
@@ -337,6 +337,126 @@ CREATE TABLE IF NOT EXISTS collect.query_store_compose_stamp_failures
 );
 """;
 
+    /// <summary>
+    /// V221 (#6800): the narrow hourly source of the fleet tag roll-up, <c>collect.query_store_hash_hourly</c>, and the ledger column
+    /// that says whether its pair of an hour is valid, <c>hash_built_seq</c>. One block, so a later table of the same family (the daily
+    /// one) extends this text while the rung is un-landed and a landed rung is never edited. Idempotent, catalog-only: the table is
+    /// created empty, the index is built over it, and the new column is nullable with no default, so no row is rewritten and nothing is
+    /// scanned. The rung writes no GRANT (the <c>collect</c> schema's blanket SELECT covers a new table).
+    /// </summary>
+    public const string HashHourlyCreateSql = """
+/* V221 (#6800): one row per (hour, server, query_hash) of the wide Query Store table with exactly the sums the fleet tag roll-up reads,
+   built by the same hourly pass as the stamp rollup, in the same transaction. Plain table on every store kind. Naive UTC.
+   hour is the hour start the builder was given. mem_max is the MAX of max_query_max_used_memory, the others are exact sums
+   (the source columns are bigint, so adding hours gives the same total). query_hash NULL is its own group. */
+CREATE TABLE IF NOT EXISTS collect.query_store_hash_hourly
+(
+    hour timestamp NOT NULL,
+    wide_rows bigint NOT NULL,
+    mem_max bigint,
+    server_id integer NOT NULL,
+    query_hash text,
+    ec_sum numeric,
+    cpu_wsum numeric,
+    dur_wsum numeric,
+    reads_wsum numeric,
+    writes_wsum numeric
+);
+
+/* No unique index, as the stamp table: the grain is held by the builder's GROUP BY and its one-transaction DELETE and INSERT. */
+CREATE INDEX IF NOT EXISTS ix_query_store_hash_hourly_hour_server
+ON collect.query_store_hash_hourly (hour, server_id);
+
+/* The ledger's second sequence: the late_seq this table's pair was built against. NULL on an hour built before V221 and on an hour a
+   build that does not know this table rebuilt (it writes built_seq only), so both read as stale for this table. */
+ALTER TABLE collect.query_store_compose_stamp_built
+    ADD COLUMN IF NOT EXISTS hash_built_seq bigint;
+
+/* The day table (#6800, the page's 7 and 30 day windows): the same partial columns as the hourly table, one row per (UTC day, server,
+   query_hash), the sum of the day's 24 hourly rows (MAX for mem_max, exact numeric sums). day is the UTC day start, naive UTC. Built by
+   QueryStoreHashDaily in one transaction with its ledger rows. */
+CREATE TABLE IF NOT EXISTS collect.query_store_hash_daily
+(
+    day timestamp NOT NULL,
+    wide_rows bigint NOT NULL,
+    mem_max bigint,
+    server_id integer NOT NULL,
+    query_hash text,
+    ec_sum numeric,
+    cpu_wsum numeric,
+    dur_wsum numeric,
+    reads_wsum numeric,
+    writes_wsum numeric
+);
+
+CREATE INDEX IF NOT EXISTS ix_query_store_hash_daily_day_server
+ON collect.query_store_hash_daily (day, server_id);
+
+/* The day table's ledger: per (day, server), the fingerprint of the server's pairs of the day at the build: how many pairs the server had
+   in the day's 24 hours and the sum of their hash_built_seq. A day's rows of a server may be read only while the server's pairs of the day
+   all have hash_built_seq = late_seq and still have this count and this sum. hash_built_seq only grows and a late write adds a pair
+   (count) or raises late_seq, which a rebuild copies into hash_built_seq (sum), so any change to the hourly rows the day summed moves the
+   fingerprint. A server with no pair in the day has no row here, which reads as (0, 0). */
+CREATE TABLE IF NOT EXISTS collect.query_store_hash_daily_built
+(
+    day timestamp NOT NULL,
+    server_id integer NOT NULL,
+    pair_count integer NOT NULL,
+    seq_sum bigint NOT NULL,
+    built_at timestamp NOT NULL,
+    CONSTRAINT pk_query_store_hash_daily_built PRIMARY KEY (day, server_id)
+);
+
+/* The day build's failure record, the shape of collect.query_store_compose_stamp_failures keyed by day. Kept apart from that table so a
+   day cannot clear or delay the build of the hour that starts it. */
+CREATE TABLE IF NOT EXISTS collect.query_store_hash_daily_failures
+(
+    day timestamp NOT NULL,
+    failures integer NOT NULL,
+    last_sqlstate text,
+    last_reason text NOT NULL,
+    last_timeout_seconds integer NOT NULL,
+    first_failed_at timestamp NOT NULL,
+    last_failed_at timestamp NOT NULL,
+    retry_at timestamp NOT NULL,
+    CONSTRAINT pk_query_store_hash_daily_failures PRIMARY KEY (day)
+);
+""";
+
+    /// <summary>Clears the hour's rows of the hash-hourly table before they are rebuilt: $1 the hour. Served by the (hour, server_id) index.</summary>
+    public const string DeleteHashHourSql = @"
+DELETE FROM collect.query_store_hash_hourly
+WHERE hour = $1;";
+
+    /// <summary>
+    /// Fills the hash-hourly table for one hour from the wide table: $1 the hour. The same rows as <see cref="BuildHourInsertSql"/>
+    /// (its bounds, the <c>first_execution_time</c> floor included), grouped by <c>server_id, query_hash</c>. The measure expressions are
+    /// the ones the tag roll-up's Query Store statement (<c>QueryTagRollupSql.QueryStoreSql</c>) sums, without the COALESCE and the cast,
+    /// which the read applies after adding the hours.
+    /// </summary>
+    public static readonly string BuildHashHourInsertSql = $@"
+INSERT INTO collect.query_store_hash_hourly (hour, wide_rows, mem_max, server_id, query_hash, ec_sum, cpu_wsum, dur_wsum, reads_wsum, writes_wsum)
+SELECT $1, count(*), MAX({FactAlias}.max_query_max_used_memory), {FactAlias}.server_id, {FactAlias}.query_hash,
+       SUM({FactAlias}.execution_count),
+       SUM({FactAlias}.avg_cpu_time_us * {FactAlias}.execution_count),
+       SUM({FactAlias}.avg_duration_us * {FactAlias}.execution_count),
+       SUM({FactAlias}.avg_logical_io_reads * {FactAlias}.execution_count),
+       SUM({FactAlias}.avg_logical_io_writes * {FactAlias}.execution_count)
+FROM collect.query_store_interval_wide AS {FactAlias}
+WHERE {FactAlias}.collection_time >= $1
+  AND {FactAlias}.collection_time < $1 + interval '1 hour'
+  AND {FactAlias}.first_execution_time >= $1 - {QueryStoreIntervalWide.PurgeEdgeMarginSql}
+GROUP BY {FactAlias}.server_id, {FactAlias}.query_hash;";
+
+    /// <summary>
+    /// Removes every hash-hourly row below the floor: $1 the floor, served by the (hour, server_id) index. By the floor and not by
+    /// the hours <see cref="GcHoursSql"/> returned in one call, as <see cref="GcBuiltSql"/> and the day cleanup do: a build before
+    /// V221 (a documented rollback) retires hours without touching this table, and those rows must still go after a roll forward.
+    /// </summary>
+    public const string GcHashHourlySql = @"
+DELETE FROM collect.query_store_hash_hourly
+WHERE hour < $1;";
+
     private static string InsertColumns() =>
         "collection_time, " + string.Join(", ", PartialColumnMap.Select(c => c.Column)) + ", " + string.Join(", ", DimensionColumns);
 
@@ -468,11 +588,13 @@ WHERE collection_time >= $1
     /// Records the hour's validity rows: $1 the hour, $2 built_at, $3 the servers read in step 1, $4 their <c>late_seq</c>.
     /// Every server of step 1 and every server in the new rollup rows gets a row. <c>built_seq</c> is the value read in step
     /// 1, 0 for a server that had no row, and <c>late_seq</c> is not touched: a row a writer created or bumped after step 1
-    /// therefore stays stale.
+    /// therefore stays stale. <c>hash_built_seq</c> (V221, #6800) is written with the same value as <c>built_seq</c>: the hash-hourly rows
+    /// were built in the same pass from the same rows. A build that sets <c>built_seq</c> only (a service host that predates V221) leaves
+    /// <c>hash_built_seq</c> behind, so the pair reads as stale for the hash-hourly table and <see cref="PlanSql"/> rebuilds it.
     /// </summary>
     public const string UpsertBuiltSql = @"
-INSERT INTO collect.query_store_compose_stamp_built AS b (server_id, hour, late_seq, built_seq, built_at, source_rows, stamp_rows)
-SELECT x.server_id, $1, 0, COALESCE(l.late_seq, 0), $2, COALESCE(r.source_rows, 0), COALESCE(r.stamp_rows, 0)
+INSERT INTO collect.query_store_compose_stamp_built AS b (server_id, hour, late_seq, built_seq, hash_built_seq, built_at, source_rows, stamp_rows)
+SELECT x.server_id, $1, 0, COALESCE(l.late_seq, 0), COALESCE(l.late_seq, 0), $2, COALESCE(r.source_rows, 0), COALESCE(r.stamp_rows, 0)
 FROM
 (
     SELECT u.server_id FROM unnest($3::integer[]) AS u (server_id)
@@ -493,6 +615,7 @@ LEFT JOIN
 ) AS r ON r.server_id = x.server_id
 ON CONFLICT (server_id, hour) DO UPDATE
 SET built_seq = EXCLUDED.built_seq,
+    hash_built_seq = EXCLUDED.hash_built_seq,
     built_at = EXCLUDED.built_at,
     source_rows = EXCLUDED.source_rows,
     stamp_rows = EXCLUDED.stamp_rows;";
@@ -506,7 +629,9 @@ ON CONFLICT (hour) DO UPDATE SET built_at = EXCLUDED.built_at;";
     /// <summary>
     /// The hours to build, as (hour, stale): $1 the floor (<see cref="FloorHour"/>), $2 the cap PER KIND, so at most that many
     /// stale hours and at most that many never-built hours; <see cref="ChooseBuilds"/> splits one tick's builds between the two.
-    /// First the stale hours (an hour the builder has done that has a pair with <c>built_seq IS DISTINCT FROM late_seq</c>),
+    /// First the stale hours (an hour the builder has done that has a pair with <c>built_seq IS DISTINCT FROM late_seq</c>, or with
+    /// <c>hash_built_seq IS DISTINCT FROM late_seq</c> for the hash-hourly table: NULL on every hour built before V221, so those plan as
+    /// stale, newest first, and the backfill is the ordinary tick),
     /// newest first; then the hours the builder has never done that are at least <see cref="BuildLag"/> old, newest first. Neither goes
     /// below the floor or below the hour of the earliest wide-table coverage claim (<c>filled_since</c>) of an enabled
     /// server, since the rollup cannot speak for earlier hours. A pair of an hour that is not in the hours table is not
@@ -556,7 +681,7 @@ stale AS
     JOIN collect.query_store_compose_stamp_hours AS h ON h.hour = b.hour
     CROSS JOIN bounds
     CROSS JOIN cutoff
-    WHERE b.built_seq IS DISTINCT FROM b.late_seq
+    WHERE (b.built_seq IS DISTINCT FROM b.late_seq OR b.hash_built_seq IS DISTINCT FROM b.late_seq)
       AND b.hour >= bounds.floor_hour
 ),
 missing AS
@@ -664,7 +789,7 @@ WHERE hour < $1;";
     public readonly record struct FailureOutcome(int Failures, DateTime NextAttemptAt, bool BackedOff);
 
     /// <summary>What one tick did.</summary>
-    public readonly record struct TickResult(int BuiltStale, int BuiltMissing, int Failed, long HoursRemoved, int Deferred = 0, int DeferredForWriters = 0, int HeldBack = 0, int BackedOff = 0)
+    public readonly record struct TickResult(int BuiltStale, int BuiltMissing, int Failed, long HoursRemoved, int Deferred = 0, int DeferredForWriters = 0, int HeldBack = 0, int BackedOff = 0, int DaysBuilt = 0, int DaysFailed = 0)
     {
         public int Built => BuiltStale + BuiltMissing;
     }
@@ -837,7 +962,8 @@ WHERE hour < $1;";
     }
 
     /// <summary>
-    /// Removes the hours below <see cref="FloorHour"/> from all three tables in ONE transaction and returns how many hours
+    /// Removes the hours below <see cref="FloorHour"/> from all three tables, the failure records and (V221, #6800) the hash-hourly
+    /// table, and the days wholly below it from the day tables (<see cref="QueryStoreHashDaily.GcAsync"/>), in ONE transaction and returns how many hours
     /// went. Step one deletes the hours and the validity rows (small tables) and returns the hours; step two removes each
     /// returned hour's rollup rows by the index. A rollup row is always written in the same transaction as its hour's row,
     /// so no rollup row is left without one.
@@ -878,6 +1004,17 @@ WHERE hour < $1;";
             rollup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hour });
             await rollup.ExecuteNonQueryAsync(cancellationToken);
         }
+
+        /* V221 (#6800): the hash-hourly rows below the floor, by the (hour, server_id) index, in the same transaction. By the floor and not
+           by `expired`: a pre-V221 build retires hours without deleting their rows here, and `expired` never names those hours again. */
+        await using (var hashHourly = new NpgsqlCommand(GcHashHourlySql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            hashHourly.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
+            await hashHourly.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        /* V221 (#6800): the day table's rows, ledger rows and failure records of every day whose whole day is below the floor, in the same transaction. */
+        await QueryStoreHashDaily.GcAsync(connection, transaction, floor, cancellationToken);
 
         await transaction.CommitAsync(cancellationToken);
         return expired.Count;
@@ -958,6 +1095,20 @@ WHERE hour < $1;";
         {
             insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             await insert.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        /* V221 (#6800): the hash-hourly rows of the same hour, in this transaction, so the table and the stamp rows come from the same
+           pass. The ledger's hash_built_seq below is the same value as built_seq. */
+        await using (var deleteHash = NewCommand(DeleteHashHourSql))
+        {
+            deleteHash.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await deleteHash.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var insertHash = NewCommand(BuildHashHourInsertSql))
+        {
+            insertHash.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await insertHash.ExecuteNonQueryAsync(cancellationToken);
         }
 
         long sourceRows;
@@ -1152,6 +1303,9 @@ WHERE hour < $1;";
             }
         }
 
+        /* V221 (#6800): the days whose 24 hours are built and valid, after the hours of this tick, newest first, at most QueryStoreHashDaily.MaxBuildsPerTick. */
+        var days = await QueryStoreHashDaily.RunTickAsync(connection, nowUtc, logger, elapsed, options?.StoreNow, cancellationToken);
+
         /* An open writer of the wide table held hours back: at plan time (the hours it would defer never took a build slot) or at build
            time (it started between the plan and the build). Name it, once per tick, however many hours; the next tick retries. */
         var heldBack = planned.HeldBack + deferredForWriters;
@@ -1185,9 +1339,9 @@ WHERE hour < $1;";
         }
 
         var deferred = plan.Count - started + deferredForWriters;
-        var result = new TickResult(builtStale, builtMissing, failed, removed, deferred, deferredForWriters, planned.HeldBack, backedOff);
-        logger.LogInformation("Query Store compose rollup: built {Built} hour(s) (stale {Stale}, missing {Missing}), failed {Failed}, deferred {Deferred}, removed {Removed} hour(s), {ElapsedMs} ms",
-            result.Built, builtStale, builtMissing, failed, deferred, removed, (long)elapsed().TotalMilliseconds);
+        var result = new TickResult(builtStale, builtMissing, failed, removed, deferred, deferredForWriters, planned.HeldBack, backedOff, days.Built, days.Failed);
+        logger.LogInformation("Query Store compose rollup: built {Built} hour(s) (stale {Stale}, missing {Missing}), failed {Failed}, deferred {Deferred}, removed {Removed} hour(s), built {DaysBuilt} day(s), failed {DaysFailed} day(s), {ElapsedMs} ms",
+            result.Built, builtStale, builtMissing, failed, deferred, removed, days.Built, days.Failed, (long)elapsed().TotalMilliseconds);
         return result;
     }
 }
