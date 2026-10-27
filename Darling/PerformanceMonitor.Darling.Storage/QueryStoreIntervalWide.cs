@@ -472,24 +472,54 @@ FROM collect.query_store_interval_wide AS t
 WHERE t.server_id = $1;";
 
     /// <summary>
-    /// <see cref="PlainTableFloorSql"/> for many servers in ONE statement (#6807): <c>$1</c> is the <c>int[]</c> of server ids, and each
-    /// id gets its own LATERAL <c>MIN</c>, so each server is still one index seek on <c>(server_id, first_execution_time)</c> in every
-    /// partition, exactly the plan the one-server statement gets. A server with no rows answers NULL, as the one-server statement does.
-    /// A fleet gate (<c>ComposePanelRunner.ResolveQueryStoreWideEligibleAsync</c>, <c>DarlingQueryTagRollupReader</c>) used to run the
-    /// one-server statement once per server, 42 round trips at 17 to 20 ms each on a store with 42 servers.
+    /// <see cref="PlainTableFloorSql"/> for many servers in ONE statement (#6807), and only for the servers that reach the gate's floor
+    /// step: <c>$1</c> is the <c>int[]</c> of server ids, <c>$2</c> the clamp (<see cref="ClampedStart"/>) and <c>$3</c> the literal window
+    /// end (NULL when there is none). The materialized <c>reach</c> keeps a server only when <see cref="ResolveReadAsync"/> would get past
+    /// clauses 1, 2 and 5 for it (a coverage row, no pending batch, <c>filled_since</c> at or below the clamp, a literal end at or past
+    /// <c>applied_through</c>), so a server that refuses ahead of the floor step is never scanned. Each kept id then gets its own LATERAL
+    /// <c>MIN</c>, the same aggregate the one-server statement runs, and a server with no rows answers NULL as it does there. The plan is
+    /// whatever plan the one-server statement gets on this store, per id. A fleet gate used to run the one-server statement once per
+    /// server, 42 round trips at 17 to 20 ms each on a store with 42 servers.
     /// </summary>
     public const string PlainTableFloorsSql = @"
+WITH
+    reach AS MATERIALIZED
+(
+    SELECT DISTINCT
+        ids.server_id
+    FROM unnest($1::integer[]) AS ids(server_id)
+    JOIN collect.query_store_interval_wide_coverage AS c
+      ON c.server_id = ids.server_id
+    WHERE c.filled_since <= $2::timestamp
+    AND   ($3::timestamp IS NULL OR $3::timestamp >= c.applied_through)
+    AND   NOT EXISTS
+          (
+              SELECT
+                  1
+              FROM collect.query_store_interval_wide_pending AS p
+              WHERE p.server_id = ids.server_id
+          )
+)
 SELECT
-    ids.server_id,
+    r.server_id,
     f.floor
-FROM unnest($1::integer[]) AS ids(server_id)
+FROM reach AS r
 CROSS JOIN LATERAL
 (
     SELECT
         MIN(t.first_execution_time) AS floor
     FROM collect.query_store_interval_wide AS t
-    WHERE t.server_id = ids.server_id
+    WHERE t.server_id = r.server_id
 ) AS f;";
+
+    /// <summary>
+    /// The deadline of <see cref="PlainTableFloorsSql"/>, in seconds (#6807 review). Warm, the statement over 42 servers takes
+    /// milliseconds. Right after a retention drain one server's floor read alone took 19.6 s and 38.9 s on large stores
+    /// (<c>QueryStoreIntervalFloorWarmUp</c>), so a fleet statement can run for minutes there. It is given this short deadline and,
+    /// when it passes it or faults, each server reads its own floor under the caller's full deadline, as before #6807. The walk it made
+    /// before the deadline is not lost: the index entries it found dead are marked, so the one-server reads skip them.
+    /// </summary>
+    public const int TableFloorsPrefetchSeconds = 5;
 
     /// <summary>
     /// Clause 6's probe (2026 field review of #4310 site 3): whether the window holds any pre-tier-2 row (no
@@ -1260,41 +1290,80 @@ FROM (
 
     /// <summary>
     /// A per-check holder for <see cref="StoreWideInputs"/>. <see cref="ResolveReadAsync"/> fills it the first
-    /// time a server reaches the floors step and reuses it for every later server, so the floors are read at
+    /// time a server reaches the floors step and reuses it for every later server, so the raw floor is read at
     /// most once per check and not at all when every server refuses before that step.
+    /// <para>#6807: a caller that names its servers with <see cref="ReadTableFloorsTogether"/> also gets their table floors in one
+    /// statement (<see cref="PlainTableFloorsSql"/>), read at that same first arrival and only for the named servers that reach the
+    /// floor step. So the table floors too are read not at all when every server refuses before that step. A server the statement did
+    /// not answer, or every server when it failed or passed <see cref="TableFloorsPrefetchSeconds"/>, reads its own floor
+    /// (<see cref="PlainTableFloorSql"/>) as before. Every server in one check must be resolved for the same window.</para>
     /// </summary>
     public sealed class StoreWideInputsCache
     {
         internal StoreWideInputs? Value;
 
-        /// <summary>The servers' table floors read ahead by <see cref="PrefetchTableFloorsAsync"/>; null until then.</summary>
+        /// <summary>The table floors <see cref="PlainTableFloorsSql"/> answered; null until it ran, and after it failed.</summary>
         internal Dictionary<int, DateTime?>? TableFloors;
 
+        /// <summary>A test's replacement for <see cref="PlainTableFloorsSql"/>, one that faults or sleeps, to drive the fallback. Scoped to
+        /// the test's own async flow, so no other caller ever sees it.</summary>
+        internal static readonly AsyncLocal<string?> TableFloorsSqlForTests = new();
+
+        private int[]? _floorServers;
+        private bool _inTransaction;
+        private bool _floorsTried;
+
         /// <summary>
-        /// Reads <see cref="PlainTableFloorSql"/>'s answer for every server in <paramref name="serverIds"/> in one statement
-        /// (<see cref="PlainTableFloorsSql"/>), so a fleet gate pays one round trip instead of one per server (#6807).
-        /// <see cref="ResolveReadAsync"/> then takes a server's floor from here and runs the one-server statement only for a server
-        /// not read. A fault leaves nothing cached, so each server decides for itself as it did before; cancellation propagates.
+        /// Asks for the table floors of <paramref name="serverIds"/> to be read in one statement when the first of them reaches the
+        /// floor step. Reads nothing now. <paramref name="inTransaction"/> says the connection is inside an explicit transaction: the
+        /// statement then runs under a SAVEPOINT, so its failure rolls back only itself, and the transaction's snapshot and every later
+        /// statement on it are untouched.
         /// </summary>
-        public async Task PrefetchTableFloorsAsync(
-            NpgsqlConnection connection, IReadOnlyCollection<int> serverIds, int commandTimeoutSeconds, CancellationToken cancellationToken)
+        public void ReadTableFloorsTogether(IEnumerable<int> serverIds, bool inTransaction)
         {
-            ArgumentNullException.ThrowIfNull(connection);
             ArgumentNullException.ThrowIfNull(serverIds);
-            if (serverIds.Count == 0)
+            _floorServers = serverIds.Distinct().ToArray();
+            _inTransaction = inTransaction;
+        }
+
+        /// <summary>Runs <see cref="PlainTableFloorsSql"/> once, at the first server to reach the floor step. A fault leaves
+        /// <see cref="TableFloors"/> null; cancellation propagates.</summary>
+        internal async Task EnsureTableFloorsAsync(
+            NpgsqlConnection connection, DateTime clampedStart, DateTime? literalWindowEnd, int commandTimeoutSeconds, ILogger? logger, CancellationToken cancellationToken)
+        {
+            if (_floorsTried || _floorServers is not { Length: > 0 } ids)
             {
                 return;
             }
 
+            _floorsTried = true;
+            if (_inTransaction)
+            {
+                await ExecuteAsync(connection, TableFloorsSavepointSql, commandTimeoutSeconds, cancellationToken);
+            }
+
             try
             {
-                var floors = new Dictionary<int, DateTime?>(serverIds.Count);
-                await using var command = new NpgsqlCommand(PlainTableFloorsSql, connection) { CommandTimeout = commandTimeoutSeconds };
-                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = serverIds.Distinct().ToArray() });
-                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                while (await reader.ReadAsync(cancellationToken))
+                var floors = new Dictionary<int, DateTime?>(ids.Length);
+                await using (var command = new NpgsqlCommand(TableFloorsSqlForTests.Value ?? PlainTableFloorsSql, connection) { CommandTimeout = Math.Min(TableFloorsPrefetchSeconds, commandTimeoutSeconds) })
                 {
-                    floors[reader.GetInt32(0)] = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+                    command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = ids });
+                    command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(clampedStart, DateTimeKind.Unspecified) });
+                    command.Parameters.Add(new NpgsqlParameter
+                    {
+                        NpgsqlDbType = NpgsqlDbType.Timestamp,
+                        Value = literalWindowEnd is DateTime e ? DateTime.SpecifyKind(e, DateTimeKind.Unspecified) : DBNull.Value,
+                    });
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        floors[reader.GetInt32(0)] = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+                    }
+                }
+
+                if (_inTransaction)
+                {
+                    await ExecuteAsync(connection, TableFloorsReleaseSql, commandTimeoutSeconds, cancellationToken);
                 }
 
                 TableFloors = floors;
@@ -1302,9 +1371,38 @@ FROM (
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 TableFloors = null;
+                logger?.LogInformation("Query Store table floors for {Servers} servers in one statement failed ({Failure}); each server reads its own", ids.Length, ex.Message);
+                if (_inTransaction)
+                {
+                    /* Undo the failed statement only. If this fails too, the connection is gone, and each server's own statements fail
+                       and refuse, as they would have on that connection without the prefetch. */
+                    try
+                    {
+                        await ExecuteAsync(connection, TableFloorsRollbackSql, commandTimeoutSeconds, cancellationToken);
+                    }
+                    catch (Exception rollback) when (rollback is not OperationCanceledException)
+                    {
+                        logger?.LogWarning("Query Store table floors: the rollback to the savepoint failed ({Failure})", rollback.Message);
+                    }
+                }
             }
         }
+
+        private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, int commandTimeoutSeconds, CancellationToken cancellationToken)
+        {
+            await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = commandTimeoutSeconds };
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
     }
+
+    /// <summary>#6807: the savepoint the fleet floor statement runs under inside an explicit transaction.</summary>
+    private const string TableFloorsSavepointSql = "SAVEPOINT query_store_table_floors";
+
+    /// <summary>#6807: drops the savepoint once the fleet floor statement answered.</summary>
+    private const string TableFloorsReleaseSql = "RELEASE SAVEPOINT query_store_table_floors";
+
+    /// <summary>#6807: undoes a failed fleet floor statement, and only it, so the transaction and its snapshot carry on.</summary>
+    private const string TableFloorsRollbackSql = "ROLLBACK TO SAVEPOINT query_store_table_floors; RELEASE SAVEPOINT query_store_table_floors";
 
     /// <summary>
     /// <see cref="UseTable"/> plus the store round trips it needs, the clamp (<see cref="ClampedStart"/>), and the
@@ -1392,6 +1490,11 @@ FROM (
             }
 
             DateTime? tableFloor;
+            if (storeWide is not null)
+            {
+                await storeWide.EnsureTableFloorsAsync(connection, ClampedStart(rawFloor, windowStart), literalWindowEnd, commandTimeoutSeconds, logger, cancellationToken);
+            }
+
             if (storeWide?.TableFloors is { } prefetched && prefetched.TryGetValue(serverId, out var prefetchedFloor))
             {
                 tableFloor = prefetchedFloor;

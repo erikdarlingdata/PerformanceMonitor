@@ -748,15 +748,12 @@ internal static class ComposePanelRunner
             string? settingServer = null;
 
             /* The floors are one store-wide answer: the first server to reach that step reads them into this
-               cache and the rest reuse them; a check that refuses before that step never reads them. */
+               cache and the rest reuse them; a check that refuses before that step never reads them.
+               #6807: that first arrival also reads the table floor of every server here that reaches the floor step, in one statement,
+               not once per server (42 round trips, about 0.75 s a panel, on a store with 42 servers). The gate takes each floor from the
+               cache and gives the answer it gave before. This connection is autocommit, so a failed statement takes nothing with it. */
             var storeWide = new QueryStoreIntervalWide.StoreWideInputsCache();
-
-            /* #6807: the gate's per-server table floor, read for every server that has a coverage row in one statement and not once per
-               server (42 round trips, about 0.75 s a panel, on a store with 42 servers). A server with no coverage row refuses ahead of
-               the floor step, so it is left out. The gate takes each floor from the cache and gives the answer it gave before. */
-            var covered = await ReadQueryStoreCoveredServersAsync(connection, cancellationToken);
-            await storeWide.PrefetchTableFloorsAsync(
-                connection, wideServers.Where(s => covered.Contains(s.Id)).Select(s => s.Id).ToList(), StorageCommandDeadlines.ComposedReadSeconds, cancellationToken);
+            storeWide.ReadTableFloorsTogether(wideServers.Select(s => s.Id), inTransaction: false);
 
             /* #6115: the gate decides per server, and a server that fails no longer sends the whole panel to raw: it reads raw, and the
                servers that pass read the interval table (the split). Each server is in exactly one set, so no row is read twice.
@@ -766,6 +763,7 @@ internal static class ComposePanelRunner
                wide start, because it has no history to bound. A server with no coverage row and rows in the window cannot use the
                interval table, so it reads raw like any refused server. Decided from the two small probes below, never from the gate,
                whose own answer for such a server is always "refuse". */
+            var covered = await ReadQueryStoreCoveredServersAsync(connection, cancellationToken);
             var rawServers = new List<int>();
             var passed = 0;
             foreach (var (serverId, serverName) in wideServers)

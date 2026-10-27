@@ -92,10 +92,12 @@ public static class DarlingQueryTagRollupReader
             await readOnly.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        /* #6807: the gate's per-server table floor for every server in one statement, and the store-wide raw floor once, inside this same
-           snapshot, instead of one floor statement per server. Each server's answer is the one it got before. */
+        /* #6807: the gate's per-server table floor in one statement for the servers that reach the floor step, and the store-wide raw
+           floor once, inside this same snapshot, instead of one floor statement per server. Each server's answer is the one it got
+           before. The statement runs under a savepoint, so if it fails or passes its short deadline only it is undone, and each server
+           reads its own floor on the snapshot as before. */
         var storeWide = new QueryStoreIntervalWide.StoreWideInputsCache();
-        await storeWide.PrefetchTableFloorsAsync(connection, serverIds, readSeconds, cancellationToken);
+        storeWide.ReadTableFloorsTogether(serverIds, inTransaction: true);
 
         /* The gate decides per server, on the shared snapshot; the read is then ONE statement over every allowed server (#6794), each
            bound to its own ReadStart, so a server's rows are the rows a per-server statement would read. */

@@ -569,6 +569,44 @@ public sealed class QueryTagRollupLiveTests
         });
     }
 
+    /// <summary>#6807 review: the gate's fleet floor statement runs inside the read's REPEATABLE READ transaction. When it fails, or passes
+    /// its short deadline, only it is undone (a savepoint): every server is still decided through its own floor read on the same snapshot,
+    /// and the section reads each server's figures. Without the savepoint the failure aborts the transaction and every server is refused.</summary>
+    [Fact]
+    public async Task AFleetFloorStatementThatFailsOrTimesOut_StillAnswersEveryServer_OnTheSameSnapshot()
+    {
+        await WithStoreAsync(async c =>
+        {
+            var now = DateTime.UtcNow;
+            await CoverQueryStoreAsync(c, ServerOne);
+            await CoverQueryStoreAsync(c, ServerTwo);
+            await QueryStoreAsync(c, ServerOne, "0xA1", 1, 4_000_000, 7);
+            await QueryStoreAsync(c, ServerTwo, "0xB1", 2, 4_000_000, 5);
+            var executions = QueryTagRollupSection.QueryStore.Measures.ToList().FindIndex(m => m.Name == "executions");
+            const string Binds = "$1::integer[] IS NOT NULL AND $2::timestamp IS NOT NULL AND ($3::timestamp IS NULL OR TRUE)";
+            foreach (var failing in new[]
+            {
+                "SELECT (1 / 0)::integer AS server_id, NULL::timestamp AS floor WHERE " + Binds,
+                "SELECT 1 AS server_id, NULL::timestamp AS floor FROM pg_sleep(60) WHERE " + Binds,
+            })
+            {
+                QueryStoreIntervalWide.StoreWideInputsCache.TableFloorsSqlForTests.Value = failing;
+                try
+                {
+                    var result = await DarlingQueryTagRollupReader.ReadQueryStoreAsync(c.Source, [ServerOne, ServerTwo], now.AddHours(-24), now, null, c.Ct);
+                    Assert.Empty(result.Refused);
+                    Assert.Equal([ServerOne, ServerTwo], result.Allowed.Keys.Order());
+                    Assert.Equal(7, result.Facts.Where(f => f.ServerId == ServerOne).Sum(f => f.Values[executions]));
+                    Assert.Equal(5, result.Facts.Where(f => f.ServerId == ServerTwo).Sum(f => f.Values[executions]));
+                }
+                finally
+                {
+                    QueryStoreIntervalWide.StoreWideInputsCache.TableFloorsSqlForTests.Value = null;
+                }
+            }
+        });
+    }
+
     /// <summary>#6794: the batched Query Store statement binds each server's own read start. Server two's start is an hour ago, so its row
     /// from two hours ago is not read, while server one's row of the same age (its start is the window's) is.</summary>
     [Fact]
