@@ -2405,6 +2405,35 @@ END $do$;";
         "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreSelfKeys.CreateSql + "\n" + QueryStoreSelfKeys.TriggerSql;
 
     /// <summary>
+    /// V220 (#6798): <c>idx_job_history_job_success</c> on <c>collect.job_history (server_id, job_id, run_datetime DESC) INCLUDE
+    /// (run_duration_seconds, collection_time) WHERE step_id = 0 AND run_status = 1</c>, for the Job History read's per-job statistics
+    /// (<see cref="DarlingJobHistoryReader.BuildJobHistorySql"/>'s <c>job_stats</c>). That part averages each listed job's successful
+    /// outcomes and finds its last one. Through V150's <c>idx_job_history_server_run</c> it read the server's whole run-time range and
+    /// dropped the step rows and the other jobs after fetching them from scattered heap pages: on a 210-server copy of a production
+    /// store, 13.2 s of a 16.3 s cold read. This partial index holds only the successful outcomes (about 23% of the rows on one
+    /// production store), and its INCLUDE columns cover the aggregate and the <c>collection_time</c> floor, so the read seeks the listed
+    /// jobs and never visits the heap. A compressed chunk keeps no rows in this index (past 7 days for <c>job_history</c>), so the read
+    /// takes those chunks through the compressed batches' <c>server_id</c> segment-by index, once per listed server, as it did before.
+    ///
+    /// <para><b>Cost, measured on PostgreSQL 17 with TimescaleDB 2.31</b> (42 servers, 9.8M rows in 101 twelve-hour chunks, 98 of them
+    /// compressed, the step and status mix of one production store): the build took 0.18 s, because a compressed chunk's index is an
+    /// empty shell and only the three uncompressed chunks hold rows. The index is 20 MB on those chunks against V150's 69 MB. A 93,000-row
+    /// insert into the newest chunk went from 0.24 s to 0.28 s (median of three), one more btree that only the 23% of rows that are
+    /// successful outcomes enter. Compressing a chunk drops its rows from the index, so the size stays bounded by the uncompressed
+    /// window. Plain <c>CREATE INDEX IF NOT EXISTS</c>, V150's shape: <c>MigrateAsync</c> runs the rung in one transaction, where
+    /// <c>timescaledb.transaction_per_chunk</c> cannot run. The build holds a SHARE lock on the uncompressed chunks, which blocks the
+    /// collector's inserts for the build's length, so the lock timeout is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as
+    /// V173's. A fresh store runs every rung, so it gets the index too. Additive: an older build never reads it, and no GRANT is needed
+    /// for an index.</para>
+    /// </summary>
+    private static readonly string V220Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+CREATE INDEX IF NOT EXISTS idx_job_history_job_success
+    ON collect.job_history (server_id, job_id, run_datetime DESC)
+    INCLUDE (run_duration_seconds, collection_time)
+    WHERE step_id = 0 AND run_status = 1;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2798,6 +2827,7 @@ $rung$;";
         new Migration(217, "query-store-hints", V217Sql),
         new Migration(218, "server-action-recompile-module", V218Sql),
         new Migration(219, "query-store-self-keys", V219Sql),
+        new Migration(220, "job-history-success-index", V220Sql),
     };
 
     /// <summary>

@@ -542,6 +542,10 @@ DROP TRIGGER IF EXISTS trg_query_store_self_keys_ins ON collect.query_store_text
 DROP TRIGGER IF EXISTS trg_query_store_self_keys_upd ON collect.query_store_text;
 DROP FUNCTION IF EXISTS collect.query_store_self_keys_track();
 DROP TABLE IF EXISTS collect.query_store_self_keys_state, collect.query_store_self_keys;"),
+        // V220 (#6798): the Job History statistics index on collect.job_history. The index is the probe's newest sentinel. The rewind drops
+        // it, so a re-run of V220 builds it again. Safe on a store that never had it.
+        new(220, "hasJobHistorySuccessIndex",
+            "DROP INDEX IF EXISTS collect.idx_job_history_job_success;"),
     ];
 
     /// <summary>
