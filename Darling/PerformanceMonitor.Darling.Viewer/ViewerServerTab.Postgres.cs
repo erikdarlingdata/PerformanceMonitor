@@ -767,7 +767,6 @@ public partial class ViewerServerTab
         PgWaitSamplingGrid.ItemsSource = PgDisplay.WaitSamplingRows(rows);
         UpdateTruncationBanner(PgWaitSamplingDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL Wait Sampling"), startUtc);
 
-        var attributed = rows.Count(r => r.QueryId != 0);
         var reset = rows.Any(r => r.CounterReset);
 
         PgWaitSamplingNote.Text = rows.Count == 0
@@ -775,30 +774,14 @@ public partial class ViewerServerTab
                 serviceTier
                     ? "No wait samples for this server in this window. This server is on the service-sampled "
                       + "tier (pg_wait_sampling is not installed), so the service polled pg_stat_activity once a "
-                      + "second for a 30-second window each cycle and found nothing worth counting — the healthy "
-                      + "answer at that grain, which under-counts waits shorter than a second."
+                      + "second for a 30-second window each cycle and found nothing worth counting, the healthy "
+                      + "answer at that grain. " + PgWaitInstrument.ServiceSampledCaveat
                     : "No wait samples for this server in this window. The usual cause is that "
                       + "pg_wait_sampling is not in shared_preload_libraries — check the Extensions panel, "
                       + "which says whether it is installed, available or absent. If it IS loaded, an empty "
                       + "grid means the server waited on nothing worth sampling, which is the healthy answer.")
-            : $"{rows.Count:N0} wait event(s), {attributed:N0} attributed to a query. "
-              + (serviceTier
-                  ? "Instrument: SERVICE SAMPLER — pg_wait_sampling is not installed, so this is the "
-                    + $"service polling pg_stat_activity once a second for a 30-second window {CollectorCadenceText.Every(waitMinutes)}. "
-                    + "A floor, not parity: waits shorter than a second are under-counted and "
-                    + "nothing between windows is seen. Installing the extension moves this server to "
-                    + "the 10 ms tier. "
-                  : instrument is not null
-                      ? "Instrument: pg_wait_sampling extension (10 ms in-engine profiler). "
-                      : string.Empty)
-              + "Est. Wait is samples multiplied by the profile period — an estimate from a sampling "
-              + "profiler, not a measured duration, so treat it as a ranking rather than a stopwatch. "
-              + "A Query ID of 0 is a background process rather than an unknown query, and CPU/Running "
-              + "is the backend on processor rather than waiting."
-              + (reset
-                  ? " One or more counters RESET inside this window (a restart, or "
-                    + "pg_wait_sampling_reset_profile), so those rows cover only the time since the reset."
-                  : string.Empty);
+            : PgDisplay.WaitSamplingSummary(rows, serviceTier, instrument is not null,
+                CollectorCadenceText.Every(waitMinutes), reset);
     }
 
     /// <summary>
