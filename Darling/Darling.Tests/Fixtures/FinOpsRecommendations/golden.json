@@ -77,7 +77,7 @@
         "Category": "Storage",
         "Severity": "Low",
         "Confidence": "Medium",
-        "Finding": "1 database(s) with low IO latency — standard storage may suffice",
+        "Finding": "1 database with low IO latency, so standard storage may suffice",
         "Detail": "These databases have avg read latency under 5ms and write under 3ms across 6 samples over 15 hours: OrdersA (read 2.0ms, write 1.0ms). Premium/high-performance storage may not be needed.",
         "EstMonthlySavings": null
       },
@@ -167,7 +167,7 @@
         "Category": "Storage",
         "Severity": "Low",
         "Confidence": "Medium",
-        "Finding": "1 database(s) with low IO latency — standard storage may suffice",
+        "Finding": "1 database with low IO latency, so standard storage may suffice",
         "Detail": "These databases have avg read latency under 5ms and write under 3ms across 6 samples over 15 hours: OrdersA (read 2.0ms, write 1.0ms). Premium/high-performance storage may not be needed.",
         "EstMonthlySavings": null
       },

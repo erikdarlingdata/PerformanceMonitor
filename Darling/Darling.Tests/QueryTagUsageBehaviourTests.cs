@@ -10,6 +10,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
 using System.Text.Json;
+using PerformanceMonitor.Common;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -26,6 +27,7 @@ public sealed class QueryTagUsageBehaviourTests
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "query-tag-usage-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
+        psi.Environment["HARNESS_CUT_WINDOW_MESSAGE"] = McpHelpers.CutWindowNothingMessage;
         Process proc;
         try
         {
@@ -96,12 +98,58 @@ public sealed class QueryTagUsageBehaviourTests
     {
         // #6794: the hourly rollup leaves out the hours past its ceiling, so the page says so beside the heading.
         var run = Run();
-        Assert.Contains(run.GetProperty("fleetHourlyNote").EnumerateArray().Select(n => n.GetString()),
-            n => n!.Contains("materialized only to 2026-10-26T21:00:00Z"));
+        var hourly = string.Join(" ", run.GetProperty("fleetHourlyNote").EnumerateArray().Select(n => n.GetString()));
+        Assert.Contains("Hourly data from ", hourly);
+        Assert.Contains("The 10 minutes before the first full hour are not included.", hourly);
+        Assert.Contains("The hourly rollup is built only up to ", hourly);
         Assert.Empty(run.GetProperty("rawMutedNotes").EnumerateArray());
         // #6800: the Query Store section of a routed fleet read carries the same kind of note, and the page shows it as it does the plan cache's.
-        Assert.Contains(run.GetProperty("fleetQueryStoreNote").EnumerateArray().Select(n => n.GetString()),
-            n => n!.Contains("hourly buckets start on the hour: no bucket before 2026-10-26T23:00:00"));
+        var queryStore = string.Join(" ", run.GetProperty("fleetQueryStoreNote").EnumerateArray().Select(n => n.GetString()));
+        Assert.Contains("Daily and hourly data, with the raw intervals for the edges, from ", queryStore);
+        Assert.Contains("The 43 minutes before the first full hour are not included.", queryStore);
+    }
+
+    [Fact]
+    public void TheEmptyRegressionsPanel_NamesTheTimeTheStoresDataStarts_NotTheFieldAndThePointerToHints()
+    {
+        // #6831: "starts at effective_start (see hints)" sent a reader to a field the page never shows.
+        var run = Run();
+        Assert.Equal("empty", run.GetProperty("regressionsEmptyKind").GetString());
+        var message = run.GetProperty("regressionsEmptyMessage").GetString()!;
+        Assert.StartsWith("Nothing in the part of the window the store covers; the store's data for this read starts at ", message);
+        Assert.Contains("2026", message);
+        Assert.EndsWith(", so the stretch before it is not a report that nothing happened.", message);
+        foreach (var pattern in new[] { @"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", "effective_start", @"\(see hints\)", @"collect\." })
+        {
+            Assert.DoesNotMatch(pattern, message);
+        }
+    }
+
+    [Fact]
+    public void TheEdgeNotes_AreWordedFromFields_NotRawStampsOrRelationNames()
+    {
+        // #6831: the page's own words for every edge case, and none of the MCP text's raw UTC stamps, field names or relation names.
+        var run = Run();
+        var edges = run.GetProperty("edgeCases").EnumerateArray().Select(n => n.ValueKind == JsonValueKind.Null ? null : n.GetString()).ToArray();
+        Assert.Contains("The 1 minute before the first full hour is not included.", edges[0]);
+        Assert.Contains("The last hour is counted whole, so the data runs to ", edges[0]);
+        Assert.Contains("How far the hourly rollup is built is not known", edges[1]);
+        Assert.Null(edges[2]);
+        Assert.Contains("Less than a minute before the first full hour is not included.", edges[3]);
+        Assert.DoesNotContain("under a minute", edges[3]);
+        // The first bucket came 5.5 hours after the window start: the missing span is named, never "the 330 minutes before the first full hour".
+        Assert.StartsWith("Hourly data from ", edges[4]);
+        Assert.Contains(" is not included.", edges[4]);
+        Assert.Contains("The data from ", edges[4]);
+        Assert.DoesNotContain("before the first full hour", edges[4]);
+        var sources = run.GetProperty("sources").EnumerateArray().Select(n => n.GetString()).ToArray();
+        Assert.Equal(["raw collections", "hourly rollup", "Query Store intervals", "hourly Query Store table, raw intervals for the edges", "dmv blocking snapshots"], sources);
+
+        var page = run.GetProperty("fleetPageText").GetString()!;
+        foreach (var pattern in new[] { @"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", "effective_start", @"\(see hints\)", @"collect\." })
+        {
+            Assert.DoesNotMatch(pattern, page);
+        }
     }
 
     [Fact]

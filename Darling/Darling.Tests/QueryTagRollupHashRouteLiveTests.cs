@@ -35,7 +35,10 @@ namespace Darling.Tests;
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test reaches DARLING_TEST_PG only to CREATE and DROP its
    own database through ScratchPostgres and works entirely inside it, so it never touches the shared database and cannot race the
-   live collection. */
+   live collection. It does join "viewer-time-statics" (#6831): one test renders the Viewer's note, which reads ViewerTimeHelper's process-wide
+   statics, and compares it to the same note rendered a moment later in the test, so another class setting the display mode in between
+   (ViewerTimeHelperTests and others run in parallel) made the equality fail at random. The collection runs with parallelization disabled. */
+[Collection("viewer-time-statics")]
 public sealed class QueryTagRollupHashRouteLiveTests
 {
     private const string SkipReason = "Set DARLING_TEST_PG to a Postgres connection string to run the V221 hash-hourly route facts.";
@@ -329,11 +332,15 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             Assert.Equal("hourly+tail", section.GetProperty("tier").GetString());
             Assert.Equal(HourlyWindowEdges.StartNote(toolStart, snappedStart), section.GetProperty("window_edges_note").GetString());
             Assert.Equal(McpHelpers.FormatEffectiveStart(snappedStart), section.GetProperty("effective_start").GetString());
+            /* #6831: the dropped start and the first instant read, as fields for the page's own words. */
+            Assert.Equal(McpHelpers.FormatEffectiveStart(snappedStart), section.GetProperty("served_start").GetString());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(toolStart), section.GetProperty("start_dropped_from").GetString());
 
-            /* The Viewer's section reads through the same reader and shows the same sentence in its note. */
+            /* The Viewer's section reads through the same reader and says the same edge in its own clock and words (#6831): no ISO stamp. */
             await using var viewer = new ViewerDataService(a.Scratch.ConnectionString);
             var viewed = await viewer.GetQueryTagRollupDataAsync(Servers, toolStart, a.End, ct);
-            Assert.Contains(HourlyWindowEdges.StartNote(toolStart, snappedStart)!, viewed.Notes[QueryTagRollupSection.QueryStore.Name], StringComparison.Ordinal);
+            Assert.Equal(QueryTagUsageNotes.QueryStore(false, snappedStart, toolStart, a.End, QueryTagUsageNotes.Stamper(Servers.Length)),
+                viewed.Notes[QueryTagRollupSection.QueryStore.Name]);
 
             /* The fallback: today's statement, the exact start, no note and no tier. */
             await ExecAsync(a.Connection, "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);

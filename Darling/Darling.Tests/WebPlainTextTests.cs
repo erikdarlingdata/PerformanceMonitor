@@ -237,6 +237,57 @@ public sealed class WebPlainTextTests
         Assert.Equal("3 queries failed, 1 query retried, 2 policies skipped.", o[6]);
     }
 
+    /* #6831: System Events says what was captured in words, with the count's own plural, for every event type the health parser reads. */
+    [Fact]
+    public void TheSystemHealthEventNames_AreSaidInWords_WithTheCountsPlural()
+    {
+        /* Every event type the parser names, read from its public constants, so a seventh type fails here until the page says it in words. */
+        var types = typeof(SystemHealthParser)
+            .GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.EndsWith("Event", StringComparison.Ordinal))
+            .Select(f => (string)f.GetRawConstantValue()!)
+            .ToArray();
+        Assert.Equal(6, types.Length);
+        var inputs = types.SelectMany(t => new[]
+        {
+            $"1431 {t} event(s) were captured for SQL2025 in the last 24 hour(s) and none qualified.",
+            $"1 {t} event(s) were captured for SQL2025 in the last 1 hour(s) and none qualified.",
+            $"No {t} events were captured for SQL2025 in the last 24 hour(s).",
+        }).ToArray();
+        var o = Run(inputs, out _);
+        for (var i = 0; i < types.Length; i++)
+        {
+            var word = types[i] switch
+            {
+                SystemHealthParser.SchedulerMonitorEvent => "scheduler monitor",
+                SystemHealthParser.SpServerDiagnosticsEvent => "server diagnostics",
+                SystemHealthParser.MemoryBrokerEvent => "memory broker",
+                SystemHealthParser.MemoryNodeOomEvent => "memory node out-of-memory",
+                SystemHealthParser.ErrorReportedEvent => "error",
+                SystemHealthParser.WaitInfoEvent => "wait",
+                _ => throw new InvalidOperationException("an event type the page has no words for: " + types[i]),
+            };
+            Assert.StartsWith($"1431 {word} events were captured for SQL2025 in the last 24 hours", o[i * 3]);
+            Assert.StartsWith($"1 {word} event was captured", o[i * 3 + 1]);
+            Assert.StartsWith($"No {word} events were captured", o[i * 3 + 2]);
+        }
+        foreach (var line in o)
+        {
+            Assert.DoesNotContain("_", line);
+            Assert.DoesNotContain("event(s)", line);
+        }
+    }
+
+    /* #6831: the cut-window sentence with no instant to name (util.js puts the time in when the answer carries one). */
+    [Fact]
+    public void TheCutWindowSentence_WithNoInstantToName_DoesNotPointAtHints()
+    {
+        var o = Run([McpHelpers.CutWindowNothingMessage], out _);
+        Assert.DoesNotContain("effective_start", o[0]);
+        Assert.DoesNotContain("see hints", o[0]);
+        Assert.Contains("starts partway into the window, so", o[0]);
+    }
+
     /* #5644 W8: the clauses that point an MCP caller at a parameter the page has no control for. */
     [Fact]
     public void ParameterClauses_ForAnMcpCaller_AreDroppedOrSaidInThePagesWords()

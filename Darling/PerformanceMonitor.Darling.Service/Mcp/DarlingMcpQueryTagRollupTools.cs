@@ -170,6 +170,9 @@ public sealed class DarlingMcpQueryTagRollupTools
                     {
                         reach["tier"] = read.UsedHashDaily ? "daily+hourly+tail" : "hourly+tail";
                         reach["window_edges_note"] = string.IsNullOrEmpty(read.WindowEdgesNote) ? null : read.WindowEdgesNote;
+                        /* #6831: the same edge as fields for the page (the Query Store read has no served end: the raw tail runs to the window's end). */
+                        reach["served_start"] = reach["effective_start"];
+                        reach["start_dropped_from"] = read.StartDroppedFrom is DateTime dropped ? McpHelpers.FormatEffectiveStart(dropped) : null;
                     }
                 }
 

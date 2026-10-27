@@ -122,6 +122,38 @@ public sealed class HourlyWindowEdgesTests
     }
 
     [Fact]
+    public void Describe_GivesTheEdgesTheNoteWords_AsFields()
+    {
+        // #6831: the page words the edges from these fields instead of reading the note.
+        var start = Aligned.AddMinutes(37);
+        var cut = HourlyWindowEdges.Describe(start, null, Aligned.AddHours(4).AddMinutes(20), Aligned.AddHours(3));
+        Assert.Equal(Aligned.AddHours(1), cut.ServedStart);
+        Assert.Equal(Aligned.AddHours(3), cut.ServedEnd);
+        Assert.Equal(start, cut.StartDroppedFrom);
+        Assert.Equal(Aligned.AddHours(3), cut.MaterializedTo);
+        Assert.False(cut.EndCountedWhole);
+
+        // A first bucket hours after the start: the start edge is where the read began, the dropped-from is where the window did, and the two are
+        // hours apart (a consumer must word that as a span, not as the minutes before the next full hour).
+        var late = HourlyWindowEdges.Describe(start, Aligned.AddHours(4), Aligned.AddHours(9), Aligned.AddHours(12));
+        Assert.Equal(Aligned.AddHours(4), late.ServedStart);
+        Assert.Equal(start, late.StartDroppedFrom);
+        Assert.True(late.ServedStart - late.StartDroppedFrom!.Value > TimeSpan.FromHours(3));
+
+        var whole = HourlyWindowEdges.Describe(Aligned, null, Aligned.AddHours(4).AddMinutes(20), Aligned.AddHours(9));
+        Assert.Equal(Aligned, whole.ServedStart);
+        Assert.Null(whole.StartDroppedFrom);
+        Assert.Null(whole.MaterializedTo);
+        Assert.True(whole.EndCountedWhole);
+        Assert.Equal(Aligned.AddHours(5), whole.ServedEnd);
+
+        var unknown = HourlyWindowEdges.Describe(Aligned, null, Aligned.AddHours(4), null);
+        Assert.Null(unknown.ServedEnd);
+        Assert.Null(unknown.MaterializedTo);
+        Assert.False(unknown.EndCountedWhole);
+    }
+
+    [Fact]
     public void ServedSpan_CutsTheEndAtTheCeiling()
     {
         var (start, end) = HourlyWindowEdges.ServedSpan(Aligned.AddMinutes(37), Aligned.AddHours(1), Aligned.AddHours(4).AddMinutes(20), Aligned.AddHours(3));

@@ -2742,7 +2742,7 @@ VALUES ($1, $2, $3, $4, $5, true, $6, 120, 100, 130, 200, false, 120.0)";
     /// Avg read latency 1ms, avg write latency 0.5ms — doesn't need premium storage.
     ///
     /// Expected recommendations:
-    ///   - Storage tier: database(s) with low IO latency — standard storage may suffice
+    ///   - Storage tier: databases with low IO latency, so standard storage may suffice
     /// </summary>
     public async Task SeedLowIoLatencyAsync()
     {

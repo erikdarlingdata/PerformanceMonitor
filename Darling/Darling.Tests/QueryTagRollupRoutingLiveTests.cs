@@ -139,6 +139,11 @@ public sealed class QueryTagRollupRoutingLiveTests
             Assert.Equal("hourly", procedures.GetProperty("tier").GetString());
             Assert.Equal(McpHelpers.FormatEffectiveStart(procCeiling!.Value), procedures.GetProperty("window_end").GetString());
             Assert.Contains("materialized only to", plan.GetProperty("window_edges_note").GetString(), StringComparison.Ordinal);
+            /* #6831: the same edges as fields, for the page's own words. */
+            Assert.Equal(McpHelpers.FormatEffectiveStart(planCeiling!.Value), plan.GetProperty("materialized_to").GetString());
+            Assert.True(plan.TryGetProperty("served_start", out _));
+            Assert.True(plan.TryGetProperty("start_dropped_from", out _));
+            Assert.False(plan.GetProperty("end_hour_counted_whole").GetBoolean());
         });
 
     /// <summary>#6794: seeds one plan-cache and one procedure row 30 hours back (so the io rollup's floor reaches a 24-hour window's start)
