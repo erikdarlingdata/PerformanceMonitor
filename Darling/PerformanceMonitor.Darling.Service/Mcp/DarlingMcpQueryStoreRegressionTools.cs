@@ -150,7 +150,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
 
             if (rows.Count == 0)
                 return McpHelpers.WithDatabasesLeftOut(
-                    await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, baselineStart, hours_back, databaseFilter, notice, tableSpans, cancellationToken), leftOut)!;
+                    await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, baselineStart, hours_back, databaseFilter, notice, tableSpans, dataStart, cancellationToken), leftOut)!;
 
             /* #6750: always present. On the table path below raw's floor each arm's own start; otherwise both are the notice's effective_start. */
             var costBaselineStart = tableSpans is not null ? McpHelpers.FormatEffectiveStart(tableSpans.CostStart) : notice.EffectiveStart;
@@ -359,7 +359,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
     /// </summary>
     private static async Task<string> EmptyAsync(
         NpgsqlDataSource postgres, string serverName, int serverId, DateTime start, DateTime end, DateTime baselineStart, int hours_back,
-        DatabaseFilter databases, McpWindowNotice notice, DarlingQueryStoreRegressionReader.RegressionSpans? tableSpans, CancellationToken cancellationToken)
+        DatabaseFilter databases, McpWindowNotice notice, DarlingQueryStoreRegressionReader.RegressionSpans? tableSpans, DateTime? rawDataStart, CancellationToken cancellationToken)
     {
         /* #6750: when the table read reached below raw's floor, the two questions are asked of the table that served the cost arms, over
            the span it compared. Raw's probe would answer "no baseline" for a 168 hour read on a store whose raw tier keeps 4 days, while
@@ -381,11 +381,19 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                     $"No Query Store data has EVER been collected for {serverName}, so this is NOT a report of zero regressions — there is nothing to compare. Query Store may be OFF on this server's databases, which get_query_store_health will say; otherwise check that collection is running for this server.");
         }
 
+        /* #6829: where the data the answer could read starts: the table path's later arm start, else this server's raw start. */
+        var floor = tableSpans is not null ? DarlingMcpWindowNotice.Later(tableSpans.CostStart, tableSpans.FailureStart) : rawDataStart;
+
         if (!hasBaseline)
         {
+            /* #6829: a server monitored since before the baseline window whose kept data starts after it has a baseline that retention
+               dropped, not one that was never collected, so the two causes below would both be false. */
+            var kept = await RetentionCause.ForServerAsync(postgres, serverId, baselineStart, start, end, floor, tableSpans is not null, cancellationToken);
             return McpHelpers.Status(
                 "unavailable",
-                $"{serverName} has no Query Store capture in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline window before this window, so there is no baseline to compare against and no regression can be detected however badly one regressed. This is NOT a clean bill of health. Either this server's whole collected history falls inside the last {hours_back} hour(s), or it has none older than the baseline lookback yet.");
+                $"{serverName} has no Query Store capture in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline window before this window, so there is no baseline to compare against and no regression can be detected however badly one regressed. This is NOT a clean bill of health. "
+                    + (kept ?? $"Either this server's whole collected history falls inside the last {hours_back} hour(s), or it has none older than the baseline lookback yet."),
+                notice.AsHints());
         }
 
         if (!hasRecent)
@@ -423,9 +431,11 @@ public sealed class DarlingMcpQueryStoreRegressionTools
 
             if (!filteredBaseline)
             {
+                var keptSome = await RetentionCause.ForDatabaseAsync(postgres, serverId, baselineStart, start, end, floor, tableSpans is not null, one, cancellationToken);
                 return McpHelpers.Status(
                     "unavailable",
-                    $"{serverName} has no Query Store capture of {scope} in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline window before this window, so there is no baseline for {that} to compare against and no regression of {(one ? "its" : "their")} queries can be detected however badly one regressed. This is NOT a clean bill of health: no query in {that} was compared. Either {thatPossessive} whole collected history falls inside the last {hours_back} hour(s), or {(one ? "it has" : "they have")} none older than the baseline lookback yet.");
+                    $"{serverName} has no Query Store capture of {scope} in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline window before this window, so there is no baseline for {that} to compare against and no regression of {(one ? "its" : "their")} queries can be detected however badly one regressed. This is NOT a clean bill of health: no query in {that} was compared. " + (keptSome ?? $"Either {thatPossessive} whole collected history falls inside the last {hours_back} hour(s), or {(one ? "it has" : "they have")} none older than the baseline lookback yet."),
+                    notice.AsHints());
             }
 
             if (!filteredRecent)
