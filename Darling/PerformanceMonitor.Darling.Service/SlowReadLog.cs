@@ -201,6 +201,8 @@ WHERE slow_read_id IN
             windowEnd = null;
         }
 
+        /* #6795: the scope already holds the slowest MaxStatementsStored statements; they are stored in the order they ran, each with
+           its ordinal, so a gap in the ordinals shows where faster statements were left out. */
         var timings = scope.Snapshot().OrderBy(t => t.Ordinal).Take(MaxStatementsStored).ToList();
         var statementsTruncated = scope.StatementTotal > timings.Count;
         var statements = new JsonArray();

@@ -149,10 +149,31 @@ public sealed class ReadScopeStatementCaptureLiveTests
         RequirePg();
         ReadStatementCapture.Register();
         await using var source = Source();
+
+        /* Open the fan's connections before the scope exists. A cold pool opens them inside the fan, and each open is a statement the
+           scope also sees (measured: 32 of them, 255 ms each, slower than the 50 ms probes). Since #6795 the scope keeps the slowest
+           MaxStatements, so with them the total passes 50 and the faster probes are evicted, which is what a scope is meant to do and
+           not what this test is about. The test asks that concurrent statements in one scope are all seen, none lost. */
+        const int Fan = 32;
+        var warm = new List<NpgsqlConnection>();
+        try
+        {
+            for (var i = 0; i < Fan; i++)
+            {
+                warm.Add(await source.OpenConnectionAsync());
+            }
+        }
+        finally
+        {
+            foreach (var connection in warm)
+            {
+                await connection.DisposeAsync();
+            }
+        }
+
         using var opened = ReadScope.Open(null);
         opened.Scope.CaptureStatements = true;
 
-        const int Fan = 32;
         await Task.WhenAll(Enumerable.Range(0, Fan).Select(async i =>
         {
             await using var command = source.CreateCommand($"SELECT {i} AS fan_probe_5097, pg_sleep(0.05)");
@@ -163,6 +184,9 @@ public sealed class ReadScopeStatementCaptureLiveTests
         Assert.Equal(Fan, seen.Count);
         Assert.Equal(Fan, seen.Select(t => t.Label).Distinct().Count());
         Assert.Equal(Fan, seen.Select(t => t.Ordinal).Distinct().Count());
+
+        /* None lost: the scope counted every probe, and nothing else ran in it, so the 32 kept are the 32 that ran. */
+        Assert.Equal(Fan, opened.Scope.StatementTotal);
     }
 }
 

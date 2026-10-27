@@ -656,6 +656,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     }
 
                     stopwatch.Restart();
+
+                    /* #6795: a read the browser abandoned is still a read that held the store. It is recorded as one cancelled
+                       read_latency sample, the way the MCP filter's cancelled arm does, so get_read_latency and get_slow_reads
+                       agree about it. Over the slow-read threshold it is also offered, with its route, the time it ran and the
+                       statements it had run, as cancelled; under the threshold the log declines it. Both happen here, before the
+                       rethrow the #4276 backstop needs, because that rethrow is the end of this read. */
+                    void RecordAndOfferCancelledWebRead()
+                    {
+                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.Cancelled, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
+                        OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, ReadOutcome.Cancelled, stopwatch.ElapsedMilliseconds, context, null);
+                    }
+
                     try
                     {
                         /* A newest-first capped read is judged against the window it read: with no anchor sent, the end is
@@ -686,12 +698,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                         /* #4276: the browser left. Not a failure — no log line, and rethrown so the #4276
                            top-of-pipeline backstop (which already owns this exact classification) sees the same
                            exception rather than this catch turning it into a written body for a caller who is gone. */
+                        RecordAndOfferCancelledWebRead();
                         throw;
                     }
                     catch (Exception ex)
                     {
                         /* #5678: the browser left and the store's connect timed out before it could raise a cancellation
                            (Npgsql can do that for an already-cancelled token): still the #4276 not-a-failure case. */
+                        if (context.RequestAborted.IsCancellationRequested)
+                        {
+                            RecordAndOfferCancelledWebRead();
+                        }
+
                         context.RequestAborted.ThrowIfCancellationRequested();
 
                         /* #4276/#4283: a binding-layer throw (the tools normally swallow their own into
