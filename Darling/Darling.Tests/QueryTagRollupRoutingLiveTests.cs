@@ -220,6 +220,32 @@ public sealed class QueryTagRollupRoutingLiveTests
             }
         });
 
+    /// <summary>#6794 review: the io rollup's floor is inside the window (it was built or backfilled late) and reaches further back than raw's
+    /// oldest row, so the route table answers Io through its partial branch. The fleet read still keeps raw, as the Viewer does, because the
+    /// hourly answer would leave out the window's first hours and the section would not name the floor.</summary>
+    [Fact]
+    public Task AFleetRead_WhoseIoFloorIsInsideTheWindow_KeepsRaw() =>
+        WithStoreAsync(async (scratch, connection, ct) =>
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerTwoId, ServerTwoName, ct);
+            var now = DateTime.UtcNow;
+            var early = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc).AddHours(-5).AddMinutes(30);
+            await TopRankingLiveTests.PlantQueryAsync(connection, ct, "collect.query_stats", ServerId, ServerName, early, "QEARLY", 1_000, 1_000, 7, 1);
+            await TopRankingLiveTests.PlantQueryAsync(connection, ct, "collect.query_stats", ServerId, ServerName, now.AddHours(-3), "QNEW", 4_000_000, 6_000_000, 11, 3);
+            await TopRankingLiveTests.PlantProcedureAsync(connection, ct, "collect.procedure_stats", ServerId, ServerName, early, "PEARLY", 1_000, 1_000, 7, 1);
+            await TopRankingLiveTests.PlantProcedureAsync(connection, ct, "collect.procedure_stats", ServerId, ServerName, now.AddHours(-3), "PNEW", 4_000_000, 6_000_000, 11, 3);
+            foreach (var view in new[] { TimescaleSupport.QueryStatsIoHourlyView, TimescaleSupport.ProcedureStatsIoHourlyView })
+            {
+                await RefreshAsync(connection, ct, view, now.AddHours(-8), now.AddHours(-1));
+            }
+
+            using var fleet = JsonDocument.Parse(await FleetAsync(scratch, 24, ct));
+            foreach (var name in new[] { "plan_cache", "procedures" })
+            {
+                Assert.Equal("raw", Section(fleet, name).GetProperty("tier").GetString());
+            }
+        });
+
     /// <summary>#6794 review: on a store with one registered server, the read with no server named reads that one server, so it keeps raw
     /// inside retention as a one-server read does: exact to the minute at both edges, and cheap.</summary>
     [Fact]
@@ -265,6 +291,16 @@ public sealed class QueryTagRollupRoutingLiveTests
                 Assert.Equal(hourly, note.StartsWith("Read from the hourly rollup", StringComparison.Ordinal));
                 /* The facts carry the statement's own unit (microseconds); the view scales them to ms when it renders. */
                 Assert.Equal(cpu * 1000, data.Sections[name].Sum(f => f.Values[0]));
+            }
+
+            /* The tables the view draws: in the all-servers view every one of them, each server's and the total, carries the note. */
+            var scope = ids.Select(id => (id, id == ServerId ? ServerName : ServerTwoName)).ToList();
+            var result = QueryTagUsageView.Build(data, scope, allServers: true, tagFilter: null);
+            foreach (var name in new[] { QueryTagRollupSection.PlanCache.Name, QueryTagRollupSection.Procedures.Name })
+            {
+                var tables = result.Tables.Where(t => t.Section == name).ToList();
+                Assert.Equal(ids.Length + 1, tables.Count);
+                Assert.All(tables, t => Assert.Equal(hourly, t.Note?.StartsWith("Read from the hourly rollup", StringComparison.Ordinal) == true));
             }
         });
 

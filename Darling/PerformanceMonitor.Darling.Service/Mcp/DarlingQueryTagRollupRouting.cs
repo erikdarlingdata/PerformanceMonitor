@@ -53,7 +53,8 @@ internal static class DarlingQueryTagRollupRouting
         {
             var ceiling = coverage.HourlyEndCeiling(ioView, windowStart);
             var hourly = route == HourlyRoute.Io
-                && (tier != RetentionTier.Raw || QueryTagFleetRoute.ReadsHourlyInsideRaw(serverIds.Length, windowStart, windowEnd, ceiling));
+                && (tier != RetentionTier.Raw || QueryTagFleetRoute.ReadsHourlyInsideRaw(
+                    serverIds.Length, windowStart, windowEnd, ceiling, coverage.FloorOf(ioView)));
             if (hourly)
             {
                 var (_, servedEnd) = HourlyWindowEdges.ServedSpan(windowStart, null, windowEnd, ceiling);

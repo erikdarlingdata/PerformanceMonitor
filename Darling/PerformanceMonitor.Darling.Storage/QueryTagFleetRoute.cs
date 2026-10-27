@@ -32,12 +32,16 @@ public static class QueryTagFleetRoute
     /// the hourly io rollup although raw still holds the window. It needs more than one server (raw over every server's rows for a whole
     /// day is what made the fleet read slow, and one server's raw read is cheap and exact to the minute, also on a store with only one
     /// registered server), a measured materialization ceiling (<paramref name="ceiling"/>, null: nothing materialized), and a served span,
-    /// as <see cref="HourlyWindowEdges.ServedSpan"/> computes it, of at least <see cref="MinimumServedShare"/> of the window. Otherwise the
-    /// read stays on raw. The caller still checks that the rollup's floor reaches the window start.
+    /// as <see cref="HourlyWindowEdges.ServedSpan"/> computes it, of at least <see cref="MinimumServedShare"/> of the window, and the rollup's
+    /// floor (<paramref name="ioFloor"/>, the oldest bucket the io rollup holds, null: it holds nothing) at or before the window start, so
+    /// the rollup holds the window's first hour. Both callers pass the floor here, so they make one decision: a floor inside the window,
+    /// where the service's route table would still answer <c>Io</c> because the rollup reaches further back than raw does, keeps raw.
+    /// Otherwise the read stays on raw.
     /// </summary>
-    public static bool ReadsHourlyInsideRaw(int serverCount, DateTime windowStart, DateTime windowEnd, DateTime? ceiling)
+    public static bool ReadsHourlyInsideRaw(
+        int serverCount, DateTime windowStart, DateTime windowEnd, DateTime? ceiling, DateTime? ioFloor)
     {
-        if (serverCount < 2 || ceiling is null || windowEnd <= windowStart)
+        if (serverCount < 2 || ceiling is null || ioFloor is not DateTime floor || floor > windowStart || windowEnd <= windowStart)
         {
             return false;
         }

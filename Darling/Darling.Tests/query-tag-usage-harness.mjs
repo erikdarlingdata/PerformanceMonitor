@@ -73,6 +73,8 @@ const planCache = (serverName, tagOnly) => {
 };
 const deadlocks = () => ({ section: "deadlocks", status: "empty", message: "No deadlock graphs in the window.", tag_rows: [], total: { deadlocks: 0, processes: 0 }, untagged: { deadlocks: 0, processes: 0 } });
 
+/* #6794: what a fleet plan-cache section carries when the hourly rollup served it. */
+const HOURLY_NOTE = "the hourly rollup is materialized only to 2026-10-26T21:00:00Z; nothing after it was read";
 const asks = [];
 const answerFor = (name, q) => {
   if (name === "list_servers") return { servers: [{ server_name: "a", display_name: "Server A", engine_kind: "sqlserver" }, { server_name: "b" }] };
@@ -81,7 +83,7 @@ const answerFor = (name, q) => {
     const tagOnly = !!q.get("tag");
     const fleet = !q.get("server");
     const sections = fleet
-      ? [{ section: "plan_cache", status: "ok", source: "collect.query_stats", servers: [planCache("a", tagOnly), planCache("b", tagOnly)], fleet_total: fig(18, 8) }, deadlocks()]
+      ? [{ section: "plan_cache", status: "ok", source: "collect.query_stats_io_hourly (hourly rollup)", tier: "hourly", window_end: "2026-10-26T21:00:00Z", window_edges_note: HOURLY_NOTE, servers: [planCache("a", tagOnly), planCache("b", tagOnly)], fleet_total: fig(18, 8) }, deadlocks()]
       : [planCache(null, tagOnly), deadlocks()];
     return { scope: fleet ? "fleet" : "server", hours_back: 24, sections_additive: false, sections };
   }
@@ -131,6 +133,8 @@ const out = {};
   /* The page opens on Fleet: no server in the read, and a block per server. */
   out.fleetRead = out.firstRead;
   out.fleetText = cardOfSection("plan_cache").textContent;
+  /* #6794: the hourly fleet section shows the read's own edges note. */
+  out.fleetHourlyNote = all(cardOfSection("plan_cache")).filter((n) => n.className === "muted").map((n) => n.textContent);
   /* #6157: a server's heading is its display name; a server with none keeps its key. */
   out.fleetHeadings = all(cardOfSection("plan_cache")).filter((n) => n.tag === "h4").map((n) => n.textContent);
 
@@ -141,6 +145,8 @@ const out = {};
   await flush();
   out.serverRead = readsOf("get_resource_use_by_tag")[0];
   out.planRows = rowsOf(cardOfSection("plan_cache"));
+  /* #6794: a raw section sends no note, so the page shows none. */
+  out.rawMutedNotes = all(cardOfSection("plan_cache")).filter((n) => n.className === "muted").map((n) => n.textContent);
 
   /* A click on a tag opens its subtree: the read is sent that tag's id. */
   asks.length = 0;

@@ -92,6 +92,16 @@ public sealed class QueryTagUsageBehaviourTests
     }
 
     [Fact]
+    public void AnHourlyFleetSection_ShowsTheReadsEdgesNote_AndARawSectionShowsNone()
+    {
+        // #6794: the hourly rollup leaves out the hours past its ceiling, so the page says so beside the heading.
+        var run = Run();
+        Assert.Contains(run.GetProperty("fleetHourlyNote").EnumerateArray().Select(n => n.GetString()),
+            n => n!.Contains("materialized only to 2026-10-26T21:00:00Z"));
+        Assert.Empty(run.GetProperty("rawMutedNotes").EnumerateArray());
+    }
+
+    [Fact]
     public void TheFleetSections_NameEachServerByDisplayName_AndKeepTheKeyWhenThereIsNone()
     {
         // #6157: the read names a server by its connection key; the heading is the display name list_servers gives it.

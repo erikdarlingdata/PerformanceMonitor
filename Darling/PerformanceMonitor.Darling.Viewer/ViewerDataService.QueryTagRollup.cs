@@ -61,7 +61,7 @@ public sealed partial class ViewerDataService
             var tier = RetentionTierRouter.Resolve(now, startUtc, grainHourly, dailyAvailable: false, coverage.For(hourlyView, dailyView));
             var measured = coverage.HourlyEndCeiling(ioView, startUtc);
             var hourly = IoHourlyCoversWindow(rollups, coverage, ioView, startUtc)
-                && (tier != RetentionTier.Raw || QueryTagFleetRoute.ReadsHourlyInsideRaw(ids.Length, startUtc, endUtc, measured));
+                && (tier != RetentionTier.Raw || QueryTagFleetRoute.ReadsHourlyInsideRaw(ids.Length, startUtc, endUtc, measured, coverage.FloorOf(ioView)));
             var ceiling = hourly ? measured : null;
             try
             {

@@ -98,6 +98,14 @@ public static class QueryTagUsageView
             if (data.Notes.TryGetValue(section.Name, out var note))
             {
                 block["note"] = note;
+                /* #6794: in the all-servers view each server's own table carries the note too, not only the fleet total. */
+                if (block.GetValueOrDefault("servers") is IEnumerable<object> perServer)
+                {
+                    foreach (var server in perServer.OfType<Dictionary<string, object?>>())
+                    {
+                        server["note"] = note;
+                    }
+                }
             }
 
             Add(tables, block, section);
