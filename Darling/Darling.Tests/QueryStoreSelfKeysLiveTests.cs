@@ -303,4 +303,128 @@ WHERE EXCLUDED.last_seen >= query_store_text.last_seen";
             Assert.Equal(1, await after.ExecuteScalarAsync(ct));
         }
     }
+
+    /// <summary>The backfill as dev shipped it in V219's first build, copied as a literal: the marker test and the ORDER BY on one SELECT,
+    /// which on a big text table the planner runs as a walk of the primary key in key order (random heap and TOAST reads).</summary>
+    private const string BackfillBeforeTheFilterFirstFix = @"
+INSERT INTO collect.query_store_self_keys (server_id, database_name, query_id)
+SELECT t.server_id, t.database_name, t.query_id
+FROM collect.query_store_text AS t
+WHERE strpos(COALESCE(t.query_sql_text, ''), 'PerformanceMonitorLite') > 0
+ORDER BY t.server_id, t.database_name, t.query_id
+ON CONFLICT (server_id, database_name, query_id) DO NOTHING";
+
+    /// <summary>The scan nodes that read <c>query_store_text</c> in a plan, as <c>Node Type</c> strings.</summary>
+    private static List<string> ScanNodesOfTextTable(System.Text.Json.JsonElement node)
+    {
+        var found = new List<string>();
+        void Visit(System.Text.Json.JsonElement n)
+        {
+            if (n.TryGetProperty("Relation Name", out var relation) && relation.GetString() == "query_store_text")
+            {
+                found.Add(n.GetProperty("Node Type").GetString()!);
+            }
+
+            if (n.TryGetProperty("Plans", out var plans))
+            {
+                foreach (var child in plans.EnumerateArray())
+                {
+                    Visit(child);
+                }
+            }
+        }
+
+        Visit(node);
+        return found;
+    }
+
+    private static async Task<List<string>> TextScansOfAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var explain = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + sql, connection);
+        var json = (string)(await explain.ExecuteScalarAsync(ct))!;
+        using var document = System.Text.Json.JsonDocument.Parse(json);
+        return ScanNodesOfTextTable(document.RootElement[0].GetProperty("Plan"));
+    }
+
+    private static async Task<List<long>> KeyIdsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT query_id FROM collect.query_store_self_keys ORDER BY server_id, database_name, query_id", connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var ids = new List<long>();
+        while (await reader.ReadAsync(ct))
+        {
+            ids.Add(reader.GetInt64(0));
+        }
+
+        return ids;
+    }
+
+    /// <summary>
+    /// #6750 part 3, the plan. The backfill filters on the marker, so it has to read the text table in one sequential pass and sort only
+    /// the matches. With the <c>ORDER BY</c> on the same <c>SELECT</c> as the filter the planner walks the primary key in key order over
+    /// every row (measured on a large store: 452.9 s and 2.2 million blocks cold, against 157.8 s and 1.4 million for the sequential
+    /// form). The seed is 20,000 rows with the table ANALYZEd and every planner setting at its default: that is enough for the planner
+    /// to choose the index walk for <see cref="BackfillBeforeTheFilterFirstFix"/>, which the test proves first, so the assertion on the
+    /// shipped statement cannot pass for want of rows. It also checks the two statements record the same keys, over a NULL text, a text
+    /// with the marker in the middle, and ordinary text.
+    /// </summary>
+    [Fact]
+    public async Task TheBackfill_ReadsTheTextTableWithOneSequentialScan_AndRecordsTheSameKeysAsBefore()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #6750 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        /* Text stored before the rung: no key for it, so the insert trigger is off while it is written. */
+        await using (var seed = new NpgsqlCommand(
+            $@"ALTER TABLE collect.query_store_text DISABLE TRIGGER {QueryStoreSelfKeys.InsertTriggerName};
+INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen)
+SELECT 1, 'db', q,
+       CASE WHEN q % 50 = 0 THEN '(@cutoff_time datetime2(7))SELECT /* ' || $1 || ' */ qsrs.plan_id -- ' || q
+            WHEN q % 97 = 0 THEN NULL
+            ELSE 'SELECT ' || q || repeat('x', 200) END,
+       now() AT TIME ZONE 'UTC'
+FROM generate_series(1, 20000) AS q;
+ALTER TABLE collect.query_store_text ENABLE TRIGGER {QueryStoreSelfKeys.InsertTriggerName};
+ANALYZE collect.query_store_text;", connection))
+        {
+            seed.Parameters.Add(new NpgsqlParameter<string> { TypedValue = QueryStoreCollector.SelfQueryMarker });
+            await seed.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.Equal(0L, await KeysAsync(connection, ct));
+
+        /* The defect: the planner picks the primary key walk for the old statement. */
+        var before = await TextScansOfAsync(connection, BackfillBeforeTheFilterFirstFix, ct);
+        Assert.True(before.Contains("Index Scan") || before.Contains("Index Only Scan"),
+            "the seed no longer makes the planner choose the primary key walk for the old statement (" + string.Join(", ", before) + "), so the plan assertion below proves nothing");
+
+        /* The fix: the shipped statement reads the text table with a Seq Scan and no index walk. */
+        var after = await TextScansOfAsync(connection, QueryStoreSelfKeys.BackfillSql, ct);
+        Assert.Equal(["Seq Scan"], after);
+
+        /* Same keys. The old statement first, then the shipped one over an emptied key table. */
+        await using (var old = new NpgsqlCommand(BackfillBeforeTheFilterFirstFix, connection))
+        {
+            Assert.Equal(400, await old.ExecuteNonQueryAsync(ct));
+        }
+
+        var oldKeys = await KeyIdsAsync(connection, ct);
+        await using (var clear = new NpgsqlCommand("DELETE FROM collect.query_store_self_keys", connection))
+        {
+            await clear.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var shipped = new NpgsqlCommand(QueryStoreSelfKeys.BackfillSql, connection))
+        {
+            Assert.Equal(400, await shipped.ExecuteNonQueryAsync(ct));
+        }
+
+        var newKeys = await KeyIdsAsync(connection, ct);
+        Assert.Equal(oldKeys, newKeys);
+        Assert.Equal(Enumerable.Range(1, 20000).Where(q => q % 50 == 0).Select(q => (long)q).ToList(), newKeys);
+    }
 }

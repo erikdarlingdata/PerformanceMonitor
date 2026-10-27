@@ -128,13 +128,27 @@ CREATE TRIGGER " + UpdateTriggerName + @"
     /// Records the keys of every stored text that carries the marker. One sequential scan of the text table (it reads the
     /// TOAST), so it runs in the background after start, never in the startup transaction. Idempotent. <see cref="StampSql"/>
     /// follows it in the same transaction, so a read never sees the gate open over a half-filled table.
+    ///
+    /// <para><b>The filter runs before the sort (#6750 part 3).</b> With the <c>ORDER BY</c> on the same <c>SELECT</c> as the marker
+    /// test, the planner walked <c>query_store_text_pkey</c> in key order over every row and tested the text row by row, so the heap and
+    /// TOAST reads were random. Measured cold on a copy of a large production store (6.6 million text rows, an 11 GB table, 16,000
+    /// IOPS): 452.9 s, 2,179,401 blocks read (16.6 GB), 420.8 s of it I/O wait, for 156,086 keys. The marker test is now the
+    /// <c>MATERIALIZED</c> CTE <c>m</c>, a Seq Scan of the text table that keeps only the matches, and the <c>ORDER BY</c> sorts those
+    /// (a 12 MB quicksort of the 156,086 rows). Same keys (0 differ), 157.8 s cold, 1,431,540 blocks read, 142.2 s of I/O wait. The
+    /// sort stays so the insert goes into the key table's primary key in key order. A slower disk costs the random form far more
+    /// than the sequential one (inferred, not measured). A parallel scan is not available, because <c>INSERT ... SELECT</c> gets no
+    /// parallel plan.</para>
     /// </summary>
     public static readonly string BackfillSql = @"
+WITH m AS MATERIALIZED (
+    SELECT t.server_id, t.database_name, t.query_id
+    FROM collect.query_store_text AS t
+    WHERE " + IsSelf("t.query_sql_text") + @"
+)
 INSERT INTO collect.query_store_self_keys (server_id, database_name, query_id)
-SELECT t.server_id, t.database_name, t.query_id
-FROM collect.query_store_text AS t
-WHERE " + IsSelf("t.query_sql_text") + @"
-ORDER BY t.server_id, t.database_name, t.query_id
+SELECT m.server_id, m.database_name, m.query_id
+FROM m
+ORDER BY m.server_id, m.database_name, m.query_id
 ON CONFLICT (server_id, database_name, query_id) DO NOTHING";
 
     /// <summary>The backfill's stamp, the gate's state row. Written after <see cref="BackfillSql"/> in the same transaction.</summary>
