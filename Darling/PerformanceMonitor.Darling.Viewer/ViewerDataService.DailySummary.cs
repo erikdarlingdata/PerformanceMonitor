@@ -53,7 +53,12 @@ public sealed partial class ViewerDataService
     /// — the WPF viewer keeps its own instance, distinct from the service's shared one). Benignly racy like
     /// <see cref="GetRollupAvailabilityAsync"/>'s cache: concurrent tab loads may miss together and compute the
     /// range twice, which is correct, just not maximally cache-efficient.</summary>
-    private readonly DailySummaryRangeCache<RawDailySummaryDay> _dailySummaryRangeCache = new();
+    private DailySummaryRangeCache<RawDailySummaryDay> _dailySummaryRangeCache = new();
+
+    /// <summary>#6815: test-only. Replaces <see cref="_dailySummaryRangeCache"/> with an empty one that reads
+    /// <paramref name="clock"/>, so a live test can move time past the sub-horizon bound without a sleep. The twin of
+    /// <c>DarlingHealthReader.UseRangeCacheClockForTests</c>. Production never calls it and keeps the wall clock.</summary>
+    internal void UseRangeCacheClockForTests(Func<DateTime> clock) => _dailySummaryRangeCache = new(clock);
 
     /// <summary>#4232: one day's worth of <see cref="DailySummarySql"/>'s raw output columns, from BEFORE any
     /// banding or retention judgment — the unit <see cref="_dailySummaryRangeCache"/> actually caches. A record
