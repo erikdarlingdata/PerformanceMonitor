@@ -36,6 +36,11 @@ internal static class DarlingQueryTagRollupRouting
     /// one's reach disclosure (#5983). The hourly rollup serves a section only when the retention tier left raw and the io route reaches
     /// the window's start; <c>tier Hourly</c> with <c>route Raw</c> falls to raw over a window raw may not hold, and says so. The tier is
     /// judged against the wall clock (retention is wall-clock age), the window's own end is the anchor.
+    /// <para>#6794: a read for more than one server also takes the io rollup inside raw retention when the route reaches the window and
+    /// the rollup serves most of it (<see cref="QueryTagFleetRoute.ReadsHourlyInsideRaw"/>, the rule the Viewer calls too). Raw there means
+    /// every server's raw rows for the whole window (about 12 million plan-cache rows for 24 hours on a 42-server store), while the rollup
+    /// holds one row per key per hour. The section says so as every hourly read does (<c>tier</c>, <c>window_end</c>, <c>window_edges_note</c>).
+    /// A short window (1 or 2 hours, where the rollup's ceiling sits at or below the window start) and a one-server read keep raw.</para>
     /// </summary>
     internal static async Task<(StatsRoute Plan, StatsRoute Procedures)> ChooseStatsRoutesAsync(
         NpgsqlDataSource postgres, int[] serverIds, DateTime windowStart, DateTime windowEnd, CancellationToken cancellationToken)
@@ -46,10 +51,12 @@ internal static class DarlingQueryTagRollupRouting
         async Task<StatsRoute> RouteAsync(
             HourlyRoute route, RetentionTier tier, string ioView, string rawSource, RawWindowFloor.Table floorTable)
         {
-            var hourly = tier != RetentionTier.Raw && route == HourlyRoute.Io;
+            var ceiling = coverage.HourlyEndCeiling(ioView, windowStart);
+            var hourly = route == HourlyRoute.Io
+                && (tier != RetentionTier.Raw || QueryTagFleetRoute.ReadsHourlyInsideRaw(
+                    serverIds.Length, windowStart, windowEnd, ceiling, coverage.FloorOf(ioView)));
             if (hourly)
             {
-                var ceiling = coverage.HourlyEndCeiling(ioView, windowStart);
                 var (_, servedEnd) = HourlyWindowEdges.ServedSpan(windowStart, null, windowEnd, ceiling);
                 var edges = HourlyWindowEdges.Note(windowStart, null, windowEnd, ceiling);
                 return new StatsRoute(true, ceiling, new Dictionary<string, object?>
