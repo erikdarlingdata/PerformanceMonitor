@@ -6,9 +6,11 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -91,5 +93,26 @@ internal static class DarlingProcessServices
     /* #1562: the read-only web dashboard on its own port — registered always, self-gating on
        darling.json's web.enabled (default OFF), same config-free posture as the worker and MCP host. */
     services.AddHostedService<DarlingWebHostService>();
+
+    /* #6840: the front door. The directory, its secrets and the hosted service that refreshes it are registered always and
+       cost nothing unless darling.json's frontDoor.enabled is set (the service gates itself, like the hosts above). The block
+       is read from the file on first use, and a file that cannot be read gives the disabled block: the worker reports the
+       load failure itself. Every store's MCP peer client is registered by the part that adds it. */
+    services.AddSingleton<FrontDoorConfig>(_ =>
+    {
+        try
+        {
+            return DarlingConfig.Load().FrontDoor;
+        }
+        catch (Exception)
+        {
+            return new FrontDoorConfig();
+        }
+    });
+    services.AddSingleton<IFrontDoorSecrets>(provider => new DarlingFrontDoorSecrets(
+        provider.GetRequiredService<FrontDoorConfig>(), provider.GetRequiredService<ILogger<DarlingFrontDoorSecrets>>()));
+    services.AddSingleton<DarlingFrontDoorDirectory>();
+    services.AddSingleton<IFrontDoorDirectory>(provider => provider.GetRequiredService<DarlingFrontDoorDirectory>());
+    services.AddHostedService<DarlingFrontDoorDirectoryService>();
     }
 }
