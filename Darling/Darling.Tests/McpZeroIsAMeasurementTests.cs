@@ -574,9 +574,10 @@ public sealed class McpZeroIsAMeasurementLivePostgresTests
                The 30-hours-ago rows sit in the baseline whichever hour the test runs (#5506: the split is by
                last_execution_time, which the seed sets to the collection time). */
             await SeedQueryStoreAsync(connection, ct, HoursAgo(30), queryId: 1, intervalId: 1, executions: 10, avgDurationUs: 0, avgCpuUs: 500, avgReads: 0);
-            await SeedQueryStoreAsync(connection, ct, MinutesAgo(30), queryId: 1, intervalId: 2, executions: 10, avgDurationUs: 1_500, avgCpuUs: 1_000, avgReads: 0);
+            /* #6781: 3,000 recent runs, so the 0.5 ms CPU rise adds 1.5 s of CPU (QueryStoreRegressionRules.CostMinAddedCpuMs). */
+            await SeedQueryStoreAsync(connection, ct, MinutesAgo(30), queryId: 1, intervalId: 2, executions: 3_000, avgDurationUs: 1_500, avgCpuUs: 1_000, avgReads: 0);
             await SeedQueryStoreAsync(connection, ct, HoursAgo(30), queryId: 2, intervalId: 3, executions: 10, avgDurationUs: 1_000, avgCpuUs: 500, avgReads: 0);
-            await SeedQueryStoreAsync(connection, ct, MinutesAgo(30), queryId: 2, intervalId: 4, executions: 10, avgDurationUs: 3_000, avgCpuUs: 1_000, avgReads: 0);
+            await SeedQueryStoreAsync(connection, ct, MinutesAgo(30), queryId: 2, intervalId: 4, executions: 3_000, avgDurationUs: 3_000, avgCpuUs: 1_000, avgReads: 0);
 
             var root = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, hours_back: 24)).RootElement;
             Assert.Equal(2, root.GetProperty("regression_count").GetInt32());
@@ -603,8 +604,8 @@ public sealed class McpZeroIsAMeasurementLivePostgresTests
             Assert.False(defined.TryGetProperty("baseline_reads", out _));
             Assert.False(defined.TryGetProperty("recent_reads", out _));
 
-            /* The ranking key is the absolute delta, defined for both — query 2's 2 ms × 10 outranks
-               query 1's 1.5 ms × 10, whatever their ratios. */
+            /* The ranking key is the absolute delta, defined for both — query 2's 2 ms × 3,000 outranks
+               query 1's 1.5 ms × 3,000, whatever their ratios. */
             var order = root.GetProperty("regressions").EnumerateArray().Select(r => r.GetProperty("query_id").GetInt64()).ToArray();
             Assert.Equal(new long[] { 2, 1 }, order);
 

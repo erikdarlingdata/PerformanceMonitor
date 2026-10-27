@@ -164,9 +164,10 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         }
 
         await W("Regular", b1, 14, 100, 1_000, 2_000);
-        await W("Regular", r2, 14, 100, 2_000, 4_000);
+        /* #6781: enough recent runs that the rise adds at least 1 s of CPU (QueryStoreRegressionRules.CostMinAddedCpuMs). */
+        await W("Regular", r2, 14, 2_000, 2_000, 4_000);
         await W("Regular", b1, 15, 100, 1_000, 2_000);
-        await W("Regular", r2, 15, 100, 2_000, 4_000);
+        await W("Regular", r2, 15, 2_000, 2_000, 4_000);
 
         /* 10: timeouts 0 -> 4 runs (two intervals of 2, 30 s and 50 s a run, CPU 500 ms and 700 ms a run). */
         await W("Aborted", r2, 10, 2, 500_000, 30_000_000);
@@ -248,7 +249,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
             async Task W(DateTime first, long q, long cpu, string database, string text)
             {
                 id++;
-                await WriteAsync(runner, server, context, "Regular", id, first, q, 100, cpu, cpu * 2, ct, database, text);
+                /* #6781: enough recent runs that the rise adds at least 1 s of CPU (QueryStoreRegressionRules.CostMinAddedCpuMs). */
+                await WriteAsync(runner, server, context, "Regular", id, first, q, 1_000, cpu, cpu * 2, ct, database, text);
             }
 
             foreach (var (q, database, text) in new[]
@@ -461,7 +463,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
             for (long q = 1; q <= 3; q++)
             {
                 await W("Regular", b1, q, 100, 1_000);
-                await W("Regular", r2, q, 100, 2_000 + (q * 100));
+                /* #6781: enough recent runs that the rise adds at least 1 s of CPU (QueryStoreRegressionRules.CostMinAddedCpuMs). */
+                await W("Regular", r2, q, 1_000, 2_000 + (q * 100));
             }
 
             for (long q = 100; q < 130; q++)

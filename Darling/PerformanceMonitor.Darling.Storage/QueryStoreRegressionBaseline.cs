@@ -64,6 +64,10 @@ public static class QueryStoreRegressionBaseline
     /// more than this percent above its baseline.</summary>
     public const int CostGatePercent = PerformanceMonitor.Common.QueryStoreRegressionRules.CostGatePercent;
 
+    /// <summary>#6781: a cost row must also add at least this many ms of CPU over the recent window
+    /// (<see cref="PerformanceMonitor.Common.QueryStoreRegressionRules.CostMinAddedCpuMs"/>).</summary>
+    public const int CostMinAddedCpuMs = PerformanceMonitor.Common.QueryStoreRegressionRules.CostMinAddedCpuMs;
+
     /// <summary>A rise in timeouts or errors qualifies when the recent per-hour rate is at least this many times the baseline's
     /// (#5506). A nonzero recent rate where the baseline had none qualifies whatever the multiple.</summary>
     public const int FailureRateMultiple = PerformanceMonitor.Common.QueryStoreRegressionRules.FailureRateMultiple;
@@ -1089,7 +1093,8 @@ public static class QueryStoreRegressionBaseline
     /// The projection, the flags, the ranking and the cap of both twins (#5506), after the aggregates. Bound with
     /// <see cref="Bind"/>: <c>@@LIMIT</c> is the row cap. A query is a candidate when it has recent Regular runs, or recent
     /// Aborted or Exception runs reaching <see cref="FailureMinRecentRuns"/>; <c>is_cost</c> is Regular CPU up more than
-    /// <see cref="CostGatePercent"/>%, <c>is_timeouts</c> and <c>is_errors</c> are that group's recent per-hour rate at least
+    /// <see cref="CostGatePercent"/>% with at least <see cref="CostMinAddedCpuMs"/> ms of added CPU over the window
+    /// (#6781, <see cref="PerformanceMonitor.Common.QueryStoreRegressionRules.CostTestSql"/>), <c>is_timeouts</c> and <c>is_errors</c> are that group's recent per-hour rate at least
     /// <see cref="FailureRateMultiple"/> times the baseline's (any at all where the baseline had none) with at least
     /// <see cref="FailureMinRecentRuns"/> recent runs. The per-hour rates divide by each window's own length (the baseline
     /// window is [baseline start, window start), the recent window [window start, window end]).
@@ -1235,7 +1240,8 @@ public static class QueryStoreRegressionBaseline
                 j.*,
                 (j.recent_dur_ms - j.base_dur_ms) * 100.0 / NULLIF(j.base_dur_ms, 0) AS duration_regression_percent,
                 (j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) AS cpu_regression_percent,
-                COALESCE((j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) > {{CostGatePercent}}, false) AS is_cost,
+                /* #6781: CPU per run up more than the gate AND at least CostMinAddedCpuMs of added CPU over the window. */
+                {{PerformanceMonitor.Common.QueryStoreRegressionRules.CostTestSql("j")}} AS is_cost,
                 COALESCE(j.recent_aborted_execs >= {{FailureMinRecentRuns}}
                     AND (j.base_aborted_execs = 0 OR j.base_fail_hours = 0
                          OR (j.recent_aborted_execs / NULLIF(j.recent_fail_hours, 0)) >= {{FailureRateMultiple}} * (j.base_aborted_execs / NULLIF(j.base_fail_hours, 0))), false) AS is_timeouts,

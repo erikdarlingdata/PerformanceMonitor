@@ -73,7 +73,7 @@ public sealed class ViewerQueryStoreRegressionRow
     public bool CanGetActualPlan => QueryId != 0;
     public DateTime? LastExecutionTime { get; set; }
 
-    /// <summary>#5506: why the row is listed: <c>cost</c> (Regular CPU up more than 25%), <c>timeouts</c> (Aborted runs per hour
+    /// <summary>#5506: why the row is listed: <c>cost</c> (Regular CPU up more than 25%, with at least 1 s of added CPU, #6781), <c>timeouts</c> (Aborted runs per hour
     /// at least doubled), <c>errors</c> (Exception runs per hour at least doubled), or a comma-separated combination.</summary>
     public string RegressionReason { get; set; } = "";
 

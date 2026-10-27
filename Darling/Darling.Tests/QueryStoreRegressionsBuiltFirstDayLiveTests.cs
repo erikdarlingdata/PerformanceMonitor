@@ -161,7 +161,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
 
         for (var t = rig.WindowStart.AddHours(6); t < rig.Now.AddHours(-1); t = t.AddHours(12))
         {
-            rows.Add(Row(EarlyQuery, t, 10, 5_000));
+            /* #6781: enough recent runs that the rise adds at least 1 s of CPU (QueryStoreRegressionRules.CostMinAddedCpuMs). */
+            rows.Add(Row(EarlyQuery, t, 10, 20_000));
         }
 
         /* One collection per day: each batch is collected ten minutes after its last interval. */

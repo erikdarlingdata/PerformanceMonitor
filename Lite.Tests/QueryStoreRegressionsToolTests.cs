@@ -149,7 +149,8 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
         */
         await SeedAsync(baseNow.AddHours(-40), 50, 1000, 1000, intervalId: 3, queryId: 7);
         await SeedAsync(baseNow.AddHours(-39), 90, 1000, 1000, intervalId: 3, queryId: 7);
-        await SeedAsync(baseNow.AddMinutes(-30), 200, 4000, 4000, intervalId: 4, queryId: 7);
+        /* #6781: enough recent runs that the rise adds at least 1 s of CPU (QueryStoreRegressionRules.CostMinAddedCpuMs). */
+        await SeedAsync(baseNow.AddMinutes(-30), 500, 4000, 4000, intervalId: 4, queryId: 7);
 
         var hit = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, 24));
         Assert.Equal(ServerName, hit.GetProperty("server").GetString());
@@ -166,12 +167,12 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
         Assert.Equal(4.0, row.GetProperty("recent_duration_ms").GetDouble(), 6);
         Assert.Equal(300.0, row.GetProperty("duration_regression_percent").GetDouble(), 6);
 
-        /* The ranking key: 3 ms per execution across the 200 recent executions. */
-        Assert.Equal(600.0, row.GetProperty("additional_duration_ms").GetDouble(), 6);
+        /* The ranking key: 3 ms per execution across the 500 recent executions. */
+        Assert.Equal(1500.0, row.GetProperty("additional_duration_ms").GetDouble(), 6);
 
         /* 90, not 140. This is the dedup, and it is the assertion the whole read leans on. */
         Assert.Equal(90, row.GetProperty("baseline_exec_count").GetInt64());
-        Assert.Equal(200, row.GetProperty("recent_exec_count").GetInt64());
+        Assert.Equal(500, row.GetProperty("recent_exec_count").GetInt64());
     }
 
     /// <summary>
