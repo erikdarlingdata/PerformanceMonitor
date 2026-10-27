@@ -433,15 +433,17 @@ function renderStatusBar() {
   let healthy = 0;
   let warning = 0;
   let failing = 0;
+  let notCollected = 0;
   for (const c of d.cards || []) {
     healthy += c.healthy_collector_count || 0;
     warning += c.warning_collector_count || 0;
     failing += c.failed_collector_count || 0;
+    notCollected += c.not_collected_collector_count || 0;
   }
   const servers = d.total_servers || 0;
   const items = [
     el("span", { class: "sb-item", text: servers + (servers === 1 ? " server" : " servers") }),
-    el("span", { class: "sb-item", text: healthy + " collectors healthy · " + (warning > 0 ? warning + " warning · " : "") + failing + " failing" }),
+    el("span", { class: "sb-item", text: healthy + " collectors healthy · " + (warning > 0 ? warning + " warning · " : "") + failing + " failing" + (notCollected > 0 ? " · " + notCollected + " not collected" : "") }),
   ];
   if (storeSizeBytes != null) {
     items.push(el("span", { class: "sb-item sb-store-size" + (storeSizeStale ? " muted" : ""), text: "Database: " + formatStoreSize(storeSizeBytes) + (storeSizeStale ? " (stale)" : "") }));

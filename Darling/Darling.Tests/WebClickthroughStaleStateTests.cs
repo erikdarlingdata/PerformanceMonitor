@@ -91,6 +91,16 @@ public sealed class WebClickthroughStaleStateTests
         Assert.Contains("39 healthy · 3 warning · 0 failing", texts[5], StringComparison.Ordinal);
     }
 
+    /// <summary>#6828: the chip's detail ends with the not-collected count in the Viewer's order, and shows none when there are none.</summary>
+    [Fact]
+    public void TheCollectorsChip_ShowsTheNotCollectedCount_LastAndOnlyWhenAboveZero()
+    {
+        var shown = Texts(Run("collectorsWarning").GetProperty("chips"));
+        Assert.Contains("39 healthy · 3 warning · 0 failing · 2 not collected", shown[5], StringComparison.Ordinal);
+        var none = Texts(Run("collectorsNoneNotCollected").GetProperty("chips"));
+        Assert.DoesNotContain("not collected", none[5], StringComparison.Ordinal);
+    }
+
     /// <summary>#6178: the Overview Threads chip of an Azure SQL Database server gives the reason beside its "n/a"; a box with no reading keeps a bare "n/a".</summary>
     [Fact]
     public void TheThreadsChip_GivesTheReasonOnAzureSqlDatabase_AndNothingOnABox()

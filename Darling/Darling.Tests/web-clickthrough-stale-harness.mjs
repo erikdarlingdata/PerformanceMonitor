@@ -136,6 +136,12 @@ const scenarios = {
       last_collection: iso(1000), collector_count: 44, healthy_collector_count: 39, warning_collector_count: 3, not_collected_collector_count: 2,
     }))),
   }),
+  /* #6828: the same server with nothing uncollected shows no "not collected" count. */
+  collectorsNoneNotCollected: async () => ({
+    chips: chips(modules.fleet.metricBands(card({
+      last_collection: iso(1000), collector_count: 44, healthy_collector_count: 41, warning_collector_count: 3, not_collected_collector_count: 0,
+    }))),
+  }),
   /* #6178: a server with no thread reading. On an Azure SQL Database (engine_edition 5) the Threads chip says why; on a box it stays a bare n/a. */
   azureThreads: async () => {
     const noThreads = { available_threads: null, total_threads: null, threads_severity: "Unknown", last_collection: iso(1000) };

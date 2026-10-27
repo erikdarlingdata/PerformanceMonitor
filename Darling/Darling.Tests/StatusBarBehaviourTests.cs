@@ -80,6 +80,14 @@ public sealed class StatusBarBehaviourTests
         Assert.Contains("44 collectors healthy · 3 warning · 1 failing", Items(r));
     }
 
+    /// <summary>#6828: the footer shows the not-collected count last, only when there is one.</summary>
+    [Fact]
+    public void TheCollectorsFooter_ShowsTheNotCollectedCount_LastAndOnlyWhenAboveZero()
+    {
+        if (!TryRun("notCollected", out var r)) return;
+        Assert.Contains("44 collectors healthy · 3 warning · 1 failing · 3 not collected", Items(r));
+    }
+
     [Theory]
     [InlineData("storeSize", "Database: 5.0 GB")]
     [InlineData("storeSizeMb", "Database: 300 MB")]

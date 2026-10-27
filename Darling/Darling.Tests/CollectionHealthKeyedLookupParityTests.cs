@@ -146,13 +146,13 @@ public sealed class CollectionHealthKeyedLookupParityTests
             var mcpOracle = await ReadAsync(connection, CollectionHealthOracleSql.Mcp, windowStart, ct);
             var mcpCurrent = await ReadAsync(connection, DarlingDataReader.CollectionHealthSql, windowStart, ct);
             Assert.Equal(31, mcpOracle.Columns.Count);
-            AssertSameRows("mcp", mcpOracle, mcpCurrent);
+            AssertSameRows("mcp", mcpOracle, mcpCurrent, McpAppended);
             AssertOracleSaw(mcpOracle, now);
 
             var viewerOracle = await ReadAsync(connection, CollectionHealthOracleSql.Viewer, windowStart, ct);
             var viewerCurrent = await ReadAsync(connection, ViewerDataService.CollectionHealthSql, windowStart, ct);
             Assert.Equal(19, viewerOracle.Columns.Count);
-            AssertSameRows("viewer", viewerOracle, viewerCurrent);
+            AssertSameRows("viewer", viewerOracle, viewerCurrent, ViewerAppended);
 
             /* ── a session-local copy of the view, for the rows the table's NOT NULL status cannot hold ──
                Both statements name v_collection_log unqualified, and pg_temp is searched first, so a temp
@@ -167,7 +167,7 @@ public sealed class CollectionHealthKeyedLookupParityTests
 
                 var mcpOracleNull = await ReadAsync(connection, CollectionHealthOracleSql.Mcp, windowStart, ct);
                 var mcpCurrentNull = await ReadAsync(connection, DarlingDataReader.CollectionHealthSql, windowStart, ct);
-                AssertSameRows("mcp+null status", mcpOracleNull, mcpCurrentNull);
+                AssertSameRows("mcp+null status", mcpOracleNull, mcpCurrentNull, McpAppended);
                 var nullTie = mcpOracleNull.Row("null_status_tie");
                 Assert.Null(nullTie["current_status"]);
                 Assert.Null(nullTie["latest_run_note"]);
@@ -175,7 +175,7 @@ public sealed class CollectionHealthKeyedLookupParityTests
 
                 var viewerOracleNull = await ReadAsync(connection, CollectionHealthOracleSql.Viewer, windowStart, ct);
                 var viewerCurrentNull = await ReadAsync(connection, ViewerDataService.CollectionHealthSql, windowStart, ct);
-                AssertSameRows("viewer+null status", viewerOracleNull, viewerCurrentNull);
+                AssertSameRows("viewer+null status", viewerOracleNull, viewerCurrentNull, ViewerAppended);
                 Assert.Null(viewerOracleNull.Row("null_status_tie")["latest_run_note"]);
                 nullStatusCasesRan = true;
             }
@@ -455,13 +455,21 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         return result;
     }
 
-    private static void AssertSameRows(string label, Result oracle, Result current)
+    private static readonly string[] McpAppended = ["trailing_success_runs"];
+
+    private static readonly string[] ViewerAppended = ["trailing_success_runs", "last_zero_row_streak_break_time"];
+
+    private static void AssertSameRows(string label, Result oracle, Result current, string[] appended)
     {
-        /* #5646: the current statements carry ONE more column than the pre-change oracles, appended last
-           (trailing_success_runs, the recovery rule's input). Every column the oracle has is compared. */
-        Assert.Contains("trailing_success_runs", current.Columns.Skip(oracle.Columns.Count).Select(c => c.Name));
-        /* #6828: the viewer's statement carries one more appended column (last_zero_row_streak_break_time), after trailing_success_runs. */
-        Assert.InRange(current.Columns.Count - oracle.Columns.Count, 1, 2);
+        /* The current statements carry columns the pre-change oracles lack, appended after the oracle's own (#5646 trailing_success_runs for both,
+           #6828 last_zero_row_streak_break_time for the viewer's). The positional mappers (MapHealthRow reads them by ordinal) rest on this
+           exact order, so the total count and the name at each appended position are pinned, and a swap of two appended columns fails here. */
+        Assert.Equal(oracle.Columns.Count + appended.Length, current.Columns.Count);
+        for (var a = 0; a < appended.Length; a++)
+        {
+            Assert.Equal(appended[a], current.Columns[oracle.Columns.Count + a].Name);
+        }
+
         Assert.Equal(oracle.Columns, current.Columns.Take(oracle.Columns.Count).ToList());
         Assert.Equal(oracle.Rows.Count, current.Rows.Count);
         Assert.True(oracle.Rows.Count >= 10, label + ": the seed should give the oracle many collectors");

@@ -18,8 +18,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// #6828: which servers report Always On as OFF, read for every server at once. The two Always On collectors run on a SQL Server
 /// without Always On, find nothing and log HEALTHY, and <c>get_collection_health</c> lists them as <c>not_collected</c> there. The fleet
 /// card and the Viewer count collectors from the same rows, so they need the same fact to count those two as not collected and not healthy.
-/// The newest <c>server_properties</c> row per server decides, as the per-server read does (<c>is_hadr_enabled = false</c>). A server with no row,
-/// or a NULL flag, makes no claim.
+/// The newest <c>server_properties</c> row per server decides, as the per-server read does: that read collapses a NULL <c>is_hadr_enabled</c> to
+/// false and reads <c>IsHadrEnabled: false</c> as Always On off whenever a row exists, so a false or NULL flag on the newest row is "off". A server
+/// with no properties row makes no claim.
 /// </summary>
 public static class FleetAlwaysOnOff
 {
@@ -41,7 +42,7 @@ ORDER BY server_id, collection_time DESC";
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                if (!reader.IsDBNull(1) && !reader.GetBoolean(1))
+                if (reader.IsDBNull(1) || !reader.GetBoolean(1))
                 {
                     off.Add(reader.GetInt32(0));
                 }

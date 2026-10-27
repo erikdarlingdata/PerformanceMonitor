@@ -37,8 +37,12 @@ public sealed class CollectorCountsAgreeAcrossSurfacesLiveTests
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    [Fact]
-    public async Task OneServer_GivesTheSameCollectorCounts_FromTheMcpRead_TheFleetCard_AndTheViewer_AgainstDevPostgres()
+    /* The newest server_properties row says Always On is off by a FALSE flag or by a NULL one: the per-server read collapses NULL to false and
+       reads that as off, so the fleet card and the Viewer must too. An older row that said TRUE must not matter either way. */
+    [Theory]
+    [InlineData(false)]
+    [InlineData(null)]
+    public async Task OneServer_GivesTheSameCollectorCounts_FromTheMcpRead_TheFleetCard_AndTheViewer_AgainstDevPostgres(bool? newestHadrEnabled)
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs),
@@ -59,10 +63,13 @@ public sealed class CollectorCountsAgreeAcrossSurfacesLiveTests
 INSERT INTO config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, TRUE)
 ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
 
-            /* Always On is off on this server. */
+            /* Always On is off on this server: the newest properties row says FALSE or NULL, an older one said TRUE. */
             await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, is_hadr_enabled)
-VALUES (6828001, $1, $2, $3, 'Edition', '15.0.2000.5', 'RTM', 3, FALSE)", DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-30)), ServerId, ServerName);
+VALUES (6828000, $1, $2, $3, 'Edition', '15.0.2000.5', 'RTM', 3, TRUE)", DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-90)), ServerId, ServerName);
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, is_hadr_enabled)
+VALUES (6828001, $1, $2, $3, 'Edition', '15.0.2000.5', 'RTM', 3, $4::boolean)", DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-30)), ServerId, ServerName, newestHadrEnabled);
 
             /* Twenty one-minute runs ending two minutes ago. The first twelve of a collector that "stops" store rows, the last eight store none. */
             var end = DateTime.UtcNow.AddMinutes(-2);
