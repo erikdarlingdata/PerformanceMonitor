@@ -1716,6 +1716,9 @@ namespace PerformanceMonitor.Common
             "default_trace_events",
             "memory_pressure_events",
             "dmv_blocking_snapshot",
+            /* The client-timeout XE capture: a row only when a client times out, so a quiet stretch is the
+               normal answer and not a stopped collector (#6828). */
+            "attention",
             "pg_deadlocks",
             "pg_log_events",
             "pg_plan_capture",

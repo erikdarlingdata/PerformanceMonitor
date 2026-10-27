@@ -309,7 +309,7 @@ public sealed class SwallowedItemFailureTests
         }
 
         /* The four the get_collection_health description names as examples, and the issue's collector. */
-        foreach (var described in new[] { "deadlocks", "blocked_process_report", "pg_blocking", "pg_xmin_horizon", "long_query_completions" })
+        foreach (var described in new[] { "deadlocks", "blocked_process_report", "pg_blocking", "pg_xmin_horizon", "long_query_completions", "attention" })
         {
             Assert.True(CollectorHealthClassifier.IsEventCollector(described), described);
         }
