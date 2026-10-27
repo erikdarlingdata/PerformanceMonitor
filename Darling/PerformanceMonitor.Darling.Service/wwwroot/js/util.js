@@ -875,14 +875,35 @@ export function buildQuery(params) {
   return parts.length ? "?" + parts.join("&") : "";
 }
 
-/* In-flight read counter (#4191): every apiGet/readTool call counts itself while its fetch is outstanding, so
+/* In-flight read counter (#4191, per page since #6793): every apiGet/readTool call counts itself while its fetch is outstanding, so
    the poll loop (app.js refresh()) can tell whether the page it is about to re-render has already settled
    before firing a whole new set of the same reads on top of it. apiSendRead (a read that must travel as a POST,
    the composed-panel run) IS counted, so a slow panel holds the poll off and the refresh back-off measures it.
    apiGetFleet IS counted too (each caller counts its own wait on the shared request), so a render whose reads are
    fleet reads is timed for as long as it ran. apiSend is deliberately NOT counted: a mutation is not a "page read"
    a poll tick should wait out. */
-let inFlightReads = 0;
+let pageReads = { n: 0 };
+
+/* The page scope (#6793). Reads are counted per page, not globally: a read counts itself on the scope that was current
+   when it started and gives the count back on that same scope. beginPageScope() runs when the user goes to another page.
+   It aborts the reads of the page being left through the hooks the page modules registered with onPageLeave, and it opens
+   a fresh count, so a read of the page left (one that has no signal, or one that has not yet ended after its abort) never
+   holds the next page's poll, Refresh button, tab-return refresh or render-time back-off. A poll or Refresh re-render of
+   the same page does not call it: that page aborts its own older load, as before. One exception: readWithinKeptHistory's retry
+   starts after an await, so it counts on the scope current at the retry. A read with no signal that is refused for its window
+   while the user leaves holds the new page for that one round trip. */
+const pageLeaveHooks = [];
+
+/** Register what a page module aborts when the user goes to another page (its module-level AbortControllers). */
+export function onPageLeave(fn) {
+  pageLeaveHooks.push(fn);
+}
+
+/** Leave the current page: abort its reads and start a fresh read count for the next one. See the scope comment above. */
+export function beginPageScope() {
+  for (const fn of pageLeaveHooks) fn();
+  pageReads = { n: 0 };
+}
 
 /* How many red error strips the page has drawn since it loaded (errorStrip counts each one). The page scheduler compares it before
    and after a render, so the footer's "Updated" time moves only when the render ended without a red strip. It is counted where
@@ -899,7 +920,7 @@ export function readErrorCount() {
 
 /** True while at least one apiGet/readTool call is outstanding — see the counter comment above. */
 export function hasInFlightReads() {
-  return inFlightReads > 0;
+  return pageReads.n > 0;
 }
 
 /**
@@ -914,7 +935,8 @@ export function hasInFlightReads() {
  * sidebar, the view list) simply omits it, exactly as before.
  */
 export async function apiGet(path, signal) {
-  inFlightReads++;
+  const scope = pageReads;
+  scope.n++;
   try {
     let resp;
     try {
@@ -925,7 +947,7 @@ export async function apiGet(path, signal) {
     }
     return await classifyResponse(resp);
   } finally {
-    inFlightReads--;
+    scope.n--;
   }
 }
 
@@ -946,7 +968,8 @@ const joinedReads = new Map();
  */
 export async function apiGetJoined(path, signal) {
   if (signal && signal.aborted) return { kind: "aborted" };
-  inFlightReads++;
+  const scope = pageReads;
+  scope.n++;
   let entry = null;
   let onAbort = null;
   try {
@@ -981,7 +1004,7 @@ export async function apiGetJoined(path, signal) {
         entry.controller.abort();
       }
     }
-    inFlightReads--;
+    scope.n--;
   }
 }
 
@@ -1000,7 +1023,8 @@ let fleetRequest = null;
  * classifies (so parses) the shared body for itself, so every page still owns the cards it was handed.
  */
 export async function apiGetFleet() {
-  inFlightReads++;
+  const scope = pageReads;
+  scope.n++;
   try {
     if (!fleetRequest) {
       fleetRequest = fetchBody("/api/fleet").finally(() => {
@@ -1012,7 +1036,7 @@ export async function apiGetFleet() {
     if (shared.transportError) return { kind: "error", message: shared.transportError };
     return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
   } finally {
-    inFlightReads--;
+    scope.n--;
   }
 }
 
@@ -1101,15 +1125,16 @@ export async function apiWrite(method, path, body) {
   return { status: resp.status, body: parsed };
 }
 
-/** #4666: a READ that has to travel as a POST (the composed-panel run, /api/compose/run). Counted in inFlightReads
+/** #4666: a READ that has to travel as a POST (the composed-panel run, /api/compose/run). Counted in the page's read count
     exactly like apiGet, so the poll's overlap guard (#4191) waits it out and the refresh back-off measures the render
     that contains it. Mutations (saves, deletes, alert validate/test) keep using apiSend, uncounted. */
 export async function apiSendRead(method, path, body) {
-  inFlightReads++;
+  const scope = pageReads;
+  scope.n++;
   try {
     return await apiSend(method, path, body);
   } finally {
-    inFlightReads--;
+    scope.n--;
   }
 }
 

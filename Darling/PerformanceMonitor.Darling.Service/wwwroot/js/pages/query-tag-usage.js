@@ -16,7 +16,8 @@
  * All server text reaches the DOM through el()/textContent.
  */
 
-import { el, mount, clear, readTool, readToolWithinKeptHistory, keptWindowStrip, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, makeActivatable, fmtInt, fmtNum, retryOnceWhenBusy, busyRetryStrip } from "../util.js";
+import { el, mount, clear, onPageLeave, readTool, readToolWithinKeptHistory, keptWindowStrip, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, makeActivatable, fmtInt, fmtNum, retryOnceWhenBusy, busyRetryStrip } from "../util.js";
+
 import { pageRangePicker, windowOfSpec } from "../page-range.js";
 import { plainText } from "../plain-text.js";
 import { relativeSpec } from "../time-range.js";
@@ -61,6 +62,11 @@ let pageSeq = 0;
 let loadSeq = 0;
 let pageAbort = null;
 let loadAbort = null;
+/* #6793: leaving the page (route() calls beginPageScope) aborts its reads, so a slow read does not run on after the user went elsewhere. */
+onPageLeave(() => {
+  if (pageAbort) pageAbort.abort();
+  if (loadAbort) loadAbort.abort();
+});
 
 /** The label of a measure: its friendly name, or the key itself for one the page does not know. */
 export function measureLabel(key) {

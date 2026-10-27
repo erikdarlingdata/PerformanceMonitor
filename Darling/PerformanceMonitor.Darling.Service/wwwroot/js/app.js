@@ -37,7 +37,7 @@
  * list) still refreshes.
  */
 
-import { el, mount, apiGet, apiGetFleet, readTool, localTime, hasInFlightReads, readErrorCount, isSessionExpired, onSessionExpired } from "./util.js";
+import { el, mount, apiGet, apiGetFleet, readTool, localTime, hasInFlightReads, beginPageScope, readErrorCount, isSessionExpired, onSessionExpired } from "./util.js";
 import { makeScrollReset } from "./scroll-reset.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
@@ -189,6 +189,12 @@ function route(opts) {
      back button), and re-dispatching to a page here would just start a fresh round of reads that fail the
      same way; short-circuiting is simpler than unwiring every listener that can reach route(). */
   if (isSessionExpired()) return;
+
+  /* #6793: going to another page (or a sub-tab, a deep link, the first paint) aborts the reads of the page being left
+     and starts a fresh read count, so a read left behind cannot hold the new page's poll, Refresh button, tab-return
+     refresh or render-time back-off. The poll and the Refresh button re-render the SAME page (`poll: true`): that page
+     aborts its own older load, as before, and the count carries on. */
+  if (!(opts && opts.poll === true)) beginPageScope();
 
   const r = currentRoute();
   resetScrollOnRouteChange(r, !!(opts && opts.poll === true));
@@ -491,10 +497,12 @@ function updateStatusBar(d) {
    Triage cost guard (#4222d): #/triage is the alert-notebook deep link's landing page. Its cost item says the
    periodic poll must not re-render it every 60s — the same reason the composer routes are skipped, just for
    "don't waste a read against a page you opened to read once" rather than "don't discard an edit". hashchange
-   still routes there normally on first load / a fresh alert link. */
+   still routes there normally on first load / a fresh alert link.
+   Query Tag Usage (#6793): its figures are 24 hour totals and the fleet read can take minutes on a large store, so a 60 s
+   re-read adds almost nothing and costs a lot. The page's own server picker and range picker still re-read it. */
 function isNoPollRoute(routeName) {
   return routeName === "editor" || routeName === "notebookEditor" || routeName === "alertEditor"
-    || routeName === "triage";
+    || routeName === "triage" || routeName === "queryTagUsage";
 }
 
 /* Per-page schedule (#4666). pageNextRefreshAt is when the page may re-render next (Infinity = never);
@@ -570,7 +578,9 @@ function initPageRefreshControl() {
 function markPageRenderStart(routeName, isPoll) {
   syncPageRefreshControl(routeName);
   if (!isPoll && (routeName === "view" || routeName === "notebook")) clearViewRefresh();
-  if (isNoPollRoute(routeName)) {
+  /* Query Tag Usage is a no-poll page whose one read can run for minutes (#6793): its "Updated" time is written when that read
+     settles, like every polled page, not at render start. The editors and #/triage read once or not at all, so they stamp now. */
+  if (isNoPollRoute(routeName) && routeName !== "queryTagUsage") {
     pageRendering = false;
     pageNextRefreshAt = Infinity;
     notePageUpdated(Date.now());
