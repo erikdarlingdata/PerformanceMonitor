@@ -558,7 +558,9 @@ WHERE server_id = 2 AND query_id IN (1, 2) AND collection_time >= TIMESTAMP '{At
                 || (Text(n, "Node Type") == "Bitmap Index Scan" && Text(n, "Index Name").Contains("query_store_interval_wide", StringComparison.Ordinal))).ToList();
             Assert.NotEmpty(wideNodes);
             double Examined(JsonElement n) => (Num(n, "Actual Rows") + Num(n, "Rows Removed by Filter") + Num(n, "Rows Removed by Index Recheck")) * Num(n, "Actual Loops");
-            bool OnFirstExecIndex(JsonElement n) => Text(n, "Index Name").Contains("first_exec", StringComparison.Ordinal);
+            // Only a Bitmap Index Scan returns index entries without reading the table. A plain Index Scan on
+            // that index reads table rows, so it stays under the half-the-window bound with the other nodes that read the table.
+            bool OnFirstExecIndex(JsonElement n) => Text(n, "Node Type") == "Bitmap Index Scan" && Text(n, "Index Name").Contains("first_exec", StringComparison.Ordinal);
             string Describe(JsonElement n) => Text(n, "Node Type") + " " + Text(n, "Relation Name") + Text(n, "Index Name") + " rows " + Num(n, "Actual Rows") + " loops " + Num(n, "Actual Loops");
 
             var rangeNodes = wideNodes.Where(n => !OnFirstExecIndex(n)).ToList();
