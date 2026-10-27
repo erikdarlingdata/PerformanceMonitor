@@ -19,10 +19,12 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// #5506 part 3: the text of recent successful answers to long reads, one object for the process (the MCP and web hosts
-/// share it through <see cref="ReadAdmission.Cache"/>). Only a heavy (surface, route, band) pair as
-/// <see cref="ReadAdmission"/> classifies it is cached, so short reads never are. A hit skips admission and the store.
+/// share it through <see cref="ReadAdmission.Cache"/>). A heavy (surface, route, band) pair as
+/// <see cref="ReadAdmission"/> classifies it is cached, and so is a whole-fleet read of a route in
+/// <see cref="ReadAdmission.FleetCachedRoutes"/> over a long window (#6800). Other short reads never are. A hit skips admission and the store.
 ///
-/// <para><b>Lifetime.</b> An entry lives for its band's TTL (<see cref="TtlOf"/>), and its key carries the TTL bucket
+/// <para><b>Lifetime.</b> An entry lives for its band's TTL (<see cref="TtlOf"/>), or for the route's own TTL when it is a fleet read
+/// (<see cref="TtlFor"/>), and its key carries the TTL bucket
 /// and the write generation (<see cref="ReadCacheKey"/>), so a successful write makes every earlier entry unreachable.
 /// Entries are held in a <see cref="MemoryCache"/> of 64 MB; an answer over 1 MB is never stored.</para>
 ///
@@ -120,6 +122,12 @@ internal sealed class ReadResultCache : IDisposable
         ReadWindowBand.OneDay => TimeSpan.FromSeconds(30),
         _ => TimeSpan.FromSeconds(15),
     };
+
+    /// <summary>The TTL of an entry of <paramref name="route"/>: the route's own TTL for a whole-fleet read of a route in
+    /// <see cref="ReadAdmission.FleetCachedRoutes"/> over a window of 24 hours or more (#6800,
+    /// <see cref="ReadAdmission.FleetTtlApplies"/>), else the band's (<see cref="TtlOf(string?)"/>).</summary>
+    internal static TimeSpan TtlFor(string route, string? band, bool fleetRead) =>
+        ReadAdmission.FleetTtlApplies(route, fleetRead) ? ReadAdmission.FleetCachedRoutes[route] : TtlOf(band);
 
     /// <summary>The TTL bucket of now, <c>floor(now / TTL)</c>, for a key with no <c>as_of</c>.</summary>
     internal long BucketOf(TimeSpan ttl) =>

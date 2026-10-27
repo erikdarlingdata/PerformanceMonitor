@@ -102,6 +102,55 @@ public sealed class ReadAdmission
         [DarlingWebEndpoints.InvestigationExportRoute] = "reads up to 2,000 cases with their reports, briefs and feedback into one file",
     };
 
+    /// <summary>
+    /// #6800: the routes whose whole-fleet form (no server named) is cached for the TTL in the table when the window asked for is at
+    /// least <see cref="FleetMinWindowHours"/> hours (<see cref="FleetTtlApplies"/>), not by the p90 table or the band prior. The fleet <c>get_resource_use_by_tag</c> reads its
+    /// Query Store section over the whole window and took about 61 s cold on a 42-server store (7.5 s warm). With no history its
+    /// 24-hour band is light, so it was never kept, and once the learned p90 made the pair heavy it was kept for the band's 30 s in a
+    /// 30 s wall-clock bucket that had passed before a 61 s read could store anything. Either way every visit, every user and every
+    /// page picker ran it again. The one-server form takes about
+    /// 1.3 s and is left to the band as before, and so is a window under 24 hours. The floor is the length of the window asked for, not
+    /// its band: the <c>24h</c> band starts just above 1 hour, so a band gate would also hold the page's Past 4 hours preset
+    /// (<c>?hours=4</c>) for 5 minutes. 24 hours is where the Query Store section starts (the tool reads it only from
+    /// <c>hours_back</c> 24) and where the 61 s cold cost was measured, so a shorter window neither pays that cost nor gets the long TTL.
+    /// A read anchored with <c>as_of</c> is measured by the same <c>hours</c> span.
+    /// <para>The 5 minutes, and what it costs: the answer has six sections. Query Store and deadlocks come from 5-minute collectors,
+    /// but the plan cache, procedures, blocked process report and blocking snapshot sections read 1-minute collectors at a 24-hour
+    /// window (the hourly rollup serves the plan cache and procedures only past the raw tier, from the 7-day band up). So a stored
+    /// answer can be up to five collection cycles old for those four sections: a blocked process report or a deadlock that landed a
+    /// minute ago can be missing from the fleet page for up to 5 minutes, where the band TTL made it 30 s. What the page shows is a
+    /// 24-hour total by tag, which moves by under 1/288th in 5 minutes, and a live blocking or deadlock event has its own reads and
+    /// alerts, which this does not touch. The entry is held for its TTL from the moment it is stored, not for what is left of a
+    /// wall-clock bucket (its key carries no bucket, <c>ReadCacheKey</c> <c>heldFromStore</c>, and the entry expires at store time
+    /// plus the TTL, as an <c>as_of</c> entry does): with a bucket key a cold read of 61 to 118 s started late in a 5-minute bucket
+    /// stores an entry nothing can reach (20 to 39% of cold reads) and the rest live about 55 to 95 s. A TTL of 1 minute would match
+    /// the fastest collector, but a reload or a second user more than a minute after the read finished would pay the cold read again,
+    /// and the page itself re-renders every 60 s, so the entry would expire about as each poll arrives. A write (the tag map, a rule)
+    /// moves the cache's generation and drops the entry at once.</para>
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, TimeSpan> FleetCachedRoutes = new Dictionary<string, TimeSpan>(StringComparer.Ordinal)
+    {
+        ["get_resource_use_by_tag"] = TimeSpan.FromMinutes(5),
+    };
+
+    /// <summary>The shortest window, in hours, whose whole-fleet read takes the route's own TTL (#6800). A window under it keeps the
+    /// band's TTL and the band's rule for whether it is cached at all. It is where the by-tag rollup's Query Store section starts
+    /// (<c>QueryStoreIntervalWide.TopMinWindow</c>, the field <c>DarlingQueryTagRollupReader.QueryStoreMinWindow</c> reads), so a retune of
+    /// that threshold moves this floor with it.</summary>
+    internal static readonly double FleetMinWindowHours = PerformanceMonitor.Darling.Storage.QueryStoreIntervalWide.TopMinWindow.TotalHours;
+
+    /// <summary>Whether the route's own TTL in <see cref="FleetCachedRoutes"/> applies to a read: <paramref name="fleetRead"/> (from
+    /// <see cref="IsFleetRead"/>, which already holds the 24-hour floor) on a route in the table.</summary>
+    internal static bool FleetTtlApplies(string route, bool fleetRead) =>
+        fleetRead && FleetCachedRoutes.ContainsKey(route);
+
+    /// <summary>Whether a read of <paramref name="route"/> is the whole-fleet form of a route in <see cref="FleetCachedRoutes"/> over a
+    /// window of at least <see cref="FleetMinWindowHours"/>: no server named (null, empty or blank), and <paramref name="hours"/>, the
+    /// window the read asks for or its declared default (<see cref="ReadWindowBand.HoursOf"/>), at least <see cref="FleetMinWindowHours"/>. No window, or one that is
+    /// not a number, is not long enough.</summary>
+    internal static bool IsFleetRead(string route, string? server, double? hours) =>
+        FleetCachedRoutes.ContainsKey(route) && string.IsNullOrWhiteSpace(server) && hours >= FleetMinWindowHours;
+
     /// <summary>Whether a tool or web read goes through admission: not a health read (<see cref="SkippedRoutes"/>) and not
     /// an MCP write tool (writes never wait).</summary>
     internal static bool IsAdmitted(string name) =>
@@ -146,18 +195,24 @@ public sealed class ReadAdmission
         Cache = new ReadResultCache(time);
     }
 
-    /// <summary>#5506 part 3: the process's read cache. It caches only the pairs this classifies as heavy
-    /// (<see cref="IsCached"/>), on the same clock.</summary>
+    /// <summary>#5506 part 3: the process's read cache. It caches the pairs this classifies as heavy
+    /// and, since #6800, a whole-fleet read of a route in <see cref="FleetCachedRoutes"/> over a long window (<see cref="IsCached"/>),
+    /// on the same clock.</summary>
     internal ReadResultCache Cache { get; }
 
     /// <summary>Whether an answer of (<paramref name="surface"/>, <paramref name="route"/>, <paramref name="band"/>) is
     /// served from and stored in <see cref="Cache"/>: a cacheable route (<see cref="ReadResultCache.IsCacheableRoute"/>)
-    /// whose pair is heavy. It does not depend on the limit: with admission off, heavy answers are still cached.</summary>
-    internal bool IsCached(ReadSurface surface, string route, string? band) =>
+    /// whose pair is heavy, or a whole-fleet read of a route in <see cref="FleetCachedRoutes"/>
+    /// over a window of <see cref="FleetMinWindowHours"/> or more (<paramref name="fleetRead"/>, from <see cref="IsFleetRead"/>,
+    /// <see cref="FleetTtlApplies"/>). It does not depend
+    /// on the limit: with admission off, heavy answers are still cached. Caching a fleet read takes no slot: whether
+    /// the read waits for one stays with <see cref="IsHeavy"/> (<see cref="AdmitAsync"/>).</summary>
+    internal bool IsCached(ReadSurface surface, string route, string? band, bool fleetRead = false) =>
         Cache.Enabled
         && !string.IsNullOrEmpty(route)
         && ReadResultCache.IsCacheableRoute(route)
-        && IsHeavy(surface, route, string.IsNullOrEmpty(band) ? ReadWindowBand.None : band, out _);
+        && (FleetTtlApplies(route, fleetRead)
+            || IsHeavy(surface, route, string.IsNullOrEmpty(band) ? ReadWindowBand.None : band, out _));
 
     /// <summary>The limit in force (0 = off).</summary>
     internal int Limit => _state.Limit;
