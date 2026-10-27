@@ -96,6 +96,7 @@ public sealed class ComposeQueryStoreGateFloorsLiveTests
         {
             var end = DateTime.UtcNow;
             var start = end.AddHours(-24);
+            var withStatement = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct);
 
             QueryStoreIntervalWide.StoreWideInputsCache.TableFloorsSqlForTests.Value =
                 "SELECT (1 / 0)::integer AS server_id, NULL::timestamp AS floor WHERE $1::integer[] IS NOT NULL AND $2::timestamp IS NOT NULL AND ($3::timestamp IS NULL OR TRUE)";
@@ -104,7 +105,8 @@ public sealed class ComposeQueryStoreGateFloorsLiveTests
                 await using var count = new NpgsqlCommandScope(scratch.DatabaseName);
                 var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct);
                 Assert.True(resolution.Eligible, "a failed fleet floor statement must leave each server to its own floor read, not refuse the panel");
-                Assert.Null(resolution.RawServerIds);
+                Assert.Equal(withStatement.WideStart, resolution.WideStart);
+                Assert.Equal(withStatement.RawServerIds ?? [], resolution.RawServerIds ?? []);
                 Assert.Equal(6, count.FloorReads);
             }
             finally
