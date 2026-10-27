@@ -25,7 +25,7 @@
  * this route (the editor-route poll guard), so an in-progress edit is never clobbered by a background refresh.
  */
 
-import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip } from "./util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, storeHash } from "./util.js";
 import {
   buildComposedPanelBody,
   loadFleetOptions,
@@ -426,7 +426,7 @@ function buildAlertEditor(main, ctx) {
   const cancelBtn = el("button", { class: "btn", type: "button", text: "Cancel" });
 
   cancelBtn.addEventListener("click", () => {
-    location.hash = "#/alert-rules";
+    location.hash = storeHash("#/alert-rules");
   });
   saveBtn.addEventListener("click", onSave);
 
@@ -513,7 +513,7 @@ function buildAlertEditor(main, ctx) {
     }
 
     if (res.kind === "data" && res.data) {
-      location.hash = "#/alert-rules";
+      location.hash = storeHash("#/alert-rules");
       return;
     }
 
@@ -527,7 +527,7 @@ function buildAlertEditor(main, ctx) {
 
   mount(main, [
     el("div", { class: "page-head" }, [
-      el("a", { href: "#/alert-rules", text: "← Alert Rules" }),
+      el("a", { href: storeHash("#/alert-rules"), text: "← Alert Rules" }),
       el("h2", { text: ctx.editingId != null ? "Edit alert rule" : "New alert rule" }),
     ]),
     el("div", { class: "editor-meta" }, [
@@ -873,7 +873,7 @@ function buildDeleteButton(id, saveStatus) {
     mount(saveStatus, el("span", { class: "muted", text: "Deleting…" }));
     const res = await api.deleteAlertRule(id);
     if (res.kind === "data") {
-      location.hash = "#/alert-rules";
+      location.hash = storeHash("#/alert-rules");
       return;
     }
     btn.disabled = false;
@@ -898,7 +898,7 @@ function handleSaveError(res, saveStatus, ctx, main) {
 
 function alertBackHead() {
   return el("div", { class: "page-head" }, [
-    el("a", { href: "#/alert-rules", text: "← Alert Rules" }),
+    el("a", { href: storeHash("#/alert-rules"), text: "← Alert Rules" }),
     el("h2", { text: "Alert-rule editor" }),
   ]);
 }

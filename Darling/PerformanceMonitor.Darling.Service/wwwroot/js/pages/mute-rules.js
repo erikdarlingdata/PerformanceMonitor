@@ -22,7 +22,7 @@
  * el()/textContent.
  */
 
-import { el, mount, readTool, loadingStrip, errorStrip, emptyStrip, localTime, reportSessionExpired } from "../util.js";
+import { storeHash, storeHeaders, el, mount, readTool, loadingStrip, errorStrip, emptyStrip, localTime, reportSessionExpired } from "../util.js";
 import * as api from "../alerts-api.js";
 
 /** The editable text scope/pattern fields, in form order, with their labels. `reason` and the expiry follow. */
@@ -148,7 +148,7 @@ async function send(method, path, body) {
   try {
     resp = await fetch(path, {
       method,
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      headers: storeHeaders({ Accept: "application/json", "Content-Type": "application/json" }),
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (e) {
@@ -317,7 +317,7 @@ function closeForm() {
   lastPrefillQuery = null;
   /* The deep link stays in the address bar; drop it so the same Mute link is a real navigation next time. */
   if (typeof window !== "undefined" && window.history && window.history.replaceState && String(window.location && window.location.hash).includes("?")) {
-    window.history.replaceState(null, "", "#/mute-rules");
+    window.history.replaceState(null, "", storeHash("#/mute-rules"));
   }
   drawForm();
 }

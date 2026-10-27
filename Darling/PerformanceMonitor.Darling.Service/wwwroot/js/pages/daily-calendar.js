@@ -22,7 +22,7 @@
  * A day with no row is "no data", never Healthy: the range lists a day when ANY collection happened, so a missing day is a
  * collection gap. A day the store purged comes back as band NoData and is drawn the same way, with the read's own note.
  */
-import { el, errorStrip, emptyStrip, noticeStrip } from "../util.js";
+import { el, errorStrip, emptyStrip, noticeStrip, storeHash } from "../util.js";
 
 const DAY_MS = 86400000;
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -155,7 +155,7 @@ export async function openServerTabOnDay(server, iso, target) {
       },
       { once: true }
     );
-    const hash = "#/server/" + encodeURIComponent(server) + "/" + drill.tab;
+    const hash = storeHash("#/server/" + encodeURIComponent(server) + "/" + drill.tab);
     if (location.hash === hash) window.dispatchEvent(new Event("hashchange"));
     else location.hash = hash;
     return null;

@@ -45,7 +45,7 @@
  * subtitle rather than inheriting a label that would misdescribe them.
  */
 
-import { el, mount, apiGetFleet, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime } from "../util.js";
+import { el, mount, apiGetFleet, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, storeHash } from "../util.js";
 import { getDatabaseFilter } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
@@ -304,7 +304,7 @@ export function renderServer(main, server, tabId, opts) {
      id the choice is stored under. */
   const dbSlot = el("span", { class: "db-filter-slot" });
   const head = el("div", { class: "page-head" }, [
-    el("a", { href: "#/fleet", text: "← Fleet" }),
+    el("a", { href: storeHash("#/fleet"), text: "← Fleet" }),
     el("span", { class: "server-title" }, [dot, title]),
     badgeSlot,
     engineSlot,
@@ -492,7 +492,7 @@ function subtabBar(server, active, tabs) {
     tabs.map((t) =>
       el("a", {
         class: "subtab" + (t.id === active.id ? " active" : ""),
-        href: "#/server/" + encodeURIComponent(server) + "/" + t.id,
+        href: storeHash("#/server/") + encodeURIComponent(server) + "/" + t.id,
         role: "tab",
         "aria-selected": t.id === active.id ? "true" : "false",
         text: t.label,
