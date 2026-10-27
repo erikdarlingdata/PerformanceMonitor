@@ -564,15 +564,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 /* #5506 part 3: a heavy cacheable read is answered from the read cache, joins an identical read running now,
                    or runs once and is stored (the text before the statement sweep, which ToHttpResult runs on every answer).
                    The key is the query string as sent, before the read below adds its own as_of. A hit skips admission. */
-                if (readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand))
+                /* #6800: a whole-fleet read of get_resource_use_by_tag (no server) over a window of 24 hours or more is cached for its own TTL. */
+                var fleetRead = ReadAdmission.IsFleetRead(name, Server(context), WebWindowHours(name, key => First(context, key)));
+                if (readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand, fleetRead))
                 {
                     var cache = admission.Cache;
-                    var ttl = ReadResultCache.TtlOf(admissionBand);
+                    var ttl = ReadResultCache.TtlFor(name, admissionBand, fleetRead);
                     /* Round 2, L4: each value of a repeated name is passed apart (StringValues.ToString() joins them with a comma,
                        which ?database=x%2Cy also gives); the key escapes every name and value. */
                     var key = ReadCacheKey.ForWeb(name,
                         context.Request.Query.SelectMany(q => q.Value.Select(v => new KeyValuePair<string, string?>(q.Key, v))),
-                        cache.Generation, cache, ttl);
+                        cache.Generation, cache, ttl, heldFromStore: ReadAdmission.FleetTtlApplies(name, fleetRead));
                     if (cache.TryGet(key, out var stored))
                     {
                         /* Round 2, L3: a hit runs no read, so it does not count as one in flight. */
@@ -5696,7 +5698,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// the default <see cref="CatalogDescriptors"/> declares for that read, else <c>none</c>. Internal so a test can pin a
     /// request that sends no window against the catalog's default.</summary>
     internal static string WebWindowBand(string name, Func<string, string?> sent) =>
-        ReadWindowBand.OrFixed(ReadWindowBand.Of(ReadWindowBand.HoursOf(sent, key => CatalogDefaultText(name, key))), name);
+        ReadWindowBand.OrFixed(ReadWindowBand.Of(WebWindowHours(name, sent)), name);
+
+    /// <summary>The window in hours of web read <paramref name="name"/>: the one the query string sent, else the default the catalog
+    /// row declares (the number <see cref="WebWindowBand"/> bands); null when there is none.</summary>
+    internal static double? WebWindowHours(string name, Func<string, string?> sent) =>
+        ReadWindowBand.HoursOf(sent, key => CatalogDefaultText(name, key));
 
     /// <summary>The default the catalog row of read <paramref name="name"/> declares for parameter <paramref name="key"/>,
     /// as text; null when the read is not in the catalog, does not take that parameter, or declares no default.</summary>

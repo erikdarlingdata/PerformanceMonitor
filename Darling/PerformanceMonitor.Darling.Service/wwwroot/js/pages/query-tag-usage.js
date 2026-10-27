@@ -16,7 +16,8 @@
  * All server text reaches the DOM through el()/textContent.
  */
 
-import { el, mount, clear, onPageLeave, readTool, readToolWithinKeptHistory, keptWindowStrip, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, makeActivatable, fmtInt, fmtNum } from "../util.js";
+import { el, mount, clear, onPageLeave, readTool, readToolWithinKeptHistory, keptWindowStrip, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, makeActivatable, fmtInt, fmtNum, retryOnceWhenBusy, busyRetryStrip } from "../util.js";
+
 import { pageRangePicker, windowOfSpec } from "../page-range.js";
 import { plainText } from "../plain-text.js";
 import { relativeSpec } from "../time-range.js";
@@ -269,7 +270,15 @@ export function renderQueryTagUsage(main) {
     );
     mount(body, loadingStrip("Loading query tag usage…"));
     const w = currentWindow();
-    const res = await readToolWithinKeptHistory("get_resource_use_by_tag", readParams(w), signal);
+    /* #6800: the fleet read is a long read once its history says so, so it can be refused busy while other long reads hold every
+       slot. The page says so and asks once more after the Retry-After, instead of showing the refusal as a failure. */
+    const res = await retryOnceWhenBusy(
+      () => readToolWithinKeptHistory("get_resource_use_by_tag", readParams(w), signal),
+      (seconds) => {
+        if (ticket === loadSeq) mount(body, busyRetryStrip(seconds));
+      },
+      signal
+    );
     /* The server list the headings are named from may still be on its way: wait for it so the first paint is not the keys. */
     await serversReady;
     if (ticket !== loadSeq) return;

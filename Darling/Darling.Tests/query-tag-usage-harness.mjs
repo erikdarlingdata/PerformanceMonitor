@@ -94,11 +94,19 @@ const answerFor = (name, q) => {
   }
   return {};
 };
+/* #6800: how many of the next by-tag reads the service refuses busy (HTTP 429 with Retry-After: 1), as admission answers a long read
+   when every slot is held. */
+let busyReads = 0;
+const BUSY_TEXT = "The service is running as many long reads as it allows (2), and 16 more are waiting. Try again in about 1 seconds.";
 globalThis.fetch = async (url) => {
   const u = new URL(String(url), "http://viewer.test");
   const name = u.pathname.replace("/api/read/", "");
   asks.push({ name, q: Object.fromEntries(u.searchParams) });
-  return { status: 200, ok: true, text: async () => JSON.stringify(answerFor(name, u.searchParams)) };
+  if (name === "get_resource_use_by_tag" && busyReads > 0) {
+    busyReads--;
+    return { status: 429, ok: false, headers: { get: (h) => (h.toLowerCase() === "retry-after" ? "1" : null) }, text: async () => JSON.stringify({ error: BUSY_TEXT }) };
+  }
+  return { status: 200, ok: true, headers: { get: () => null }, text: async () => JSON.stringify(answerFor(name, u.searchParams)) };
 };
 process.on("unhandledRejection", () => {});
 
@@ -155,6 +163,26 @@ const out = {};
   await flush();
   out.tagRead = readsOf("get_resource_use_by_tag")[0];
   out.tagRows = rowsOf(cardOfSection("plan_cache"));
+}
+
+/* #6800: a by-tag read refused busy shows a "retrying" note, not an error, and is sent once more after the Retry-After it names.
+   A second refusal is shown as the error it is, and the page does not ask a third time. */
+for (const [label, refusals] of [["busyOnce", 1], ["busyTwice", 2]]) {
+  const main = new FakeNode("main");
+  main.isRoot = true;
+  asks.length = 0;
+  busyReads = refusals;
+  modules.page.renderQueryTagUsage(main);
+  await flush();
+  const strips = () => all(main).filter((n) => /\bstrip\b/.test(n.attrs.class || n.className || "")).map((n) => ({ cls: n.attrs.class || n.className, text: n.textContent }));
+  const seen = { readsBefore: readsOf("get_resource_use_by_tag").length, stripsBefore: strips() };
+  await new Promise((r) => setTimeout(r, 1300));
+  await flush();
+  seen.readsAfter = readsOf("get_resource_use_by_tag").length;
+  seen.stripsAfter = strips();
+  seen.planCardAfter = all(main).some((n) => n.attrs["data-section"] === "plan_cache");
+  busyReads = 0;
+  out[label] = seen;
 }
 
 /* #6157: the Availability Groups card names the reporting server by its display name, and falls back to the key. */

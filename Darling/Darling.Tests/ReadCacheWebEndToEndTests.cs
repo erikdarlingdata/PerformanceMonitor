@@ -57,7 +57,7 @@ public sealed class ReadCacheWebEndToEndTests
 
     /// <summary>The production web pipeline over an unreachable store, plus a test-only write route (any 2xx non-GET
     /// <c>/api/*</c> answer moves the cache's write generation) and an optional middleware ahead of everything.</summary>
-    private static async Task<(WebApplication App, NpgsqlDataSource Postgres)> BuildServer(ReadAdmission admission, ReadLatencyAccumulator readLatency,
+    internal static async Task<(WebApplication App, NpgsqlDataSource Postgres)> BuildServer(ReadAdmission admission, ReadLatencyAccumulator readLatency,
         Func<RequestDelegate, RequestDelegate>? first = null, Task? heldWriteEnd = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
