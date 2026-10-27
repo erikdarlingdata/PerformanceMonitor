@@ -140,7 +140,7 @@ export function sourceText(source) {
   if (/^collect\.query_store_hash_daily \+ /.test(s)) return "daily and hourly Query Store tables, raw intervals for the edges";
   if (/^collect\.query_store_hash_hourly \+ /.test(s)) return "hourly Query Store table, raw intervals for the edges";
   if (s === "collect.query_store_interval_wide") return "Query Store intervals";
-  if (/_io_hourly \(hourly rollup\)$/.test(s)) return "hourly rollup";
+  if (s.endsWith("_io_hourly (hourly rollup)")) return "hourly rollup";
   if (s === "collect.query_stats" || s === "collect.procedure_stats") return "raw collections";
   return plainText(s.replace(/collect\./g, "").replace(/_/g, " "));
 }
