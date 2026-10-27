@@ -37,11 +37,24 @@ public sealed class QueryStoreClutterChurnPlanLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
         var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
-        var anchor = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+        var anchor = LiveClock.AnchoredEnd();
 
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, null, ct);
+
+        /* The service's own order, so the plan under EXPLAIN is production's (#6808 review): the hypertable conversion where
+           TimescaleDB is present, then the tuning list that creates idx_query_store_stats_server_db_query_plan_time, the index
+           PlanChurnSql's projection is cut to. MigrateAsync alone leaves a plain table with no such index, which can show
+           neither an index-only walk nor the per-chunk plan production runs. */
+        if (scratch.TimescaleEnabled)
+        {
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            await using var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection);
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await PgTableTuning.ApplyAsync(connection, null, ct);
         await QueryStoreClutterChurnProbe.SeedAsync(connection, anchor, ct);
 
         /* the whole seed, then a window that starts in the middle of it (the 24 h shape: older collections fall out and
@@ -62,6 +75,18 @@ public sealed class QueryStoreClutterChurnPlanLiveTests
                     label + "\n" + QueryStoreClutterChurnProbe.FirstDifference(run.Rows, expected));
                 Assert.True(QueryStoreClutterChurnProbe.SpillIn(run.PlanText) is null,
                     label + ": the statement spilled at work_mem " + QueryStoreClutterChurnProbe.WorkMem + ": " + QueryStoreClutterChurnProbe.SpillIn(run.PlanText) + "\n" + run.PlanText);
+
+                /* At 76,000 rows the planner prefers a sequential scan of the one chunk, where production's 2.4 million rows
+                   take the index. With the sequential and bitmap scans off the planner has to pick an index path, and whether that path is
+                   index-only is decided by the statement's own projection: a column the covering index does not carry
+                   turns it into an Index Scan, which is the heap walk the projection is cut to avoid. */
+                var viaIndex = await QueryStoreClutterChurnProbe.RunAsync(connection, start, end, databases, ct, "enable_seqscan = off", "enable_bitmapscan = off");
+                Assert.True(QueryStoreClutterChurnProbe.FirstDifference(viaIndex.Rows, expected) is null,
+                    label + " (index path)\n" + QueryStoreClutterChurnProbe.FirstDifference(viaIndex.Rows, expected));
+                Assert.True(QueryStoreClutterChurnProbe.WalksCoveringIndexOnly(viaIndex.PlanText),
+                    label + ": with the sequential and bitmap scans off, the statement did not read " + QueryStoreClutterChurnProbe.CoveringIndex + " with an index-only scan\n" + viaIndex.PlanText);
+                Assert.True(QueryStoreClutterChurnProbe.SpillIn(viaIndex.PlanText) is null,
+                    label + ": the index path spilled at work_mem " + QueryStoreClutterChurnProbe.WorkMem + ": " + QueryStoreClutterChurnProbe.SpillIn(viaIndex.PlanText) + "\n" + viaIndex.PlanText);
             }
         }
     }

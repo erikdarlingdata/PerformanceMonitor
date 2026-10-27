@@ -135,7 +135,8 @@ internal static class QueryStoreClutterChurnProbe
             await insert.ExecuteNonQueryAsync(ct);
         }
 
-        await using var analyze = new NpgsqlCommand("ANALYZE query_store_stats", connection);
+        /* VACUUM sets the visibility map, which production's autovacuum keeps set and an index-only walk needs to skip the heap. */
+        await using var analyze = new NpgsqlCommand("VACUUM (ANALYZE) query_store_stats", connection);
         await analyze.ExecuteNonQueryAsync(ct);
     }
 
@@ -143,14 +144,21 @@ internal static class QueryStoreClutterChurnProbe
 
     /// <summary>
     /// Runs the shipped statement under <see cref="WorkMem"/> (SET LOCAL, so it ends with the transaction): once for its rows, once
-    /// under EXPLAIN (ANALYZE) for the plan it actually ran.
+    /// under EXPLAIN (ANALYZE) for the plan it actually ran. <paramref name="planSettings"/> are more SET LOCAL settings (for example
+    /// <c>enable_seqscan = off</c>) applied to both.
     /// </summary>
-    internal static async Task<Run> RunAsync(NpgsqlConnection connection, DateTime start, DateTime end, string[]? databases, CancellationToken ct)
+    internal static async Task<Run> RunAsync(NpgsqlConnection connection, DateTime start, DateTime end, string[]? databases, CancellationToken ct, params string[] planSettings)
     {
         await using var tx = await connection.BeginTransactionAsync(ct);
         await using (var set = new NpgsqlCommand("SET LOCAL work_mem = '" + WorkMem + "'", connection, tx))
         {
             await set.ExecuteNonQueryAsync(ct);
+        }
+
+        foreach (var planSetting in planSettings)
+        {
+            await using var force = new NpgsqlCommand("SET LOCAL " + planSetting, connection, tx);
+            await force.ExecuteNonQueryAsync(ct);
         }
 
         NpgsqlCommand Build(string sql)
@@ -188,6 +196,13 @@ internal static class QueryStoreClutterChurnProbe
         await tx.RollbackAsync(ct);
         return new Run(rows, plan.ToString());
     }
+
+    /// <summary>The index <c>PlanChurnSql</c>'s projection is cut to: <c>PgTableTuning</c> creates it, <c>MigrateAsync</c> does not.</summary>
+    internal const string CoveringIndex = "idx_query_store_stats_server_db_query_plan_time";
+
+    /// <summary>True when some node of the plan is an index-only scan of <see cref="CoveringIndex"/> (a chunk index is named <c>&lt;chunk&gt;_&lt;index&gt;</c> cut to 63 characters, so the match is on the first 40 characters of the index name).</summary>
+    internal static bool WalksCoveringIndexOnly(string planText) =>
+        planText.Split('\n').Any(line => line.Contains("Index Only Scan", StringComparison.Ordinal) && line.Contains(CoveringIndex[..40], StringComparison.Ordinal));
 
     /// <summary>Why a plan spilled to disk, or null when it did not: an external sort, a hash aggregate that wrote batches, or a materialized CTE that went to temp files.</summary>
     internal static string? SpillIn(string planText)
