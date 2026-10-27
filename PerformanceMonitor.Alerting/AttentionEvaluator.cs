@@ -157,9 +157,38 @@ public static class AttentionEvaluator
     /// "Microsoft SQL Server Management Studio" followed by anything and ending in "IntelliSense", so a renamed SSMS build still matches.
     /// </summary>
     public static bool IsExcludedApp(string? clientAppName) =>
-        clientAppName is not null
-        && clientAppName.StartsWith("Microsoft SQL Server Management Studio", StringComparison.OrdinalIgnoreCase)
+        clientAppName is not null && (IsSsmsIntelliSense(clientAppName) || IsVsCodeMssqlMetadata(clientAppName));
+
+    private static bool IsSsmsIntelliSense(string clientAppName) =>
+        clientAppName.StartsWith("Microsoft SQL Server Management Studio", StringComparison.OrdinalIgnoreCase)
         && clientAppName.TrimEnd().EndsWith("IntelliSense", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The VS Code mssql extension's metadata connections (#6856). The SQL Tools Service it runs appends the connection purpose to
+    /// the application name "vscode-mssql" (ConnectionService.GetApplicationNameWithFeature), and the language service adds "-languageService".
+    /// Metadata work is the General connection and Object Explorer, each with or without that suffix, plus the language service alone. The
+    /// query editor connects as plain "vscode-mssql" with no suffix, so it stays counted, the way SSMS "- Query" does.</summary>
+    private static readonly string[] VsCodeMetadataApps =
+    {
+        "vscode-mssql-GeneralConnection",
+        "vscode-mssql-GeneralConnection-languageService",
+        "vscode-mssql-ObjectExplorer",
+        "vscode-mssql-ObjectExplorer-languageService",
+        "vscode-mssql-languageService",
+    };
+
+    private static bool IsVsCodeMssqlMetadata(string clientAppName)
+    {
+        var name = clientAppName.Trim();
+        foreach (var known in VsCodeMetadataApps)
+        {
+            if (string.Equals(name, known, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>How far back the read looks, in minutes. Equal to <see cref="RunnableQueueEvaluator.ReadLookbackMinutes"/>
     /// (a test pins it): the shared freshness rule caps its window there.</summary>
@@ -472,7 +501,7 @@ public static class AttentionEvaluator
         if (finding.ExcludedSamples > 0)
         {
             text += string.Create(CultureInfo.InvariantCulture,
-                $" {finding.ExcludedSamples:N0} of the {finding.SampledEvents:N0} sampled events came from SSMS IntelliSense cancelling its own queries and are left out of the rate judged.");
+                $" {finding.ExcludedSamples:N0} of the {finding.SampledEvents:N0} sampled events came from SSMS IntelliSense and VS Code mssql metadata connections cancelling their own queries and are left out of the rate judged.");
         }
 
         if (finding.Bars is not null)

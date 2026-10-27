@@ -266,6 +266,49 @@ public sealed class AttentionAlertTests
     public void IsExcludedApp_MatchesOnlyIntelliSense(string? app, bool expected) =>
         Assert.Equal(expected, AttentionEvaluator.IsExcludedApp(app));
 
+    /* ---------------- #6856: the VS Code mssql extension's metadata connections ---------------- */
+
+    [Theory]
+    [InlineData("vscode-mssql-GeneralConnection", true)]
+    [InlineData("vscode-mssql-GeneralConnection-languageService", true)]
+    [InlineData("vscode-mssql-ObjectExplorer", true)]
+    [InlineData("vscode-mssql-ObjectExplorer-languageService", true)]
+    [InlineData("VSCODE-MSSQL-OBJECTEXPLORER", true)]
+    [InlineData("vscode-mssql", false)]
+    [InlineData("vscode-mssql-Query", false)]
+    [InlineData("my-vscode-mssql-ObjectExplorer", false)]
+    public void IsExcludedApp_MatchesVsCodeMetadataConnections_NotTheQueryEditor(string app, bool expected) =>
+        Assert.Equal(expected, AttentionEvaluator.IsExcludedApp(app));
+
+    [Fact]
+    public void MixedWindow_CountsOnlyRealCancels_AndNamesBothToolsAsLeftOut()
+    {
+        var runs = Runs(T0.AddSeconds(-5), 6);
+        var window = Window(runs, new[] { Count(runs[0], 540) }, new[]
+        {
+            Sample(runs[0], "master", AttentionEvaluator.IntelliSenseClientApp, 100),
+            Sample(runs[0], "master", "vscode-mssql-ObjectExplorer", 40),
+            Sample(runs[0], "master", "vscode-mssql-GeneralConnection-languageService", 10),
+            Sample(runs[0], "master", "vscode-mssql", 10),
+            Sample(runs[0], "sales", "web", 20),
+        });
+
+        /* 180 sampled events, 150 left out (100 SSMS IntelliSense, 50 VS Code metadata): the query editor and web count, so 540 x 30/180 = 90 judged = 30 per minute. */
+        var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(window, T0), 10, 60);
+
+        Assert.NotNull(finding);
+        Assert.Equal(150, finding!.ExcludedSamples);
+        Assert.Equal(30.0, finding.RatePerMinute);
+        Assert.Contains("SSMS IntelliSense and VS Code mssql", finding.Summary, StringComparison.Ordinal);
+
+        var (_, reading) = ClientTimeoutsRead.Classify(window, T0);
+        using var doc = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(
+            ClientTimeoutsRead.Payload(reading!, window, Array.Empty<ClientTimeoutSample>(), 20, 2000)));
+        var apps = doc.RootElement.GetProperty("excluded_from_alert").GetProperty("client_apps").EnumerateArray().Select(a => a.GetString()).ToArray();
+        Assert.Contains(apps, a => a!.Contains("SSMS", StringComparison.Ordinal));
+        Assert.Contains(apps, a => a!.Contains("VS Code", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void Mute_PartlyMuted_JudgesTheUnmutedShareOfTheExactCount()
     {
