@@ -28,6 +28,34 @@ public sealed class QueryStoreClutterChurnPlanLiveTests
 {
     private const string Skip = "Set DARLING_TEST_PG to a Postgres connection string to run the live plan-churn test (it mints its own scratch database).";
 
+    private const string Idx = "_hyper_1_1_chunk_idx_query_store_stats_server_db_query_plan_ti";
+
+    /* #6816: the plan-text judges themselves, on plan text, so they run without a database. */
+
+    [Fact]
+    public void WalksCoveringIndexOnly_RequiresEveryStatsScanToBeIndexOnly_AndAtLeastTwoOfThem()
+    {
+        var indexOnly = "  ->  Index Only Scan using " + Idx + " on _hyper_1_1_chunk (actual rows=10 loops=1)\n";
+        var indexOnlyAlias = "  ->  Index Only Scan using " + Idx + " on _hyper_1_1_chunk _hyper_1_1_chunk_1 (actual rows=10 loops=1)\n";
+        var heap = "  ->  Index Scan using _hyper_1_1_chunk_idx_query_store_stats_time on _hyper_1_1_chunk _hyper_1_1_chunk_1 (actual rows=10 loops=1)\n";
+        var seq = "  ->  Seq Scan on _hyper_1_1_chunk _hyper_1_1_chunk_1 (actual rows=10 loops=1)\n";
+        var bitmap = "  ->  Bitmap Heap Scan on _hyper_1_1_chunk _hyper_1_1_chunk_1 (actual rows=10 loops=1)\n        ->  Bitmap Index Scan on " + Idx + " (actual rows=10 loops=1)\n";
+
+        Assert.True(QueryStoreClutterChurnProbe.WalksCoveringIndexOnly(indexOnly + indexOnlyAlias));
+        Assert.False(QueryStoreClutterChurnProbe.WalksCoveringIndexOnly(indexOnly + heap), "one scan went back to the heap");
+        Assert.False(QueryStoreClutterChurnProbe.WalksCoveringIndexOnly(indexOnly + seq), "one scan is sequential");
+        Assert.False(QueryStoreClutterChurnProbe.WalksCoveringIndexOnly(indexOnly + bitmap), "one scan is a bitmap heap scan");
+        Assert.False(QueryStoreClutterChurnProbe.WalksCoveringIndexOnly(indexOnly), "the CTE is read twice, so one scan is not enough");
+        Assert.False(QueryStoreClutterChurnProbe.WalksCoveringIndexOnly("Aggregate\n  ->  Result\n"), "no scan at all");
+    }
+
+    [Fact]
+    public void SpillIn_FlagsAMultiBatchHashJoin_AndNotASingleBatchOne()
+    {
+        Assert.Contains("Batches: 4", QueryStoreClutterChurnProbe.SpillIn("Hash Join\n  ->  Hash\n        Buckets: 1024  Batches: 4  Memory Usage: 9kB\n"));
+        Assert.Null(QueryStoreClutterChurnProbe.SpillIn("Hash Join\n  ->  Hash\n        Buckets: 1024  Batches: 1  Memory Usage: 9kB\n"));
+    }
+
     [Fact]
     public async Task PlanChurn_ReturnsTheSeededAnswerExactly_ForTwoWindows_WithAndWithoutADatabaseChoice_AndNeverSpills()
     {
