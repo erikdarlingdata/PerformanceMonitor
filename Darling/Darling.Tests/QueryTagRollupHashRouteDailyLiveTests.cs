@@ -77,6 +77,19 @@ public sealed class QueryTagRollupHashRouteDailyLiveTests
     private static async Task<Arranged> ArrangeAsync(CancellationToken ct)
     {
         var scratch = await ScratchPostgres.CreateAsync(ComposeStampLiveSupport.BaseConnectionString!, ct);
+        try
+        {
+            return await ArrangeIntoAsync(scratch, ct);
+        }
+        catch
+        {
+            await scratch.DisposeAsync();
+            throw;
+        }
+    }
+
+    private static async Task<Arranged> ArrangeIntoAsync(ScratchPostgres scratch, CancellationToken ct)
+    {
         var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
