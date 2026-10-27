@@ -107,7 +107,7 @@ public sealed partial class ViewerDataService
             sections[QueryTagRollupSection.QueryStore.Name] = qs.Facts;
             if (qs.UsedHashHourly && !string.IsNullOrEmpty(qs.WindowEdgesNote))
             {
-                notes[QueryTagRollupSection.QueryStore.Name] = $"Read from the hourly table {QueryTagRollupHashRoute.RoutedSourceName}: {qs.WindowEdgesNote}.";
+                notes[QueryTagRollupSection.QueryStore.Name] = $"Read from the {(qs.UsedHashDaily ? "daily and hourly" : "hourly")} Query Store {(qs.UsedHashDaily ? "tables" : "table")}, with the raw intervals for the edges: {qs.WindowEdgesNote}.";
             }
 
             if (qs.Allowed.Count == 0)

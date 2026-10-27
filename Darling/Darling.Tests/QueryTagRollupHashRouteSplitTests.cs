@@ -113,23 +113,27 @@ public sealed class QueryTagRollupHashRouteSplitTests
         var random = new Random(6800);
         var withTable = 0;
         var withWide = 0;
+        var withDay = 0;
         var movedStarts = 0;
         for (var c = 0; c < Cases; c++)
         {
-            var windowEnd = Edge(random, 30 + random.Next(0, 40), random.Next(0, 3) == 0);
+            /* One case in three is a multi-day window (up to 6 days back), the others the 36 hours of step 3a. */
+            var longWindow = random.Next(0, 3) == 0;
+            var maxBackHours = longWindow ? 6 * 24 : 36;
+            var windowEnd = Edge(random, 30 + random.Next(0, 40) + (longWindow ? 6 * 24 : 0), random.Next(0, 3) == 0);
             var starts = new Dictionary<int, DateTime>();
             var servers = random.Next(1, 7);
             for (var s = 1; s <= servers; s++)
             {
-                /* Spans from under an hour to over a day, the ones inside the last hour included. */
-                var back = random.Next(0, 4) == 0 ? TimeSpan.FromMinutes(random.Next(0, 120)) : TimeSpan.FromMinutes(random.Next(0, 36 * 60));
+                /* Spans from under an hour to over a day (or six), the ones inside the last hour included. */
+                var back = random.Next(0, 4) == 0 ? TimeSpan.FromMinutes(random.Next(0, 120)) : TimeSpan.FromMinutes(random.Next(0, maxBackHours * 60));
                 var start = windowEnd - back;
                 starts[s] = random.Next(0, 3) == 0 ? new DateTime(start.Ticks / TimeSpan.TicksPerHour * TimeSpan.TicksPerHour) : start;
             }
 
             var built = new HashSet<DateTime>();
             var density = random.NextDouble();
-            for (var h = windowEnd.AddHours(-40); h <= windowEnd.AddHours(1); h = h.AddHours(1))
+            for (var h = windowEnd.AddHours(-(maxBackHours + 4)); h <= windowEnd.AddHours(1); h = h.AddHours(1))
             {
                 if (random.NextDouble() < density)
                 {
@@ -149,7 +153,27 @@ public sealed class QueryTagRollupHashRouteSplitTests
                 }
             }
 
-            var plan = QueryTagRollupHashRoute.Split(starts, windowEnd, built, stale);
+            /* Valid days, as the ledger rule makes them: all 24 hours built and the server's pairs of the day not stale. Days that cut the
+               server's range, or the window end, are offered too: Split must leave those alone. */
+            var validDays = new HashSet<(DateTime, int)>();
+            for (var day = new DateTime(windowEnd.Date.Ticks).AddDays(-(maxBackHours / 24) - 2); day <= windowEnd.Date; day = day.AddDays(1))
+            {
+                for (var s = 1; s <= servers; s++)
+                {
+                    if (random.Next(0, 5) < 3)
+                    {
+                        validDays.Add((day, s));
+                        for (var h = 0; h < 24; h++)
+                        {
+                            built.Add(day.AddHours(h));
+                            stale.Remove((day.AddHours(h), s));
+                        }
+                    }
+                }
+            }
+
+            var plan = QueryTagRollupHashRoute.Split(starts, windowEnd, built, stale, validDays);
+            var wholeEnd = new DateTime(windowEnd.Ticks / TimeSpan.TicksPerHour * TimeSpan.TicksPerHour);
             foreach (var (server, requested) in starts)
             {
                 var snapped = plan.Starts[server];
@@ -157,14 +181,27 @@ public sealed class QueryTagRollupHashRouteSplitTests
                 movedStarts += snapped != requested ? 1 : 0;
                 var tables = plan.TablePairs.Where(p => p.ServerId == server).Select(p => p.Hour).ToList();
                 var wides = plan.WideRanges.Where(r => r.ServerId == server).ToList();
+                var days = plan.DayPairs.Where(p => p.ServerId == server).Select(p => p.Day).ToList();
                 withTable += tables.Count > 0 ? 1 : 0;
                 withWide += wides.Count > 0 ? 1 : 0;
+                withDay += days.Count > 0 ? 1 : 0;
                 Assert.All(tables, h => Assert.True(built.Contains(h) && !stale.Contains((h, server)), $"case {c}: a table hour is built and not stale"));
+                Assert.All(days, d => Assert.True(validDays.Contains((d, server)) && d >= snapped && d.AddDays(1) <= wholeEnd, $"case {c}: a day is valid and whole inside the server's range"));
+
+                /* Every valid whole day inside the server's range is taken (the day first), none other is. */
+                var expectedDays = validDays.Where(v => v.Item2 == server && v.Item1 >= snapped && v.Item1.AddDays(1) <= wholeEnd).Select(v => v.Item1).OrderBy(d => d).ToList();
+                Assert.True(expectedDays.SequenceEqual(days.OrderBy(d => d)), $"case {c} server {server}: the days taken are the valid whole days inside the range");
 
                 var edges = new SortedSet<DateTime> { snapped, windowEnd, requested };
                 for (var h = snapped.AddHours(-2); h <= windowEnd.AddHours(2); h = h.AddHours(1))
                 {
                     edges.Add(h);
+                }
+
+                foreach (var d in days)
+                {
+                    edges.Add(d);
+                    edges.Add(d.AddDays(1));
                 }
 
                 foreach (var r in wides)
@@ -186,6 +223,7 @@ public sealed class QueryTagRollupHashRouteSplitTests
                 {
                     var sources =
                         tables.Count(h => h <= t && t < h.AddHours(1))
+                        + days.Count(d => d <= t && t < d.AddDays(1))
                         + wides.Count(r => r.From <= t && t < r.To && t <= windowEnd);
                     var expected = t >= snapped && t <= windowEnd ? 1 : 0;
                     Assert.True(sources == expected, $"case {c} server {server}: instant {t:O} (start {requested:O}, snapped {snapped:O}, end {windowEnd:O}) is in {sources} sources, expected {expected}");
@@ -193,8 +231,57 @@ public sealed class QueryTagRollupHashRouteSplitTests
             }
         }
 
-        /* The generator reaches the shapes the property is about: table hours, wide ranges and starts that move. */
-        Assert.True(withTable > Cases && withWide > Cases && movedStarts > Cases, $"{withTable}/{withWide}/{movedStarts}");
+        /* The generator reaches the shapes the property is about: table hours, wide ranges, days and starts that move. */
+        Assert.True(withTable > Cases && withWide > Cases && movedStarts > Cases && withDay > Cases / 2, $"{withTable}/{withWide}/{withDay}/{movedStarts}");
+    }
+
+    private static QueryTagRollupHashRoute.Plan SplitWithDays(
+        DateTime start, DateTime end, IEnumerable<int> builtHours, IEnumerable<(int Day, int Server)> validDays, params (int Hour, int Server)[] stale) =>
+        QueryTagRollupHashRoute.Split(
+            new Dictionary<int, DateTime> { [1] = start, [2] = start }, end, builtHours.Select(h => T(h)).ToHashSet(),
+            stale.Select(s => (T(s.Hour), s.Server)).ToHashSet(), validDays.Select(d => (T(d.Day * 24), d.Server)).ToHashSet());
+
+    [Fact]
+    public void AValidDay_IsTakenFirst_TheHoursAroundItStayTableHoursAndWideRanges_AndADayThatCutsTheRangeIsNot()
+    {
+        /* Start 21:17 on day 0 (snapped 22:00), end 10:20 on day 3 (whole hour end 10:00). Day 1 and day 2 are whole inside it, day 0 and day 3 are not. */
+        var built = Enumerable.Range(0, 24 * 3 + 10);
+        var plan = SplitWithDays(T(21, 17), T(3 * 24 + 10, 20), built, [(0, 1), (1, 1), (2, 1), (3, 1)]);
+
+        Assert.Equal("1/1,2/1", string.Join(",", plan.DayPairs.Where(p => p.ServerId == 1).Select(p => $"{(int)(p.Day - Day).TotalDays}/{p.ServerId}")));
+        Assert.True(plan.UsesDays);
+        /* Server 1: hours 22 and 23 of day 0 and hours 0 to 9 of day 3 from the table, none inside the days, the tail [10, 11) wide. Server 2 has no valid day: every hour is a table hour. */
+        Assert.Equal(
+            "22,23,72,73,74,75,76,77,78,79,80,81",
+            string.Join(",", plan.TablePairs.Where(p => p.ServerId == 1).Select(p => (int)(p.Hour - Day).TotalHours)));
+        Assert.Equal(60, plan.TablePairs.Count(p => p.ServerId == 2));
+        Assert.Equal(new[] { T(3 * 24 + 10) }, plan.WideRanges.Where(r => r.ServerId == 1).Select(r => r.From));
+    }
+
+    [Fact]
+    public void ADayInvalidForOneServer_IsReadFromHoursAndWideForThatServerOnly()
+    {
+        /* Day 1 is valid for server 2 only. Server 1's day 1 has two stale hours, 30 and 40, so server 1 reads its hours and wide ranges there. */
+        var plan = SplitWithDays(T(0), T(3 * 24, 20), Enumerable.Range(0, 24 * 3), [(1, 2)], (30, 1), (40, 1));
+
+        Assert.Equal("2", string.Join(",", plan.DayPairs.Select(p => p.ServerId)));
+        var server1Hours = plan.TablePairs.Where(p => p.ServerId == 1).Select(p => (int)(p.Hour - Day).TotalHours).ToList();
+        Assert.Contains(24, server1Hours);
+        Assert.Contains(39, server1Hours);
+        Assert.DoesNotContain(30, server1Hours);
+        Assert.DoesNotContain(40, server1Hours);
+        Assert.Equal(new[] { T(30), T(40) }, plan.WideRanges.Where(r => r.ServerId == 1).Select(r => r.From).Take(2));
+        Assert.DoesNotContain(plan.TablePairs, p => p.ServerId == 2 && p.Hour >= T(24) && p.Hour < T(48));
+    }
+
+    [Fact]
+    public void ADayAloneIsEnoughToRoute_AndADayRightAtTheEdgesIsTaken()
+    {
+        /* A window of exactly one day, aligned both ends, no hour built: the day alone answers it, and only the instant at the end stays wide. */
+        var plan = SplitWithDays(T(24), T(48), [], [(1, 1), (1, 2)]);
+        Assert.Empty(plan.TablePairs);
+        Assert.Equal(2, plan.DayPairs.Count);
+        Assert.Equal(new[] { T(48), T(48) }, plan.WideRanges.Select(r => r.From));
     }
 
     private static DateTime Edge(Random random, int hoursIn, bool aligned)

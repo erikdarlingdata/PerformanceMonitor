@@ -116,6 +116,8 @@ public static class QueryTagRollupSql
     /// <see cref="QueryTagRollupHashRoute"/> decides which is which. Parameters: $1 and $2 the table pairs as parallel arrays (hour start
     /// <c>timestamp[]</c>, server <c>integer[]</c>), $3 the window end, then three per wide range: the servers that share it
     /// (<c>integer[]</c>), its <c>from</c> and its <c>to</c> (each range <c>[from, to)</c>), the first range at $4, $5 and $6.
+    /// With <paramref name="days"/> (#6800 step 3c) the day pairs come next as $4 (day start <c>timestamp[]</c>) and $5 (server <c>integer[]</c>), probed in
+    /// <c>collect.query_store_hash_daily</c> with the same partials, and the first range moves to $6, $7 and $8.
     /// <para>Both arms yield six partials per <c>(server_id, query_hash)</c> (sums of the weighted products and of the counts, the maximum of
     /// the memory), exact <c>numeric</c> sums, so adding the hours gives the wide statement's total. The tag map is joined once, on the
     /// partials, and the final GROUP BY is by <c>(server_id, tag_id)</c>: the aggregate stays at that size. The COALESCE and the cast to
@@ -132,8 +134,9 @@ public static class QueryTagRollupSql
     /// sees the real range and scans <c>collection_time</c> alone. A constant floor shared by all ranges was tried first and did not stop
     /// it (PR notes).</para>
     /// </summary>
-    public static string QueryStoreRoutedSqlFor(int wideRanges)
+    public static string QueryStoreRoutedSqlFor(int wideRanges, bool days = false)
     {
+        var first = days ? 6 : 4;
         var text = new System.Text.StringBuilder();
         text.Append("""
             WITH partials AS
@@ -145,11 +148,24 @@ public static class QueryTagRollupSql
                       AND t.server_id = p.server_id
 
             """);
+        if (days)
+        {
+            text.Append("""
+                    UNION ALL
+                    SELECT t.server_id, t.query_hash, t.ec_sum, t.cpu_wsum, t.dur_wsum, t.reads_wsum, t.writes_wsum, t.mem_max
+                    FROM unnest($4::timestamp[], $5::integer[]) AS p(day, server_id)
+                    JOIN collect.query_store_hash_daily AS t
+                           ON t.day = p.day
+                          AND t.server_id = p.server_id
+
+                """);
+        }
+
         for (var arm = 0; arm < wideRanges; arm++)
         {
-            var servers = "$" + (4 + (3 * arm)).ToString(System.Globalization.CultureInfo.InvariantCulture);
-            var from = "$" + (5 + (3 * arm)).ToString(System.Globalization.CultureInfo.InvariantCulture);
-            var to = "$" + (6 + (3 * arm)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var servers = "$" + (first + (3 * arm)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var from = "$" + (first + 1 + (3 * arm)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var to = "$" + (first + 2 + (3 * arm)).ToString(System.Globalization.CultureInfo.InvariantCulture);
             text.Append($$"""
                     UNION ALL
                     SELECT q.server_id, q.query_hash,

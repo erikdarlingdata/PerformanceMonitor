@@ -267,14 +267,15 @@ WHERE day <= $1 - interval '1 day';";
     /// (<see cref="ValidDaysSql"/>), on <paramref name="connection"/> and its current transaction.
     /// </summary>
     public static async Task<IReadOnlyList<(DateTime Day, int ServerId)>> ReadValidDaysAsync(
-        NpgsqlConnection connection, IReadOnlyCollection<int> servers, DateTime from, DateTime to, CancellationToken cancellationToken)
+        NpgsqlConnection connection, IReadOnlyCollection<int> servers, DateTime from, DateTime to, CancellationToken cancellationToken,
+        int commandTimeoutSeconds = QueryStoreComposeStamp.BuildStatementTimeoutSeconds)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(servers);
 
         var days = new List<(DateTime, int)>();
         var ids = System.Linq.Enumerable.ToArray(servers);
-        await using var command = new NpgsqlCommand(ValidDaysSql, connection) { CommandTimeout = QueryStoreComposeStamp.BuildStatementTimeoutSeconds };
+        await using var command = new NpgsqlCommand(ValidDaysSql, connection) { CommandTimeout = commandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = ids });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(from) });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(to) });

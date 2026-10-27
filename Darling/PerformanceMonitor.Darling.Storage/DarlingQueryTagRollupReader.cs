@@ -58,10 +58,10 @@ public static class DarlingQueryTagRollupReader
     /// for them, the servers it refused with why, the facts read for the allowed ones, and whether the interval table itself was missing.
     /// <paramref name="UsedHashHourly"/>: the fleet route read built hours from <c>collect.query_store_hash_hourly</c> (#6800), so the section's source is both tables.
     /// Then <paramref name="RoutedStarts"/> is each server's start rounded up to the hour, the first instant it read (<paramref name="Allowed"/> keeps the gate's
-    /// own starts), and <paramref name="WindowEdgesNote"/> says the partial first hour was not read (null when the start was on the hour).</summary>
+    /// own starts), and <paramref name="WindowEdgesNote"/> says the partial first hour was not read (null when the start was on the hour). <paramref name="UsedHashDaily"/>: the route also read whole UTC days from <c>collect.query_store_hash_daily</c> (step 3c).</summary>
     public readonly record struct QueryStoreRead(
         Dictionary<int, DateTime> Allowed, Dictionary<int, string> Refused, List<QueryTagRollupFact> Facts, bool TableMissing, bool UsedHashHourly = false,
-        Dictionary<int, DateTime>? RoutedStarts = null, string? WindowEdgesNote = null);
+        Dictionary<int, DateTime>? RoutedStarts = null, string? WindowEdgesNote = null, bool UsedHashDaily = false);
 
     /// <summary>
     /// The Query Store gate and the read it authorizes, per server: the interval table is read only where the same gate every other reader of
@@ -156,7 +156,7 @@ public static class DarlingQueryTagRollupReader
             return new QueryStoreRead(allowed, refused, [], true);
         }
 
-        return new QueryStoreRead(allowed, refused, facts, false, route is not null, route?.Starts, route?.EdgesNote);
+        return new QueryStoreRead(allowed, refused, facts, false, route is not null, route?.Starts, route?.EdgesNote, route?.UsesDays ?? false);
     }
 
     /// <summary>The batched Query Store statement's command (<see cref="QueryTagRollupSql.QueryStoreSql"/>): the allowed servers and each one's
