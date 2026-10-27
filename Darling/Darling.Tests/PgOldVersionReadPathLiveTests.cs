@@ -10,8 +10,13 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Npgsql;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -196,11 +201,146 @@ public sealed class PgOldVersionReadPathLiveTests
             Assert.Equal(2, page.Rows.Count);
             Assert.All(page.Rows, row => Assert.Null(row.WalBytes));
 
+            /* The bad-actor detail reads the same series and must say "not reported" the same way: GREATEST(NULL - NULL, 0)
+               is 0, so a sum of the deltas alone reports 0 bytes of WAL for a target that has no WAL counters. */
+            var detail = await BadActorDetailAsync(dataSource, serverId, serverName, 101, ct);
+            Assert.True(detail.ContainsKey("wal_bytes"));
+            Assert.Null(detail["wal_bytes"]);
+            Assert.Equal(2L, detail["snapshot_count"]!.GetValue<long>());
+
             bodySucceeded = true;
         }
         finally
         {
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (cleanup, cleanupCt) => CleanupAsync(cleanup, serverId, cleanupCt));
+        }
+    }
+
+    private static async Task<JsonObject> BadActorDetailAsync(NpgsqlDataSource dataSource, int serverId, string serverName, long queryId, CancellationToken ct)
+    {
+        var context = new AnalysisContext
+        {
+            ServerId = serverId, ServerName = serverName, ServerUtcOffset = TimeSpan.Zero, CancellationToken = ct,
+            TimeRangeStart = Anchor.AddHours(-1), TimeRangeEnd = Anchor.AddHours(1),
+        };
+        var key = PgTargetFactKeys.BadActorKey(queryId);
+        var finding = new AnalysisFinding { RootFactKey = key, StoryPath = key, PathKeys = [key], Severity = 1.0 };
+        await new PgTargetDrillDownCollector(dataSource).EnrichFindingsAsync([finding], context);
+        var details = Assert.IsType<Dictionary<string, object>>(finding.DrillDown!["pg_bad_actor_statements"]);
+        return JsonSerializer.SerializeToNode(details[key])!.AsObject();
+    }
+
+    private static async Task PlantWalAsync(NpgsqlConnection store, int serverId, string serverName, long queryId, DateTime at, long walBytes, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(@"
+INSERT INTO pg_statement_stats
+    (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel,
+     calls, total_exec_time_ms, max_exec_time_ms, rows_returned, shared_blks_hit, shared_blks_read,
+     temp_blks_read, temp_blks_written, wal_bytes, delta_calls, delta_total_exec_time_ms, delta_rows)
+VALUES ($1, $2, $3, $4, $5, 1, 10, TRUE, 5, 50, 20, 5, 100, 10, 0, 0, $6, 5, 50, 5)", store);
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(at);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue(queryId);
+        command.Parameters.AddWithValue(walBytes);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// The other half of the bad-actor detail's rule: a target that DID report WAL gets its number, and a zero when
+    /// the counter did not move. NULL is for "never reported", not for "nothing changed".
+    /// </summary>
+    [Fact]
+    public async Task BadActorDetail_ReportsWalWhenTheTargetReportedIt_IncludingAZeroChange()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        var (serverId, serverName) = NewServer();
+        await using var store = await OpenAsync(connectionString!, migrate: true, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await PlantWalAsync(store, serverId, serverName, 201, Anchor, 1_000, ct);
+            await PlantWalAsync(store, serverId, serverName, 201, Anchor.AddMinutes(1), 5_000, ct);
+            await PlantWalAsync(store, serverId, serverName, 202, Anchor, 1_000, ct);
+            await PlantWalAsync(store, serverId, serverName, 202, Anchor.AddMinutes(1), 1_000, ct);
+
+            var builder = new NpgsqlConnectionStringBuilder(connectionString!) { SearchPath = PgSchemaGenerator.SearchPath };
+            await using var dataSource = NpgsqlDataSource.Create(builder.ConnectionString);
+            Assert.Equal(4_000L, (await BadActorDetailAsync(dataSource, serverId, serverName, 201, ct))["wal_bytes"]!.GetValue<long>());
+            Assert.Equal(0L, (await BadActorDetailAsync(dataSource, serverId, serverName, 202, ct))["wal_bytes"]!.GetValue<long>());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (cleanup, cleanupCt) => CleanupAsync(cleanup, serverId, cleanupCt));
+        }
+    }
+
+    private static async Task<int> RunLogTailAsync<TRow>(CollectorDefinitionBase<TRow> definition, CollectorContext context, NpgsqlConnection target, CancellationToken ct)
+    {
+        var query = definition.BuildQuery(context);
+        Assert.DoesNotContain("MATERIALIZED", query.Text, StringComparison.OrdinalIgnoreCase);
+        await using var command = PostgresTargetProvider.Instance.CreateCommand(query, target, 30);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        try
+        {
+            return (await definition.ReadAsync(reader, context, ct)).Count;
+        }
+        catch (Exception ex) when (ex is PgNoStderrLogFileException or PgNoCsvlogFileException or PgNoJsonlogFileException)
+        {
+            /* The reader's own verdict on a target that has no file for this route: it read the query's result and named why
+               there is nothing to parse. The query ran, which is what this test is for. */
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// The server-log collectors leave out <c>MATERIALIZED</c> below PostgreSQL 12 (#6206). The text that is sent there
+    /// is valid on a current server too, so it runs here: every route (stderr, csvlog, jsonlog; with and without
+    /// <c>pg_read_binary_file</c>) of <c>pg_deadlocks</c>, <c>pg_log_events</c> and <c>pg_plan_capture</c>, through the
+    /// collector's own reader. Needs the target the csvlog live tests use (logging_collector on).
+    /// </summary>
+    [Theory]
+    [InlineData(10)]
+    [InlineData(11)]
+    public async Task TheLogTailQueriesBelow12_RunOnARealServer_AndTheirReadersTakeTheResult(int major)
+    {
+        var target = Environment.GetEnvironmentVariable("DARLING_TEST_PG_CSVLOG");
+        Assert.SkipWhen(string.IsNullOrEmpty(target), "Set DARLING_TEST_PG_CSVLOG (a PostgreSQL with logging_collector on) to run the below-12 log tail read path tests.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var (serverId, serverName) = NewServer();
+        await using var connection = new NpgsqlConnection(target);
+        await connection.OpenAsync(ct);
+
+        foreach (var binary in new[] { false, true })
+        {
+            foreach (var route in new[] { "stderr", "csvlog", "jsonlog" })
+            {
+                var context = new CollectorContext
+                {
+                    LogHashKey = TestLogHashKeys.Fixed,
+                    ServerId = serverId, ServerName = serverName,
+                    CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+                    Deltas = DeltaCalculator,
+                    Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = major, PostgresVersionNum = major * 10000 },
+                    PgLogUsesCsvlog = route == "csvlog",
+                    PgLogUsesJsonlog = route == "jsonlog",
+                    PgReadBinaryFileGranted = binary,
+                };
+
+                await RunLogTailAsync(PgLogEventsCollector.Instance, context, connection, ct);
+                if (route != "jsonlog")
+                {
+                    await RunLogTailAsync(PgDeadlocksCollector.Instance, context, connection, ct);
+                    await RunLogTailAsync(PgPlanCaptureCollector.Instance, context, connection, ct);
+                }
+            }
         }
     }
 

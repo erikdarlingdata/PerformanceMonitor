@@ -982,4 +982,26 @@ public sealed class ViewerPostgresTabsTests
 
     private static string ViewerDir(string thisFile) =>
         Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "PerformanceMonitor.Darling.Viewer"));
+
+    /// <summary>
+    /// #6836: a statement whose target never reported WAL shows the not-applicable text in the WAL column and sorts as
+    /// empty. "0 B" would say the statement wrote no WAL, which a target without WAL counters cannot know.
+    /// </summary>
+    [Fact]
+    public void StatementRow_ShowsNotApplicableForUnreportedWal_AndBytesForReportedWal()
+    {
+        static DarlingPgStatementReader.PgStatementRow Row(long? wal) => new(
+            QueryId: 1, DatabaseId: 2, Calls: 3, TotalExecTimeMs: 4, RowsReturned: 5, MaxExecTimeMs: 6.0,
+            SharedBlocksHit: 7, SharedBlocksRead: 8, StorageBlocksRead: null, OrcacheBlocksHit: null,
+            TempBlocksRead: 0, TempBlocksWritten: 0, WalBytes: wal, MaxPeakMemBytes: null);
+
+        var unreported = PgDisplay.Statement(Row(null));
+        Assert.Equal(PgDisplay.NotApplicableText, unreported.WalWritten);
+        Assert.Null(unreported.WalWrittenSort);
+
+        var reported = PgDisplay.Statement(Row(2_048));
+        Assert.Equal(PgDisplay.Bytes(2_048), reported.WalWritten);
+        Assert.NotEqual(PgDisplay.NotApplicableText, reported.WalWritten);
+        Assert.Equal(2_048L, reported.WalWrittenSort);
+    }
 }

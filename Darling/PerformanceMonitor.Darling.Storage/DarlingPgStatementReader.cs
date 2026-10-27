@@ -78,6 +78,18 @@ public static class DarlingPgStatementReader
     public const int PgTopQueriesGridRowCap = 50;
 
     /// <summary>
+    /// The window's WAL figure for a statement, as one aggregate expression over a differenced series that carries
+    /// <c>raw_wal_bytes</c> (the undifferenced column) beside <c>d_wal_bytes</c> (its <c>GREATEST(x - LAG(x), 0)</c>
+    /// delta). NULL when no sample reported the column (pg_stat_statements before 1.8 has no <c>wal_*</c> columns, and
+    /// Aurora types it NULL), 0 when one did and the window holds no interval. The delta alone cannot tell the two
+    /// apart: <c>GREATEST(NULL - NULL, 0)</c> is 0 in PostgreSQL, so a series that never reported WAL differences to 0.
+    /// <see cref="PgTopQueriesSql"/> and the bad-actor detail read (<c>PgTargetDrillDownCollector</c>) both splice this
+    /// text, so the rule lives once (#6836).
+    /// </summary>
+    public const string WalBytesWindowSql =
+        "CASE WHEN COUNT(raw_wal_bytes) = 0 THEN NULL ELSE CAST(coalesce(SUM(d_wal_bytes), 0) AS bigint) END";
+
+    /// <summary>
     /// Every counter is reported for the WINDOW, never as a lifetime total. Summing the cumulative
     /// counters directly would multiply each query's whole history by the number of snapshots in the
     /// window, so the time/call/row figures come from the stored delta columns and the block/WAL figures
@@ -112,7 +124,7 @@ public static class DarlingPgStatementReader
     /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row cap — a PARAMETER, bound to the caller's limit by
     /// the page read and to <see cref="PgTopQueriesGridRowCap"/> by the unpaged one.</para>
     /// </summary>
-    public const string PgTopQueriesSql = """
+    public const string PgTopQueriesSql = $"""
         WITH differenced AS (
             SELECT
                 queryid,
@@ -173,8 +185,7 @@ public static class DarlingPgStatementReader
             CAST(coalesce(SUM(d_temp_blks_written), 0) AS bigint) AS temp_blks_written,
             /* #6836: NULL when the source never reported WAL (pg_stat_statements before 1.8 has no wal_* columns),
                0 when it did and the window holds no interval. */
-            CASE WHEN COUNT(raw_wal_bytes) = 0 THEN NULL
-                 ELSE CAST(coalesce(SUM(d_wal_bytes), 0) AS bigint) END AS wal_bytes,
+            {WalBytesWindowSql} AS wal_bytes,
             CAST(MAX(max_exec_peakmem_bytes) AS bigint) AS max_exec_peakmem_bytes,
             /* #2219: the statement text, from the (server_id, queryid) store. MAX rather than a join column
                because the grain here is (queryid, database_id) while text is keyed on queryid alone — one text

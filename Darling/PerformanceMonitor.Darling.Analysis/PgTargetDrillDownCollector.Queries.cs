@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -114,6 +115,7 @@ WITH stmt_series AS (
         GREATEST(shared_blks_read  - LAG(shared_blks_read)  OVER identity, 0) AS d_shared_blks_read,
         GREATEST(temp_blks_read    - LAG(temp_blks_read)    OVER identity, 0) AS d_temp_blks_read,
         GREATEST(temp_blks_written - LAG(temp_blks_written) OVER identity, 0) AS d_temp_blks_written,
+        wal_bytes                                                         AS raw_wal_bytes,
         GREATEST(wal_bytes         - LAG(wal_bytes)         OVER identity, 0) AS d_wal_bytes
     FROM pg_statement_stats
     WHERE server_id = $1
@@ -142,7 +144,7 @@ SELECT
     CAST(COALESCE(SUM(s.d_shared_blks_read), 0) AS bigint)       AS shared_blks_read,
     CAST(COALESCE(SUM(s.d_temp_blks_read), 0) AS bigint)         AS temp_blks_read,
     CAST(COALESCE(SUM(s.d_temp_blks_written), 0) AS bigint)      AS temp_blks_written,
-    CAST(COALESCE(SUM(s.d_wal_bytes), 0) AS bigint)              AS wal_bytes,
+    " + DarlingPgStatementReader.WalBytesWindowSql + @" AS wal_bytes,
     COUNT(DISTINCT s.collection_time)                            AS snapshot_count,
     MIN(s.collection_time)                                       AS first_snapshot,
     MAX(s.collection_time)                                       AS last_snapshot,
@@ -284,7 +286,8 @@ HAVING COUNT(*) > 0";
             shared_blks_read = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
             temp_blks_read = reader.IsDBNull(6) ? 0L : Convert.ToInt64(reader.GetValue(6)),
             temp_blks_written = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)),
-            wal_bytes = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
+            /* Null, not 0, when the target never reported WAL (#6836): a zero here reads as a measurement. */
+            wal_bytes = reader.IsDBNull(8) ? (long?)null : Convert.ToInt64(reader.GetValue(8)),
             snapshot_count = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
             first_snapshot = reader.IsDBNull(10) ? null : reader.GetDateTime(10).ToString("o", CultureInfo.InvariantCulture),
             last_snapshot = reader.IsDBNull(11) ? null : reader.GetDateTime(11).ToString("o", CultureInfo.InvariantCulture),
