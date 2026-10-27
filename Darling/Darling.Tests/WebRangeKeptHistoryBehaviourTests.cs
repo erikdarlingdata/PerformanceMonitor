@@ -282,7 +282,7 @@ public sealed class WebRangeKeptHistoryBehaviourTests
 
         var serverTabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         Assert.DoesNotMatch(new Regex(@"readTool\(\s*[A-Za-z_""]+\s*,\s*\{[^}]*\bhours\b"), serverTabs);
-        Assert.Contains("const res = await readToolWithinKeptHistory(read, params);", serverTabs, StringComparison.Ordinal);
+        Assert.Contains("const res = await readToolWithinKeptHistory(read, params, signal);", serverTabs, StringComparison.Ordinal);
 
         /* The view editor's three sample reads (Save, Auto-detect fields, the field lists) send the panel's own params,
            hours included, so none of them may call readTool directly. */
