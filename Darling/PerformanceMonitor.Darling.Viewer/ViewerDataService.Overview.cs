@@ -535,7 +535,7 @@ LIMIT 1";
         /* Collectors row — REUSE the viewer's own 7-day per-collector health banding (the same STALE /
            FAILING / NEVER_RUN / HEALTHY logic the Collection Health tab renders), mirroring the Dashboard's
            SUM(CASE health_status = 'HEALTHY' / 'FAILING') over report.collection_health. */
-        var (healthyCollectors, failingCollectors, totalCollectors, deadlockBand, pgDeadlockBand) = await GetCollectorHealthCountsAsync(serverId, cancellationToken);
+        var (healthyCollectors, warningCollectors, failingCollectors, notCollectedCollectors, totalCollectors, deadlockBand, pgDeadlockBand) = await GetCollectorHealthCountsAsync(serverId, cancellationToken);
 
 
         return new ServerSummaryItem
@@ -571,6 +571,8 @@ LIMIT 1";
             ThreadsWaitingForCpu = threadsWaitingForCpu,
             RequestsWaitingForThreads = requestsWaitingForThreads,
             HealthyCollectorCount = healthyCollectors,
+            WarningCollectorCount = warningCollectors,
+            NotCollectedCollectorCount = notCollectedCollectors,
             FailedCollectorCount = failingCollectors,
             CollectorCount = totalCollectors,
             DeadlockCollectorBand = deadlockBand,
@@ -632,7 +634,7 @@ WHERE id = 1";
     /// terms; this method does not know the engine, so the card carries both and
     /// <see cref="ServerSummaryItem.DeadlockSource"/> picks once <c>IsPostgres</c> is stamped.</para>
     /// </summary>
-    private async Task<(int Healthy, int Failing, int Total, string? DeadlockBand, string? PgDeadlockBand)> GetCollectorHealthCountsAsync(int serverId, CancellationToken cancellationToken)
+    private async Task<(int Healthy, int Warning, int Failing, int NotCollected, int Total, string? DeadlockBand, string? PgDeadlockBand)> GetCollectorHealthCountsAsync(int serverId, CancellationToken cancellationToken)
     {
         /* #4226: the fleet-wide rollup-backed read, memoized, instead of this server's OWN raw
            CollectionHealthSql scan — the Overview loader's per-server loop now shares one store round trip
@@ -641,8 +643,14 @@ WHERE id = 1";
            per-server scan finding none. */
         var byServer = await GetFleetCollectionHealthByServerAsync(cancellationToken);
         var rows = byServer.TryGetValue(serverId, out var serverRows) ? serverRows : new List<CollectorHealthRow>();
-        var healthy = rows.Count(r => r.HealthStatus == "HEALTHY");
-        var failing = rows.Count(r => r.HealthStatus == "FAILING");
+        /* #6828: the one shared tally, so a WARNING collector is not counted healthy here and the counts match get_collection_health's rows
+           and the service's fleet card for the same server. */
+        var tally = new CollectorHealthClassifier.BandTally();
+        foreach (var row in rows)
+        {
+            tally = tally.Add(row.CollectorName, row.HealthStatus, row.ServerAlwaysOnOff);
+        }
+
         var deadlockBand = rows
             .FirstOrDefault(r => string.Equals(r.CollectorName, DeadlocksCollector.Instance.Name, StringComparison.Ordinal))
             ?.HealthStatus;
@@ -650,7 +658,7 @@ WHERE id = 1";
             .FirstOrDefault(r => string.Equals(r.CollectorName, PgDatabaseStatsCollector.Instance.Name, StringComparison.Ordinal))
             ?.HealthStatus;
         /* #3539 A8d: every banded row is the share's denominator — the service's CollectorCounts.Total. */
-        return (healthy, failing, rows.Count, deadlockBand, pgDeadlockBand);
+        return (tally.Healthy, tally.Warning, tally.Failing, tally.NotCollected, tally.Total, deadlockBand, pgDeadlockBand);
     }
 
     /// <summary>Whole minutes elapsed from a stored naive-UTC instant to now (UTC), floored at 0, or null
@@ -900,6 +908,12 @@ public sealed class ServerSummaryItem
     /// <summary>Collectors whose 7-day band is HEALTHY (mirrors report.collection_health).</summary>
     public int HealthyCollectorCount { get; set; }
 
+    /// <summary>#6828: collectors banded WARNING, shown beside the healthy and failing counts so the card does not leave them out or call them healthy.</summary>
+    public int WarningCollectorCount { get; set; }
+
+    /// <summary>#6828: Always On collectors on a server with Always On off, which <c>get_collection_health</c> lists as not_collected.</summary>
+    public int NotCollectedCollectorCount { get; set; }
+
     /// <summary>Collectors whose 7-day band is FAILING (no success in over 24h).</summary>
     public int FailedCollectorCount { get; set; }
 
@@ -1104,7 +1118,13 @@ public sealed class ServerSummaryItem
 
     /// <summary>Collectors detail — "No recent collection" when offline, else "Healthy: N, Failing: M" (Dashboard's CollectorDetailText).</summary>
     public string CollectorDetail =>
-        IsOffline ? "No recent collection" : $"Healthy: {HealthyCollectorCount}, Failing: {FailedCollectorCount}";
+        IsOffline ? "No recent collection"
+        /* #6828: a WARNING collector is not healthy and is not left out. The warning and not-collected counts show only when there is one,
+           so the card reads as it always did for a server with none. */
+        : $"Healthy: {HealthyCollectorCount}, "
+            + (WarningCollectorCount > 0 ? $"Warning: {WarningCollectorCount}, " : "")
+            + $"Failing: {FailedCollectorCount}"
+            + (NotCollectedCollectorCount > 0 ? $", Not collected: {NotCollectedCollectorCount}" : "");
 
     /// <summary>
     /// The stored collection_time is naive UTC; the viewer shows it in the viewer machine's local time

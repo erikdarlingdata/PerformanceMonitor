@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -41,14 +42,13 @@ internal static class DarlingGatedCollectorRows
     /// <summary>The status word on a gated row: the same word the <c>not_collected</c> envelope uses.</summary>
     internal const string NotCollectedStatus = "not_collected";
 
-    /// <summary>The two Always On collectors. On a SQL Server without Always On they run and log HEALTHY with zero rows.</summary>
-    private static readonly string[] AlwaysOnCollectors = { "ag_database_replica_states", "ag_replica_states" };
 
     /// <summary>The sentence on a not-applicable Always On row.</summary>
     internal const string AlwaysOnOffMessage = "Always On availability groups are not enabled on this server, so there is nothing for this collector to read.";
 
+    /// <summary>The two Always On collectors, named once in the shared classifier (#6828) so the count surfaces and this list cannot disagree.</summary>
     internal static bool IsAlwaysOnCollector(string collectorName) =>
-        Array.IndexOf(AlwaysOnCollectors, collectorName) >= 0;
+        CollectorHealthClassifier.IsAlwaysOnCollector(collectorName);
 
     /// <summary>
     /// True for a logged row that a server without Always On shows as "not applicable" (round-1 L5): an Always On
@@ -57,7 +57,7 @@ internal static class DarlingGatedCollectorRows
     /// and all, instead of vanishing behind the not-applicable sentence.
     /// </summary>
     internal static bool IsNotApplicableWhenAlwaysOnOff(CollectorHealth row) =>
-        IsAlwaysOnCollector(row.CollectorName) && string.Equals(row.HealthStatus, "HEALTHY", StringComparison.Ordinal);
+        CollectorHealthClassifier.IsNotCollectedWhenAlwaysOnOff(row.CollectorName, row.HealthStatus, alwaysOnOff: true);
 
     /// <summary>
     /// The logged rows a server without Always On still lists: everything except the HEALTHY Always On collectors

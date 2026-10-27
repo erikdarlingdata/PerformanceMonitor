@@ -160,7 +160,13 @@ public sealed partial class ViewerDataService
                 MAX(CASE WHEN status IS NULL
                           OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
                          THEN collection_time END) AS last_non_skip_time,
-                MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time
+                MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+                -- #6828: the newest run that was NOT a zero-row SUCCESS, the fleet read's own aggregate, so this grid bands a
+                -- collector that stopped storing rows the way the Overview card and get_collection_health do. APPENDED.
+                MAX(CASE WHEN NOT (status = 'SUCCESS'
+                                   AND COALESCE(rows_collected, 0) = 0
+                                   AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
+                         THEN collection_time END) AS last_zero_row_streak_break_time
             FROM v_collection_log
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -214,7 +220,9 @@ public sealed partial class ViewerDataService
             -- #5646: how many of the NEWEST runs in a row succeeded, counted to 3 and no further. Newest first on
             -- the full timestamp, then log_id DESC (unique), the Darling service read's own statement.
             -- APPENDED, read positionally by the one shared mapper.
-            COALESCE(recent.trailing_success_runs, 0) AS trailing_success_runs
+            COALESCE(recent.trailing_success_runs, 0) AS trailing_success_runs,
+            -- #6828: see the aggregate. APPENDED, read positionally by the one shared mapper.
+            h.last_zero_row_streak_break_time
         FROM health h
         -- #4955: the keyed lookups. Each reads ONE collector's rows through
         -- idx_collection_log_watermark (server_id, collector_name, collection_time DESC), at an instant the
@@ -741,6 +749,10 @@ LIMIT 1";
            rows are stamped with the interval its collectors are scheduled at on THAT server, so the Overview cards
            and the status bar band them as the server's own Collection Health tab does. */
         var scheduleOverrides = await ReadScheduleOverridesForHealthAsync(CancellationToken.None);
+        /* #6828: the servers that report Always On off, read before the health statement's reader opens (one connection at a time). The
+           rows of a server in it stamp the Always On collectors as not collected, as get_collection_health lists them, so the card and the
+           status bar do not count them as healthy. */
+        var alwaysOnOffServers = await FleetAlwaysOnOff.ReadAsync(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, CancellationToken.None);
         var now = DateTime.UtcNow;
         var windowStart = DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified);
         var headEnd = CollectionHealthRollupSupport.CeilingHour(windowStart);
@@ -778,7 +790,9 @@ LIMIT 1";
                     byServer[serverId] = rows;
                 }
 
-                rows.Add(MapFleetByServerRow(reader));
+                var row = MapFleetByServerRow(reader);
+                row.ServerAlwaysOnOff = alwaysOnOffServers.Contains(serverId);
+                rows.Add(row);
             }
         }
 
@@ -861,11 +875,13 @@ LIMIT 1";
            the Overview card would band a collector that lost half its databases HEALTHY beside its own tab's
            WARNING. */
         LatestRunNote = reader.IsDBNull(13) ? null : reader.GetString(13),
+        /* #6828: the aggregate already selects it (ordinal 12). Left unmapped, the card banded a collector that stopped storing rows HEALTHY. */
+        LastZeroRowStreakBreakTime = reader.IsDBNull(12) ? null : reader.GetDateTime(12),
     };
 
-    /// <summary>Maps one row of the 20-column per-server health projection (<see cref="CollectionHealthSql"/>, ordinals 0-19)
+    /// <summary>Maps one row of the 21-column per-server health projection (<see cref="CollectionHealthSql"/>, ordinals 0-20)
     /// to a <see cref="CollectorHealthRow"/>. The count is load-bearing: the projection is read POSITIONALLY
-    /// through this one mapper, so it must match it exactly (20 since #5646 appended trailing_success_runs at
+    /// through this one mapper, so it must match it exactly (21 since #6828 appended last_zero_row_streak_break_time at ordinal 20, 20 since #5646 appended trailing_success_runs at
     /// ordinal 19; #4748's latest_run_note sits at ordinal 18; #3819's last_non_skip_time and last_productive_time sit at ordinals 16-17,
     /// #3240's extension_missing_count at 15 and #2804's abandoned_count at 14).</summary>
     private static CollectorHealthRow MapHealthRow(NpgsqlDataReader reader) => new()
@@ -899,6 +915,8 @@ LIMIT 1";
         LatestRunNote = reader.IsDBNull(18) ? null : reader.GetString(18),
         /* Appended (#5646): the newest runs' success streak, the band's recovery input. */
         TrailingSuccessRuns = reader.IsDBNull(19) ? 0 : Convert.ToInt64(reader.GetValue(19)),
+        /* Appended (#6828): the quiet streak's break, so the grid bands a collector that stopped storing rows as the card does. */
+        LastZeroRowStreakBreakTime = reader.IsDBNull(20) ? null : reader.GetDateTime(20),
     };
 
     /// <summary>
@@ -1247,6 +1265,34 @@ public class CollectorHealthRow
     public bool RegressedFromProductive => CollectorHealthClassifier.RegressedFromProductive(
         LastRunTime, LastNonSkipTime, LastProductiveTime);
 
+    /// <summary>
+    /// #6828: the newest run that was NOT a zero-row SUCCESS (<c>last_zero_row_streak_break_time</c>), the instant the current quiet
+    /// streak began after. The input <see cref="TrailingZeroRowSuccessRuns"/> is estimated from, as the service's fleet card does.
+    /// </summary>
+    public DateTime? LastZeroRowStreakBreakTime { get; set; }
+
+    /// <summary>
+    /// #6828: how many runs, counting back from the newest, were SUCCESS with zero rows, as the service's fleet read estimates it
+    /// (<see cref="CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns"/>) from the same aggregate and the cadence this row is
+    /// banded against. Computed where it is read, so it always follows the cadence <see cref="ViewerDataService.ApplyScheduledFrequencies"/> stamped.
+    /// </summary>
+    public long TrailingZeroRowSuccessRuns => CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns(
+        LastRunTime, LastZeroRowStreakBreakTime, TotalRuns, FrequencyMinutes);
+
+    /// <summary>
+    /// #6828: whether this collector WAS producing rows and now records SUCCESS with zero rows every cycle (#3885). Left off this row
+    /// until now, so the Viewer banded HEALTHY a collector that <c>get_collection_health</c> banded WARNING. Event and on-load collectors are
+    /// excluded inside the shared predicate.
+    /// </summary>
+    public bool ProducedThenStopped => CollectorHealthClassifier.ProducedThenStopped(
+        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime);
+
+    /// <summary>Whether the server this row was read for reports Always On as off. Stamped by the fleet read, false for a row built outside it.</summary>
+    internal bool ServerAlwaysOnOff { get; set; }
+
+    /// <summary>#6828: an Always On collector, HEALTHY, on a server with Always On off, which <c>get_collection_health</c> lists as not_collected.</summary>
+    internal bool NotCollected => CollectorHealthClassifier.IsNotCollectedWhenAlwaysOnOff(CollectorName, HealthStatus, ServerAlwaysOnOff);
+
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
 
@@ -1362,7 +1408,7 @@ public class CollectorHealthRow
         CollectorHealthClassifier.Classify(
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
             HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote, TrailingSuccessRuns),
-        RegressedFromProductive);
+        RegressedFromProductive || ProducedThenStopped);
 
     public string AvgDurationFormatted => AvgDurationMs < 1000
         ? $"{AvgDurationMs:F0} ms"

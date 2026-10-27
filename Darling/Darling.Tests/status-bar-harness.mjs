@@ -86,6 +86,14 @@ run.storeFailsAfterGood = async () => {
 run.paused = async () => ({ items: await poll({ ...fleet, collection: { paused: true, paused_by: "erik (viewer)", paused_utc: "2026-10-20T10:00:00" } }) });
 run.pausedUnknownWho = async () => ({ items: await poll({ ...fleet, collection: { paused: true } }) });
 run.notPaused = async () => ({ items: await poll({ ...fleet, collection: { paused: false } }) });
+// #6828: the footer shows the warning count beside healthy and failing, so a WARNING collector is not folded into "healthy".
+run.warnings = async () => ({
+  items: await poll({ cards: [{ healthy_collector_count: 39, warning_collector_count: 3, failed_collector_count: 0 }, { healthy_collector_count: 5, failed_collector_count: 1 }], total_servers: 2, generated_at: "T" }),
+});
+// #6828: the not-collected count is summed across the cards and shown last, in the Viewer's order (healthy, warning, failing, not collected).
+run.notCollected = async () => ({
+  items: await poll({ cards: [{ healthy_collector_count: 39, warning_collector_count: 3, failed_collector_count: 0, not_collected_collector_count: 2 }, { healthy_collector_count: 5, failed_collector_count: 1, not_collected_collector_count: 1 }], total_servers: 2, generated_at: "T" }),
+});
 run.pingFails = async () => { sc.ping = new Error("net"); return { items: await poll() }; };
 // W3/W10: the footer's Updated time follows the page's own load, not the fleet roll-up's generated_at.
 run.pageUpdated = async () => {

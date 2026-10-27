@@ -1231,7 +1231,7 @@ public sealed class ViewerFleetDeadlockCoverageTests
            The tuple grew a Total for #3539 A8d (the share's denominator) — a fourth tally, same shape —
            and the pg_database_stats collector's band for #3539's PostgreSQL deadlock arm, a fifth. */
         var start = source.IndexOf(
-            "private async Task<(int Healthy, int Failing, int Total, string? DeadlockBand, string? PgDeadlockBand)> GetCollectorHealthCountsAsync",
+            "private async Task<(int Healthy, int Warning, int Failing, int NotCollected, int Total, string? DeadlockBand, string? PgDeadlockBand)> GetCollectorHealthCountsAsync",
             StringComparison.Ordinal);
         Assert.True(start > 0, "the collector-health helper does not hand back the deadlock band");
         var end = source.IndexOf("private static int? MinutesAgo", start, StringComparison.Ordinal);
