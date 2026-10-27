@@ -180,7 +180,7 @@ public sealed partial class ViewerDataService
 
         /* #4232: the closed-day cache. The viewer's calendar reads are always live ("as of now"), so every
            call is cache-eligible. ToDailySummaryRow re-reads the live banding/horizon on every row, cached or
-           fresh, every call — never from whatever a cached block happened to compute them as up to an hour ago
+           fresh, every call — never from whatever a cached block happened to compute them as when it was built
            (ruling item 7: no column the statement itself returns spans more than one day, but this post-read
            judgment does move between refreshes). */
         Task<List<RawDailySummaryDay>> ReadRawAsync(string sql, IReadOnlyList<string>? scope) => _dailySummaryRangeCache.GetRangeAsync(
@@ -193,7 +193,8 @@ public sealed partial class ViewerDataService
             day: raw => raw.Day,
             runRange: (start, end, ct) => RunRangeAsync(sql, scope, start, end, ct),
             scopeKey: DailySummaryAzureMasterScope.CacheScopeKey(scope),
-            cancellationToken: cancellationToken);
+            cancellationToken: cancellationToken,
+            trustFromUtc: DailySummaryRangeCache<RawDailySummaryDay>.TrustFloorFor(horizon)); // #6809: the horizon day and older are re-read, never served from a day-long block
 
         /* #4925: an Azure SQL Database master with separately monitored databases counts only its own blocking and
            deadlocks, as get_daily_health does. An empty list (every other target) is today's read, unchanged. A

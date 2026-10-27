@@ -438,7 +438,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
     /// a live test's own <c>ScratchPostgres</c> database — never collide on one store's cached block.</summary>
     internal static readonly DailySummaryRangeCache<DailySummaryReadRow> RangeCache = new();
 
-    /// <summary>#4232: test-only reset for <see cref="RangeCache"/>. This cache is by design one hour stale for
+    /// <summary>#4232: test-only reset for <see cref="RangeCache"/>. This cache is by design stale (until the next UTC day plus the grace) for
     /// a closed day -- a row that lands late for a closed day (an outage catch-up, a backfill) shows within the
     /// hour, not immediately (the #4232 ruling). A live test that mutates a closed day's rows and reads the same
     /// server/range again through the same store object is testing THAT contract, not a product bug, unless it
@@ -542,7 +542,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
         /* #4232: the closed-day cache. ReadDailySummaryRow above returns the row from BEFORE the RateTiers /
            ReferenceUtc / DataState / RetentionHorizon stamp below — that raw row is what gets cached, and every
            row (cached or freshly read) is re-stamped from THIS call's live thresholds and horizon, never from
-           whatever a cached block happened to compute them as up to an hour ago (ruling item 7: no column the
+           whatever a cached block happened to compute them as when it was built (ruling item 7: no column the
            statement itself returns spans more than one day, but these post-read judgments do move between
            refreshes, so they are re-applied after the join every time). */
         Task<List<DailySummaryReadRow>> ReadRawAsync(string sql, IReadOnlyList<string>? scope) => RangeCache.GetRangeAsync(
@@ -555,7 +555,8 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
             day: row => row.SummaryDate,
             runRange: (start, end, ct) => RunRangeAsync(sql, scope, start, end, ct),
             scopeKey: DailySummaryAzureMasterScope.CacheScopeKey(scope),
-            cancellationToken: cancellationToken);
+            cancellationToken: cancellationToken,
+            trustFromUtc: DailySummaryRangeCache<DailySummaryReadRow>.TrustFloorFor(horizon)); // #6809: the horizon day and older are re-read, never served from a day-long block
 
         /* #4925: an Azure SQL Database master with separately monitored databases counts only its own blocking and
            deadlocks. A scoping fault (the statement drifted, a graph read timed out) must not take the day away: it

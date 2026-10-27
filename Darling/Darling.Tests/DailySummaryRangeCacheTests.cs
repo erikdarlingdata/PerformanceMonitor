@@ -96,40 +96,11 @@ public sealed class DailySummaryRangeCacheTests
     }
 
     [Fact]
-    public async Task GetRangeAsync_WithinOneHour_ReusesBlock_AfterOneHour_RecomputesWhole()
-    {
-        var now = new DateTime(2026, 9, 25, 12, 0, 0, DateTimeKind.Utc);
-        var cache = new DailySummaryRangeCache<TestRow>(() => now);
-        var calls = new List<(DateTime Start, DateTime End)>();
-
-        Task<List<TestRow>> Recording(DateTime start, DateTime end, CancellationToken ct)
-        {
-            calls.Add((start, end));
-            return Task.FromResult(new List<TestRow> { new(start, 0) });
-        }
-
-        var fromDate = D(1);
-        var toDate = D(26);
-
-        await cache.GetRangeAsync("store", ServerId, fromDate, toDate, RoutedSql, true, r => r.Day, Recording, CancellationToken.None);
-
-        now = now.AddMinutes(59); // still inside the one-hour block TTL
-        await cache.GetRangeAsync("store", ServerId, fromDate, toDate, RoutedSql, true, r => r.Day, Recording, CancellationToken.None);
-        Assert.Equal(2, calls.Count);
-        Assert.Equal((D(25), toDate), calls[1]); // open-only, block still trusted
-
-        now = now.AddMinutes(2); // now 61 minutes after the block was built -- past BlockTtl
-        await cache.GetRangeAsync("store", ServerId, fromDate, toDate, RoutedSql, true, r => r.Day, Recording, CancellationToken.None);
-        Assert.Equal(3, calls.Count);
-        Assert.Equal((fromDate, toDate), calls[2]); // whole range recomputed
-    }
-
-    [Fact]
     public async Task GetRangeAsync_GraceBoundaryCrossesMidTtl_DoesNotDropYesterday()
     {
         /* Block built late in yesterday's grace window (01:45, grace ends 02:00), so the block's OWN
-           closed-end boundary excludes yesterday. Moved 25 minutes later (02:10): still inside the one-hour
-           BlockTtl from 01:45, but the grace has now expired, so a fresh call computes a DIFFERENT closed-end
+           closed-end boundary excludes yesterday. Moved 25 minutes later (02:10): still inside the block's
+           lifetime from 01:45, but the grace has now expired, so a fresh call computes a DIFFERENT closed-end
            boundary (today, not yesterday). A cache that trusted the stale block's ClosedRows here and only
            re-read the (now-advanced) open portion would read neither the stale closed block's excluded
            yesterday nor the open re-read's [today, end) -- yesterday would vanish from the join entirely. */
@@ -148,7 +119,7 @@ public sealed class DailySummaryRangeCacheTests
 
         await cache.GetRangeAsync("store", ServerId, fromDate, toDate, RoutedSql, true, r => r.Day, Fresh, CancellationToken.None);
 
-        now = now.AddMinutes(25); // 02:10 -- grace expired, still inside the one-hour block TTL
+        now = now.AddMinutes(25); // 02:10 -- grace expired, still inside the block's lifetime
         var second = await cache.GetRangeAsync("store", ServerId, fromDate, toDate, RoutedSql, true, r => r.Day, Fresh, CancellationToken.None);
 
         Assert.Contains(second, r => r.Day == D(24) && r.Value == 20);
@@ -170,7 +141,7 @@ public sealed class DailySummaryRangeCacheTests
     {
         /* #4232 follow-up: the cache never removed a block on its own -- every distinct server/range added one
            that nothing replaced. Here two different servers share a range, so each gets its own block, and
-           moving the clock past BlockTtl before the second server's first (miss) call must sweep server 1's
+           moving the clock past the block's expiry before the second server's first (miss) call must sweep server 1's
            now-stale block, not just leave it to rot. */
         var now = new DateTime(2026, 9, 25, 12, 0, 0, DateTimeKind.Utc);
         var cache = new DailySummaryRangeCache<TestRow>(() => now);
@@ -189,7 +160,7 @@ public sealed class DailySummaryRangeCacheTests
             (s, e, ct) => Recording(1, s, e, ct), CancellationToken.None);
         Assert.Equal(1, cache.Count);
 
-        now = now.Add(DailySummaryRangeCache<TestRow>.BlockTtl).AddMinutes(1); // past BlockTtl for server 1's block
+        now = now.Date.AddDays(1).Add(DailySummaryRangeCache<TestRow>.ClosedGrace).AddMinutes(1); // past server 1's block expiry
 
         await cache.GetRangeAsync("store", 2, fromDate, toDate, RoutedSql, true, r => r.Day,
             (s, e, ct) => Recording(2, s, e, ct), CancellationToken.None);
@@ -221,7 +192,7 @@ public sealed class DailySummaryRangeCacheTests
         for (var serverId = 1; serverId <= total; serverId++)
         {
             await cache.GetRangeAsync("store", serverId, fromDate, toDate, RoutedSql, true, r => r.Day, Fresh, CancellationToken.None);
-            now = now.AddSeconds(1); // distinct ComputedAtUtc per block, well inside BlockTtl for the whole loop
+            now = now.AddSeconds(1); // distinct ComputedAtUtc per block, well inside every block's lifetime for the whole loop
         }
 
         Assert.Equal(DailySummaryRangeCache<TestRow>.MaxBlocks, cache.Count);
@@ -263,5 +234,197 @@ public sealed class DailySummaryRangeCacheTests
 
         Assert.Equal(2, calls.Count);
         Assert.All(calls, call => Assert.Equal((fromDate, toDate), call)); // never narrowed -- no block ever built
+    }
+
+    /* ---- #6809: a closed day is kept until the next UTC day boundary plus ClosedGrace, not one hour ---- */
+
+    /// <summary>A store that counts reads, so a test can say "served from cache, no store read".</summary>
+    private sealed class CountingStore
+    {
+        public readonly Dictionary<DateTime, int> Days = new();
+        public readonly List<(DateTime Start, DateTime End)> Reads = new();
+
+        public Task<List<TestRow>> Run(DateTime start, DateTime end, CancellationToken ct)
+        {
+            Reads.Add((start, end));
+            return Task.FromResult(Days.Where(kv => kv.Key >= start && kv.Key < end)
+                .OrderBy(kv => kv.Key).Select(kv => new TestRow(kv.Key, kv.Value)).ToList());
+        }
+    }
+
+    private static CountingStore Month()
+    {
+        var store = new CountingStore();
+        for (var d = 1; d <= 25; d++) store.Days[D(d)] = d;
+        return store;
+    }
+
+    [Fact]
+    public async Task ClosedDay_FetchedAt1000_ServedFromCacheAt1059_1101_and2359_WithoutAClosedDayRead()
+    {
+        var now = new DateTime(2026, 9, 25, 10, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var store = Month();
+
+        var first = await cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day, store.Run, CancellationToken.None);
+        Assert.Equal(25, first.Count);
+        Assert.Single(store.Reads);
+
+        foreach (var (h, m) in new[] { (10, 59), (11, 1), (23, 59) })
+        {
+            now = new DateTime(2026, 9, 25, h, m, 0, DateTimeKind.Utc);
+            var rows = await cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day, store.Run, CancellationToken.None);
+            Assert.Equal(25, rows.Count);
+            Assert.Equal(Enumerable.Range(1, 25).Select(D), rows.Select(r => r.Day));
+        }
+
+        /* Three more reads, each only today's partial day: no read ever touches a closed day. */
+        Assert.Equal(4, store.Reads.Count);
+        Assert.All(store.Reads.Skip(1), read => Assert.Equal((D(25), D(26)), read));
+    }
+
+    [Fact]
+    public async Task TodaysPartialDay_IsReadLiveEveryCall_AndSeesNewRows()
+    {
+        var now = new DateTime(2026, 9, 25, 10, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var store = Month();
+
+        await cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day, store.Run, CancellationToken.None);
+        store.Days[D(25)] = 999; // today keeps filling
+        now = now.AddHours(5);
+        var rows = await cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day, store.Run, CancellationToken.None);
+
+        Assert.Equal(999, rows.Single(r => r.Day == D(25)).Value);
+        Assert.Equal((D(25), D(26)), store.Reads[^1]);
+    }
+
+    [Fact]
+    public async Task NextUtcDay_NewlyClosedDayIsFetchedOnce_ThenCachedAgain()
+    {
+        var now = new DateTime(2026, 9, 25, 10, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var store = Month();
+        var from = D(1);
+        var to = D(26);
+
+        await cache.GetRangeAsync("s", ServerId, from, to, RoutedSql, true, r => r.Day, store.Run, CancellationToken.None);
+
+        /* 26 Sep 02:30: past the grace, so the 25th is closed. A caller's window now ends on the 27th; whatever
+           the key does, the 25th is read once and then cached. */
+        now = new DateTime(2026, 9, 26, 2, 30, 0, DateTimeKind.Utc);
+        store.Days[D(26)] = 26;
+        to = D(27);
+        store.Reads.Clear();
+        var rows = await cache.GetRangeAsync("s", ServerId, from, to, RoutedSql, true, r => r.Day, store.Run, CancellationToken.None);
+        Assert.Contains(rows, r => r.Day == D(25));
+        Assert.Contains(rows, r => r.Day == D(26));
+
+        store.Reads.Clear();
+        now = now.AddHours(3);
+        await cache.GetRangeAsync("s", ServerId, from, to, RoutedSql, true, r => r.Day, store.Run, CancellationToken.None);
+        Assert.All(store.Reads, read => Assert.True(read.Start >= D(26), $"read reached back to {read.Start}"));
+    }
+
+    [Fact]
+    public async Task BlockBuiltInsideGrace_WhenGraceEnds_ReadsOnlyTheNewlyClosedDay()
+    {
+        /* Built at 01:00 on the 25th: the 24th is still open, closed days end at the 23rd. At 02:30 the 24th is closed. */
+        var now = new DateTime(2026, 9, 25, 1, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var store = Month();
+
+        await cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day, store.Run, CancellationToken.None);
+        store.Reads.Clear();
+
+        now = new DateTime(2026, 9, 25, 2, 30, 0, DateTimeKind.Utc);
+        var rows = await cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day, store.Run, CancellationToken.None);
+        Assert.Equal(25, rows.Count);
+        Assert.Equal((D(24), D(26)), Assert.Single(store.Reads)); // two days, not the range
+
+        store.Reads.Clear();
+        now = now.AddHours(1);
+        await cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day, store.Run, CancellationToken.None);
+        Assert.Equal((D(25), D(26)), Assert.Single(store.Reads)); // the 24th is now cached too
+    }
+
+    [Fact]
+    public async Task LateRowForClosedDay_ShowsAfterNextUtcDayPlusGrace_NotBefore()
+    {
+        /* The bound this change accepts: a row that lands for a closed day after the block was built shows once the
+           block expires (next UTC midnight plus the grace). */
+        var now = new DateTime(2026, 9, 25, 10, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var store = Month();
+        var from = D(1);
+        var to = D(26);
+
+        await cache.GetRangeAsync("s", ServerId, from, to, RoutedSql, true, r => r.Day, store.Run, CancellationToken.None);
+        store.Days[D(20)] = 2000; // late backfill
+
+        now = new DateTime(2026, 9, 26, 1, 59, 0, DateTimeKind.Utc);
+        var before = await cache.GetRangeAsync("s", ServerId, from, to, RoutedSql, true, r => r.Day, store.Run, CancellationToken.None);
+        Assert.Equal(20, before.Single(r => r.Day == D(20)).Value);
+
+        now = new DateTime(2026, 9, 26, 2, 0, 0, DateTimeKind.Utc);
+        var after = await cache.GetRangeAsync("s", ServerId, from, to, RoutedSql, true, r => r.Day, store.Run, CancellationToken.None);
+        Assert.Equal(2000, after.Single(r => r.Day == D(20)).Value);
+    }
+
+    [Fact]
+    public async Task DaysAtOrBeforeTheRetentionHorizon_AreReadLive_SoAPurgeShowsAtOnce()
+    {
+        var now = new DateTime(2026, 9, 25, 10, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var store = Month();
+        var trustFrom = D(3).AddDays(1); // horizon is the 3rd
+
+        Task<List<TestRow>> Read() => cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day,
+            store.Run, "", CancellationToken.None, trustFrom);
+
+        await Read();
+        store.Days.Remove(D(2)); // the purge deletes these days' rows
+        store.Days.Remove(D(3));
+        store.Days.Remove(D(10)); // inside retention: not a purge target, so the block still holds it
+        store.Reads.Clear();
+
+        now = now.AddHours(2);
+        var rows = await Read();
+
+        Assert.DoesNotContain(rows, r => r.Day == D(2) || r.Day == D(3));
+        Assert.Contains(rows, r => r.Day == D(10)); // cached
+        Assert.Contains((D(1), D(4)), store.Reads); // the purge-exposed days are read, only they
+        Assert.DoesNotContain(store.Reads, read => read.Start >= D(4) && read.Start < D(25));
+    }
+
+    [Fact]
+    public async Task RetentionRaisedAfterBlockBuilt_RebuildsInsteadOfServingAHole()
+    {
+        var now = new DateTime(2026, 9, 25, 10, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var store = Month();
+
+        Task<List<TestRow>> Read(DateTime? trustFrom) => cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day,
+            store.Run, "", CancellationToken.None, trustFrom);
+
+        await Read(D(10)); // block holds the 10th onward only
+        now = now.AddHours(1);
+        var rows = await Read(D(4)); // retention raised: days 4..9 are trusted now and must not be missing
+        Assert.Equal(25, rows.Count);
+        Assert.Contains(rows, r => r.Day == D(6));
+    }
+
+    [Fact]
+    public async Task AsOfRead_NeverUsesTheBlock()
+    {
+        var now = new DateTime(2026, 9, 25, 10, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var store = Month();
+
+        await cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day, store.Run, CancellationToken.None);
+        store.Reads.Clear();
+        await cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, false, r => r.Day, store.Run, CancellationToken.None);
+
+        Assert.Equal((D(1), D(26)), Assert.Single(store.Reads));
     }
 }
