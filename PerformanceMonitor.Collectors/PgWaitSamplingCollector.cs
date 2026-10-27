@@ -505,14 +505,37 @@ LIMIT 500";
         }
         else
         {
-            /* #6849: the mirror. A target upgraded in place from PostgreSQL 13 to 14 now samples
-               coalesce(query_id, 0), so the carried NULL series would stop growing and be re-emitted frozen every
-               cycle. Fold them into the 0 keys so each series continues. */
+            /* #6849: a target upgraded in place from PostgreSQL 13 to 14 now samples coalesce(query_id, 0), so a
+               carried NULL series would stop growing and be re-emitted frozen every cycle. Every reader differences
+               this table per (type, event, query_id), so two cumulative counts are never added. A NULL key whose 0
+               key already exists is DROPPED: that NULL series is frozen on a target with the column, so nothing a
+               reader differences is lost, and adding its whole total to the live 0 series would read as waits
+               observed in one window. A NULL key with no 0 key is renamed to the 0 key, so the series continues. */
             foreach (var (key, count) in tally.Where(kv => kv.Key.QueryId == null).ToList())
             {
                 tally.Remove(key);
                 var folded = (key.Type, key.Event, (long?)0);
-                tally[folded] = tally.TryGetValue(folded, out var existing) ? existing + count : count;
+                if (!tally.ContainsKey(folded))
+                {
+                    tally[folded] = count;
+                }
+            }
+
+            /* The window holds increments, not a cumulative series, so a NULL key there (the version crossed 14
+               between building the query and reading it) is added to the 0 key of the same type and event. */
+            foreach (var (key, seen) in window.Where(kv => kv.Key.QueryId == null).ToList())
+            {
+                window.Remove(key);
+                var folded = (key.Type, key.Event, (long?)0);
+                if (window.TryGetValue(folded, out var into))
+                {
+                    into.Pids.UnionWith(seen.Pids);
+                    window[folded] = (into.Samples + seen.Samples, into.Pids);
+                }
+                else
+                {
+                    window[folded] = seen;
+                }
             }
         }
 

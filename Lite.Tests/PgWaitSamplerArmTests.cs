@@ -331,13 +331,14 @@ public sealed class PgWaitSamplerArmTests
 
     /// <summary>
     /// #6849: a target upgraded in place from PostgreSQL 13 to 14 carries NULL keys (stored while the column was
-    /// absent). Once the column exists the sampler writes 0 for an unattributed wait, so the NULL series must fold
-    /// into the 0 series, its count added to any existing 0 key, rather than freezing and being re-emitted.
+    /// absent). Every reader differences the table per (type, event, query_id), so the property that matters is
+    /// that the live 0 series steps only by what the window observed: a carried NULL key beside a carried 0 key is
+    /// dropped, never added into it.
     /// </summary>
     [Fact]
-    public async Task ACarriedNullQueryIdTally_FoldsIntoZeroOnATargetThatHasTheColumn()
+    public async Task ACarriedNullKeyBesideACarriedZeroKey_IsDropped_SoTheZeroSeriesStepsOnlyByTheWindow()
     {
-        const string carriedTally = "Lock\trelation\t\t7\nLock\trelation\t0\t2\nIO\tDataFileRead\t\t3\nIO\tDataFileRead\t5\t4\n";
+        const string carriedTally = "Lock\trelation\t\t7\nLock\trelation\t0\t2\nIO\tDataFileRead\t5\t4\n";
 
         var upgraded = MakeContext(hasExtension: false, major: 14, state: new Dictionary<string, string> { [PgWaitSamplingCollector.TallyStateKey] = carriedTally });
         var rows = await PgWaitSamplingCollector.Instance.ReadAsync(
@@ -346,9 +347,49 @@ public sealed class PgWaitSamplerArmTests
         Assert.DoesNotContain(rows, r => r.QueryId == null);
         var lockRow = Assert.Single(rows, r => r.EventType == "Lock");
         Assert.Equal(0L, lockRow.QueryId);
-        Assert.Equal(10, lockRow.SampleCount);
-        Assert.Equal(3, Assert.Single(rows, r => r.EventType == "IO" && r.QueryId == 0).SampleCount);
+        Assert.Equal(3, lockRow.SampleCount);
         Assert.Equal(4, Assert.Single(rows, r => r.EventType == "IO" && r.QueryId == 5).SampleCount);
+
+        var roundTrip = PgWaitSamplingCollector.ParseTally(upgraded.PendingState[PgWaitSamplingCollector.TallyStateKey]);
+        Assert.DoesNotContain(roundTrip.Keys, k => k.QueryId == null);
+    }
+
+    /// <summary>#6849: a carried NULL key with no 0 key is a clean rename, so its series continues under the 0 key.</summary>
+    [Fact]
+    public async Task ACarriedNullKeyWithNoZeroKey_IsRenamedToZero_AndContinuesFromItsTotal()
+    {
+        const string carriedTally = "Lock\trelation\t\t7\n";
+
+        var upgraded = MakeContext(hasExtension: false, major: 14, state: new Dictionary<string, string> { [PgWaitSamplingCollector.TallyStateKey] = carriedTally });
+        var rows = await PgWaitSamplingCollector.Instance.ReadAsync(
+            FakeCollectorDataReader.WithResultSets(new[] { Snap("Lock", "relation", 0, 10) }), upgraded, CancellationToken.None);
+
+        Assert.DoesNotContain(rows, r => r.QueryId == null);
+        var lockRow = Assert.Single(rows, r => r.EventType == "Lock");
+        Assert.Equal(0L, lockRow.QueryId);
+        Assert.Equal(8, lockRow.SampleCount);
+    }
+
+    /// <summary>
+    /// #6849: a window can hold a NULL key on a target that has the column if the version crossed 14 between
+    /// building the query and reading it. The window is increments, so it is added to the 0 key of the same
+    /// type and event, and no NULL key is emitted or stored.
+    /// </summary>
+    [Fact]
+    public async Task AWindowNullKeyOnATargetWithTheColumn_IsAddedToTheZeroKey()
+    {
+        const string carriedTally = "Lock\trelation\t0\t2\n";
+
+        var upgraded = MakeContext(hasExtension: false, major: 14, state: new Dictionary<string, string> { [PgWaitSamplingCollector.TallyStateKey] = carriedTally });
+        var rows = await PgWaitSamplingCollector.Instance.ReadAsync(
+            FakeCollectorDataReader.WithResultSets(new[] { Snap("Lock", "relation", 0, 10), SnapNoQueryId("Lock", "relation", 11) }),
+            upgraded, CancellationToken.None);
+
+        Assert.DoesNotContain(rows, r => r.QueryId == null);
+        var lockRow = Assert.Single(rows, r => r.EventType == "Lock");
+        Assert.Equal(0L, lockRow.QueryId);
+        Assert.Equal(4, lockRow.SampleCount);
+        Assert.Equal(2, lockRow.BackendCount);
 
         var roundTrip = PgWaitSamplingCollector.ParseTally(upgraded.PendingState[PgWaitSamplingCollector.TallyStateKey]);
         Assert.DoesNotContain(roundTrip.Keys, k => k.QueryId == null);

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -1599,6 +1600,42 @@ internal static class PgDisplay
         CaptureTime = Timestamp(row.CaptureTime),
         CaptureTimeUtc = row.CaptureTime,
     };
+
+    /// <summary>How many wait rows are attributed to a statement. A null query id is a target that does not report
+    /// one (#6836) and 0 is work belonging to no statement, so neither counts: a lifted <c>null != 0</c> is true
+    /// and would call every row of a PostgreSQL 13 target attributed (#6849).</summary>
+    internal static int WaitSamplingAttributedCount(IReadOnlyList<DarlingPgWaitSamplingReader.PgWaitSamplingRow> rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+
+        return rows.Count(r => r.QueryId is not null and not 0);
+    }
+
+    /// <summary>The note over the Wait Sampling grid. The service tier appends
+    /// <see cref="PgWaitInstrument.ServiceSampledCaveat"/>, the one copy the MCP read and the empty-state message
+    /// also use, so the three surfaces cannot drift on what the caveat is (#6849). <paramref name="cadence"/> is the
+    /// collector's cadence phrase.</summary>
+    internal static string WaitSamplingSummary(IReadOnlyList<DarlingPgWaitSamplingReader.PgWaitSamplingRow> rows, bool serviceTier,
+        bool instrumentKnown, string cadence, bool reset)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+
+        return $"{rows.Count:N0} wait event(s), {WaitSamplingAttributedCount(rows):N0} attributed to a query. "
+            + (serviceTier
+                ? $"Instrument: SERVICE SAMPLER, the service polling pg_stat_activity {cadence}. "
+                  + PgWaitInstrument.ServiceSampledCaveat + " "
+                : instrumentKnown
+                    ? "Instrument: pg_wait_sampling extension (10 ms in-engine profiler). "
+                    : string.Empty)
+            + "Est. Wait is samples multiplied by the profile period, an estimate from a sampling "
+            + "profiler and not a measured duration, so treat it as a ranking rather than a stopwatch. "
+            + "A Query ID of 0 is a background process rather than an unknown query, and CPU/Running "
+            + "is the backend on processor rather than waiting."
+            + (reset
+                ? " One or more counters RESET inside this window (a restart, or "
+                  + "pg_wait_sampling_reset_profile), so those rows cover only the time since the reset."
+                : string.Empty);
+    }
 
     /// <summary>One standby of the Replication grid: the reader's columns, with Connected Since as text.</summary>
     internal sealed class ReplicationStatRow
