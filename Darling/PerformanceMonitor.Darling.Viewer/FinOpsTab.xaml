@@ -321,10 +321,10 @@
                             </Grid.ColumnDefinitions>
 
                             <GroupBox Grid.Column="0" Header="CPU" Margin="0,0,5,0" VerticalAlignment="Top" Foreground="{DynamicResource ForegroundBrush}">
-                                <StackPanel Margin="10">
+                                <StackPanel Margin="10" Grid.IsSharedSizeScope="True">
                                     <Grid Margin="0,0,0,8">
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
-                                        <TextBlock Grid.Column="0" Text="{x:Static local:ViewerLabels.AvgSqlServerCpu}" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" SharedSizeGroup="FinOpsCpuLabel"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{x:Static local:ViewerLabels.AvgSqlServerCpu}" Margin="0,0,8,0" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                                         <Grid Grid.Column="1" Margin="0,0,8,0">
                                             <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
                                             <Grid>
@@ -335,8 +335,8 @@
                                         <TextBlock x:Name="FinOpsAvgCpuText" Grid.Column="2" Text="-" Foreground="{DynamicResource ForegroundBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
                                     </Grid>
                                     <Grid Margin="0,0,0,8">
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
-                                        <TextBlock Grid.Column="0" Text="{x:Static local:ViewerLabels.P95SqlServerCpu}" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" SharedSizeGroup="FinOpsCpuLabel"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{x:Static local:ViewerLabels.P95SqlServerCpu}" Margin="0,0,8,0" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                                         <Grid Grid.Column="1" Margin="0,0,8,0">
                                             <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
                                             <Grid>
@@ -347,8 +347,8 @@
                                         <TextBlock x:Name="FinOpsP95CpuText" Grid.Column="2" Text="-" Foreground="{DynamicResource ForegroundBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
                                     </Grid>
                                     <Grid Margin="0,0,0,8">
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
-                                        <TextBlock Grid.Column="0" Text="{x:Static local:ViewerLabels.MaxSqlServerCpu}" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" SharedSizeGroup="FinOpsCpuLabel"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{x:Static local:ViewerLabels.MaxSqlServerCpu}" Margin="0,0,8,0" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                                         <Grid Grid.Column="1" Margin="0,0,8,0">
                                             <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
                                             <Grid>

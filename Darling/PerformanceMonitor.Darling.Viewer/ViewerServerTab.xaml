@@ -1759,13 +1759,13 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
-                            <TextBlock Grid.Row="0" Margin="8,4,0,4" FontSize="11"
+                            <TextBlock Grid.Row="0" Margin="8,4,8,4" FontSize="11" TextWrapping="Wrap"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"
                                        Text="Queries whose Query Store performance regressed — recent-window averages vs. the baseline captured before the window, kept when Regular CPU regressed more than 25% and the query added at least 1 s of CPU over the window (cost compares Regular runs only), or when timeouts (Aborted runs) or errors (Exception runs) per hour at least doubled (Why). The Aborted and Exception counts, CPU and duration per execution sit beside the Regular figures, ranked by total added duration. Double-click a row for its execution history."/>
                             <!-- "Showing since <start>" when this server's Query Store history starts after the BASELINE window does: the read
                                  compares the range with the 7 days before it, so the notice keys on that earlier window (#4966). -->
                             <TextBlock Grid.Row="1" x:Name="QueryStoreRegressionsTruncationBanner" Visibility="Collapsed"
-                                       Padding="8,4" FontWeight="Bold"
+                                       Padding="8,4" FontWeight="Bold" TextWrapping="Wrap"
                                        Foreground="{DynamicResource ForegroundBrush}"
                                        Background="#22FFAA00"/>
                             <!-- Databases the read left out (#6654): the dropped ones, named so an empty grid is not read as "nothing regressed". -->
