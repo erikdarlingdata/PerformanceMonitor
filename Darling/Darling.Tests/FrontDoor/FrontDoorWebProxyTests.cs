@@ -72,7 +72,7 @@ internal sealed class WebFakeDirectory : IFrontDoorDirectory
 
             if (hits.Count > 1)
             {
-                return new FrontDoorRoute.Refused($"'{serverName}' matches servers in {string.Join(", ", hits)}.");
+                return new FrontDoorRoute.Refused($"'{serverName}' matches servers in {string.Join(", ", hits)}.", Ambiguous: true, Stores: hits);
             }
         }
 
@@ -136,8 +136,22 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
 
     internal DarlingFrontDoorWebSession Session { get; }
 
+    internal static Task<FrontDoorWebHarness> StartAsync(
+        IReadOnlyList<(FakeWebPeer Peer, string[] Servers)> peers, TimeSpan? peerTimeout = null, TimeProvider? time = null,
+        CancellationToken ct = default)
+    {
+        var secrets = new WebFakeSecrets();
+        var directory = new WebFakeDirectory(peers.Select(p =>
+        {
+            secrets.SetWebToken(p.Peer.Name, p.Peer.Token);
+            return (new FrontDoorStore(p.Peer.Name, new Uri("http://127.0.0.1:1/"), p.Peer.BaseUri, null), p.Servers);
+        }));
+        return StartAsync(directory, secrets, peerTimeout, time, ct);
+    }
+
     internal static async Task<FrontDoorWebHarness> StartAsync(
-        IReadOnlyList<(FakeWebPeer Peer, string[] Servers)> peers, TimeSpan? peerTimeout = null, TimeProvider? time = null)
+        WebFakeDirectory directory, WebFakeSecrets secrets, TimeSpan? peerTimeout = null, TimeProvider? time = null,
+        CancellationToken ct = default)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -149,12 +163,6 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
         DarlingWebHostService.ConfigureResponseCompression(builder.Services);
         var app = builder.Build();
 
-        var secrets = new WebFakeSecrets();
-        var directory = new WebFakeDirectory(peers.Select(p =>
-        {
-            secrets.SetWebToken(p.Peer.Name, p.Peer.Token);
-            return (new FrontDoorStore(p.Peer.Name, new Uri("http://127.0.0.1:1/"), p.Peer.BaseUri, null), p.Servers);
-        }));
         var session = new DarlingFrontDoorWebSession(secrets, time);
         var proxy = new DarlingFrontDoorWebProxy(directory, session, peerTimeout ?? TimeSpan.FromSeconds(30), NullLogger.Instance, time);
 
@@ -169,7 +177,7 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
         host.ConfigurePipeline(app, null, networkMode: false, networkListenIp: null,
             allowedCidr: IPNetwork.Parse("127.0.0.1/32"), accessToken: FrontDoorToken, oidcClient: null,
             requireTokenWhenLoopbackOnly: true, sessionSigningKeyForTests: SigningKey, frontDoorProxy: proxy);
-        await app.StartAsync(TestContext.Current.CancellationToken);
+        await app.StartAsync(ct == default ? TestContext.Current.CancellationToken : ct);
         return new FrontDoorWebHarness(app, app.GetTestServer().CreateClient(), directory, secrets, session);
     }
 
@@ -231,11 +239,12 @@ public sealed class FrontDoorWebProxyTests
     private static readonly string[] UseServers = { "sql-east-1", "sql-shared" };
     private static readonly string[] UsuServers = { "sql-west-1", "sql-shared" };
 
-    private static async Task<(FakeWebPeer A, FakeWebPeer B, FrontDoorWebHarness Door)> TwoStoresAsync(TimeSpan? peerTimeout = null, TimeProvider? time = null)
+    private static async Task<(FakeWebPeer A, FakeWebPeer B, FrontDoorWebHarness Door)> TwoStoresAsync(
+        CancellationToken ct, TimeSpan? peerTimeout = null, TimeProvider? time = null)
     {
         var a = await FakeWebPeer.StartAsync("use1");
         var b = await FakeWebPeer.StartAsync("usw2");
-        var door = await FrontDoorWebHarness.StartAsync(new[] { (a, UseServers), (b, UsuServers) }, peerTimeout, time);
+        var door = await FrontDoorWebHarness.StartAsync(new[] { (a, UseServers), (b, UsuServers) }, peerTimeout, time, ct);
         return (a, b, door);
     }
 
@@ -244,7 +253,7 @@ public sealed class FrontDoorWebProxyTests
     [Fact(Timeout = 60_000)]
     public async Task TheStoresSetCookieAndSecurityHeaders_NeverReachTheBrowser()
     {
-        var (a, b, door) = await TwoStoresAsync();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -263,7 +272,7 @@ public sealed class FrontDoorWebProxyTests
     [Fact(Timeout = 60_000)]
     public async Task TheFrontDoorsCookieAndAuthorization_NeverReachAStore_AndTheStoresOwnSessionDoes()
     {
-        var (a, b, door) = await TwoStoresAsync();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -302,7 +311,7 @@ public sealed class FrontDoorWebProxyTests
     [Fact(Timeout = 60_000)]
     public async Task AViewersPost_IsRefusedWith403_AndTheStoreReceivesNothing()
     {
-        var (a, b, door) = await TwoStoresAsync();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -322,7 +331,7 @@ public sealed class FrontDoorWebProxyTests
     [Fact(Timeout = 60_000)]
     public async Task AnUnknownStoreName_Is400_AndNothingIsSent()
     {
-        var (a, b, door) = await TwoStoresAsync();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -347,7 +356,7 @@ public sealed class FrontDoorWebProxyTests
     [InlineData("/api/fleet")]
     public async Task ASignedOutRequest_ToEachLocalRoute_Is401(string url)
     {
-        var (a, b, door) = await TwoStoresAsync();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -364,7 +373,7 @@ public sealed class FrontDoorWebProxyTests
     [InlineData("application/x-www-form-urlencoded")]
     public async Task ANonJsonWrite_IsRefused_AndNothingIsSent(string contentType)
     {
-        var (a, b, door) = await TwoStoresAsync();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -384,7 +393,7 @@ public sealed class FrontDoorWebProxyTests
     [Fact(Timeout = 60_000)]
     public async Task AnAmbiguousServerName_Is409_AndNothingIsSent()
     {
-        var (a, b, door) = await TwoStoresAsync();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -409,7 +418,7 @@ public sealed class FrontDoorWebProxyTests
     [Fact(Timeout = 60_000)]
     public async Task ARateLimitedStore_PassesItsStatusAndRetryAfterThrough()
     {
-        var (a, b, door) = await TwoStoresAsync();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -425,7 +434,7 @@ public sealed class FrontDoorWebProxyTests
     [Fact(Timeout = 60_000)]
     public async Task ASlowStore_Gives504_NamingTheStore()
     {
-        var (a, b, door) = await TwoStoresAsync(peerTimeout: TimeSpan.FromSeconds(1));
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken, peerTimeout: TimeSpan.FromSeconds(1));
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -443,7 +452,7 @@ public sealed class FrontDoorWebProxyTests
     [Fact(Timeout = 60_000)]
     public async Task OneUnauthorizedFromAStore_LeadsToOneNewSignIn_AndOneRetryWithTheSameBody()
     {
-        var (a, b, door) = await TwoStoresAsync();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -466,7 +475,7 @@ public sealed class FrontDoorWebProxyTests
     [Fact(Timeout = 60_000)]
     public async Task AStoreThatKeepsAnswering401_IsNotLoopedOn_AndIsNotPassedOnAsThePersonsOwn401()
     {
-        var (a, b, door) = await TwoStoresAsync();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -483,7 +492,7 @@ public sealed class FrontDoorWebProxyTests
     [Fact(Timeout = 60_000)]
     public async Task AClosedRequest_CancelsTheCallToTheStore()
     {
-        var (a, b, door) = await TwoStoresAsync();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -504,7 +513,7 @@ public sealed class FrontDoorWebProxyTests
     public async Task AStoreThatRefusesTheSignIn_IsHeldFor60Seconds_AndAnswered502NamingIt()
     {
         var time = new ManualTime();
-        var (a, b, door) = await TwoStoresAsync(time: time);
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken, time: time);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -536,7 +545,7 @@ public sealed class FrontDoorWebProxyTests
     public async Task ASignInRateLimit_HoldsTheStoreForItsRetryAfter_WhenThatIsLongerThanTheDefault()
     {
         var time = new ManualTime();
-        var (a, b, door) = await TwoStoresAsync(time: time);
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken, time: time);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -554,7 +563,7 @@ public sealed class FrontDoorWebProxyTests
     [Fact(Timeout = 60_000)]
     public async Task ConcurrentFirstRequests_SignInOnce_AndShareTheSession()
     {
-        var (a, b, door) = await TwoStoresAsync();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -572,7 +581,7 @@ public sealed class FrontDoorWebProxyTests
     [Fact(Timeout = 60_000)]
     public async Task TheTargetStore_IsTheHeader_ThenTheServerName_ThenTheOnlyStore()
     {
-        var (a, b, door) = await TwoStoresAsync();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -599,7 +608,7 @@ public sealed class FrontDoorWebProxyTests
         var (exact, _) = await door.SendAsync(door.Request(HttpMethod.Put, "/api/server-tags/1?server=sql-east-1", body: "{}"));
         Assert.Equal(HttpStatusCode.OK, exact.StatusCode);
         Assert.Equal(2, a.Api.Count);
-        Assert.Equal(1, b.Api.Count);
+        Assert.Single(b.Api);
     }
 
     [Fact(Timeout = 60_000)]
@@ -607,7 +616,7 @@ public sealed class FrontDoorWebProxyTests
     {
         var only = await FakeWebPeer.StartAsync("only");
         await using var _only = only;
-        await using var door = await FrontDoorWebHarness.StartAsync(new[] { (only, new[] { "sql-1" }) });
+        await using var door = await FrontDoorWebHarness.StartAsync(new[] { (only, new[] { "sql-1" }) }, ct: TestContext.Current.CancellationToken);
 
         var (read, _) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/fleet"));
         var (ghost, _) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/fleet?server=not-a-server"));
@@ -624,7 +633,7 @@ public sealed class FrontDoorWebProxyTests
     [Fact(Timeout = 60_000)]
     public async Task TheLocalRoutes_AnswerTheirShapes_WithoutCallingAStore()
     {
-        var (a, b, door) = await TwoStoresAsync();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -672,7 +681,7 @@ public sealed class FrontDoorWebProxyTests
     [Fact(Timeout = 60_000)]
     public async Task TheSignInRoutesAndTheStaticPages_AreServedByTheFrontDoor_NeverForwarded()
     {
-        var (a, b, door) = await TwoStoresAsync();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
         await using var _b = b;
         await using var _door = door;
@@ -692,35 +701,68 @@ public sealed class FrontDoorWebProxyTests
     [Fact(Timeout = 60_000)]
     public async Task AStoreWithNoWebAddress_Is502_NamingIt()
     {
-        var a = await FakeWebPeer.StartAsync("use1");
-        await using var _a = a;
         var directory = new WebFakeDirectory(new[] { (new FrontDoorStore("mcp-only", new Uri("http://127.0.0.1:1/"), null, null), new[] { "sql-1" }) });
-        using var session = new DarlingFrontDoorWebSession(new WebFakeSecrets());
-        var proxy = new DarlingFrontDoorWebProxy(directory, session, TimeSpan.FromSeconds(5), NullLogger.Instance);
-        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
-        {
-            ContentRootPath = Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Service"),
-            WebRootPath = "wwwroot",
-        });
-        builder.WebHost.UseTestServer();
-        builder.Logging.ClearProviders();
-        DarlingWebHostService.ConfigureResponseCompression(builder.Services);
-        await using var app = builder.Build();
-        app.Use(next => context =>
-        {
-            context.Connection.RemoteIpAddress ??= IPAddress.Loopback;
-            return next(context);
-        });
-        new DarlingWebHostService(NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState())
-            .ConfigurePipeline(app, null, networkMode: false, networkListenIp: null, allowedCidr: IPNetwork.Parse("127.0.0.1/32"),
-                accessToken: FrontDoorWebHarness.FrontDoorToken, oidcClient: null, requireTokenWhenLoopbackOnly: true,
-                sessionSigningKeyForTests: System.Security.Cryptography.RandomNumberGenerator.GetBytes(32), frontDoorProxy: proxy);
-        await app.StartAsync(TestContext.Current.CancellationToken);
+        await using var door = await FrontDoorWebHarness.StartAsync(directory, new WebFakeSecrets(), ct: TestContext.Current.CancellationToken);
 
-        /* A signed-in request needs the key the pipeline was given, so it is refused 401 here: this store has no web address to forward to
-           whichever way, and the answer that matters is the one from a signed-in caller, which the next test pins through the harness. */
-        using var client = app.GetTestServer().CreateClient();
-        var response = await client.GetAsync("/api/fleet", TestContext.Current.CancellationToken);
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        var (response, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/fleet", store: "mcp-only"));
+
+        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+        Assert.Equal("mcp-only", (string?)Json(body)["store"]);
+        Assert.Equal("store_unavailable", (string?)Json(body)["status"]);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task AStoreThatAnswersARedirect_Is502_AndNoLocationReachesTheBrowser()
+    {
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
+        await using var _a = a;
+        await using var _b = b;
+        await using var _door = door;
+        a.RedirectTo = "https://elsewhere.example.test/api/fleet";
+
+        var (response, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/fleet", store: "use1"));
+
+        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+        Assert.False(response.Headers.Contains("Location"), "a store's redirect reached the browser");
+        Assert.Equal("use1", (string?)Json(body)["store"]);
+        Assert.Contains("redirect", (string?)Json(body)["message"]);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task AChangeBodyOverTheLimit_Is413_AndNothingIsSent()
+    {
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
+        await using var _a = a;
+        await using var _b = b;
+        await using var _door = door;
+
+        var tooLarge = "{\"note\":\"" + new string('x', DarlingFrontDoorWebProxy.MaxBodyBytes) + "\"}";
+        var (response, _) = await door.SendAsync(door.Request(HttpMethod.Post, "/api/mute-rules", store: "use1", body: tooLarge));
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        Assert.Empty(a.Api);
+        Assert.Empty(a.Logins);
+    }
+
+    [Theory]
+    [InlineData("/api/../admin/purge")]
+    [InlineData("/api/%2e%2e/admin/purge")]
+    [InlineData("//elsewhere.example.test/api/fleet")]
+    [InlineData("/auth/logout")]
+    [InlineData("/index.html")]
+    public void APathOutsideTheStoresApiTree_IsRefused_BeforeAnythingIsSent(string path)
+    {
+        var webUrl = new Uri("http://127.0.0.1:5000/");
+
+        Assert.Throws<FrontDoorPeerUnavailableException>(() => DarlingFrontDoorWebProxy.PeerUri(webUrl, path, null));
+        Assert.Throws<FrontDoorPeerUnavailableException>(() => DarlingFrontDoorWebProxy.PeerUri(new Uri("http://127.0.0.1:5000/darling/"), path, null));
+    }
+
+    [Fact]
+    public void AnApiPath_StaysUnderTheStoresConfiguredBase()
+    {
+        var target = DarlingFrontDoorWebProxy.PeerUri(new Uri("https://store.example.test:8443/darling/"), "/api/fleet", "?server=a%20b");
+
+        Assert.Equal("https://store.example.test:8443/darling/api/fleet?server=a%20b", target.AbsoluteUri);
     }
 }

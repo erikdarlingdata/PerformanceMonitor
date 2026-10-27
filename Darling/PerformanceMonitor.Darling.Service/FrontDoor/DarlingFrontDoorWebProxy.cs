@@ -201,7 +201,7 @@ internal sealed class DarlingFrontDoorWebProxy
                 {
                     var servers = _directory.Stores.FirstOrDefault(s => string.Equals(s.Store.Name, found.Store, StringComparison.OrdinalIgnoreCase))?.Servers
                         ?? Array.Empty<RegisteredServer>();
-                    var match = ServerNameMatcher.Match(servers, name);
+                    var match = DarlingFrontDoorDirectory.MatchIn(servers, name);
                     await WriteJsonAsync(context, StatusCodes.Status200OK, new JsonObject
                     {
                         ["store"] = found.Store,
@@ -210,12 +210,12 @@ internal sealed class DarlingFrontDoorWebProxy
                     return;
                 }
 
-            case FrontDoorRoute.Refused refused when CandidateStores(name).Count > 0:
+            case FrontDoorRoute.Refused { Ambiguous: true } ambiguous:
                 await WriteJsonAsync(context, StatusCodes.Status409Conflict, new JsonObject
                 {
                     ["status"] = "ambiguous",
-                    ["message"] = refused.Message,
-                    ["stores"] = StoreArray(CandidateStores(name)),
+                    ["message"] = ambiguous.Message,
+                    ["stores"] = StoreArray(ambiguous.Stores ?? Array.Empty<string>()),
                 });
                 return;
 
@@ -483,12 +483,12 @@ internal sealed class DarlingFrontDoorWebProxy
 
                     return routed;
 
-                case FrontDoorRoute.Refused refused when CandidateStores(serverName).Count > 0:
+                case FrontDoorRoute.Refused { Ambiguous: true } ambiguous:
                     await WriteJsonAsync(context, StatusCodes.Status409Conflict, new JsonObject
                     {
                         ["status"] = "ambiguous",
-                        ["message"] = refused.Message,
-                        ["stores"] = StoreArray(CandidateStores(serverName)),
+                        ["message"] = ambiguous.Message,
+                        ["stores"] = StoreArray(ambiguous.Stores ?? Array.Empty<string>()),
                     });
                     return null;
             }
@@ -509,7 +509,7 @@ internal sealed class DarlingFrontDoorWebProxy
     private async Task<FrontDoorRoute> ResolveWithRefreshAsync(string serverName, CancellationToken ct)
     {
         var route = _directory.ResolveServer(serverName);
-        if (route is FrontDoorRoute.Refused && CandidateStores(serverName).Count == 0)
+        if (route is FrontDoorRoute.Refused { Ambiguous: false })
         {
             await _directory.RefreshOnMissAsync(ct);
             route = _directory.ResolveServer(serverName);
@@ -518,16 +518,9 @@ internal sealed class DarlingFrontDoorWebProxy
         return route;
     }
 
-    /// <summary>The stores that hold at least one server this name matches.</summary>
-    private List<string> CandidateStores(string serverName)
-        => _directory.Stores
-            .Where(s => ServerNameMatcher.Match(s.Servers, serverName).Candidates.Count > 0)
-            .Select(s => s.Store.Name)
-            .ToList();
-
     private bool MatchesExactly(string store, string serverName)
         => _directory.Stores.FirstOrDefault(s => string.Equals(s.Store.Name, store, StringComparison.OrdinalIgnoreCase)) is { } state
-           && ServerNameMatcher.Match(state.Servers, serverName).MatchedBy == "exact";
+           && DarlingFrontDoorDirectory.MatchIn(state.Servers, serverName).MatchedBy == "exact";
 
     /* ── answers ── */
 

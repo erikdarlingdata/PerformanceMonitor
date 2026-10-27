@@ -175,8 +175,7 @@ internal sealed class DarlingFrontDoorDirectory : IFrontDoorDirectory, IDisposab
         /* Each store matches with the rule a single store uses for its own reads. Exact beats partial across stores too: a name
            that is one store's server exactly is not made ambiguous by another store's longer name that merely contains it. */
         var matches = states
-            .Select(s => (State: s, Match: ServerNameMatcher.Match(
-                s.Servers, name, storageNameIgnoresCase: true, nameClash: NameClash.StoredNameWins)))
+            .Select(s => (State: s, Match: MatchIn(s.Servers, name)))
             .Where(m => m.Match.Candidates.Count > 0)
             .ToList();
         var tier = matches.Any(m => m.Match.MatchedBy == "exact") ? "exact" : "partial";
@@ -199,7 +198,7 @@ internal sealed class DarlingFrontDoorDirectory : IFrontDoorDirectory, IDisposab
                     .Append(string.Join(", ", hit.Match.Candidates.Select(Describe)));
             }
 
-            return new FrontDoorRoute.Refused(text.ToString());
+            return new FrontDoorRoute.Refused(text.ToString(), Ambiguous: true, Stores: hits.Select(h => h.State.Store.Name).ToList());
         }
 
         var listing = string.Join("; ", states.Select(s =>
@@ -209,6 +208,11 @@ internal sealed class DarlingFrontDoorDirectory : IFrontDoorDirectory, IDisposab
             $"'{name}' matches no server in any store. Stores: {(listing.Length == 0 ? "none configured" : listing)}. "
             + "A store that is stale, unreachable or held is searched by its last known list, or not at all.");
     }
+
+    /// <summary>One store's servers against a name, with the rule a single store uses for its own reads. The web proxy matches through
+    /// this too, so the front door has one rule for what a name means.</summary>
+    internal static ServerNameMatch MatchIn(IReadOnlyList<RegisteredServer> servers, string name)
+        => ServerNameMatcher.Match(servers, name, storageNameIgnoresCase: true, nameClash: NameClash.StoredNameWins);
 
     private static string Describe(RegisteredServer s)
         => string.IsNullOrEmpty(s.DisplayName) || s.DisplayName == s.ServerName ? s.ServerName : $"{s.ServerName} ({s.DisplayName})";

@@ -87,6 +87,9 @@ internal sealed class FakeWebPeer : IAsyncDisposable
     /// <summary>When set, the sign-in answers 429 with this <c>Retry-After</c> instead of looking at the token.</summary>
     internal int? SignInRateLimitSeconds;
 
+    /// <summary>When set, every signed-in <c>/api/*</c> call answers a redirect to this address instead of its answer.</summary>
+    internal string? RedirectTo;
+
     /// <summary>Completes when a call reaches the delay.</summary>
     internal TaskCompletionSource ApiStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -170,6 +173,12 @@ internal sealed class FakeWebPeer : IAsyncDisposable
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
             context.Response.ContentType = "application/json; charset=utf-8";
             await context.Response.WriteAsync("{\"error\":\"session expired\",\"login\":\"/\"}");
+            return;
+        }
+
+        if (RedirectTo is { } redirect)
+        {
+            context.Response.Redirect(redirect);
             return;
         }
 

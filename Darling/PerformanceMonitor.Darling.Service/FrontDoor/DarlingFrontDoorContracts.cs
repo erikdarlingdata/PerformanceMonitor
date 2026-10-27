@@ -68,8 +68,10 @@ internal abstract record FrontDoorRoute
     /// <summary>The name is <c>*</c>: ask every store.</summary>
     internal sealed record FanOut : FrontDoorRoute;
 
-    /// <summary>The name matches nothing, or matches in more than one store. <see cref="Message"/> names the stores and candidates.</summary>
-    internal sealed record Refused(string Message) : FrontDoorRoute;
+    /// <summary>The name matches nothing, or matches in more than one store. <see cref="Message"/> names the stores and candidates.
+    /// <see cref="Ambiguous"/> is true when it matched in more than one store, and <see cref="Stores"/> then names those stores (the
+    /// web proxy answers 409 with them, and 404 when the name matched nowhere).</summary>
+    internal sealed record Refused(string Message, bool Ambiguous = false, IReadOnlyList<string>? Stores = null) : FrontDoorRoute;
 }
 
 /// <summary>The front door's view of which store holds which server.</summary>
