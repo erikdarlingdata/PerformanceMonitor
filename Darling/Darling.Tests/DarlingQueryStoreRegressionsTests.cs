@@ -522,10 +522,11 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
 
     /// <summary>
     /// #4966: every <c>empty</c> answer carries the three keys under <c>hints</c>, the all-clear included (a clean comparison
-    /// over a baseline the store only partly holds is not a true negative), and every <c>unavailable</c> answer carries none.
+    /// over a baseline the store only partly holds is not a true negative). #6829: the two no-baseline <c>unavailable</c> answers carry
+    /// them too, since the data start is what says whether a missing baseline is retention. The "nothing ever collected" answer stays bare.
     /// </summary>
     [Fact]
-    public async Task TheEmptyAnswers_CarryTheDataStartHints_AndTheUnavailableOnesStayBare_AgainstDevPostgres()
+    public async Task TheEmptyAnswers_AndTheNoBaselineAnswers_CarryTheDataStartHints_AndTheNeverCollectedOneStaysBare_AgainstDevPostgres()
     {
         await WithServerAsync(async (connection, postgres, baseNow, ct) =>
         {
@@ -552,10 +553,12 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.True(clearHints.GetProperty("window_truncated").GetBoolean());
             Assert.Equal(McpHelpers.FormatEffectiveStart(baseNow.AddHours(-40)), clearHints.GetProperty("effective_start").GetString());
 
-            /* No baseline: the whole history sits inside the window. The unavailable answer stays bare. */
+            /* No baseline: the whole history sits inside the window. #6829: the unavailable answer carries the data-start hints. */
             var noBaseline = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 48));
             Assert.Equal("unavailable", noBaseline.GetProperty("status").GetString());
-            Assert.False(noBaseline.TryGetProperty("hints", out _));
+            var noBaselineHints = noBaseline.GetProperty("hints");
+            Assert.True(noBaselineHints.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(baseNow.AddHours(-40)), noBaselineHints.GetProperty("effective_start").GetString());
         });
     }
 
