@@ -128,8 +128,10 @@ public sealed class ReadAdmission
     };
 
     /// <summary>The shortest window, in hours, whose whole-fleet read takes the route's own TTL (#6800). A window under it keeps the
-    /// band's TTL and the band's rule for whether it is cached at all.</summary>
-    internal const double FleetMinWindowHours = 24;
+    /// band's TTL and the band's rule for whether it is cached at all. It is where the by-tag rollup's Query Store section starts
+    /// (<c>QueryStoreIntervalWide.TopMinWindow</c>, the field <c>DarlingQueryTagRollupReader.QueryStoreMinWindow</c> reads), so a retune of
+    /// that threshold moves this floor with it.</summary>
+    internal static readonly double FleetMinWindowHours = PerformanceMonitor.Darling.Storage.QueryStoreIntervalWide.TopMinWindow.TotalHours;
 
     /// <summary>Whether the route's own TTL in <see cref="FleetCachedRoutes"/> applies to a read: <paramref name="fleetRead"/> (from
     /// <see cref="IsFleetRead"/>, which already holds the 24-hour floor) on a route in the table.</summary>
@@ -138,7 +140,7 @@ public sealed class ReadAdmission
 
     /// <summary>Whether a read of <paramref name="route"/> is the whole-fleet form of a route in <see cref="FleetCachedRoutes"/> over a
     /// window of at least <see cref="FleetMinWindowHours"/>: no server named (null, empty or blank), and <paramref name="hours"/>, the
-    /// window the read asks for or its declared default (<see cref="ReadWindowBand.HoursOf"/>), 24 or more. No window, or one that is
+    /// window the read asks for or its declared default (<see cref="ReadWindowBand.HoursOf"/>), at least <see cref="FleetMinWindowHours"/>. No window, or one that is
     /// not a number, is not long enough.</summary>
     internal static bool IsFleetRead(string route, string? server, double? hours) =>
         FleetCachedRoutes.ContainsKey(route) && string.IsNullOrWhiteSpace(server) && hours >= FleetMinWindowHours;
@@ -187,14 +189,15 @@ public sealed class ReadAdmission
         Cache = new ReadResultCache(time);
     }
 
-    /// <summary>#5506 part 3: the process's read cache. It caches only the pairs this classifies as heavy
-    /// (<see cref="IsCached"/>), on the same clock.</summary>
+    /// <summary>#5506 part 3: the process's read cache. It caches the pairs this classifies as heavy
+    /// and, since #6800, a whole-fleet read of a route in <see cref="FleetCachedRoutes"/> over a long window (<see cref="IsCached"/>),
+    /// on the same clock.</summary>
     internal ReadResultCache Cache { get; }
 
     /// <summary>Whether an answer of (<paramref name="surface"/>, <paramref name="route"/>, <paramref name="band"/>) is
     /// served from and stored in <see cref="Cache"/>: a cacheable route (<see cref="ReadResultCache.IsCacheableRoute"/>)
     /// whose pair is heavy, or a whole-fleet read of a route in <see cref="FleetCachedRoutes"/>
-    /// over a window of 24 hours or more (<paramref name="fleetRead"/>, from <see cref="IsFleetRead"/>,
+    /// over a window of <see cref="FleetMinWindowHours"/> or more (<paramref name="fleetRead"/>, from <see cref="IsFleetRead"/>,
     /// <see cref="FleetTtlApplies"/>). It does not depend
     /// on the limit: with admission off, heavy answers are still cached. Caching a fleet read takes no slot: whether
     /// the read waits for one stays with <see cref="IsHeavy"/> (<see cref="AdmitAsync"/>).</summary>

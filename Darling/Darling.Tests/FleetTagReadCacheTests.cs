@@ -10,12 +10,16 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO.Pipelines;
 using System.Net;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Linq;
 using Microsoft.AspNetCore.TestHost;
+using System.ComponentModel;
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -274,5 +278,68 @@ public sealed class FleetTagReadCacheTests
 
         Assert.False(McpToolLatencyFilter.IsFleetRead(Route, shortSpan, types));
         Assert.True(McpToolLatencyFilter.IsFleetRead(Route, longSpan, types));
+    }
+
+    /// <summary>A stand-in for the real tool: same name and the same two parameters, counts its runs, answers a small ok envelope.</summary>
+    [McpServerToolType]
+    public sealed class CountingTagTool
+    {
+        public static int Runs;
+
+        [McpServerTool(Name = "get_resource_use_by_tag"), Description("counts")]
+        public static string Run(string? server_name = null, int hours_back = 24) =>
+            "{\"rows\":[" + Interlocked.Increment(ref Runs).ToString(System.Globalization.CultureInfo.InvariantCulture) + "]}";
+    }
+
+    private static async Task<int> CallThroughTheFilterAsync(int[] hoursBack, TimeSpan[] advanceBefore)
+    {
+        CountingTagTool.Runs = 0;
+        var clock = new TimerTimeProvider();
+        var admission = LightAdmission(clock);
+        var filter = new McpToolLatencyFilter(new ReadLatencyAccumulator(), null, null, admission);
+        var clientToServer = new Pipe();
+        var serverToClient = new Pipe();
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddMcpServer()
+            .WithStreamServerTransport(clientToServer.Reader.AsStream(), serverToClient.Writer.AsStream())
+            .WithRequestFilters(filters => filters.AddCallToolFilter(filter.AsFilter()))
+            .WithGeminiCompatibleTools<CountingTagTool>();
+        await using var provider = services.BuildServiceProvider();
+        using var stop = new CancellationTokenSource();
+        var run = provider.GetRequiredService<McpServer>().RunAsync(stop.Token);
+        await using var client = await McpClient.CreateAsync(
+            new StreamClientTransport(clientToServer.Writer.AsStream(), serverToClient.Reader.AsStream()),
+            cancellationToken: TestContext.Current.CancellationToken);
+        try
+        {
+            for (var i = 0; i < hoursBack.Length; i++)
+            {
+                clock.Advance(advanceBefore[i]);
+                var result = await client.CallToolAsync(Route,
+                    new Dictionary<string, object?> { ["hours_back"] = hoursBack[i] },
+                    cancellationToken: TestContext.Current.CancellationToken);
+                Assert.NotEqual(true, result.IsError);
+            }
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            try { await run; } catch (OperationCanceledException) { }
+        }
+
+        return CountingTagTool.Runs;
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task AnMcpFleetCall_At24Hours_RunsTheToolOnceInsideFiveMinutes()
+    {
+        Assert.Equal(1, await CallThroughTheFilterAsync([24, 24], [TimeSpan.Zero, TimeSpan.FromMinutes(4)]));
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task AnMcpFleetCall_At4Hours_IsNotKeptForFiveMinutes()
+    {
+        Assert.Equal(2, await CallThroughTheFilterAsync([4, 4], [TimeSpan.Zero, TimeSpan.FromMinutes(4)]));
     }
 }
