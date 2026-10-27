@@ -193,7 +193,7 @@ public sealed class DarlingMcpQueryTagRollupTools
                     var message = facts.Count == 0
                         ? (refusalNote is null ? "No rows in the window." : "No rows in the window for the servers that were read. " + refusalNote)
                         : refusalNote;
-                    sections.Add(Merge(Wrap(QueryTagRollupSection.QueryStore, "collect.query_store_interval_wide", fleet, scope, names, tags, tagFilter, limit,
+                    sections.Add(Merge(Wrap(QueryTagRollupSection.QueryStore, read.UsedHashHourly ? QueryTagRollupHashRoute.RoutedSourceName : "collect.query_store_interval_wide", fleet, scope, names, tags, tagFilter, limit,
                         facts, facts.Count == 0 ? "empty" : "ok", message, refused), reach));
                 }
             }

@@ -55,9 +55,10 @@ public static class DarlingQueryTagRollupReader
         StorageVersion.SchemaVersion >= QueryStoreTableMinSchemaVersion && endUtc - startUtc >= QueryStoreMinWindow;
 
     /// <summary>What <see cref="ReadQueryStoreAsync"/> decided and read: the servers the gate allowed with the start the table provably holds
-    /// for them, the servers it refused with why, the facts read for the allowed ones, and whether the interval table itself was missing.</summary>
+    /// for them, the servers it refused with why, the facts read for the allowed ones, and whether the interval table itself was missing.
+    /// <paramref name="UsedHashHourly"/>: the fleet route read built hours from <c>collect.query_store_hash_hourly</c> (#6800), so the section's source is both tables.</summary>
     public readonly record struct QueryStoreRead(
-        Dictionary<int, DateTime> Allowed, Dictionary<int, string> Refused, List<QueryTagRollupFact> Facts, bool TableMissing);
+        Dictionary<int, DateTime> Allowed, Dictionary<int, string> Refused, List<QueryTagRollupFact> Facts, bool TableMissing, bool UsedHashHourly = false);
 
     /// <summary>
     /// The Query Store gate and the read it authorizes, per server: the interval table is read only where the same gate every other reader of
@@ -122,9 +123,15 @@ public static class DarlingQueryTagRollupReader
             return new QueryStoreRead(allowed, refused, facts, false);
         }
 
+        /* #6800 part 2: a fleet read takes the hours the hourly builder has done from collect.query_store_hash_hourly and the rest from the
+           wide table (QueryTagRollupHashRoute). One server, a store without the table, or no hour the table can answer yet: today's
+           statement. The route's two small reads and the statement share this snapshot. */
+        var route = await QueryTagRollupHashRoute.TryPlanAsync(connection, allowed, windowEnd, readSeconds, cancellationToken);
         try
         {
-            await using var command = QueryStoreCommand(connection, allowed, windowEnd, readSeconds);
+            await using var command = route is null
+                ? QueryStoreCommand(connection, allowed, windowEnd, readSeconds)
+                : QueryTagRollupHashRoute.Command(connection, route, windowEnd, readSeconds);
             facts.AddRange(await ReadFactsFromAsync(command, QueryTagRollupSection.QueryStore, cancellationToken));
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
@@ -133,7 +140,7 @@ public static class DarlingQueryTagRollupReader
             return new QueryStoreRead(allowed, refused, [], true);
         }
 
-        return new QueryStoreRead(allowed, refused, facts, false);
+        return new QueryStoreRead(allowed, refused, facts, false, route is not null);
     }
 
     /// <summary>The batched Query Store statement's command (<see cref="QueryTagRollupSql.QueryStoreSql"/>): the allowed servers and each one's

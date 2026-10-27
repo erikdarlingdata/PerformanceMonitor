@@ -106,6 +106,71 @@ public static class QueryTagRollupSql
         GROUP BY q.server_id, m.tag_id
         """;
 
+    /// <summary>
+    /// The fleet form of <see cref="QueryStoreSql"/> (#6800 part 2, step 2): the same six measures per <c>(server_id, tag_id)</c>, with the
+    /// whole hours the hourly builder has done read from <c>collect.query_store_hash_hourly</c> and the rest from the wide table.
+    /// <see cref="QueryTagRollupHashRoute"/> decides which is which. Parameters: $1 and $2 the table pairs as parallel arrays (hour start
+    /// <c>timestamp[]</c>, server <c>integer[]</c>), $3, $4 and $5 the wide ranges as parallel arrays (server, from, to, each range
+    /// <c>[from, to)</c>), $6 the window end.
+    /// <para>Both arms yield six partials per <c>(server_id, query_hash)</c> (sums of the weighted products and of the counts, the maximum of
+    /// the memory), exact <c>numeric</c> sums, so adding the hours gives the wide statement's total. The tag map is joined once, on the
+    /// partials, and the final GROUP BY is by <c>(server_id, tag_id)</c>: the aggregate stays at that size. The COALESCE and the cast to
+    /// <c>double precision</c> are today's, applied after the hours are added.</para>
+    /// <para>The table arm is one probe of <c>(hour, server_id)</c> per listed pair. The wide arm runs once per distinct <c>[from, to)</c>
+    /// (the ranges are grouped, so every server that shares the tail shares one scan of it, not one scan per server): inside each, the
+    /// bounds on <c>collection_time</c> are written plainly so a scan by <c>collection_time</c> is possible, which a per-server loop must
+    /// not use (<see cref="QueryStoreSql"/> explains the 13.0 s it cost). The <c>first_execution_time</c> floor is the range's own start
+    /// less the purge margin, the same floor the builder uses for the hour, and the wide statement's own for the first range.</para>
+    /// </summary>
+    public static readonly string QueryStoreRoutedSql = $$"""
+        WITH wide_groups AS
+        (
+            SELECT r.from_time, r.to_time, array_agg(r.server_id) AS servers
+            FROM unnest($3::integer[], $4::timestamp[], $5::timestamp[]) AS r(server_id, from_time, to_time)
+            GROUP BY r.from_time, r.to_time
+        ),
+        partials AS
+        (
+            SELECT t.server_id, t.query_hash, t.ec_sum, t.cpu_wsum, t.dur_wsum, t.reads_wsum, t.writes_wsum, t.mem_max
+            FROM unnest($1::timestamp[], $2::integer[]) AS p(hour, server_id)
+            JOIN collect.query_store_hash_hourly AS t
+                   ON t.hour = p.hour
+                  AND t.server_id = p.server_id
+            UNION ALL
+            SELECT w.server_id, w.query_hash, w.ec_sum, w.cpu_wsum, w.dur_wsum, w.reads_wsum, w.writes_wsum, w.mem_max
+            FROM wide_groups AS g
+            CROSS JOIN LATERAL
+            (
+                SELECT q.server_id, q.query_hash,
+                       SUM(q.execution_count) AS ec_sum,
+                       SUM(q.avg_cpu_time_us * q.execution_count) AS cpu_wsum,
+                       SUM(q.avg_duration_us * q.execution_count) AS dur_wsum,
+                       SUM(q.avg_logical_io_reads * q.execution_count) AS reads_wsum,
+                       SUM(q.avg_logical_io_writes * q.execution_count) AS writes_wsum,
+                       MAX(q.max_query_max_used_memory) AS mem_max
+                FROM collect.query_store_interval_wide AS q
+                WHERE q.server_id = ANY(g.servers)
+                AND   q.collection_time >= g.from_time
+                AND   q.collection_time < g.to_time
+                AND   q.collection_time <= $6
+                AND   q.first_execution_time >= g.from_time - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+                AND   q.first_execution_time <= $6 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+                GROUP BY q.server_id, q.query_hash
+            ) AS w
+        )
+        SELECT p.server_id, m.tag_id,
+               CAST(COALESCE(SUM(p.cpu_wsum), 0) AS double precision) AS cpu_ms,
+               CAST(COALESCE(SUM(p.dur_wsum), 0) AS double precision) AS duration_ms,
+               CAST(COALESCE(SUM(p.reads_wsum), 0) AS double precision) AS logical_reads,
+               CAST(COALESCE(SUM(p.writes_wsum), 0) AS double precision) AS logical_writes,
+               CAST(COALESCE(SUM(p.ec_sum), 0) AS double precision) AS executions,
+               CAST(COALESCE(MAX(p.mem_max), 0) AS double precision) AS peak_memory_pages
+        FROM partials AS p
+        LEFT JOIN config.query_tag_map AS m
+               ON m.server_id = p.server_id AND m.key_kind = 'hash' AND m.key = p.query_hash
+        GROUP BY p.server_id, m.tag_id
+        """;
+
     /// <summary>Procedures, raw tier: <c>collect.procedure_stats</c> deltas keyed by <c>database.schema.name</c>.</summary>
     public static readonly string ProceduresRawSql = $"""
         SELECT q.server_id, m.tag_id,
