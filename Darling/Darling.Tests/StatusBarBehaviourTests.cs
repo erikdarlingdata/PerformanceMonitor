@@ -73,6 +73,13 @@ public sealed class StatusBarBehaviourTests
         Assert.Contains(expected, Items(r));
     }
 
+    [Fact]
+    public void TheCollectorsFooter_ShowsTheWarningCount_AndDoesNotCountWarningsAsHealthy()
+    {
+        if (!TryRun("warnings", out var r)) return;
+        Assert.Contains("44 collectors healthy · 3 warning · 1 failing", Items(r));
+    }
+
     [Theory]
     [InlineData("storeSize", "Database: 5.0 GB")]
     [InlineData("storeSizeMb", "Database: 300 MB")]

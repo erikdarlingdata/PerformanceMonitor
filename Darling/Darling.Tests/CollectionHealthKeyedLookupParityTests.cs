@@ -459,8 +459,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
     {
         /* #5646: the current statements carry ONE more column than the pre-change oracles, appended last
            (trailing_success_runs, the recovery rule's input). Every column the oracle has is compared. */
-        Assert.Equal(oracle.Columns.Count + 1, current.Columns.Count);
-        Assert.Equal("trailing_success_runs", current.Columns[^1].Name);
+        Assert.Contains("trailing_success_runs", current.Columns.Skip(oracle.Columns.Count).Select(c => c.Name));
+        /* #6828: the viewer's statement carries one more appended column (last_zero_row_streak_break_time), after trailing_success_runs. */
+        Assert.InRange(current.Columns.Count - oracle.Columns.Count, 1, 2);
         Assert.Equal(oracle.Columns, current.Columns.Take(oracle.Columns.Count).ToList());
         Assert.Equal(oracle.Rows.Count, current.Rows.Count);
         Assert.True(oracle.Rows.Count >= 10, label + ": the seed should give the oracle many collectors");

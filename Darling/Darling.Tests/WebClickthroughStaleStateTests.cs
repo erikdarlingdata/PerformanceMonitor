@@ -83,6 +83,14 @@ public sealed class WebClickthroughStaleStateTests
         Assert.StartsWith("CollectorsStale", texts[5], StringComparison.Ordinal);
     }
 
+    /// <summary>#6828: the server header's Collectors chip counts a WARNING collector as a warning, not as healthy.</summary>
+    [Fact]
+    public void TheCollectorsChip_ShowsTheWarningCount_AndDoesNotCountWarningsAsHealthy()
+    {
+        var texts = Texts(Run("collectorsWarning").GetProperty("chips"));
+        Assert.Contains("39 healthy · 3 warning · 0 failing", texts[5], StringComparison.Ordinal);
+    }
+
     /// <summary>#6178: the Overview Threads chip of an Azure SQL Database server gives the reason beside its "n/a"; a box with no reading keeps a bare "n/a".</summary>
     [Fact]
     public void TheThreadsChip_GivesTheReasonOnAzureSqlDatabase_AndNothingOnABox()

@@ -130,6 +130,12 @@ const scenarios = {
     offline: chips(modules.fleet.metricBands(card({ is_online: false }))),
     online: chips(modules.fleet.metricBands(card({ last_collection: iso(1000) }))),
   }),
+  /* #6828: a server whose collectors are 39 HEALTHY, 3 WARNING and 2 not collected: the Collectors chip shows the warning count and does not call them healthy. */
+  collectorsWarning: async () => ({
+    chips: chips(modules.fleet.metricBands(card({
+      last_collection: iso(1000), collector_count: 44, healthy_collector_count: 39, warning_collector_count: 3, not_collected_collector_count: 2,
+    }))),
+  }),
   /* #6178: a server with no thread reading. On an Azure SQL Database (engine_edition 5) the Threads chip says why; on a box it stays a bare n/a. */
   azureThreads: async () => {
     const noThreads = { available_threads: null, total_threads: null, threads_severity: "Unknown", last_collection: iso(1000) };

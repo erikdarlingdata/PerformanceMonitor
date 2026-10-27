@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -404,7 +405,17 @@ public partial class MainWindow
         }
         else
         {
-            CollectorHealthText.Text = $"Collectors: {health.Count} OK";
+            /* #6828: OK counts HEALTHY collectors only, so a WARNING collector is not called OK and the number matches the Overview cards'
+               healthy counts (the same BandTally), and the warning and not-collected counts follow when there are any. */
+            var tally = new CollectorHealthClassifier.BandTally();
+            foreach (var h in health)
+            {
+                tally = tally.Add(h.CollectorName, h.HealthStatus, h.ServerAlwaysOnOff);
+            }
+
+            CollectorHealthText.Text = $"Collectors: {tally.Healthy} OK"
+                + (tally.Warning > 0 ? $", {tally.Warning} warning" : "")
+                + (tally.NotCollected > 0 ? $", {tally.NotCollected} not collected" : "");
             CollectorHealthText.SetResourceReference(System.Windows.Controls.TextBlock.ForegroundProperty, "ForegroundMutedBrush");
             CollectorHealthText.ToolTip = null;
         }

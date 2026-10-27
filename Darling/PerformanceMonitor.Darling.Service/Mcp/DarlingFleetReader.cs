@@ -1205,6 +1205,8 @@ GROUP BY server_id, collector_name";
             RequestsWaitingForThreads = threads.WorkQueue,
             ThreadsSeverity = ServerHealthClassifier.ThreadsSeverity(threads.TotalThreads, availableThreads, threads.RunnableTasks, threads.WorkQueue),
             HealthyCollectorCount = collectors.Healthy,
+            WarningCollectorCount = collectors.Warning,
+            NotCollectedCollectorCount = collectors.NotCollected,
             FailedCollectorCount = collectors.Failing,
             RegressedCollectorCount = collectors.Regressed,
             CollectorCount = collectors.Total,
@@ -1995,6 +1997,9 @@ GROUP BY server_id, collector_name";
            shipped cadence, as the per-server read does. */
         var scheduleOverrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, null, cancellationToken);
         var overridesByServer = new Dictionary<int, IReadOnlyList<ScheduleOverride>>();
+        /* #6828: the servers that report Always On off, read once here for the same one-connection reason. get_collection_health lists
+           a HEALTHY Always On collector there as not_collected, so the tally counts it there too and not as healthy. */
+        var alwaysOnOffServers = await FleetAlwaysOnOff.ReadAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken);
         /* #3893 arm 2, #4477: the composed read (hourly aggregate + raw head slice + any hole hours read raw
            alongside it) when the guard passes, else the raw scan. Same fourteen ordinals either way, so
            everything below is shared. */
@@ -2040,11 +2045,15 @@ GROUP BY server_id, collector_name";
         {
             counts.TryGetValue(serverId, out var existing);
             var status = health.HealthStatus;
+            /* #6828: one tally for every count surface (CollectorHealthClassifier.BandTally). A WARNING collector is not healthy, and a
+               HEALTHY Always On collector on a server with Always On off is not collected. */
+            var tally = new CollectorHealthClassifier.BandTally(existing.Healthy, existing.Warning, existing.Failing, existing.NotCollected, existing.Total)
+                .Add(health.CollectorName, status, alwaysOnOffServers.Contains(serverId));
             counts[serverId] = new CollectorCounts(
-                existing.Healthy + (status == "HEALTHY" ? 1 : 0),
-                existing.Failing + (status == "FAILING" ? 1 : 0),
+                tally.Healthy,
+                tally.Failing,
                 /* #3539 A8d: every banded row, whatever its band — the share's denominator. */
-                existing.Total + 1,
+                tally.Total,
                 /* #3819: counted off the PREDICATE rather than off the band, and the two are not the same
                    population. The band floor only moves a row that would have read HEALTHY; a collector
                    whose success clock has already run out reads FAILING and is regressed as well. Keyed
@@ -2068,7 +2077,9 @@ GROUP BY server_id, collector_name";
                     : existing.DeadlockBand,
                 string.Equals(health.CollectorName, PgDatabaseStatsCollector.Instance.Name, StringComparison.Ordinal)
                     ? status
-                    : existing.PgDeadlockBand);
+                    : existing.PgDeadlockBand,
+                tally.Warning,
+                tally.NotCollected);
         }
 
         return counts;
@@ -2243,7 +2254,7 @@ GROUP BY server_id, collector_name";
     /// old), so the band floor moves it to WARNING; by the second day the success clock has run out and
     /// the same collector reads FAILING while still being regressed. Counting off the band would make
     /// this go quiet precisely as the regression got worse.</para></param>
-    internal readonly record struct CollectorCounts(int Healthy, int Failing, int Total, int Regressed, string? DeadlockBand = null, string? PgDeadlockBand = null);
+    internal readonly record struct CollectorCounts(int Healthy, int Failing, int Total, int Regressed, string? DeadlockBand = null, string? PgDeadlockBand = null, int Warning = 0, int NotCollected = 0);
 
     /// <summary>One completed 7-day collection-health scan (#3735): the per-server counts
     /// <see cref="ReadFailingCollectorCountsAsync"/> produced and the <c>nowUtc</c> the scan was started with —
@@ -2700,6 +2711,14 @@ public sealed class FleetServerCard
     [JsonPropertyName("threads_severity")] public HealthSeverity ThreadsSeverity { get; init; }
 
     [JsonPropertyName("healthy_collector_count")] public int HealthyCollectorCount { get; init; }
+
+    /// <summary>#6828: collectors banded WARNING, so a footer or header that shows only healthy and failing does not leave them out or count them
+    /// as healthy. <c>get_collection_health</c> lists the same collectors with status WARNING.</summary>
+    [JsonPropertyName("warning_collector_count")] public int WarningCollectorCount { get; init; }
+
+    /// <summary>#6828: Always On collectors on a server with Always On off, which <c>get_collection_health</c> lists as <c>not_collected</c> and
+    /// the card does not count as healthy.</summary>
+    [JsonPropertyName("not_collected_collector_count")] public int NotCollectedCollectorCount { get; init; }
     [JsonPropertyName("failed_collector_count")] public int FailedCollectorCount { get; init; }
 
     /// <summary>

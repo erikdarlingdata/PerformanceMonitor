@@ -2223,6 +2223,41 @@ namespace PerformanceMonitor.Common
                 ? Warning
                 : band;
 
+        /// <summary>True for the two Always On collectors. On a SQL Server without Always On they run, find nothing and log HEALTHY
+        /// with zero rows (#6828, click-through 5).</summary>
+        public static bool IsAlwaysOnCollector(string? collectorName) =>
+            string.Equals(collectorName, "ag_database_replica_states", StringComparison.Ordinal)
+            || string.Equals(collectorName, "ag_replica_states", StringComparison.Ordinal);
+
+        /// <summary>
+        /// True for a collector row that a server with Always On OFF reports as not collected rather than healthy (#6828): an Always On
+        /// collector whose own band is HEALTHY. One that is FAILING keeps its band, because a failing collector is a real problem on a
+        /// server without Always On too.
+        /// </summary>
+        public static bool IsNotCollectedWhenAlwaysOnOff(string? collectorName, string band, bool alwaysOnOff) =>
+            alwaysOnOff && IsAlwaysOnCollector(collectorName) && string.Equals(band, Healthy, StringComparison.Ordinal);
+
+        /// <summary>
+        /// One server's collector counts by band (#6828), the one tally every count surface reads: the fleet card and its web header and
+        /// footer, and the Viewer's card and status bar. <c>get_collection_health</c> lists the same rows one by one, so counting its rows by
+        /// status gives these numbers. <see cref="Healthy"/> is HEALTHY rows only, so a WARNING collector is never counted as healthy, and a
+        /// row a server without Always On reports as not collected is counted there instead. <see cref="Total"/> is every banded row.
+        /// </summary>
+        public readonly record struct BandTally(int Healthy, int Warning, int Failing, int NotCollected, int Total)
+        {
+            /// <summary>This tally plus one collector row, banded by the caller through the shared ladder.</summary>
+            public BandTally Add(string? collectorName, string band, bool alwaysOnOff)
+            {
+                var notCollected = IsNotCollectedWhenAlwaysOnOff(collectorName, band, alwaysOnOff);
+                return new BandTally(
+                    Healthy + (!notCollected && string.Equals(band, CollectorHealthClassifier.Healthy, StringComparison.Ordinal) ? 1 : 0),
+                    Warning + (string.Equals(band, CollectorHealthClassifier.Warning, StringComparison.Ordinal) ? 1 : 0),
+                    Failing + (string.Equals(band, CollectorHealthClassifier.Failing, StringComparison.Ordinal) ? 1 : 0),
+                    NotCollected + (notCollected ? 1 : 0),
+                    Total + 1);
+            }
+        }
+
         /// <summary>
         /// The sentence a regressed collector carries (#3819), or null when the row is not one. States the
         /// three facts an operator needs in the order they happened: how much it was producing, when it
