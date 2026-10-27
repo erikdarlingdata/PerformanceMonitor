@@ -491,16 +491,18 @@ WHERE server_id = 2 AND query_id IN (1, 2) AND collection_time >= TIMESTAMP '{At
     /// <summary>
     /// #6800 part 2, step 2b: the wide side of the routed statement. A window of 24 hours whose wide ranges are the partial first hour and
     /// the unbuilt tail (about 2 of the 24 hours) must scan about those rows of <c>collect.query_store_interval_wide</c>, not the window's.
-    /// Found by what the nodes do: every scan of the wide table or one of its partitions, that is, the nodes that read rows from the table.
-    /// A Bitmap Index Scan is not counted (#6847): it puts index entries into a bitmap and reads no table row, and when PostgreSQL ANDs two
-    /// bitmaps (<c>collection_time</c> with <c>(server_id, first_execution_time)</c>, which it does on some versions and some statistics)
-    /// the entries it returns are not rows read. Per node the rows it examined are Actual Rows plus Rows Removed by Filter plus Rows Removed
-    /// by Index Recheck, times Actual Loops, so a plan that reads the whole window from the table shows it however it gets there. The heap is laid out in collection_time order, as the store's is, so the BRIN
+    /// Found by what the nodes do: every scan of the wide table or one of its partitions, plus every bitmap index scan of one of their
+    /// indexes. Per node the rows it examined are Actual Rows plus Rows Removed by Filter plus Rows Removed by Index Recheck, times Actual
+    /// Loops. A node on the <c>(server_id, first_execution_time)</c> index is bounded by what its own index condition admits (#6847): each
+    /// arm's first-execution range is <c>[range start - 26 h, earlier of range end and window end + 12 h]</c>, which for a small range is
+    /// about the seed's window, and PostgreSQL may AND that index into the scan of <c>collection_time</c> on some versions and statistics.
+    /// So those nodes are held to the rows the arms' first-execution ranges hold (counted with the statement's bounds), and fail on an
+    /// index walk past them, and every other node is held to the window's half as before. The heap is laid out in collection_time order, as the store's is, so the BRIN
     /// index on collection_time can do what it is for, and sequential scans are turned off (the seed is a few thousand rows, where any
     /// plan scans), so the plan shows the paths the statement allows.
     /// </summary>
     [Fact]
-    public async Task TheRoutedStatementsWideArms_ExamineAboutTheirRangesRows_NotTheWindows()
+    public async Task TheRoutedStatementsWideArms_ExamineAboutTheirRangesRows_AndTheirIndexRangesStayInTheirBounds()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), "Set DARLING_TEST_PG to run this.");
         var ct = TestContext.Current.CancellationToken;
@@ -545,16 +547,49 @@ WHERE server_id = 2 AND query_id IN (1, 2) AND collection_time >= TIMESTAMP '{At
             string Text(JsonElement n, string name) => n.TryGetProperty(name, out var v) ? v.GetString() ?? string.Empty : string.Empty;
             double Num(JsonElement n, string name) => n.TryGetProperty(name, out var v) ? v.GetDouble() : 0;
 
-            var wideScans = nodes.Where(n =>
+            /* A node reads the table through either index family. Those on (server_id, first_execution_time) return every entry their own
+               condition admits, which the arm's first-execution range (floor 26 h before its start, #4605, cap 12 h after its end, #5523,
+               #6847) makes about as wide as the seed's window for a range that is itself small, and that cost is what the floor is written
+               for. So those nodes are bounded by the rows that range holds, counted here with the statement's own bounds, and every other node
+               (the scans of collection_time, and the heap) by the rows of the arm's own range as before. A node that walks past its own
+               bounds fails the first, and a plan that reads the window through collection_time fails the second. */
+            var wideNodes = nodes.Where(n =>
                 Text(n, "Relation Name").StartsWith("query_store_interval_wide", StringComparison.Ordinal)
-                && Text(n, "Node Type") != "Bitmap Index Scan").ToList();
-            Assert.NotEmpty(wideScans);
-            var examined = wideScans.Sum(n => (Num(n, "Actual Rows") + Num(n, "Rows Removed by Filter") + Num(n, "Rows Removed by Index Recheck")) * Num(n, "Actual Loops"));
+                || (Text(n, "Node Type") == "Bitmap Index Scan" && Text(n, "Index Name").Contains("query_store_interval_wide", StringComparison.Ordinal))).ToList();
+            Assert.NotEmpty(wideNodes);
+            double Examined(JsonElement n) => (Num(n, "Actual Rows") + Num(n, "Rows Removed by Filter") + Num(n, "Rows Removed by Index Recheck")) * Num(n, "Actual Loops");
+            bool OnFirstExecIndex(JsonElement n) => Text(n, "Index Name").Contains("first_exec", StringComparison.Ordinal);
+            string Describe(JsonElement n) => Text(n, "Node Type") + " " + Text(n, "Relation Name") + Text(n, "Index Name") + " rows " + Num(n, "Actual Rows") + " loops " + Num(n, "Actual Loops");
+
+            var rangeNodes = wideNodes.Where(n => !OnFirstExecIndex(n)).ToList();
+            var firstExecNodes = wideNodes.Where(OnFirstExecIndex).ToList();
+            var examined = rangeNodes.Sum(Examined);
             Assert.True(examined > 0, "the wide arms must have read rows");
             Assert.True(
                 examined < windowRows / 2.0,
                 "the wide arms examined " + examined.ToString("0", CultureInfo.InvariantCulture) + " rows of a window that holds " + windowRows + "; nodes: "
-                + string.Join(" | ", wideScans.Select(n => Text(n, "Node Type") + " " + Text(n, "Relation Name") + Text(n, "Index Name") + " rows " + Num(n, "Actual Rows") + " loops " + Num(n, "Actual Loops"))));
+                + string.Join(" | ", rangeNodes.Select(Describe)));
+
+            /* The rows each arm's first-execution range holds, for the servers that share the arm, summed over the arms (the arms' index
+               scans sit under one plan, and an arm's nodes cannot return more than the rows of its own bounds). */
+            long firstExecRows = 0;
+            foreach (var group in plan.WideRanges.GroupBy(r => (r.From, r.To)))
+            {
+                var servers = string.Join(",", group.Select(r => r.ServerId).Distinct().OrderBy(s => s));
+                firstExecRows += await ComposeStampLiveSupport.CountAsync(
+                    a.Connection,
+                    $@"SELECT count(*) FROM collect.query_store_interval_wide
+WHERE server_id IN ({servers})
+AND first_execution_time >= TIMESTAMP '{At(group.Key.From)}' - {QueryStoreIntervalWide.PurgeEdgeMarginSql}
+AND first_execution_time <= LEAST(TIMESTAMP '{At(group.Key.To)}', TIMESTAMP '{At(a.End)}') + {QueryStoreIntervalWide.FirstExecUpperSlackSql}",
+                    ct);
+            }
+
+            var firstExecExamined = firstExecNodes.Sum(Examined);
+            Assert.True(
+                firstExecExamined <= firstExecRows,
+                "the first-execution indexes returned " + firstExecExamined.ToString("0", CultureInfo.InvariantCulture) + " entries for arms whose first-execution ranges hold "
+                + firstExecRows + " rows; nodes: " + string.Join(" | ", firstExecNodes.Select(Describe)));
 
             await transaction.RollbackAsync(ct);
             bodySucceeded = true;
