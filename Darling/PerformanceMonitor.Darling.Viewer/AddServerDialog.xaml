@@ -258,9 +258,15 @@
                 <CheckBox x:Name="GrantScriptFinOpsCheck" Content="FinOps" VerticalAlignment="Center" Margin="8,0,0,0" DockPanel.Dock="Left"
                           Foreground="{DynamicResource ForegroundBrush}"
                           ToolTip="Also grant what the FinOps Index Analysis tab needs in each user database."/>
-                <Button Content="_Cancel" Width="80" Height="30" Click="CancelButton_Click" DockPanel.Dock="Right" IsCancel="True"/>
-                <Button x:Name="SaveButton" Content="_Save" Width="80" Height="30" Click="SaveButton_Click" Style="{StaticResource AccentButton}" DockPanel.Dock="Right" Margin="0,0,8,0"/>
             </DockPanel>
+            <!-- #6823: Save and Cancel sit on their own row. They shared the DockPanel above with the three tool
+                 controls, whose widths add up to more than the 450 px dialog, and a DockPanel clips its last
+                 children first, so Save was the control pushed out of view. On a row of their own nothing the
+                 tool row grows to can reach them. -->
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                <Button x:Name="SaveButton" Content="_Save" Width="80" Height="30" Click="SaveButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
+                <Button Content="_Cancel" Width="80" Height="30" Click="CancelButton_Click" IsCancel="True"/>
+            </StackPanel>
         </StackPanel>
     </Grid>
 </Window>
