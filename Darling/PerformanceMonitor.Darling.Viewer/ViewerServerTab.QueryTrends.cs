@@ -188,7 +188,7 @@ public partial class ViewerServerTab
 
     /// <summary>
     /// The one composition every trend title here goes through (#3653): <c>Source: {what served}</c>, and only
-    /// when the series' head was not served, <c>— data begins {head}; {why}</c>. One method so the two series
+    /// when the series' head was not served, <c>. Data begins {head} because {why}.</c>. One method so the two series
     /// types cannot drift in the shape of the sentence — the word order, the dash, the timestamp format —
     /// while each says its own truth in the two slots. Terse in the common case on purpose: a long banner on
     /// every chart teaches the eye to skip the one that matters.
@@ -201,7 +201,7 @@ public partial class ViewerServerTab
         }
 
         var from = ViewerTimeHelper.FormatForDisplay(head, "yyyy-MM-dd HH:mm");
-        return $"Source: {served} — data begins {from}; {whyUnserved}";
+        return $"Source: {served}. Data begins {from} because {whyUnserved}.";
     }
 
     /// <summary>Puts <see cref="DescribeTrendCoverage"/> on a chart as its title, coloured like its tick
@@ -213,11 +213,16 @@ public partial class ViewerServerTab
     private static void ShowTrendCoverage(ScottPlot.WPF.WpfPlot chart, QueryStoreTrendSeries series)
         => ShowTrendCoverageTitle(chart, DescribeQueryStoreTrendCoverage(series));
 
-    private static void ShowTrendCoverageTitle(ScottPlot.WPF.WpfPlot chart, string coverage)
+    /// <summary>The width a chart is taken to have before it is laid out (half of 1366 less the tab's margins, the four trend charts sit two across), so a caption set on a tab that was never shown still wraps.</summary>
+    private const double UnlaidChartWidth = 650;
+
+    internal static void ShowTrendCoverageTitle(ScottPlot.WPF.WpfPlot chart, string coverage)
     {
-        chart.Plot.Title(coverage);
+        /* #6832: the title is one centred line, cut at both ends at 1366x768. Break it to the chart's width; every refresh re-wraps it. */
+        const float fontSize = 11;
+        chart.Plot.Title(PerformanceMonitor.Ui.ChartCaption.Wrap(coverage, chart.ActualWidth > 0 ? chart.ActualWidth : UnlaidChartWidth, fontSize));
         chart.Plot.Axes.Title.Label.ForeColor = chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
-        chart.Plot.Axes.Title.Label.FontSize = 11;
+        chart.Plot.Axes.Title.Label.FontSize = fontSize;
         chart.Plot.Axes.Title.Label.Bold = false;
     }
 

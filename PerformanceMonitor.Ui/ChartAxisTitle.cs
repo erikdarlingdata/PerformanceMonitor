@@ -59,10 +59,33 @@ namespace PerformanceMonitor.Ui
             return (title[..(max - 1)].TrimEnd() + "…", MinFontSize);
         }
 
+        /// <summary>
+        /// #6832: the rotated title is centred on the plot, and the top and bottom tick labels sit at the plot's ends, so a title
+        /// longer than the plot minus one tick label's height runs into them (and out of the figure on a plot of 30 px). Scaled
+        /// units: a 13 point tick label is about 16 tall, plus a few for its padding.
+        /// </summary>
+        public const double TickLabelClearance = 20;
+
+        /// <summary>
+        /// #6832: the left axis panel is at least this wide (scaled units): the title's height (a 12 point line, about 16), a tick
+        /// mark, and a tick label of six characters at 13 points ("398.17", about 48), with some padding.
+        /// </summary>
+        public const double LeftPanelMinWidth = 80;
+
+        /// <summary>
+        /// The room (scaled units) the title may use: the plot's height, less <see cref="TickLabelClearance"/>. The plot's height
+        /// is the figure's less <paramref name="chromeHeight"/>, the space the bottom ticks, legend and padding take as last
+        /// measured (<see cref="ChartLayout.ChromeHeight"/>); <see cref="ReservedHeight"/> until a render has measured it.
+        /// </summary>
+        public static double AvailableFor(double figureHeight, double? chromeHeight) =>
+            figureHeight - (chromeHeight ?? ReservedHeight) - TickLabelClearance;
+
         private sealed class State
         {
             public string? Original;
             public string? Applied;
+            public double? UsedChrome;
+            public bool RefitPending;
         }
 
         private static readonly ConditionalWeakTable<ScottPlot.Plot, State> s_state = new();
@@ -79,10 +102,25 @@ namespace PerformanceMonitor.Ui
                 var label = plot.Axes.Left.Label;
                 if (label.Text != state.Applied) state.Original = label.Text;
                 if (string.IsNullOrEmpty(state.Original)) { state.Applied = null; return; }
-                var (text, size) = Fit(state.Original, rp.ScaledFigureRect.Height - ReservedHeight);
+                state.UsedChrome = ChartLayout.ChromeHeight(plot);
+                var (text, size) = Fit(state.Original, AvailableFor(rp.ScaledFigureRect.Height, state.UsedChrome));
                 label.Text = text;
                 label.FontSize = (float)size;
                 state.Applied = text;
+            };
+            // The first render of a chart fits with the estimate. Once it has measured the real chrome (a ten-entry legend is
+            // three rows tall), one more render fits the title to the plot that is really there.
+            plot.RenderManager.RenderFinished += (_, rp) =>
+            {
+                var measured = ChartLayout.ChromeHeight(plot);
+                if (state.RefitPending || measured is null || string.IsNullOrEmpty(state.Original)) return;
+                if (state.UsedChrome is { } used && Math.Abs(used - measured.Value) <= 3) return;
+                state.RefitPending = true;
+                chart.Dispatcher.BeginInvoke(() =>
+                {
+                    state.RefitPending = false;
+                    if (ReferenceEquals(chart.Plot, plot)) chart.Refresh();
+                }, System.Windows.Threading.DispatcherPriority.Background);
             };
         }
     }
@@ -92,6 +130,102 @@ namespace PerformanceMonitor.Ui
     {
         /// <summary>Smallest height a chart row may shrink to; below it the tab scrolls instead (a shorter plot cannot draw its ticks).</summary>
         public const double MinPlotHeight = 200;
+
+        /// <summary>
+        /// #6832: smallest height the plot area (the data rectangle, not the chart row) may have. The row minimum above is for a chart
+        /// with a one-line legend. A ten-entry legend is three lines and a restart marker adds an entry, so the row grows by what the
+        /// legend, the bottom ticks and the padding take, and the tab scrolls instead (<see cref="Attach"/>).
+        /// </summary>
+        public const double MinPlotAreaHeight = 100;
+
+        /// <summary>The row height that leaves <see cref="MinPlotAreaHeight"/> for the plot when everything but the plot takes <paramref name="chromeHeight"/>.</summary>
+        public static double RowMinHeightFor(double chromeHeight) => Math.Max(MinPlotHeight, chromeHeight + MinPlotAreaHeight);
+
+        private sealed class Chrome
+        {
+            public double Height = double.NaN;
+            public float FigureHeight;
+            public bool FitPending;
+        }
+
+        private static readonly ConditionalWeakTable<ScottPlot.Plot, Chrome> s_chrome = new();
+        private static readonly ConditionalWeakTable<System.Windows.Controls.RowDefinition, object> s_baseRowMin = new();
+        private static readonly ConditionalWeakTable<System.Windows.Controls.Grid, object> s_baseGridMin = new();
+
+        /// <summary>The height (scaled units) of everything in the figure but the plot area, from the plot's last render; null before the first.</summary>
+        public static double? ChromeHeight(ScottPlot.Plot plot) =>
+            s_chrome.TryGetValue(plot, out var c) && !double.IsNaN(c.Height) ? c.Height : null;
+
+        /// <summary>
+        /// Measures every render of the chart and, when the chart sits in a star row of a Grid whose XAML minimum is
+        /// <see cref="MinPlotHeight"/> or more, raises that row's minimum to <see cref="RowMinHeightFor"/> and the Grid's own minimum
+        /// to the rows' total, so the tab's scroll viewer scrolls instead of clipping the chart. A chart anywhere else is only measured.
+        /// Safe to call more than once per plot. Rendering happens on the UI thread; the row is adjusted after it, at background priority.
+        /// </summary>
+        public static void Attach(WpfPlot chart)
+        {
+            var plot = chart.Plot;
+            if (s_chrome.TryGetValue(plot, out _)) return;
+            var chrome = new Chrome();
+            s_chrome.Add(plot, chrome);
+            plot.RenderManager.RenderStarting += (_, rp) => chrome.FigureHeight = rp.ScaledFigureRect.Height;
+            plot.RenderManager.RenderFinished += (_, rp) =>
+            {
+                var measured = chrome.FigureHeight - rp.DataRect.Height;
+                if (!(measured > 0) || double.IsInfinity(measured)) return;
+                var changed = double.IsNaN(chrome.Height) || Math.Abs(chrome.Height - measured) > 0.5;
+                chrome.Height = measured;
+                if (!changed || chrome.FitPending) return;
+                chrome.FitPending = true;
+                chart.Dispatcher.BeginInvoke(() =>
+                {
+                    chrome.FitPending = false;
+                    FitRow(chart);
+                }, System.Windows.Threading.DispatcherPriority.Background);
+            };
+        }
+
+        private static void FitRow(WpfPlot chart)
+        {
+            // WpfPlot -> Border -> Grid is how every chart tab hosts a chart; walk up to the Grid whichever the nesting.
+            System.Windows.DependencyObject child = chart;
+            System.Windows.Controls.Grid? grid = null;
+            while (child is not null)
+            {
+                var parent = System.Windows.Media.VisualTreeHelper.GetParent(child);
+                if (parent is System.Windows.Controls.Grid g) { grid = g; break; }
+                child = parent;
+            }
+            if (grid is null || child is not System.Windows.FrameworkElement host) return;
+
+            var row = System.Windows.Controls.Grid.GetRow(host);
+            if (row < 0 || row >= grid.RowDefinitions.Count) return;
+            var definition = grid.RowDefinitions[row];
+            var baseMin = (double)s_baseRowMin.GetValue(definition, d => ((System.Windows.Controls.RowDefinition)d).MinHeight);
+            if (baseMin < MinPlotHeight || !definition.Height.IsStar) return;
+
+            var need = baseMin;
+            foreach (System.Windows.UIElement sibling in grid.Children)
+            {
+                if (System.Windows.Controls.Grid.GetRow(sibling) != row) continue;
+                var plot = ((sibling as System.Windows.Controls.Border)?.Child as WpfPlot ?? sibling as WpfPlot)?.Plot;
+                // The Border around the chart has a margin between charts, and that is part of the row, not of the chart.
+                var margin = sibling is System.Windows.FrameworkElement fe ? fe.Margin.Top + fe.Margin.Bottom : 0;
+                if (plot is not null && ChromeHeight(plot) is { } h) need = Math.Max(need, Math.Ceiling(RowMinHeightFor(h) + margin)); // whole pixels: the chart renders at its pixel size, truncated
+            }
+            if (Math.Abs(definition.MinHeight - need) > 0.5) definition.MinHeight = need;
+
+            var baseGridMin = (double)s_baseGridMin.GetValue(grid, g => ((System.Windows.Controls.Grid)g).MinHeight);
+            double total = 0;
+            foreach (var d in grid.RowDefinitions)
+            {
+                if (d.Height.IsStar) total += d.MinHeight;
+                else if (d.Height.IsAbsolute) total += d.Height.Value;
+                else total += d.ActualHeight;
+            }
+            var gridMin = Math.Max(baseGridMin, total);
+            if (Math.Abs(grid.MinHeight - gridMin) > 0.5) grid.MinHeight = gridMin;
+        }
 
         /// <summary>
         /// A chart inside a vertical <see cref="System.Windows.Controls.ScrollViewer"/> keeps the mouse wheel for its own

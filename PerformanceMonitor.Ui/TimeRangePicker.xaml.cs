@@ -326,7 +326,7 @@ public partial class TimeRangePicker : UserControl
 
         foreach (var spec in TimeRangePresets.CalendarPeriods)
         {
-            var length = new TextBlock { HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
+            var length = new TextBlock { HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0, 0, 0) };
             length.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundDimBrush");
             var row = new Grid();
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -344,6 +344,9 @@ public partial class TimeRangePicker : UserControl
             };
             AutomationProperties.SetName(button, spec.Name);
             button.Click += Preset_Click;
+            /* #6832: both apps' button templates centre their content presenter, so HorizontalContentAlignment=Stretch does not reach the row and
+               it shrank to its text, leaving the label touching its duration ("Today7h 52m"). Give the row the button's inner width so the duration sits at the right edge. */
+            button.SizeChanged += (_, _) => row.Width = Math.Max(0, button.ActualWidth - button.Padding.Left - button.Padding.Right - button.BorderThickness.Left - button.BorderThickness.Right);
             PeriodPanel.Children.Add(button);
             _periodButtons.Add((button, spec, length));
         }
