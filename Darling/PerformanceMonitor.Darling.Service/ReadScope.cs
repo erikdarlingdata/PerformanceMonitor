@@ -53,7 +53,9 @@ internal sealed class ReadScope
     private string? _source;
     private string? _sourceReason;
     private long _rows = -1;
-    private int _serverId = -1;
+    /* #6834: a server id is a hash of the name, so half of them are negative; "none noted" is a value no int can hold. */
+    private const long NoServer = long.MinValue;
+    private long _serverId = NoServer;
     private long _waitTicks;
     private DateTime? _windowStart;
     private DateTime? _windowEnd;
@@ -203,14 +205,14 @@ internal sealed class ReadScope
     internal long? Rows { get { var r = Interlocked.Read(ref _rows); return r < 0 ? null : r; } }
 
     /// <summary>The monitored server id the read resolved, or null for a store-wide or fleet read.</summary>
-    internal int? ServerId { get { var id = Volatile.Read(ref _serverId); return id < 0 ? null : id; } }
+    internal int? ServerId { get { var id = Interlocked.Read(ref _serverId); return id == NoServer ? null : (int)id; } }
 
     /// <summary>Notes the server a read resolved. Ignored outside a scope; the first one noted stays.</summary>
     internal static void NoteServer(int serverId)
     {
-        if (s_current.Value is { } scope && serverId >= 0)
+        if (s_current.Value is { } scope)
         {
-            Interlocked.CompareExchange(ref scope._serverId, serverId, -1);
+            Interlocked.CompareExchange(ref scope._serverId, serverId, NoServer);
         }
     }
 
