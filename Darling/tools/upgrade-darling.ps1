@@ -31,9 +31,12 @@ What it does, in order:
      guard fired, what it caught was an operator's own psql.exe sitting in the install directory from a
      diagnostic query.
   5. Stops the service and waits for it to actually be Stopped.
-  6. Copies the install root's FILES (not its subdirectories) to _rollback_manual_<stamp>. A re-run inside
-     -BackupWindowMinutes reuses the existing backup instead of taking a second one, because a second one
-     would be a copy of the half-extracted tree written over your only good copy.
+  6. Copies the install root's FILES (not its subdirectories) to _rollback_manual_<stamp>. A re-run of an
+     INTERRUPTED upgrade inside -BackupWindowMinutes reuses the existing backup instead of taking a second one,
+     because a second one would be a copy of the half-extracted tree written over your only good copy. An
+     upgrade that FINISHED (darling-install-manifest.txt is newer than the backup) always gets a new backup,
+     so two complete upgrades inside the window do not leave the newest backup two builds back. A missing or
+     unreadable manifest counts as not finished.
   7. Prunes the rollback backups past -KeepRollbacks, each in its own handler.
   8. Lays the new build over the install root, retrying once on the transient file lock that has bitten this
      step before.
@@ -74,7 +77,9 @@ back a bad deploy; the fourth can only roll back to a version nobody wants.
 
 .PARAMETER BackupWindowMinutes
 A backup newer than this is reused rather than replaced, so a re-run after an interrupted upgrade does not
-overwrite the good pre-upgrade copy with a copy of the half-upgraded tree.
+overwrite the good pre-upgrade copy with a copy of the half-upgraded tree. It is reused only when that upgrade
+did not finish: if darling-install-manifest.txt was written after the backup, the last upgrade completed and
+this one takes a new backup. A missing or unreadable manifest keeps the backup in use.
 
 .PARAMETER PruneOnly
 Prune the rollback backups and exit. Nothing is stopped, nothing is copied, and the service keeps running.
@@ -2118,6 +2123,47 @@ function Test-DarlingRollbackBackupIsRecent($backups, [int]$withinMinutes, [date
     return ($elapsed -ge 0) -and ($elapsed -lt $withinMinutes)
 }
 
+# When the install manifest was last written (UTC), or $null when it is missing or cannot be read. The manifest is written
+# only after a successful copy (step 8), so its time is the time the last upgrade FINISHED. A failure to read it is never
+# fatal: $null sends the caller down the reuse side, the safe one.
+function Get-DarlingInstallManifestWriteUtc([string]$manifestPath) {
+    try {
+        if ([string]::IsNullOrWhiteSpace($manifestPath)) { return $null }
+        $item = Get-Item -LiteralPath $manifestPath -Force -ErrorAction Stop
+        if ($item.PSIsContainer) { return $null }
+        return [datetime]$item.LastWriteTimeUtc
+    }
+    catch {
+        return $null
+    }
+}
+
+# True when the upgrade that took the newest backup FINISHED: the install manifest was written after that backup (#6821).
+#
+# Test-DarlingRollbackBackupIsRecent alone looks only at the backup's age, so two complete upgrades inside one window
+# reused the first one's backup, and the newest backup then held root files from two builds back. The manifest is written
+# only after the copy succeeds and every copy failure stops before it, so a manifest newer than the backup means the last
+# upgrade is not an interrupted one and this run needs a backup of its own.
+#
+# A missing or unreadable manifest ($null) and one not later than the backup both answer $false, which keeps the reuse: an
+# interrupted first upgrade has no manifest, and a spare backup costs 120 MB while a lost good copy costs the rollback.
+function Test-DarlingLastUpgradeFinishedAfterBackup($backups, $manifestWriteUtc) {
+    $ordered = @($backups | Where-Object { $null -ne $_ })
+    if ($ordered.Count -eq 0) { return $false }
+    if ($null -eq $manifestWriteUtc) { return $false }
+    return ([datetime]$manifestWriteUtc) -gt $ordered[0].LastWriteTimeUtc
+}
+
+# What step 6 does about the backup, as one word so the decision runs under test and the caller only acts on it:
+#   'reuse'    a recent backup and the upgrade that took it did not finish (a re-run of an interrupted upgrade)
+#   'finished' a recent backup, but the install manifest is newer, so that upgrade completed: take a new backup
+#   'new'      no backup, or none inside the window: take a new backup
+function Get-DarlingRollbackBackupDecision($backups, [int]$withinMinutes, [datetime]$nowUtc, [string]$manifestPath) {
+    if (-not (Test-DarlingRollbackBackupIsRecent $backups $withinMinutes $nowUtc)) { return 'new' }
+    if (Test-DarlingLastUpgradeFinishedAfterBackup $backups (Get-DarlingInstallManifestWriteUtc $manifestPath)) { return 'finished' }
+    return 'reuse'
+}
+
 # ============================ the install tree ============================
 
 # True when two paths name the same directory: both go through Get-DarlingCanonicalPath (#5673), so a folder typed as a
@@ -3518,10 +3564,17 @@ Invoke-UpgradeTreeLock 'before the backup and the copy'
 $backups = Get-DarlingRollbackBackups $InstallRoot
 $nowUtc = [datetime]::UtcNow
 
-if (Test-DarlingRollbackBackupIsRecent $backups $BackupWindowMinutes $nowUtc) {
-    Note ("Reusing the rollback backup {0}, taken {1:N0} minute(s) ago - this looks like a re-run of an interrupted upgrade, and a second backup now would copy a half-upgraded tree over the good one." -f $backups[0].Name, ($nowUtc - $backups[0].LastWriteTimeUtc).TotalMinutes)
+# A recent backup is reused only when the upgrade that took it did not finish (#6821): a manifest written after it means
+# that upgrade completed, and reusing its backup would leave the newest backup holding files from two builds back.
+$backupDecision = Get-DarlingRollbackBackupDecision $backups $BackupWindowMinutes $nowUtc $manifestPath
+
+if ($backupDecision -eq 'reuse') {
+    Note ("Reusing the rollback backup {0}, taken {1:N0} minute(s) ago - this looks like a re-run of an interrupted upgrade (no upgrade has finished since it was taken), and a second backup now would copy a half-upgraded tree over the good one." -f $backups[0].Name, ($nowUtc - $backups[0].LastWriteTimeUtc).TotalMinutes)
 }
 else {
+    if ($backupDecision -eq 'finished') {
+        Note ("The rollback backup {0} is inside the {1}-minute window, but the upgrade that took it finished (the install manifest is newer), so this is a new upgrade and it takes its own backup." -f $backups[0].Name, $BackupWindowMinutes)
+    }
     $backupPath = Join-Path $InstallRoot (New-DarlingRollbackBackupName $nowUtc)
     Note "Backing up the install root's files to $backupPath ..."
     try {
