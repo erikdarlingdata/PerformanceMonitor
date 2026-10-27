@@ -293,6 +293,49 @@ INSERT INTO collect.query_store_compose_stamp_hours (hour, built_at) VALUES (TIM
         }
     }
 
+    /// <summary>
+    /// A build before V221 retires an hour from the hours table without touching the hash-hourly table (the rollback the admin guide
+    /// documents), so after a roll forward the hours table no longer names the hour and a delete driven by the retired hours would keep its
+    /// rows for good. The cleanup deletes by the floor: rows below it go whether or not the hours table still holds the hour.
+    /// </summary>
+    [Fact]
+    public async Task TheCleanup_RemovesHashHourlyRowsBelowTheFloor_ForAnHourTheHoursTableNoLongerHolds()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ComposeStampLiveSupport.BaseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var bodySucceeded = false;
+        try
+        {
+            var now = DateTime.UtcNow;
+            var floor = QueryStoreComposeStamp.FloorHour(now, ComposeStampLiveSupport.RetentionDays);
+            /* Hash-hourly rows for two hours below the floor and two at or above it, and hours-table rows only for the ones at or above:
+               an older build retired the two below without deleting their hash rows. */
+            foreach (var hour in new[] { floor.AddHours(-5), floor.AddHours(-3), floor, floor.AddHours(1) })
+            {
+                await ExecAsync(connection, $@"
+INSERT INTO collect.query_store_hash_hourly (hour, wide_rows, server_id, query_hash) VALUES (TIMESTAMP '{At(hour)}', 1, 1, 'a'), (TIMESTAMP '{At(hour)}', 1, 2, NULL)", ct);
+            }
+            foreach (var hour in new[] { floor, floor.AddHours(1) })
+            {
+                await ExecAsync(connection, $"INSERT INTO collect.query_store_compose_stamp_hours (hour, built_at) VALUES (TIMESTAMP '{At(hour)}', now() AT TIME ZONE 'UTC')", ct);
+            }
+
+            Assert.Equal(0, await QueryStoreComposeStamp.GcAsync(connection, now, ComposeStampLiveSupport.RetentionDays, ct));
+            Assert.Equal(0, await CountAsync(connection, $"SELECT count(*) FROM collect.query_store_hash_hourly WHERE hour < TIMESTAMP '{At(floor)}'", ct));
+            Assert.Equal(4, await CountAsync(connection, "SELECT count(*) FROM collect.query_store_hash_hourly", ct));
+            Assert.Equal(2, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
     [Fact]
     public async Task TheRung_RunsTwiceCleanly_ScansAndRewritesNothing_AndAddsANullableColumnWithNoDefault()
     {

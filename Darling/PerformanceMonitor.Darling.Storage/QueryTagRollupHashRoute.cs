@@ -19,8 +19,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <summary>
 /// #6800 part 2, step 2: the route of the fleet Query Store tag roll-up. A fleet read (two or more allowed servers) takes the hours the
 /// hourly builder has done from <c>collect.query_store_hash_hourly</c> and everything else from <c>collect.query_store_interval_wide</c>, so
-/// the answer stays what the single wide statement (<see cref="QueryTagRollupSql.QueryStoreSql"/>) returns, while the whole hours cost a
-/// narrow table's rows instead of the wide table's.
+/// the answer is what the single wide statement (<see cref="QueryTagRollupSql.QueryStoreSql"/>) returns, while the whole hours cost a
+/// narrow table's rows instead of the wide table's, with ONE exception: a row whose <c>first_execution_time</c> is more than 12 hours
+/// after the window end. The wide statement and the routed wide arms bound that column (<c>first_execution_time &lt;= window end +
+/// FirstExecUpperSlack</c>, #5523) to keep their <c>(server_id, first_execution_time)</c> range finite, so they drop such a row from a
+/// window it would count in a wider one. The hour and day tables carry no <c>first_execution_time</c>, so they keep the row every time.
+/// That takes a monitored server whose clock runs more than 12 hours fast, and the wide statement's own answer for the row already
+/// depends on where the window ends, so the bound is deliberately not added to the builds.
 ///
 /// <para>The source of a (server, hour) is decided in C# from two small reads in the read's own snapshot: the window's built hours and
 /// the pairs whose table rows are no longer valid. Each server's read STARTS ON THE HOUR: its read start snapped up to the next whole hour

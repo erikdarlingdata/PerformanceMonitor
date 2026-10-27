@@ -133,6 +133,12 @@ public static class QueryTagRollupSql
     /// servers, so each range paid for the whole window's index entries and the bitmap went lossy. With the values in the arm the planner
     /// sees the real range and scans <c>collection_time</c> alone. A constant floor shared by all ranges was tried first and did not stop
     /// it (PR notes).</para>
+    ///
+    /// <para>The wide arms bound <c>first_execution_time</c> above by the window end plus <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>,
+    /// as <see cref="QueryStoreSql"/> does. The table arm and the day arm have no such bound, because the hour and day rows do not carry the
+    /// column. So the routed answer equals <see cref="QueryStoreSql"/> except for a row whose first execution is more than 12 hours after the
+    /// window end (a monitored server whose clock runs more than 12 hours fast): the statement drops it from a window it would count in a
+    /// wider one, and the tables keep it every time.</para>
     /// </summary>
     public static string QueryStoreRoutedSqlFor(int wideRanges, bool days = false)
     {

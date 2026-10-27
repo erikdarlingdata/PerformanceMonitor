@@ -26,7 +26,9 @@ namespace Darling.Tests;
 /// <summary>
 /// #6800 part 2, step 3c: the fleet Query Store tag roll-up also takes whole UTC days from <c>collect.query_store_hash_daily</c>
 /// (<see cref="QueryTagRollupHashRoute"/>), against a real PostgreSQL store (<c>DARLING_TEST_PG</c>). The answer must equal the single wide
-/// statement's (<see cref="QueryTagRollupSql.QueryStoreSql"/>) value for value over the window the route read. The seed is nine days of
+/// statement's (<see cref="QueryTagRollupSql.QueryStoreSql"/>) value for value over the window the route read, for a seed whose first
+/// executions are all within 12 hours of the window end: a row first executed later than that is dropped by the wide statement's
+/// <c>first_execution_time</c> bound and kept by the tables, the one difference (see <see cref="QueryTagRollupHashRoute"/>). The seed is nine days of
 /// wide rows for four servers (a stamp every 20 minutes, six queries, two plans, a NULL hash, products past a bigint), every hour and every
 /// whole day built, the anchored end (<see cref="LiveClock.AnchoredEnd"/>) 22:00 yesterday, so the newest day is open.
 /// </summary>

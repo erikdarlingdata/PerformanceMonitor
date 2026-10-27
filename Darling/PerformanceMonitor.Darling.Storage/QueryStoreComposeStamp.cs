@@ -448,8 +448,14 @@ WHERE {FactAlias}.collection_time >= $1
   AND {FactAlias}.first_execution_time >= $1 - {QueryStoreIntervalWide.PurgeEdgeMarginSql}
 GROUP BY {FactAlias}.server_id, {FactAlias}.query_hash;";
 
-    /// <summary>Removes one expired hour of hash-hourly rows: $1 the hour. Run per expired hour, like <see cref="GcRollupSql"/>.</summary>
-    public const string GcHashHourlySql = DeleteHashHourSql;
+    /// <summary>
+    /// Removes every hash-hourly row below the floor: $1 the floor, served by the (hour, server_id) index. By the floor and not by
+    /// the hours <see cref="GcHoursSql"/> returned in one call, as <see cref="GcBuiltSql"/> and the day cleanup do: a build before
+    /// V221 (a documented rollback) retires hours without touching this table, and those rows must still go after a roll forward.
+    /// </summary>
+    public const string GcHashHourlySql = @"
+DELETE FROM collect.query_store_hash_hourly
+WHERE hour < $1;";
 
     private static string InsertColumns() =>
         "collection_time, " + string.Join(", ", PartialColumnMap.Select(c => c.Column)) + ", " + string.Join(", ", DimensionColumns);
@@ -999,11 +1005,11 @@ WHERE hour < $1;";
             await rollup.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        /* V221 (#6800): the hash-hourly rows of the same hours, by the (hour, server_id) index, in the same transaction. */
-        foreach (var hour in expired)
+        /* V221 (#6800): the hash-hourly rows below the floor, by the (hour, server_id) index, in the same transaction. By the floor and not
+           by `expired`: a pre-V221 build retires hours without deleting their rows here, and `expired` never names those hours again. */
+        await using (var hashHourly = new NpgsqlCommand(GcHashHourlySql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
-            await using var hashHourly = new NpgsqlCommand(GcHashHourlySql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
-            hashHourly.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hour });
+            hashHourly.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
             await hashHourly.ExecuteNonQueryAsync(cancellationToken);
         }
 

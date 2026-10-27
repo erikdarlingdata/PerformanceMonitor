@@ -27,7 +27,9 @@ namespace Darling.Tests;
 /// #6800 part 2, step 2: the fleet Query Store tag roll-up reads built hours from <c>collect.query_store_hash_hourly</c> and the rest from
 /// the wide table (<see cref="QueryTagRollupHashRoute"/>), against a real PostgreSQL store (<c>DARLING_TEST_PG</c>). The answer must equal
 /// the single wide statement's (<see cref="QueryTagRollupSql.QueryStoreSql"/>) value for value over the window the route actually read, which
-/// starts on the hour (the read start rounded up, #6800 part 2, step 3a). The seed is the shared 30-hour one (three
+/// starts on the hour (the read start rounded up, #6800 part 2, step 3a), for a seed whose first executions are all within 12 hours of the
+/// window end: a row first executed later than that is dropped by the wide statement's <c>first_execution_time</c> bound and kept by the
+/// tables, which is the one difference (see <see cref="QueryTagRollupHashRoute"/>). The seed is the shared 30-hour one (three
 /// servers, 28 hours built, the newest two hours unbuilt), read through a window with an unaligned start, with the three measures the
 /// stamp does not carry added, three tags mapped on two servers, and a NULL-hash group on every server.
 /// </summary>
