@@ -140,6 +140,9 @@ export function sectionCard(section, block, onTag, range = "this time range", se
     return el("div", { class: "panel", "data-section": section.name }, parts);
   }
   if (section.name === "deadlocks") parts.push(el("div", { class: "muted", text: DEADLOCK_NOTE }));
+  /* #6794: an hourly-rollup section says which edges the hour buckets moved (the note names the materialization ceiling). */
+  if (block.window_edges_note) parts.push(el("div", { class: "muted", text: plainText(block.window_edges_note) }));
+  else if (block.tier === "hourly" && block.window_end) parts.push(el("div", { class: "muted", text: "Read from the hourly rollup up to " + block.window_end + "." }));
   if (isEmptyBlock(block) && !Array.isArray(block.servers)) {
     parts.push(emptyStrip("None in " + range + "."));
     return el("div", { class: "panel", "data-section": section.name }, parts);
