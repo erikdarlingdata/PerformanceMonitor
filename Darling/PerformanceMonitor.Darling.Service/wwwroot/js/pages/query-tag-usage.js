@@ -145,13 +145,12 @@ export function sourceText(source) {
   return plainText(s.replace(/collect\./g, "").replace(/_/g, " "));
 }
 
-/** "10 minutes", "1 minute": the gap between two instants, in whole minutes (a dropped first partial hour is under an hour). */
+/** The gap between two instants in whole minutes, or null when either is unreadable or the second is not later. */
 function minutesBetween(fromIso, toIso) {
   const a = parseUtc(fromIso);
   const b = parseUtc(toIso);
   if (!a || !b || b <= a) return null;
-  const m = Math.round((b.getTime() - a.getTime()) / 60000);
-  return m < 1 ? "under a minute" : m + (m === 1 ? " minute" : " minutes");
+  return Math.round((b.getTime() - a.getTime()) / 60000);
 }
 
 /**
@@ -168,7 +167,13 @@ export function edgesText(block) {
   const sentences = [];
   if (start) sentences.push(lead + " from " + start + (end ? " to " + end : "") + ".");
   const gap = minutesBetween(block.start_dropped_from, block.served_start);
-  if (gap) sentences.push(gap === "under a minute" ? "Less than a minute before the first full hour is not included." : "The " + gap + " before the first full hour " + (gap.startsWith("1 ") ? "is" : "are") + " not included.");
+  const gapFrom = at(block.start_dropped_from);
+  if (gap !== null && gap >= 60 && gapFrom && start) {
+    /* The first bucket came hours after the window start: that is a span with no data, not a partial first hour. */
+    sentences.push("The data from " + gapFrom + " to " + start + " is not included.");
+  } else if (gap !== null) {
+    sentences.push(gap < 1 ? "Less than a minute before the first full hour is not included." : "The " + gap + (gap === 1 ? " minute before the first full hour is" : " minutes before the first full hour are") + " not included.");
+  }
   const built = at(block.materialized_to);
   if (built) sentences.push("The hourly rollup is built only up to " + built + ", so nothing after that is included.");
   else if (block.end_hour_counted_whole && end) sentences.push("The last hour is counted whole, so the data runs to " + end + ", past the end of the window.");

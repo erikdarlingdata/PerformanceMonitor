@@ -112,6 +112,21 @@ public sealed class QueryTagUsageNotesTests : IDisposable
     }
 
     [Fact]
+    public void A_first_bucket_hours_after_the_start_names_the_span_not_a_partial_first_hour()
+    {
+        // The first stored bucket is 14:00 and the window began 10:30: the 3.5 hours between are a gap, not "the N minutes before the first full hour".
+        var note = QueryTagUsageNotes.Hourly(HourlyWindowEdges.Describe(Utc(26, 10, 30), Utc(26, 14, 0), Utc(27, 14, 0), Utc(27, 20, 0)), QueryTagUsageNotes.Stamper(1));
+
+        AssertPlain(note);
+        Assert.Contains("The data from 2026-10-26 10:30 UTC to 2026-10-26 14:00 UTC is not included.", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("before the first full hour", note, StringComparison.Ordinal);
+
+        var queryStore = QueryTagUsageNotes.QueryStore(false, Utc(26, 14, 0), Utc(26, 10, 30), Utc(27, 13, 20), QueryTagUsageNotes.Stamper(1));
+        Assert.Contains("The data from 2026-10-26 10:30 UTC to 2026-10-26 14:00 UTC is not included.", queryStore, StringComparison.Ordinal);
+        Assert.DoesNotContain("before the first full hour", queryStore, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void The_query_store_note_names_the_tables_in_words_and_says_the_dropped_start()
     {
         var served = Utc(26, 14, 0);

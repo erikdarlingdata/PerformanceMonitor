@@ -26,7 +26,10 @@ internal static class DarlingQueryTagRollupRouting
     /// <summary>
     /// How one stats section (plan cache or procedures) is served and what it says about how far it reached. <paramref name="Hourly"/>: the
     /// io rollup serves it, cut at <paramref name="Ceiling"/>. <paramref name="Disclosure"/> is merged into the section: on the hourly
-    /// branch <c>window_end</c> (the served end) and <c>window_edges_note</c>; on the raw branch <c>effective_start</c>, <c>window_truncated</c>
+    /// branch <c>window_end</c> (the served end), <c>window_edges_note</c> and the four edge fields (<c>served_start</c>,
+    /// <c>start_dropped_from</c>, <c>materialized_to</c>, <c>end_hour_counted_whole</c>, #6831). The Query Store section carries only
+    /// <c>served_start</c> and <c>start_dropped_from</c>: its read ends exactly at the window's end, so it has no ceiling or whole last hour to
+    /// report. On the raw branch <c>effective_start</c>, <c>window_truncated</c>
     /// and <c>truncation_note</c>, the notice <c>get_top_queries_by_cpu</c> carries.
     /// </summary>
     internal sealed record StatsRoute(bool Hourly, DateTime? Ceiling, Dictionary<string, object?> Disclosure);

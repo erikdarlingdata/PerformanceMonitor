@@ -137,6 +137,11 @@ public sealed class QueryTagUsageBehaviourTests
         Assert.Null(edges[2]);
         Assert.Contains("Less than a minute before the first full hour is not included.", edges[3]);
         Assert.DoesNotContain("under a minute", edges[3]);
+        // The first bucket came 5.5 hours after the window start: the missing span is named, never "the 330 minutes before the first full hour".
+        Assert.StartsWith("Hourly data from ", edges[4]);
+        Assert.Contains(" is not included.", edges[4]);
+        Assert.Contains("The data from ", edges[4]);
+        Assert.DoesNotContain("before the first full hour", edges[4]);
         var sources = run.GetProperty("sources").EnumerateArray().Select(n => n.GetString()).ToArray();
         Assert.Equal(["raw collections", "hourly rollup", "Query Store intervals", "hourly Query Store table, raw intervals for the edges", "dmv blocking snapshots"], sources);
 

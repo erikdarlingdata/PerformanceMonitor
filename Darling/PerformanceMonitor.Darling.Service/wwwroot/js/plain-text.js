@@ -166,7 +166,13 @@ const SYSTEM_HEALTH_EVENT_WORDS = {
   scheduler_monitor_system_health_ring_buffer_recorded: "scheduler monitor",
   memory_broker_ring_buffer_recorded: "memory broker",
   memory_node_oom_ring_buffer_recorded: "memory node out-of-memory",
+  error_reported: "error",
+  wait_info: "wait",
 };
+/* The two rules in namedTokenText match exactly the names the table above holds, so a name is added in one place. */
+const SYSTEM_HEALTH_EVENT_NAMES = Object.keys(SYSTEM_HEALTH_EVENT_WORDS).join("|");
+const SYSTEM_HEALTH_EVENT_COUNTED = new RegExp("(?<![\\w.])(\\d[\\d,]*) (" + SYSTEM_HEALTH_EVENT_NAMES + ") event\\(s\\)( were)?", "g");
+const SYSTEM_HEALTH_EVENT_BARE = new RegExp("\\b(" + SYSTEM_HEALTH_EVENT_NAMES + ")\\b", "g");
 
 function namedTokenText(text) {
   let t = text;
@@ -367,13 +373,10 @@ export function plainText(text) {
   /* #6831: the system_health event names ("1431 scheduler_monitor_system_health_ring_buffer_recorded event(s) were captured") in words, with
      the count's own plural. The same words say the name inside "No ... events were captured". */
   t = t.replace(
-    /(?<![\w.])(\d[\d,]*) (sp_server_diagnostics_component_result|scheduler_monitor_system_health_ring_buffer_recorded|memory_broker_ring_buffer_recorded|memory_node_oom_ring_buffer_recorded) event\(s\)( were)?/g,
+    SYSTEM_HEALTH_EVENT_COUNTED,
     (m, n, type, were) => n + " " + SYSTEM_HEALTH_EVENT_WORDS[type] + (n === "1" ? " event" + (were ? " was" : "") : " events" + (were || "")),
   );
-  t = t.replace(
-    /\b(sp_server_diagnostics_component_result|scheduler_monitor_system_health_ring_buffer_recorded|memory_broker_ring_buffer_recorded|memory_node_oom_ring_buffer_recorded)\b/g,
-    (m, type) => SYSTEM_HEALTH_EVENT_WORDS[type],
-  );
+  t = t.replace(SYSTEM_HEALTH_EVENT_BARE, (m, type) => SYSTEM_HEALTH_EVENT_WORDS[type]);
   /* #6831: the empty cut-window sentence's pointer at hints.effective_start, when the page has no instant to put there (util.js names it when it has one). */
   t = t.replace(/\bstarts at effective_start \(see hints\)/g, "starts partway into the window");
   /* "24 hour(s)", "288 collector run(s)": the count is known, so the word agrees with it ("1 hour", "24 hours", "2 queries"). */

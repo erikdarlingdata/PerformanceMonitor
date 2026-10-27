@@ -91,7 +91,7 @@ public partial class LocalDataService
         /* A section whose table is missing is unavailable with the reason, never a tool error (the twin's rule, #5983). */
         var unavailable = new Dictionary<string, string>();
 
-        async Task<List<T>> Served<T>(QueryTagRollupSection section, string source, Func<Task<List<T>>> read)
+        async Task<List<T>> Served<T>(QueryTagRollupSection section, Func<Task<List<T>>> read)
         {
             try
             {
@@ -99,13 +99,14 @@ public partial class LocalDataService
             }
             catch (DuckDBException ex) when (ex.Message.Contains("does not exist", StringComparison.OrdinalIgnoreCase))
             {
-                unavailable[section.Name] = $"{source} does not exist in this store yet.";
+                /* #6831: the windows show this text, so it says what is missing in words, as the Darling Viewer does, not the view's name. */
+                unavailable[section.Name] = $"This store has no {QueryTagRollup.SourceWords(section)} data yet.";
                 return [];
             }
         }
 
         Task<List<QueryTagRollupFact>> Additive(QueryTagRollupSection section, string sql, int keyColumns, Func<System.Data.Common.DbDataReader, int, int?> tagOf) =>
-            Served(section, QueryTagRollup.SourceOf(section), () => AdditiveRead(section, sql, keyColumns, tagOf));
+            Served(section, () => AdditiveRead(section, sql, keyColumns, tagOf));
 
         async Task<List<QueryTagRollupFact>> AdditiveRead(QueryTagRollupSection section, string sql, int keyColumns, Func<System.Data.Common.DbDataReader, int, int?> tagOf)
         {
@@ -204,15 +205,15 @@ GROUP BY server_id, {side}_client_app, {side}_login_name, {side}_host_name, data
             return rows;
         }
 
-        var reportRows = await Served(QueryTagRollupSection.BlockingReports, QueryTagRollup.SourceOf(QueryTagRollupSection.BlockingReports),
+        var reportRows = await Served(QueryTagRollupSection.BlockingReports,
             () => BlockingRows(QueryTagRollupSection.BlockingReports, w => StoredEventCopies.BlockedProcessReports(w) + " AS ev", "event_time"));
-        var snapshotRows = await Served(QueryTagRollupSection.BlockingSnapshots, QueryTagRollup.SourceOf(QueryTagRollupSection.BlockingSnapshots),
+        var snapshotRows = await Served(QueryTagRollupSection.BlockingSnapshots,
             () => BlockingRows(QueryTagRollupSection.BlockingSnapshots, w => $"(SELECT * FROM v_dmv_blocking_snapshots WHERE {w}) AS ev", "collection_time"));
 
         var graphs = new List<(int Server, List<string> Keys, bool Unparsed)>();
         var read = 0;
         var truncated = false;
-        var deadlockRows = await Served(QueryTagRollupSection.Deadlocks, QueryTagRollup.SourceOf(QueryTagRollupSection.Deadlocks), async () =>
+        var deadlockRows = await Served(QueryTagRollupSection.Deadlocks, async () =>
         {
             var found = new List<(int Server, string? Xml, DateTime? When)>();
             await ReadRowsAsync(connection, $@"

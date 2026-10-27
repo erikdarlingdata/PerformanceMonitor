@@ -241,11 +241,13 @@ public sealed class WebPlainTextTests
     [Fact]
     public void TheSystemHealthEventNames_AreSaidInWords_WithTheCountsPlural()
     {
-        string[] types =
-        [
-            SystemHealthParser.SchedulerMonitorEvent, SystemHealthParser.SpServerDiagnosticsEvent,
-            SystemHealthParser.MemoryBrokerEvent, SystemHealthParser.MemoryNodeOomEvent,
-        ];
+        /* Every event type the parser names, read from its public constants, so a seventh type fails here until the page says it in words. */
+        var types = typeof(SystemHealthParser)
+            .GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.EndsWith("Event", StringComparison.Ordinal))
+            .Select(f => (string)f.GetRawConstantValue()!)
+            .ToArray();
+        Assert.Equal(6, types.Length);
         var inputs = types.SelectMany(t => new[]
         {
             $"1431 {t} event(s) were captured for SQL2025 in the last 24 hour(s) and none qualified.",
@@ -253,9 +255,22 @@ public sealed class WebPlainTextTests
             $"No {t} events were captured for SQL2025 in the last 24 hour(s).",
         }).ToArray();
         var o = Run(inputs, out _);
-        Assert.StartsWith("1431 scheduler monitor events were captured for SQL2025 in the last 24 hours", o[0]);
-        Assert.StartsWith("1 scheduler monitor event was captured", o[1]);
-        Assert.StartsWith("No scheduler monitor events were captured", o[2]);
+        for (var i = 0; i < types.Length; i++)
+        {
+            var word = types[i] switch
+            {
+                SystemHealthParser.SchedulerMonitorEvent => "scheduler monitor",
+                SystemHealthParser.SpServerDiagnosticsEvent => "server diagnostics",
+                SystemHealthParser.MemoryBrokerEvent => "memory broker",
+                SystemHealthParser.MemoryNodeOomEvent => "memory node out-of-memory",
+                SystemHealthParser.ErrorReportedEvent => "error",
+                SystemHealthParser.WaitInfoEvent => "wait",
+                _ => throw new InvalidOperationException("an event type the page has no words for: " + types[i]),
+            };
+            Assert.StartsWith($"1431 {word} events were captured for SQL2025 in the last 24 hours", o[i * 3]);
+            Assert.StartsWith($"1 {word} event was captured", o[i * 3 + 1]);
+            Assert.StartsWith($"No {word} events were captured", o[i * 3 + 2]);
+        }
         foreach (var line in o)
         {
             Assert.DoesNotContain("_", line);

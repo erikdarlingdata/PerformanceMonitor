@@ -79,9 +79,18 @@ public static class QueryTagUsageNotes
         if (startDroppedFrom is DateTime dropped && servedStart > dropped)
         {
             var minutes = (int)Math.Round((servedStart - dropped).TotalMinutes);
-            sentences.Add(minutes < 1
-                ? "Less than a minute before the first full hour is not included."
-                : $"The {minutes} {(minutes == 1 ? "minute before the first full hour is" : "minutes before the first full hour are")} not included.");
+            if (minutes >= 60)
+            {
+                // The first bucket came hours after the window start (nothing was stored for the hours between): "the N minutes before the first
+                // full hour" would call the whole gap a partial hour, so name the span the read did not cover.
+                sentences.Add("The data from " + at(dropped) + " to " + at(servedStart) + " is not included.");
+            }
+            else
+            {
+                sentences.Add(minutes < 1
+                    ? "Less than a minute before the first full hour is not included."
+                    : $"The {minutes} {(minutes == 1 ? "minute before the first full hour is" : "minutes before the first full hour are")} not included.");
+            }
         }
 
         if (materializedTo is DateTime built)

@@ -35,7 +35,10 @@ namespace Darling.Tests;
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test reaches DARLING_TEST_PG only to CREATE and DROP its
    own database through ScratchPostgres and works entirely inside it, so it never touches the shared database and cannot race the
-   live collection. */
+   live collection. It does join "viewer-time-statics" (#6831): one test renders the Viewer's note, which reads ViewerTimeHelper's process-wide
+   statics, and compares it to the same note rendered a moment later in the test, so another class setting the display mode in between
+   (ViewerTimeHelperTests and others run in parallel) made the equality fail at random. The collection runs with parallelization disabled. */
+[Collection("viewer-time-statics")]
 public sealed class QueryTagRollupHashRouteLiveTests
 {
     private const string SkipReason = "Set DARLING_TEST_PG to a Postgres connection string to run the V221 hash-hourly route facts.";
