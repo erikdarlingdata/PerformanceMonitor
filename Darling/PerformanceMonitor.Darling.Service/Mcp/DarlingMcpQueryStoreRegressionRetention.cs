@@ -47,7 +47,7 @@ internal static class RetentionCause
         /* A smaller hours_back moves the baseline window's END later (it ends where the recent window starts), so the end can pass the
            data's start. The baseline is then the partial span from there, never the whole 7 days, which the kept data cannot hold. */
         return $"The baseline window ({Date(baselineStart)} to {Date(baselineEnd)}) is older than this server's {DataKind(fromTables)}, which starts {Date(kept)}, "
-            + $"so there is no baseline to compare against. An hours_back shorter than the time since {Date(kept)} moves the baseline's end past that date, and the read then compares against the partial baseline from {Date(kept)} to that end.";
+            + $"so there is no baseline to compare against. An hours_back shorter than the span from {Date(kept)} to the window's end moves the baseline's end past that date, and the read then compares against the partial baseline from {Date(kept)} to that end.";
     }
 
     /// <summary>The answer for a database filter, reached only when the server has a baseline. The kept data starts inside the baseline
