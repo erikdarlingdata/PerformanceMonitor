@@ -220,6 +220,75 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
         }
     }
 
+    /// <summary>
+    /// #6847: each routed wide arm bounds <c>first_execution_time</c> by its OWN range's end (or the window end when that is earlier) plus
+    /// the 12-hour slack, not by the window end. A row collected inside a range holds a first execution at most the slack after the
+    /// range's end, so every row the slack was written to keep is kept: one a minute short of the range end plus the slack in a range in
+    /// the middle of the window, and one a minute short of the window end plus the slack in the tail, whose range ends an hour past the
+    /// window end. Both answer as the single wide statement does. A tail row a minute past the window end plus the slack is dropped by
+    /// both (the tail range's end is later than the window's, so the bound takes the window end). A middle row a minute past ITS range's
+    /// end plus the slack is the one difference: it was collected before the range ended and executed more than 12 hours after it, which is
+    /// the clock-skew case the slack already leaves out, and the statement for the whole window would still count it.
+    /// </summary>
+    [Fact]
+    public async Task TheWideArms_BoundFirstExecutionByTheirOwnRangeEnd_KeepingEveryRowTheSlackIsWrittenFor()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), "Set DARLING_TEST_PG to run this.");
+        var ct = TestContext.Current.CancellationToken;
+        var a = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            var slack = QueryStoreIntervalWide.FirstExecUpperSlack;
+            async Task InsertAsync(int serverId, DateTime collected, DateTime firstExecution, long interval) => await ExecAsync(a.Connection, $@"
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+ module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us, runtime_stats_interval_id)
+VALUES (TIMESTAMP '{At(collected)}', {serverId}, 'dbX', 98, 98, 'Regular', TIMESTAMP '{At(firstExecution)}', TIMESTAMP '{At(collected)}',
+        'modX', 'hashE', 7, 1000, 500, 2000, 900, {interval})", ct);
+
+            /* Server 2's rows of the hour 12 hours back move into the next hour: that leaves the two hours' pairs stale, so they are wide
+               ranges in the middle of the window, [hour - 12 h, hour - 10 h). The tail is [hour - 2 h, hour + 1 h) for every server. */
+            await ExecAsync(a.Connection, $@"
+UPDATE collect.query_store_interval_wide
+SET collection_time = collection_time + interval '1 hour'
+WHERE server_id = 2 AND query_id IN (1, 2) AND collection_time >= TIMESTAMP '{At(a.HourNow.AddHours(-12))}' AND collection_time < TIMESTAMP '{At(a.HourNow.AddHours(-11))}'", ct);
+            var middleEnd = a.HourNow.AddHours(-10);
+            var windowEnd = a.End;
+            await InsertAsync(2, a.HourNow.AddHours(-11).AddMinutes(10), middleEnd + slack - TimeSpan.FromMinutes(1), 710_001);
+            await InsertAsync(3, a.HourNow.AddMinutes(20), windowEnd + slack - TimeSpan.FromMinutes(1), 710_002);
+            await InsertAsync(3, a.HourNow.AddMinutes(25), windowEnd + slack + TimeSpan.FromMinutes(1), 710_003);
+
+            var executionsAt = QueryTagRollupSection.QueryStore.Measures.Select(m => m.Name).ToList().IndexOf("executions");
+            Assert.True(executionsAt >= 0);
+            async Task<(string Routed, string Wide, double RoutedExecutions, double WideExecutions)> ReadBothAsync()
+            {
+                var read = await FleetAsync(a, Servers, a.Start, windowEnd, ct);
+                Assert.True(read.UsedHashHourly);
+                var wide = await TodaysAsync(a, Snapped(read), windowEnd, ct);
+                return (Canon(read.Facts), Canon(wide), read.Facts.Sum(f => f.Values[executionsAt]), wide.Sum(f => f.Values[executionsAt]));
+            }
+
+            var kept = await ReadBothAsync();
+            Assert.Equal(kept.Wide, kept.Routed);
+            /* The two rows a minute short of their bounds are in the answer (seven executions each), the tail row past it is not. */
+            await ExecAsync(a.Connection, "DELETE FROM collect.query_store_interval_wide WHERE runtime_stats_interval_id IN (710001, 710002)", ct);
+            var without = await ReadBothAsync();
+            Assert.Equal(14, kept.RoutedExecutions - without.RoutedExecutions);
+
+            await InsertAsync(2, a.HourNow.AddHours(-11).AddMinutes(10), middleEnd + slack + TimeSpan.FromMinutes(1), 710_004);
+            var over = await ReadBothAsync();
+            Assert.Equal(7, over.WideExecutions - over.RoutedExecutions);
+            Assert.Equal(without.RoutedExecutions, over.RoutedExecutions);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(a, bodySucceeded);
+        }
+    }
+
     [Fact]
     public async Task ALateWriteToABuiltHour_ShowsInTheFleetReadAtOnce_AndStaysCorrectAfterTheNextBuild()
     {
@@ -430,14 +499,17 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
     /// #6800 part 2, step 2b: the wide side of the routed statement. A window of 24 hours whose wide ranges are the partial first hour and
     /// the unbuilt tail (about 2 of the 24 hours) must scan about those rows of <c>collect.query_store_interval_wide</c>, not the window's.
     /// Found by what the nodes do: every scan of the wide table or one of its partitions, plus every bitmap index scan of one of their
-    /// indexes (a plan that ANDs the <c>first_execution_time</c> index into the scan reads every entry of the window from it, and the heap
-    /// then only shows the few rows that survive the AND). Per node the rows it examined are Actual Rows plus Rows Removed by Filter plus
-    /// Rows Removed by Index Recheck, times Actual Loops. The heap is laid out in collection_time order, as the store's is, so the BRIN
+    /// indexes. Per node the rows it examined are Actual Rows plus Rows Removed by Filter plus Rows Removed by Index Recheck, times Actual
+    /// Loops. A node on the <c>(server_id, first_execution_time)</c> index is bounded by what its own index condition admits (#6847): each
+    /// arm's first-execution range is <c>[range start - 26 h, earlier of range end and window end + 12 h]</c>, which for a small range is
+    /// about the seed's window, and PostgreSQL may AND that index into the scan of <c>collection_time</c> on some versions and statistics.
+    /// So those nodes are held to the rows the arms' first-execution ranges hold (counted with the statement's bounds), and fail on an
+    /// index walk past them, and every other node is held to the window's half as before. The heap is laid out in collection_time order, as the store's is, so the BRIN
     /// index on collection_time can do what it is for, and sequential scans are turned off (the seed is a few thousand rows, where any
     /// plan scans), so the plan shows the paths the statement allows.
     /// </summary>
     [Fact]
-    public async Task TheRoutedStatementsWideArms_ExamineAboutTheirRangesRows_NotTheWindows()
+    public async Task TheRoutedStatementsWideArms_ExamineAboutTheirRangesRows_AndTheirIndexRangesStayInTheirBounds()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), "Set DARLING_TEST_PG to run this.");
         var ct = TestContext.Current.CancellationToken;
@@ -482,16 +554,51 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             string Text(JsonElement n, string name) => n.TryGetProperty(name, out var v) ? v.GetString() ?? string.Empty : string.Empty;
             double Num(JsonElement n, string name) => n.TryGetProperty(name, out var v) ? v.GetDouble() : 0;
 
-            var wideScans = nodes.Where(n =>
+            /* A node reads the table through either index family. Those on (server_id, first_execution_time) return every entry their own
+               condition admits, which the arm's first-execution range (floor 26 h before its start, #4605, cap 12 h after its end, #5523,
+               #6847) makes about as wide as the seed's window for a range that is itself small, and that cost is what the floor is written
+               for. So those nodes are bounded by the rows that range holds, counted here with the statement's own bounds, and every other node
+               (the scans of collection_time, and the heap) by the rows of the arm's own range as before. A node that walks past its own
+               bounds fails the first, and a plan that reads the window through collection_time fails the second. */
+            var wideNodes = nodes.Where(n =>
                 Text(n, "Relation Name").StartsWith("query_store_interval_wide", StringComparison.Ordinal)
                 || (Text(n, "Node Type") == "Bitmap Index Scan" && Text(n, "Index Name").Contains("query_store_interval_wide", StringComparison.Ordinal))).ToList();
-            Assert.NotEmpty(wideScans);
-            var examined = wideScans.Sum(n => (Num(n, "Actual Rows") + Num(n, "Rows Removed by Filter") + Num(n, "Rows Removed by Index Recheck")) * Num(n, "Actual Loops"));
+            Assert.NotEmpty(wideNodes);
+            double Examined(JsonElement n) => (Num(n, "Actual Rows") + Num(n, "Rows Removed by Filter") + Num(n, "Rows Removed by Index Recheck")) * Num(n, "Actual Loops");
+            // Only a Bitmap Index Scan returns index entries without reading the table. A plain Index Scan on
+            // that index reads table rows, so it stays under the half-the-window bound with the other nodes that read the table.
+            bool OnFirstExecIndex(JsonElement n) => Text(n, "Node Type") == "Bitmap Index Scan" && Text(n, "Index Name").Contains("first_exec", StringComparison.Ordinal);
+            string Describe(JsonElement n) => Text(n, "Node Type") + " " + Text(n, "Relation Name") + Text(n, "Index Name") + " rows " + Num(n, "Actual Rows") + " loops " + Num(n, "Actual Loops");
+
+            var rangeNodes = wideNodes.Where(n => !OnFirstExecIndex(n)).ToList();
+            var firstExecNodes = wideNodes.Where(OnFirstExecIndex).ToList();
+            var examined = rangeNodes.Sum(Examined);
             Assert.True(examined > 0, "the wide arms must have read rows");
             Assert.True(
                 examined < windowRows / 2.0,
                 "the wide arms examined " + examined.ToString("0", CultureInfo.InvariantCulture) + " rows of a window that holds " + windowRows + "; nodes: "
-                + string.Join(" | ", wideScans.Select(n => Text(n, "Node Type") + " " + Text(n, "Relation Name") + Text(n, "Index Name") + " rows " + Num(n, "Actual Rows") + " loops " + Num(n, "Actual Loops"))));
+                + string.Join(" | ", rangeNodes.Select(Describe)));
+
+            /* The rows each arm's first-execution range holds, for the servers that share the arm, summed over the arms (the arms' index
+               scans sit under one plan, and an arm's nodes cannot return more than the rows of its own bounds). */
+            long firstExecRows = 0;
+            foreach (var group in plan.WideRanges.GroupBy(r => (r.From, r.To)))
+            {
+                var servers = string.Join(",", group.Select(r => r.ServerId).Distinct().OrderBy(s => s));
+                firstExecRows += await ComposeStampLiveSupport.CountAsync(
+                    a.Connection,
+                    $@"SELECT count(*) FROM collect.query_store_interval_wide
+WHERE server_id IN ({servers})
+AND first_execution_time >= TIMESTAMP '{At(group.Key.From)}' - {QueryStoreIntervalWide.PurgeEdgeMarginSql}
+AND first_execution_time <= LEAST(TIMESTAMP '{At(group.Key.To)}', TIMESTAMP '{At(a.End)}') + {QueryStoreIntervalWide.FirstExecUpperSlackSql}",
+                    ct);
+            }
+
+            var firstExecExamined = firstExecNodes.Sum(Examined);
+            Assert.True(
+                firstExecExamined <= firstExecRows,
+                "the first-execution indexes returned " + firstExecExamined.ToString("0", CultureInfo.InvariantCulture) + " entries for arms whose first-execution ranges hold "
+                + firstExecRows + " rows; nodes: " + string.Join(" | ", firstExecNodes.Select(Describe)));
 
             await transaction.RollbackAsync(ct);
             bodySucceeded = true;
