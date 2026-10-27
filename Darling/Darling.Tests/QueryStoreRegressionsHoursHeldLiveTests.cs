@@ -491,7 +491,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
 
     /// <summary>
     /// The cost side of the same state (#6750). Cost compares per-execution averages, which need no hours, so a Regular interval that
-    /// ran before the window and was collected inside it (1000 us) is a baseline for the Regular interval inside the window (2500
+    /// ran before the window and was collected inside it (1000 us) is a baseline for the Regular interval inside the window (20,000
     /// us). The row is listed for cost beside a note that says what the zero-hour baseline can and cannot flag.
     /// </summary>
     [Fact]

@@ -29,7 +29,7 @@ namespace Darling.Tests;
 /// <list type="bullet">
 /// <item>61: a cheap query that ran twice recently, 10 ms to 15 ms CPU a run (+50%): 10 ms added. Not listed.</item>
 /// <item>62: once in the window, a job whose CPU went from 5 minutes to 50 minutes: 2,700 s added in one run. Listed for cost.</item>
-/// <item>63: 5,000 recent runs, 1 ms to 3 ms CPU a run: 10 s added. Listed for cost, first by added duration.</item>
+/// <item>63: 5,000 recent runs, 1 ms to 3 ms CPU a run: 10 s added. Listed for cost, second by added duration, after 62.</item>
 /// <item>64: a plan that went parallel: CPU per run 100 ms to 400 ms while the duration fell 500 ms to 300 ms, over 100 runs: 30 s of
 /// CPU added and negative added duration. Listed for cost, which a floor on added duration would have dropped.</item>
 /// <item>65: a cheap query with a timeout rise: its CPU rose 50% on 2 runs (cost fails the floor) and its timeouts rose 0 to 4.
