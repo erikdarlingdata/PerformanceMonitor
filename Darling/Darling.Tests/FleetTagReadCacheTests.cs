@@ -45,7 +45,7 @@ public sealed class FleetTagReadCacheTests
     private static ReadAdmission LightAdmission(TimerTimeProvider clock) =>
         new(clock, ReadAdmission.DefaultWaitCap, null, 2);
 
-    private static async Task<(int Calls, string[] Bodies)> RunAsync(string[] paths, TimeSpan[] advanceBefore)
+    private static async Task<(int Calls, string[] Bodies)> RunAsync(string[] paths, TimeSpan[] advanceBefore, CancellationToken cancellationToken = default)
     {
         var clock = new TimerTimeProvider();
         var admission = LightAdmission(clock);
@@ -61,7 +61,7 @@ public sealed class FleetTagReadCacheTests
         for (var i = 0; i < paths.Length; i++)
         {
             clock.Advance(advanceBefore[i]);
-            bodies[i] = await client.GetStringAsync(paths[i], TestContext.Current.CancellationToken);
+            bodies[i] = await client.GetStringAsync(paths[i], cancellationToken);
         }
 
         return (calls, bodies);
@@ -72,7 +72,7 @@ public sealed class FleetTagReadCacheTests
     {
         var (calls, bodies) = await RunAsync(
             [$"/api/read/{Route}?hours=24", $"/api/read/{Route}?hours=24", $"/api/read/{Route}?hours=24"],
-            [TimeSpan.Zero, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(2)]);
+            [TimeSpan.Zero, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(2)], TestContext.Current.CancellationToken);
 
         Assert.Equal(1, calls);
         Assert.Equal(bodies[0], bodies[1]);
@@ -85,7 +85,7 @@ public sealed class FleetTagReadCacheTests
         /* The test clock starts on a 5-minute boundary: 4 minutes later is a hit (the 24-hour band alone keeps 30 s), 6 is a miss. */
         var (calls, bodies) = await RunAsync(
             [$"/api/read/{Route}?hours=24", $"/api/read/{Route}?hours=24", $"/api/read/{Route}?hours=24"],
-            [TimeSpan.Zero, TimeSpan.FromMinutes(4), TimeSpan.FromMinutes(2)]);
+            [TimeSpan.Zero, TimeSpan.FromMinutes(4), TimeSpan.FromMinutes(2)], TestContext.Current.CancellationToken);
 
         Assert.Equal(2, calls);
         Assert.Equal(bodies[0], bodies[1]);
@@ -94,7 +94,7 @@ public sealed class FleetTagReadCacheTests
 
     /// <summary>A web fleet read that runs for <paramref name="readTakes"/> on the test clock (the handler moves it), then reads at the
     /// offsets in <paramref name="advanceBefore"/>, each after the one before has answered. Returns how many times the read ran.</summary>
-    private static async Task<int> RunTimedAsync(TimeSpan startAt, TimeSpan readTakes, TimeSpan[] advanceBefore)
+    private static async Task<int> RunTimedAsync(TimeSpan startAt, TimeSpan readTakes, TimeSpan[] advanceBefore, CancellationToken cancellationToken = default)
     {
         var clock = new TimerTimeProvider();
         var admission = LightAdmission(clock);
@@ -110,11 +110,11 @@ public sealed class FleetTagReadCacheTests
         using var client = app.GetTestServer().CreateClient();
 
         clock.Advance(startAt);
-        await client.GetStringAsync($"/api/read/{Route}?hours=24", TestContext.Current.CancellationToken);
+        await client.GetStringAsync($"/api/read/{Route}?hours=24", cancellationToken);
         foreach (var advance in advanceBefore)
         {
             clock.Advance(advance);
-            await client.GetStringAsync($"/api/read/{Route}?hours=24", TestContext.Current.CancellationToken);
+            await client.GetStringAsync($"/api/read/{Route}?hours=24", cancellationToken);
         }
 
         return calls;
@@ -126,15 +126,15 @@ public sealed class FleetTagReadCacheTests
         /* The test clock starts on a 5-minute boundary. The read starts at +4:00, takes 61 s (as the cold read did on a 42-server store),
            so it is stored at +5:01, past that boundary. A read 90 s later (+6:31) is inside the 5 minutes from the store. A wall-clock
            bucket key stored the answer under the +0:00 bucket, which no request after +5:00 could reach. */
-        Assert.Equal(1, await RunTimedAsync(TimeSpan.FromMinutes(4), TimeSpan.FromSeconds(61), [TimeSpan.FromSeconds(90)]));
+        Assert.Equal(1, await RunTimedAsync(TimeSpan.FromMinutes(4), TimeSpan.FromSeconds(61), [TimeSpan.FromSeconds(90)], TestContext.Current.CancellationToken));
     }
 
     [Fact(Timeout = 60_000)]
     public async Task AFleetRead_IsAMiss_OnceFiveMinutesHavePassedSinceItWasStored()
     {
         /* Stored at +5:01. A hit at +9:59 (4:58 after the store, inside the TTL), then a miss at +10:02 (5:01 after the store). */
-        Assert.Equal(1, await RunTimedAsync(TimeSpan.FromMinutes(4), TimeSpan.FromSeconds(61), [TimeSpan.FromSeconds(298)]));
-        Assert.Equal(2, await RunTimedAsync(TimeSpan.FromMinutes(4), TimeSpan.FromSeconds(61), [TimeSpan.FromSeconds(298), TimeSpan.FromSeconds(3)]));
+        Assert.Equal(1, await RunTimedAsync(TimeSpan.FromMinutes(4), TimeSpan.FromSeconds(61), [TimeSpan.FromSeconds(298)], TestContext.Current.CancellationToken));
+        Assert.Equal(2, await RunTimedAsync(TimeSpan.FromMinutes(4), TimeSpan.FromSeconds(61), [TimeSpan.FromSeconds(298), TimeSpan.FromSeconds(3)], TestContext.Current.CancellationToken));
     }
 
     [Fact(Timeout = 60_000)]
@@ -169,7 +169,7 @@ public sealed class FleetTagReadCacheTests
         /* hours=4 is the page's own Past 4 hours preset, in the 24h band. Four minutes apart is inside the 5 minute TTL and past the
            band's 15 and 30 seconds, so a call total of 2 says the long TTL was not applied. */
         var path = $"/api/read/{Route}?hours={hours}";
-        var (calls, _) = await RunAsync([path, path], [TimeSpan.Zero, TimeSpan.FromMinutes(4)]);
+        var (calls, _) = await RunAsync([path, path], [TimeSpan.Zero, TimeSpan.FromMinutes(4)], TestContext.Current.CancellationToken);
 
         Assert.Equal(2, calls);
     }
@@ -180,7 +180,7 @@ public sealed class FleetTagReadCacheTests
         /* Two identical reads at the same instant: a cached read would run once. A light band is not cached, as before #6800. */
         var (calls, _) = await RunAsync(
             [$"/api/read/{Route}?hours=4", $"/api/read/{Route}?hours=4", $"/api/read/{Route}?hours=1&server_name=", $"/api/read/{Route}?hours=1&server_name="],
-            [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero]);
+            [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero], TestContext.Current.CancellationToken);
 
         Assert.Equal(4, calls);
     }
@@ -194,7 +194,7 @@ public sealed class FleetTagReadCacheTests
     {
         /* The last row names no window: the route's declared default is 24 hours. */
         var path = $"/api/read/{Route}" + (query.Length == 0 ? "" : "?" + query);
-        var (calls, _) = await RunAsync([path, path, path], [TimeSpan.Zero, TimeSpan.FromMinutes(4), TimeSpan.FromMinutes(6)]);
+        var (calls, _) = await RunAsync([path, path, path], [TimeSpan.Zero, TimeSpan.FromMinutes(4), TimeSpan.FromMinutes(6)], TestContext.Current.CancellationToken);
 
         Assert.Equal(2, calls);
     }
@@ -207,7 +207,7 @@ public sealed class FleetTagReadCacheTests
         {
             var (calls, _) = await RunAsync(
                 [$"/api/read/{Route}?hours=24&{query}", $"/api/read/{Route}?hours=24&{query}"],
-                [TimeSpan.Zero, TimeSpan.FromMinutes(4)]);
+                [TimeSpan.Zero, TimeSpan.FromMinutes(4)], TestContext.Current.CancellationToken);
 
             Assert.Equal(2, calls);
         }
@@ -219,7 +219,7 @@ public sealed class FleetTagReadCacheTests
         var (calls, _) = await RunAsync(
             [$"/api/read/{Route}?hours=24&server=a", $"/api/read/{Route}?hours=24&server=a", $"/api/read/{Route}?hours=24&server_name=a",
              $"/api/read/{Route}?hours=24", $"/api/read/{Route}?hours=24"],
-            [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero]);
+            [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero], TestContext.Current.CancellationToken);
 
         /* Three one-server reads run three times; the two fleet reads run once. */
         Assert.Equal(4, calls);
@@ -230,7 +230,7 @@ public sealed class FleetTagReadCacheTests
     {
         var (calls, _) = await RunAsync(
             [$"/api/read/{Route}?hours=24", $"/api/read/{Route}?hours=24&tag=7", $"/api/read/{Route}?hours=24&as_of=2026-01-01T00:00:00Z"],
-            [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero]);
+            [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero], TestContext.Current.CancellationToken);
 
         Assert.Equal(3, calls);
     }
@@ -365,7 +365,7 @@ public sealed class FleetTagReadCacheTests
         }
     }
 
-    private static async Task<int> CallThroughTheFilterAsync(int[] hoursBack, TimeSpan[] advanceBefore, TimeSpan readTakes = default)
+    private static async Task<int> CallThroughTheFilterAsync(int[] hoursBack, TimeSpan[] advanceBefore, TimeSpan readTakes = default, CancellationToken cancellationToken = default)
     {
         CountingTagTool.Runs = 0;
         var clock = new TimerTimeProvider();
@@ -385,7 +385,7 @@ public sealed class FleetTagReadCacheTests
         var run = provider.GetRequiredService<McpServer>().RunAsync(stop.Token);
         await using var client = await McpClient.CreateAsync(
             new StreamClientTransport(clientToServer.Writer.AsStream(), serverToClient.Reader.AsStream()),
-            cancellationToken: TestContext.Current.CancellationToken);
+            cancellationToken: cancellationToken);
         try
         {
             for (var i = 0; i < hoursBack.Length; i++)
@@ -393,7 +393,7 @@ public sealed class FleetTagReadCacheTests
                 clock.Advance(advanceBefore[i]);
                 var result = await client.CallToolAsync(Route,
                     new Dictionary<string, object?> { ["hours_back"] = hoursBack[i] },
-                    cancellationToken: TestContext.Current.CancellationToken);
+                    cancellationToken: cancellationToken);
                 Assert.NotEqual(true, result.IsError);
             }
         }
@@ -410,22 +410,22 @@ public sealed class FleetTagReadCacheTests
     [Fact(Timeout = 60_000)]
     public async Task AnMcpFleetCall_At24Hours_RunsTheToolOnceInsideFiveMinutes()
     {
-        Assert.Equal(1, await CallThroughTheFilterAsync([24, 24], [TimeSpan.Zero, TimeSpan.FromMinutes(4)]));
+        Assert.Equal(1, await CallThroughTheFilterAsync([24, 24], [TimeSpan.Zero, TimeSpan.FromMinutes(4)], cancellationToken: TestContext.Current.CancellationToken));
     }
 
     [Fact(Timeout = 60_000)]
     public async Task AnMcpFleetCall_StartedLateInAFiveMinuteSpan_IsStillAHit90SecondsAfterItIsStored()
     {
         /* Called at +4:00, the tool takes 61 s, so the answer is stored at +5:01. A call at +6:31 is 90 s after the store: a hit. */
-        Assert.Equal(1, await CallThroughTheFilterAsync([24, 24], [TimeSpan.FromMinutes(4), TimeSpan.FromSeconds(90)], TimeSpan.FromSeconds(61)));
+        Assert.Equal(1, await CallThroughTheFilterAsync([24, 24], [TimeSpan.FromMinutes(4), TimeSpan.FromSeconds(90)], TimeSpan.FromSeconds(61), cancellationToken: TestContext.Current.CancellationToken));
         /* Two calls after the first: +9:59 is a hit (4:58 after the store), +10:02 a miss (5:01 after it). */
         Assert.Equal(2, await CallThroughTheFilterAsync([24, 24, 24],
-            [TimeSpan.FromMinutes(4), TimeSpan.FromSeconds(298), TimeSpan.FromSeconds(3)], TimeSpan.FromSeconds(61)));
+            [TimeSpan.FromMinutes(4), TimeSpan.FromSeconds(298), TimeSpan.FromSeconds(3)], TimeSpan.FromSeconds(61), cancellationToken: TestContext.Current.CancellationToken));
     }
 
     [Fact(Timeout = 60_000)]
     public async Task AnMcpFleetCall_At4Hours_IsNotKeptForFiveMinutes()
     {
-        Assert.Equal(2, await CallThroughTheFilterAsync([4, 4], [TimeSpan.Zero, TimeSpan.FromMinutes(4)]));
+        Assert.Equal(2, await CallThroughTheFilterAsync([4, 4], [TimeSpan.Zero, TimeSpan.FromMinutes(4)], cancellationToken: TestContext.Current.CancellationToken));
     }
 }
