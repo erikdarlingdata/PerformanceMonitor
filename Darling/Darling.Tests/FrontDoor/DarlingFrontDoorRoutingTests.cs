@@ -286,7 +286,7 @@ public sealed class DarlingFrontDoorRoutingTests
         var peers = new FakeFrontDoorPeers
         {
             Handler = call => call.Store == "use1"
-                ? throw new FrontDoorPeerException("use1", FrontDoorPeerKind.Unreachable, "use1 is down")
+                ? throw new FrontDoorPeerException("use1", FrontDoorPeerFailure.Unreachable, "use1 is down")
                 : Task.FromResult(Text("{\"status\":\"ok\"}")),
         };
 
@@ -340,7 +340,7 @@ public sealed class DarlingFrontDoorRoutingTests
         var peers = new FakeFrontDoorPeers
         {
             Handler = call => call.Store == "use2"
-                ? throw new FrontDoorPeerException("use2", FrontDoorPeerKind.Unreachable, "use2 could not be reached")
+                ? throw new FrontDoorPeerException("use2", FrontDoorPeerFailure.Unreachable, "use2 could not be reached")
                 : Task.FromResult(Text("{\"status\":\"ok\"}")),
         };
 
@@ -350,7 +350,7 @@ public sealed class DarlingFrontDoorRoutingTests
         var stores = Parse(TextOf(result)).GetProperty("stores").EnumerateArray().ToList();
         Assert.Equal(3, stores.Count);
         Assert.Equal("unavailable", stores[1].GetProperty("status").GetString());
-        Assert.Equal("use2 could not be reached", stores[1].GetProperty("message").GetString());
+        Assert.Equal("Store use2: use2 could not be reached", stores[1].GetProperty("message").GetString());
         Assert.Equal("ok", stores[0].GetProperty("result").GetProperty("status").GetString());
         Assert.Equal("ok", stores[2].GetProperty("result").GetProperty("status").GetString());
     }
@@ -361,7 +361,7 @@ public sealed class DarlingFrontDoorRoutingTests
         var directory = new FakeFrontDoorDirectory("use1", "use2");
         var peers = new FakeFrontDoorPeers
         {
-            Handler = call => throw new FrontDoorPeerException(call.Store, FrontDoorPeerKind.Unreachable, $"{call.Store} could not be reached"),
+            Handler = call => throw new FrontDoorPeerException(call.Store, FrontDoorPeerFailure.Unreachable, $"{call.Store} could not be reached"),
         };
 
         var result = await RouterOf(directory, peers).CallAsync("list_servers", Args(), agentRole: false, CancellationToken.None);
@@ -464,7 +464,7 @@ public sealed class DarlingFrontDoorRoutingTests
         var directory = new FakeFrontDoorDirectory("use1") { Resolver = _ => To("use1") };
         var peers = new FakeFrontDoorPeers
         {
-            Handler = _ => throw new FrontDoorPeerException("use1", FrontDoorPeerKind.AuthFailed, "use1 refused the front door's token"),
+            Handler = _ => throw new FrontDoorPeerException("use1", FrontDoorPeerFailure.AuthFailed, "use1 refused the front door's token"),
         };
 
         var result = await RouterOf(directory, peers).CallAsync(
@@ -473,7 +473,7 @@ public sealed class DarlingFrontDoorRoutingTests
         Assert.True(result.IsError);
         var root = Parse(TextOf(result));
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
-        Assert.Equal("use1 refused the front door's token", root.GetProperty("message").GetString());
+        Assert.Equal("Store use1: use1 refused the front door's token", root.GetProperty("message").GetString());
     }
 
     [Fact]

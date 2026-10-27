@@ -21,6 +21,7 @@ using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.FrontDoor;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -75,8 +76,12 @@ public sealed class DarlingFrontDoorToolTests
         var served = provider.GetRequiredService<IOptions<McpServerOptions>>().Value.ToolCollection!.ToList();
 
         var (registered, _, _) = McpToolsListBudgetTests.BuildServedTools();
-        var offered = DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(
-            new McpServerPrimitiveCollection<McpServerTool>(registered), Operator));
+        var registeredCollection = new McpServerPrimitiveCollection<McpServerTool>();
+        foreach (var registeredTool in registered)
+        {
+            registeredCollection.Add(registeredTool);
+        }
+        var offered = DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(registeredCollection, Operator));
         Assert.True(served.Count > 100);
         Assert.Equal(offered.OrderBy(n => n, StringComparer.Ordinal), served.Select(t => t.ProtocolTool.Name).OrderBy(n => n, StringComparer.Ordinal));
         Assert.All(served, tool => Assert.IsType<DarlingFrontDoorTool>(tool));
@@ -103,8 +108,8 @@ public sealed class DarlingFrontDoorToolTests
             Assert.DoesNotContain("store", RequiredOf(tool.ProtocolTool));
 
             Assert.Equal(inner.Description, tool.ProtocolTool.Description);
-            Assert.Equal(inner.Annotations?.ReadOnlyHint, tool.ProtocolTool.Annotations?.ReadOnlyHint);
-            Assert.Equal(inner.Annotations?.DestructiveHint, tool.ProtocolTool.Annotations?.DestructiveHint);
+            Assert.Equal(!DarlingMcpWritePolicy.IsWrite(inner.Name) && !DarlingMcpWritePolicy.IsInvestigation(inner.Name), tool.ProtocolTool.Annotations?.ReadOnlyHint);
+            Assert.Equal(DarlingMcpWritePolicy.IsWrite(inner.Name), tool.ProtocolTool.Annotations?.DestructiveHint);
         }
     }
 

@@ -108,6 +108,8 @@ internal sealed class FakeMcpPeer : IAsyncDisposable
 
         void Count(string tool) => self!._toolCalls.AddOrUpdate(tool, 1, (_, n) => n + 1);
 
+        /* Without Services at Create time the SDK reads IHttpContextAccessor as a tool argument and the call fails to bind. */
+        var serviceTypes = new ServiceCollection().AddHttpContextAccessor().BuildServiceProvider();
         var tools = new List<McpServerTool>
         {
             McpServerTool.Create(
@@ -139,7 +141,7 @@ internal sealed class FakeMcpPeer : IAsyncDisposable
                     Count("whoami");
                     return http.HttpContext?.Items["role"] as string ?? "none";
                 },
-                new McpServerToolCreateOptions { Name = "whoami" }),
+                new McpServerToolCreateOptions { Name = "whoami", Services = serviceTypes }),
             McpServerTool.Create(
                 async (IHttpContextAccessor http, CancellationToken ct) =>
                 {
@@ -164,7 +166,7 @@ internal sealed class FakeMcpPeer : IAsyncDisposable
 
                     return "{\"status\":\"ok\"}";
                 },
-                new McpServerToolCreateOptions { Name = "get_wait_stats" }),
+                new McpServerToolCreateOptions { Name = "get_wait_stats", Services = serviceTypes }),
             McpServerTool.Create(
                 () =>
                 {

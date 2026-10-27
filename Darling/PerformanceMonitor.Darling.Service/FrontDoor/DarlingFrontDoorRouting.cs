@@ -81,6 +81,33 @@ internal static class DarlingFrontDoorRouting
     /// sets and the tools that take <c>server_name</c>, they cover every registered tool: a census test fails on one that is in none.</summary>
     internal static readonly IReadOnlySet<string> FanOutTools = new HashSet<string>(StringComparer.Ordinal)
     {
+        "find_database",
+        "get_agent_changes",
+        "get_collection_state",
+        "get_collector_cost",
+        "get_command_result",
+        "get_compiles_after_evict",
+        "get_custom_alert_rule",
+        "get_custom_view",
+        "get_finops_inventory",
+        "get_fleet_overview",
+        "get_investigation_evidence",
+        "get_mute_rules",
+        "get_notification_routes",
+        "get_read_latency",
+        "get_server_actions",
+        "get_store_host",
+        "get_store_log",
+        "get_store_metrics",
+        "get_store_query_history",
+        "get_store_query_stats",
+        "get_sweep_reports",
+        "list_custom_alert_rules",
+        "list_custom_views",
+        "list_query_tag_rules",
+        "list_query_tags",
+        "list_servers",
+        "test_query_tag_rule",
     };
 
     /// <summary>True when <paramref name="tool"/> is in the store-required class: any write, investigation or server admin tool, or one

@@ -729,7 +729,7 @@ public sealed class DarlingMcpHostService : BackgroundService
 
                 frontDoor = new DarlingFrontDoorRouter(
                     frontDoorDirectory, frontDoorPeers, TimeSpan.FromSeconds(config.FrontDoor.PeerTimeoutSeconds), _logger);
-                postgres = NpgsqlDataSource.Create("Host=front-door.invalid");
+                postgres = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc("Host=front-door.invalid"));
                 _appDataSource = postgres;
             }
             else
