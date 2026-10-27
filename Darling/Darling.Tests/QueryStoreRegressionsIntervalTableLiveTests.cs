@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -101,12 +102,14 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
             ]);
         }
 
-        /* Window: query 10 regresses on a new plan and also times out once per interval; query 20 does not. */
+        /* Window: query 10 regresses on a new plan and also times out once per interval; query 20 does not.
+           #6781: 60 ms of CPU a run against the baseline's 1 ms adds 2.1 s over its 36 runs, over the 1 s floor, so the row is a cost row
+           and not only a timeouts row (at 5 ms it added 144 ms and survived on its Aborted runs alone). */
         foreach (var hour in new[] { 2, 10 })
         {
             await IntervalAsync(start.AddHours(hour), (f, k) =>
             [
-                Row(10, 102, "Regular", f, 6 * k, 5_000, 9_000),
+                Row(10, 102, "Regular", f, 6 * k, 60_000, 9_000),
                 Row(10, 102, "Aborted", f, k, 40_000, 30_000_000),
                 Row(20, 201, "Regular", f, 4 * k, 3_000, 3_000),
             ]);
@@ -294,6 +297,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         /* Latest snapshots only, Regular executions only (#5506: the daily totals hold no other kind): baseline 3 x 30, window 2 x 18. */
         Assert.Equal(90, row.BaselineExecCount);
         Assert.Equal(36, row.RecentExecCount);
+        /* #6781: the row clears the cost test's added-CPU floor, so the equality below compares a cost row on every side. */
+        Assert.True((row.RecentCpuMs - row.BaselineCpuMs) * row.RecentExecCount >= QueryStoreRegressionRules.CostMinAddedCpuMs, Describe(row));
 
         var served = await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(
             postgres, ServerId, start, end, DatabaseFilter.One(Db), 50, baselineStart, ct);
@@ -458,6 +463,9 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
             rig.Postgres, ServerId, rig.Start, rig.End, DatabaseFilter.One(Db), 50, rig.BaselineStart, ct);
         Assert.Equal("interval_table", narrowBefore.Source);
         Assert.Equal(fixedBefore, narrowBefore.Rows.Select(Describe).ToList());
+        /* #6781: the seeded row clears the cost test's added-CPU floor on its own (the later reads add to its runs, never take away). */
+        var seeded = Assert.Single(narrowBefore.Rows);
+        Assert.True((seeded.RecentCpuMs - seeded.BaselineCpuMs) * seeded.RecentExecCount >= QueryStoreRegressionRules.CostMinAddedCpuMs, Describe(seeded));
 
         /* Two intervals the 26-hour margin admits and the three-hour margin drops. */
         await SeedOutOfMarginIntervalsAsync(rig.Connection, rig, ct);

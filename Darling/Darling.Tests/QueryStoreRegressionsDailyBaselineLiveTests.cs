@@ -41,6 +41,11 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
     private const int ServerId = QueryStoreIntervalWideBelowFloorLiveTests.ServerId;
     private const string Db = "qsDaily";
 
+    /// <summary>#6781: every interval's CPU and duration are the seeded microseconds times this, so each regressing query's rise
+    /// adds at least 1 s of CPU over the window (<see cref="PerformanceMonitor.Common.QueryStoreRegressionRules.CostMinAddedCpuMs"/>).
+    /// The hand-worked figures below scale by it too.</summary>
+    private const long CpuScale = 1_000;
+
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>The re-collected interval of the extra fixture (query 41): its identity, so the second snapshot upserts the first.</summary>
@@ -92,8 +97,8 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
                 QueryText = text ?? "SELECT " + queryId.ToString(CultureInfo.InvariantCulture),
                 ReplicaRole = replicaRole,
                 ExecutionCount = executions,
-                AvgCpuTimeUs = cpuUs,
-                AvgDurationUs = cpuUs * 2,
+                AvgCpuTimeUs = cpuUs * CpuScale,
+                AvgDurationUs = cpuUs * 2 * CpuScale,
                 IsForcedPlan = false,
                 ForceFailureCount = 0,
                 RuntimeStatsIntervalId = reuseIntervalId ?? intervalId,
@@ -216,8 +221,8 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
             QueryPlanHash = "0x" + 531.ToString("X8", CultureInfo.InvariantCulture),
             QueryText = "SELECT 53",
             ExecutionCount = 25,
-            AvgCpuTimeUs = 3_000,
-            AvgDurationUs = 6_000,
+            AvgCpuTimeUs = 3_000 * CpuScale,
+            AvgDurationUs = 6_000 * CpuScale,
             IsForcedPlan = false,
             ForceFailureCount = 0,
             RuntimeStatsIntervalId = RecentRecollectedIntervalId,
@@ -253,8 +258,8 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
             QueryPlanHash = "0x" + 411.ToString("X8", CultureInfo.InvariantCulture),
             QueryText = "SELECT 41",
             ExecutionCount = 25,
-            AvgCpuTimeUs = 1_000,
-            AvgDurationUs = 2_000,
+            AvgCpuTimeUs = 1_000 * CpuScale,
+            AvgDurationUs = 2_000 * CpuScale,
             IsForcedPlan = false,
             ForceFailureCount = 0,
             RuntimeStatsIntervalId = RecollectedIntervalId,
@@ -434,10 +439,10 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         var only = Assert.Single(reference);
         var fields = only.Split('|');
         Assert.Equal("10", fields[1]);
-        Assert.Equal(200_000.0 / 143 / 1000, double.Parse(fields[4], CultureInfo.InvariantCulture), 5);
+        Assert.Equal(200_000.0 * CpuScale / 143 / 1000, double.Parse(fields[4], CultureInfo.InvariantCulture), 5);
         Assert.Equal(143L, long.Parse(fields[7], CultureInfo.InvariantCulture));
         Assert.Equal(60L, long.Parse(fields[8], CultureInfo.InvariantCulture));
-        Assert.Equal(290_000.0 / 60 / 1000, double.Parse(fields[5], CultureInfo.InvariantCulture), 5);
+        Assert.Equal(290_000.0 * CpuScale / 60 / 1000, double.Parse(fields[5], CultureInfo.InvariantCulture), 5);
 
         async Task<List<string>> ServedAsync()
         {

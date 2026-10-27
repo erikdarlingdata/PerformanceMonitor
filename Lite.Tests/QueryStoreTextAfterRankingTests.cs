@@ -108,10 +108,12 @@ public sealed class QueryStoreTextAfterRankingTests : IDisposable
             WHEN qid = 7 AND {day} = 0 AND snap = {SnapshotsPerDay - 1} THEN NULL
             WHEN qid = 11 THEN 'WAITFOR DELAY ''00:00:01''; ' || repeat(md5(qid::VARCHAR), {textRepeat})
             ELSE 'SELECT ' || qid::VARCHAR || ' FROM dbo.t ' || repeat(md5(qid::VARCHAR), {textRepeat}) END";
-        /* qids 7, 11 and 13 are expensive so they sit in the top page; every fifth query regressed on day 0. */
+        /* qids 7, 11 and 13 are expensive so they sit in the top page; every fifth query regressed on day 0. #6781: by at least 6.5 ms
+           of CPU a run, so its 200 recent runs add more than 1 s of CPU (QueryStoreRegressionRules.CostMinAddedCpuMs) and the regressions
+           read still lists it. */
         var duration = $@"CASE
             WHEN qid = 11 THEN 90000 WHEN qid = 13 THEN 80000 WHEN qid = 7 THEN 70000
-            WHEN {day} = 0 AND qid % 5 = 0 THEN 4000 + qid * 37
+            WHEN {day} = 0 AND qid % 5 = 0 THEN 14000 + qid * 37
             ELSE 1000 + qid * 10 END";
         return $@"
 SELECT

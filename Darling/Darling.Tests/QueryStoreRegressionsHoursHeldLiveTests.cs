@@ -358,9 +358,9 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         {
             /* The cost variant (#6750): the same two collections as below, as Regular intervals. The first, ten hours back, carries an
                interval last run 26 hours back at 1000 us average CPU, so the baseline has a CPU average over no hours. The second,
-               inside the window, runs at 2500 us. */
+               inside the window, runs at 20,000 us (#6781: 120 runs then add at least 1 s of CPU, CostMinAddedCpuMs). */
             await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddHours(-10), 12, lastRunAt: now.AddHours(-26), executionType: "Regular", avgCpuUs: 1_000);
-            await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddHours(-3), 120, executionType: "Regular", avgCpuUs: 2_500);
+            await SnapshotAsync(ServerId, ServerName, RisingQuery, now.AddHours(-3), 120, executionType: "Regular", avgCpuUs: 20_000);
         }
         else if (baselineHoldsNoHours)
         {
@@ -491,7 +491,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
 
     /// <summary>
     /// The cost side of the same state (#6750). Cost compares per-execution averages, which need no hours, so a Regular interval that
-    /// ran before the window and was collected inside it (1000 us) is a baseline for the Regular interval inside the window (2500
+    /// ran before the window and was collected inside it (1000 us) is a baseline for the Regular interval inside the window (20,000
     /// us). The row is listed for cost beside a note that says what the zero-hour baseline can and cannot flag.
     /// </summary>
     [Fact]

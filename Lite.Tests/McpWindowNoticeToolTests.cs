@@ -1069,13 +1069,14 @@ VALUES ($1, $2, $3, $4, 'Db', $5, $6, $2, 10, 5000, 5000, $7)",
     /// <summary>
     /// One Query Store interval of a query at <paramref name="avgUs"/> CPU and duration: a baseline row or a regressed one.
     /// <paramref name="database"/> is the database it belongs to ("Db" unless a test needs a second one to filter on).
+    /// #6781: 1,000 runs an interval, so a 2 ms rise adds at least 1 s of CPU (QueryStoreRegressionRules.CostMinAddedCpuMs).
     /// </summary>
     private Task SeedRegressionAsync(DateTime at, long queryId, long avgUs, long intervalId, string database = "Db") => ExecuteAsync(@"
 INSERT INTO query_store_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
      execution_type_desc, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads,
      runtime_stats_interval_id, query_text, last_execution_time)
-VALUES ($1, $2, $3, $4, $8, $5, 9, 'Regular', 100, $6, $6, 100, $7, 'SELECT * FROM dbo.Widgets', $2)",
+VALUES ($1, $2, $3, $4, $8, $5, 9, 'Regular', 1000, $6, $6, 100, $7, 'SELECT * FROM dbo.Widgets', $2)",
         _nextId++, Naive(at), _serverId, ServerName, queryId, avgUs, intervalId, database);
 
     /// <summary>The collector's runs in collection_log, every <paramref name="everyMinutes"/> minutes, whether or not anything ran or waited.</summary>

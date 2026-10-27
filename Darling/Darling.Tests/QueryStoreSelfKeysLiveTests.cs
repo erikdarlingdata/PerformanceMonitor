@@ -108,7 +108,8 @@ public sealed class QueryStoreSelfKeysLiveTests
                 foreach (var (first, cpu) in new[] { (now.AddDays(-5), 1_000L), (now.AddHours(-3), 3_000L) })
                 {
                     id++;
-                    await QueryStoreRegressionsFailureGroupsLiveTests.WriteAsync(runner, server, context, "Regular", id, first, q, 100, cpu, cpu * 2, ct, Db, "SELECT " + q);
+                    /* #6781: enough recent runs that the rise adds at least 1 s of CPU (QueryStoreRegressionRules.CostMinAddedCpuMs). */
+                    await QueryStoreRegressionsFailureGroupsLiveTests.WriteAsync(runner, server, context, "Regular", id, first, q, 1_000, cpu, cpu * 2, ct, Db, "SELECT " + q);
                 }
             }
 

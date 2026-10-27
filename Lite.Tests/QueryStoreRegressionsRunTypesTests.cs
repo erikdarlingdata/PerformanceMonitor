@@ -126,7 +126,8 @@ public sealed class QueryStoreRegressionsRunTypesTests : IClassFixture<SharedDuc
 
     /// <summary>The cost comparison is Regular runs only and WEIGHTED by execution count, with no logical reads anywhere in the row. Query 7's baseline is
     /// 100 executions at 1 ms CPU and 300 at 3 ms: 2.5 ms weighted (the average of the two intervals' averages would be 2 ms and show
-    /// +100%), and a huge Aborted run beside it must not leak into the Regular figure. 4 ms against 2.5 ms is +60%, reason cost, HIGH.</summary>
+    /// +100%), and a huge Aborted run beside it must not leak into the Regular figure. 4 ms against 2.5 ms is +60%, reason cost, HIGH.
+    /// #6781: 1,000 recent runs, so the 1.5 ms rise adds 1.5 s of CPU, over the 1 s floor.</summary>
     [Fact]
     public async Task TheCostFigureIsRegularOnlyAndWeighted_AndNoReadsAreReported()
     {
@@ -134,7 +135,7 @@ public sealed class QueryStoreRegressionsRunTypesTests : IClassFixture<SharedDuc
         await SeedAsync("Regular", now.AddHours(-40), 100, 1000, 1000, intervalId: 1, queryId: 7);
         await SeedAsync("Regular", now.AddHours(-30), 300, 3000, 3000, intervalId: 2, queryId: 7);
         await SeedAsync("Aborted", now.AddHours(-35), 1, 900_000, 900_000, intervalId: 3, queryId: 7);
-        await SeedAsync("Regular", now.AddHours(-1), 200, 4000, 4000, intervalId: 4, queryId: 7);
+        await SeedAsync("Regular", now.AddHours(-1), 1000, 4000, 4000, intervalId: 4, queryId: 7);
 
         var rows = await ReadRowsAsync();
 
@@ -147,9 +148,9 @@ public sealed class QueryStoreRegressionsRunTypesTests : IClassFixture<SharedDuc
         Assert.Equal(60.0, row.GetProperty("cpu_regression_percent").GetDouble(), 6);
         Assert.Equal(60.0, row.GetProperty("duration_regression_percent").GetDouble(), 6);
         Assert.Equal(400, row.GetProperty("baseline_exec_count").GetInt64());
-        Assert.Equal(200, row.GetProperty("recent_exec_count").GetInt64());
-        /* 1.5 ms more per execution across the 200 recent executions. */
-        Assert.Equal(300.0, row.GetProperty("additional_duration_ms").GetDouble(), 6);
+        Assert.Equal(1000, row.GetProperty("recent_exec_count").GetInt64());
+        /* 1.5 ms more per execution across the 1,000 recent executions. */
+        Assert.Equal(1500.0, row.GetProperty("additional_duration_ms").GetDouble(), 6);
         /* The Aborted group is counted beside it, and a row listed for cost alone carries counts, not rates. */
         Assert.Equal(1, row.GetProperty("baseline_aborted_count").GetInt64());
         Assert.False(row.TryGetProperty("baseline_aborted_per_hour", out _));
@@ -169,7 +170,8 @@ public sealed class QueryStoreRegressionsRunTypesTests : IClassFixture<SharedDuc
         await SeedAsync("Regular", now.AddHours(-1), 100, 1000, 1000, intervalId: 2, queryId: 5);
         await SeedAsync("Aborted", now.AddHours(-2), 5, 1000, 1000, intervalId: 3, queryId: 5);
         await SeedAsync("Regular", now.AddHours(-30), 100, 1000, 1000, intervalId: 4, queryId: 7);
-        await SeedAsync("Regular", now.AddHours(-1), 100, 4000, 4000, intervalId: 5, queryId: 7);
+        /* #6781: enough recent runs that the rise adds at least 1 s of CPU (QueryStoreRegressionRules.CostMinAddedCpuMs). */
+        await SeedAsync("Regular", now.AddHours(-1), 1000, 4000, 4000, intervalId: 5, queryId: 7);
 
         var json = Root(await McpQueryTools.GetQueryStoreRegressions(new LocalDataService(_duckDb), _serverManager, ServerName, 24));
         var ids = json.GetProperty("regressions").EnumerateArray().Select(r => r.GetProperty("query_id").GetInt64()).ToArray();
@@ -177,6 +179,39 @@ public sealed class QueryStoreRegressionsRunTypesTests : IClassFixture<SharedDuc
         Assert.Equal(new long[] { 7, 5 }, ids);
         Assert.Equal(2, json.GetProperty("regression_count").GetInt32());
         Assert.Contains("timeouts", json.GetProperty("gate").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>#6781, Lite's twin of Darling's QueryStoreRegressionsAddedCpuFloorLiveTests: the cost test also needs at least
+    /// QueryStoreRegressionRules.CostMinAddedCpuMs of CPU added over the window (recent runs times the rise in CPU per run). Query 61,
+    /// two cheap runs at +50% CPU (10 ms added), is not listed. Query 62, one run of a job whose CPU went from 5 to 50 minutes, is.
+    /// Query 63, 5,000 runs at 1 to 3 ms, is. Query 64, CPU per run up 100 to 400 ms while its duration fell 500 to 300 ms (a plan that
+    /// went parallel), is listed for cost though it added no duration. Query 65, cheap like 61 but with timeouts 0 to 4, is listed for
+    /// timeouts only, and regression_count counts the four rows that pass.</summary>
+    [Fact]
+    public async Task ACheapLowRunRise_IsNotACostRegression_AndARareExpensiveOneAndAParallelPlanAre()
+    {
+        var now = Truncate(DateTime.UtcNow);
+        long interval = 100;
+        async Task S(string type, int hoursBack, long q, long n, long durUs, long cpuUs) =>
+            await SeedAsync(type, now.AddHours(-hoursBack), n, durUs, cpuUs, intervalId: ++interval, queryId: q);
+        await S("Regular", 40, 61, 2, 20_000, 10_000);
+        await S("Regular", 1, 61, 2, 30_000, 15_000);
+        await S("Regular", 40, 62, 1, 310_000_000, 300_000_000);
+        await S("Regular", 1, 62, 1, 3_010_000_000, 3_000_000_000);
+        await S("Regular", 40, 63, 5_000, 2_000, 1_000);
+        await S("Regular", 1, 63, 5_000, 6_000, 3_000);
+        await S("Regular", 40, 64, 100, 500_000, 100_000);
+        await S("Regular", 1, 64, 100, 300_000, 400_000);
+        await S("Regular", 40, 65, 2, 20_000, 10_000);
+        await S("Regular", 1, 65, 2, 30_000, 15_000);
+        await S("Aborted", 2, 65, 4, 30_000_000, 10_000);
+
+        var json = Root(await McpQueryTools.GetQueryStoreRegressions(new LocalDataService(_duckDb), _serverManager, ServerName, 24));
+        var rows = json.GetProperty("regressions").EnumerateArray()
+            .Select(r => (r.GetProperty("query_id").GetInt64(), r.GetProperty("regression_reason").GetString())).ToArray();
+
+        Assert.Equal(new (long, string?)[] { (62L, "cost"), (63L, "cost"), (64L, "cost"), (65L, "timeouts") }, rows);
+        Assert.Equal(4, json.GetProperty("regression_count").GetInt32());
     }
 
     private async Task<JsonElement[]> ReadRowsAsync()

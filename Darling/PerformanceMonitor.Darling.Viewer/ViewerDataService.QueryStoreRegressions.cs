@@ -73,7 +73,7 @@ public sealed class ViewerQueryStoreRegressionRow
     public bool CanGetActualPlan => QueryId != 0;
     public DateTime? LastExecutionTime { get; set; }
 
-    /// <summary>#5506: why the row is listed: <c>cost</c> (Regular CPU up more than 25%), <c>timeouts</c> (Aborted runs per hour
+    /// <summary>#5506: why the row is listed: <c>cost</c> (Regular CPU up more than 25%, with at least 1 s of added CPU, #6781), <c>timeouts</c> (Aborted runs per hour
     /// at least doubled), <c>errors</c> (Exception runs per hour at least doubled), or a comma-separated combination.</summary>
     public string RegressionReason { get; set; } = "";
 
@@ -153,7 +153,7 @@ public sealed partial class ViewerDataService
     /// projection joins them per (database, query_id), computes the duration and CPU regression percents, the
     /// execution-count-weighted <c>additional_duration_ms</c>
     /// (extra total time = per-exec delta × recent exec count), and a DURATION-driven severity band, keeping
-    /// rows whose Regular CPU regressed > 25% (the TVF's single-metric gate) or whose Aborted or Exception runs per hour at
+    /// rows whose Regular CPU regressed > 25% with at least 1 s of added CPU over the window (the TVF's single-metric gate plus the #6781 floor) or whose Aborted or Exception runs per hour at
     /// least doubled (#5506), ranked by additional_duration_ms (failure-only rows after the cost rows, within a share of the
     /// cap) and capped at the TVF's TOP (50). Logical reads are not part of it (#5506).
     ///
@@ -166,7 +166,7 @@ public sealed partial class ViewerDataService
     /// Darling's text is already decompressed, where the TVF <c>DECOMPRESS()</c>es a compressed
     /// <c>query_sql_text</c>.
     /// (3) The stale INTENT comment on the Dashboard's C# caller does NOT match what the TVF actually runs; this ports the
-    /// ACTUAL gate (CPU-only > 25%, no minimums), with the baseline bounded per #4217.</para>
+    /// ACTUAL gate (CPU-only > 25%, no run-count minimum), plus the 1 s added-CPU floor Darling adds (#6781), with the baseline bounded per #4217.</para>
     ///
     /// <para>Since #5809 this raw form is the fallback: <see cref="QueryStoreRegressionsTableSql"/> serves wherever the
     /// interval table's gate allows.</para>

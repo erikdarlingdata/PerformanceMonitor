@@ -14,7 +14,8 @@ namespace PerformanceMonitor.Common;
 /// The thresholds of the Query Store regressions read (get_query_store_regressions), shared by Darling's read
 /// (<c>QueryStoreRegressionBaseline</c>) and Lite's (<c>LocalDataService.GetQueryStoreRegressionsAsync</c>) so the two products
 /// flag the same rows (#5506, #6268). A query is listed for COST when its Regular CPU per execution is more than
-/// <see cref="CostGatePercent"/>% above its baseline, and for TIMEOUTS (Aborted runs) or ERRORS (Exception runs) when that
+/// <see cref="CostGatePercent"/>% above its baseline and the rise in its CPU per execution, times its recent runs, adds at least
+/// <see cref="CostMinAddedCpuMs"/> ms of CPU over the recent window (#6781, <see cref="CostTestSql"/>), and for TIMEOUTS (Aborted runs) or ERRORS (Exception runs) when that
 /// group's per-hour rate in the recent window is at least <see cref="FailureRateMultiple"/> times the baseline's, or any at all
 /// where the baseline had none, with at least <see cref="FailureMinRecentRuns"/> such runs in the recent window.
 /// </summary>
@@ -22,6 +23,31 @@ public static class QueryStoreRegressionRules
 {
     /// <summary>A query qualifies for <c>cost</c> when its Regular CPU per execution is more than this percent above its baseline.</summary>
     public const int CostGatePercent = 25;
+
+    /// <summary>
+    /// #6781: a query qualifies for <c>cost</c> only when it also added at least this many milliseconds of CPU over the recent
+    /// window: its recent Regular runs times the rise in its CPU per run. CPU, not duration, because CPU is the test's own metric:
+    /// a query whose CPU per run rose while its elapsed time fell (a plan that went parallel) is a real CPU regression and adds no
+    /// duration. A fixed amount over the window, not a rate per hour. Chosen from one production store with 42 servers (three
+    /// servers, 24 and 168 hours): about 80 to 96% of the rows the CPU test alone passed added under 1 s of CPU, most of them a
+    /// few runs of a cheap query, while today's first page is unchanged wherever at least a page of rows clears it. A once-a-day
+    /// job whose CPU per run rose by minutes adds minutes in one run and still passes, which a minimum run count would not allow.
+    /// A rate per hour drops far more at 168 hours than at 24 for the same query, so a job that runs once a week would fall out
+    /// of the long window first, the window where it is most likely to be seen. Spelled "1 s" in the tools' text and in the
+    /// Viewer's, by hand, as <see cref="CostGatePercent"/> is.
+    /// </summary>
+    public const int CostMinAddedCpuMs = 1_000;
+
+    /// <summary>
+    /// #6781: the cost test, as one SQL boolean over a row with <c>base_cpu_ms</c>, <c>recent_cpu_ms</c> (ms per run) and
+    /// <c>recent_execs</c> (a run count) under <paramref name="alias"/>. One text for
+    /// Darling's read (the MCP tool and the Viewer, every tier) and Lite's, PostgreSQL and DuckDB alike. Regular CPU per run more
+    /// than <see cref="CostGatePercent"/>% above the baseline AND at least <see cref="CostMinAddedCpuMs"/> ms of added CPU over
+    /// the window. A baseline with no CPU (no ratio) is false, as the CPU test alone was.
+    /// </summary>
+    public static string CostTestSql(string alias) =>
+        $"COALESCE(({alias}.recent_cpu_ms - {alias}.base_cpu_ms) * 100.0 / NULLIF({alias}.base_cpu_ms, 0) > {CostGatePercent}"
+        + $" AND ({alias}.recent_cpu_ms - {alias}.base_cpu_ms) * {alias}.recent_execs >= {CostMinAddedCpuMs}, false)";
 
     /// <summary>The closing sentence of the regressions read's <c>truncation_note</c> when the window starts at <c>baseline_start</c>
     /// and the store holds only part of the baseline. One definition for Darling's and Lite's reads, and the text the web page's

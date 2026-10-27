@@ -86,8 +86,8 @@ public sealed class QueryStoreRunGroup
  * (timeouts, cancels) and Exception (errors). Counting only Regular runs hides what a timeout or an error does (one 30 s timeout
  * among 1,000 fast runs barely moves an average), and blending them into one average would hide it the same way. Cost is the
  * Regular runs' CPU and duration per execution, WEIGHTED by execution count (the summed cost over the summed executions, not an
- * average of interval averages), for both sides. A query is flagged for COST (Regular CPU up more than CostGatePercent), for
- * TIMEOUTS or ERRORS (that group's per-hour rate in the recent window at least FailureRateMultiple times the baseline's, or any at
+ * average of interval averages), for both sides. A query is flagged for COST (Regular CPU up more than CostGatePercent,
+ * with at least CostMinAddedCpuMs of added CPU over the window, #6781), for TIMEOUTS or ERRORS (that group's per-hour rate in the recent window at least FailureRateMultiple times the baseline's, or any at
  * all where the baseline had none, with at least FailureMinRecentRuns such runs in the recent window), or for several. The
  * thresholds are QueryStoreRegressionRules', shared with Darling. Logical reads are not read at all.
  *
@@ -301,7 +301,7 @@ flagged AS (
         j.*,
         (j.recent_dur_ms - j.base_dur_ms) * 100.0 / NULLIF(j.base_dur_ms, 0) AS duration_regression_percent,
         (j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) AS cpu_regression_percent,
-        COALESCE((j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) > " + QueryStoreRegressionRules.CostGatePercent + @", false) AS is_cost,
+        " + QueryStoreRegressionRules.CostTestSql("j") + @" AS is_cost,
         COALESCE(j.recent_aborted_execs >= " + QueryStoreRegressionRules.FailureMinRecentRuns + @"
             AND (j.base_aborted_execs = 0
                  OR (j.recent_aborted_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureRateMultiple + @" * (j.base_aborted_execs / " + baseHours + @")), false) AS is_timeouts,
