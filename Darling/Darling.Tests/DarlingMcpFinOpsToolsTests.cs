@@ -151,6 +151,52 @@ public sealed class DarlingMcpFinOpsToolsTests
         Assert.Contains(DarlingMcpTestData.StatusOf(empty), new[] { "empty", "not_collected" });
     }
 
+    /// <summary>
+    /// #6830: utilization and index_analysis take only a 24 hour window, so every other hours_back gets the view's own
+    /// message. Before the fix the shared 168 hour ceiling answered 336 with "exceeds maximum of 168", a value the view
+    /// then refuses, and answered 0 with a range message that did not say the view ignores hours_back.
+    /// </summary>
+    [Fact]
+    public async Task FixedWindowViews_RefuseEveryHoursBackExcept24_InTheirOwnWords()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to run the get_finops fixed-window facts.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, FinOpsHighImpactReaderLiveTests.ServerId, FinOpsHighImpactReaderLiveTests.ServerName, ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var name = FinOpsHighImpactReaderLiveTests.ServerName;
+
+        foreach (var view in new[] { "utilization", "index_analysis" })
+        {
+            foreach (var hours in new[] { 336, 168, 0 })
+            {
+                var refused = await DarlingMcpFinOpsTools.GetFinOps(postgres, view, name, hours_back: hours, cancellationToken: ct);
+                Assert.True(McpHelpers.IsRefusalEnvelope(refused), $"{view} hours_back {hours}: {refused}");
+                var root = JsonDocument.Parse(refused).RootElement;
+                Assert.Equal("hours_back", root.GetProperty("hints").GetProperty("parameter").GetString());
+                var message = root.GetProperty("message").GetString()!;
+                Assert.Contains("hours_back does not apply", message, StringComparison.Ordinal);
+                Assert.Contains($"'{hours}'", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("exceeds maximum", message, StringComparison.Ordinal);
+            }
+
+            var read = await DarlingMcpFinOpsTools.GetFinOps(postgres, view, name, hours_back: 24, cancellationToken: ct);
+            Assert.False(McpHelpers.IsRefusalEnvelope(read), $"{view} hours_back 24: {read}");
+            Assert.False(McpHelpers.IsErrorEnvelope(read), $"{view} hours_back 24: {read}");
+        }
+
+        // The other views keep the shared range check.
+        var shared = await DarlingMcpFinOpsTools.GetFinOps(postgres, "high_impact", name, hours_back: 336, cancellationToken: ct);
+        Assert.Contains("exceeds maximum", JsonDocument.Parse(shared).RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
     /* #1776 own-store: the fact seeds its own scratch database, so nothing here shares rows with another test. */
     public sealed class LiveParity
     {
