@@ -38,6 +38,9 @@ public sealed partial class ViewerDataService
     /// on its own and never added to another. Plan cache and procedures read the hourly io rollup when it reaches the window's start and the
     /// retention tier left raw (the rule the grids use, <see cref="IoHourlyCoversWindow"/>), else raw; a raw read that starts after the window does
     /// says so in <c>Notes</c>. Query Store reads the interval table only, through the same gate the MCP tool applies.
+    /// <para>#6794: a read for more than one server also takes the hourly io rollup inside raw retention when it serves most of the
+    /// window, by the rule the MCP tool calls (<see cref="QueryTagFleetRoute.ReadsHourlyInsideRaw"/>), because raw there is every server's
+    /// raw rows for the whole window. An hourly-served section says so in <c>Notes</c>, with the edges the hour buckets move.</para>
     /// </summary>
     public async Task<QueryTagRollupData> GetQueryTagRollupDataAsync(
         IReadOnlyList<int> serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
@@ -56,13 +59,20 @@ public sealed partial class ViewerDataService
             bool grainHourly, string hourlyView, string dailyView, RawWindowFloor.Table floorTable)
         {
             var tier = RetentionTierRouter.Resolve(now, startUtc, grainHourly, dailyAvailable: false, coverage.For(hourlyView, dailyView));
-            var hourly = tier != RetentionTier.Raw && IoHourlyCoversWindow(rollups, coverage, ioView, startUtc);
-            var ceiling = hourly ? coverage.HourlyEndCeiling(ioView, startUtc) : null;
+            var measured = coverage.HourlyEndCeiling(ioView, startUtc);
+            var hourly = IoHourlyCoversWindow(rollups, coverage, ioView, startUtc)
+                && (tier != RetentionTier.Raw || QueryTagFleetRoute.ReadsHourlyInsideRaw(ids.Length, startUtc, endUtc, measured, coverage.FloorOf(ioView)));
+            var ceiling = hourly ? measured : null;
             try
             {
                 sections[section.Name] = await DarlingQueryTagRollupReader.ReadFactsAsync(
                     _dataSource, hourly ? hourlySql : rawSql, section, ids, startUtc, endUtc, ceiling, cancellationToken, seconds);
-                if (!hourly)
+                if (hourly)
+                {
+                    var edges = HourlyWindowEdges.Note(startUtc, null, endUtc, ceiling);
+                    notes[section.Name] = $"Read from the hourly rollup {ioView}" + (string.IsNullOrEmpty(edges) ? "." : ": " + edges + ".");
+                }
+                else
                 {
                     foreach (var id in ids)
                     {
