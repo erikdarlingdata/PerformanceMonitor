@@ -19,7 +19,7 @@ All sections except `postgres` and `servers` are optional — omit a section (or
 | `mcp.enabled`, `mcp.port`, `web.enabled`, `web.port` | First-run seed | The Viewer's Settings window, live and with no restart. On a box with no Viewer, `--enable-mcp` and `--enable-web` |
 | `servers` | First-run seed, copied once while the server registry is empty. A server added to the file later is ignored | The Viewer, the web dashboard's Admin page, or the MCP tools `add_servers` and `edit_server`. The one exception is the `remediation*` and `hypotheticalIndex*` login keys, which the service syncs from the file at every start |
 | `analysis.uncorroboratedRoute` | Both. The store's value wins when it is set. Otherwise the file's value is used | The store value, from the same places as the rest of `analysis`. Clear it to hand the choice back to the file |
-| `postgres`, `collectSchemaChangeEvents`, `rawChunkIntervalReconcileEnabled` (default `true`), `procedureStatsPlanCycleInterval`, `queryStatsDeferredPlanFetch`, `procedureStatsDeferredPlanFetch`, `allowedAwsRoles`, `peers`, `heartbeat`, `reads`, `forcePlanBot`, `analyzer`, and every other key in `mcp` and `web` (including `mcp.network` and `web.network`) | File only | Edit `darling.json` and restart the service |
+| `postgres`, `collectSchemaChangeEvents`, `rawChunkIntervalReconcileEnabled` (default `true`), `procedureStatsPlanCycleInterval`, `queryStatsDeferredPlanFetch`, `procedureStatsDeferredPlanFetch`, `allowedAwsRoles`, `peers`, `frontDoor`, `heartbeat`, `reads`, `forcePlanBot`, `analyzer`, and every other key in `mcp` and `web` (including `mcp.network` and `web.network`) | File only | Edit `darling.json` and restart the service |
 
 ## postgres
 
@@ -230,6 +230,10 @@ A **file-only** block (not seeded into the control plane): it describes the depl
 **Declaring nothing changes nothing, with one exception worth knowing about on upgrade.** The instructions, the resolution-miss message, and `list_servers`' empty-registry sentence are byte-for-byte what they were. But `list_servers`' JSON envelope carries `this_store_covers`, `peer_fleets` and `peer_note` on *every* response, declared or not — so a script comparing that tool's exact shape sees three new keys even if you never write a `peers` block. That is deliberate: an empty `peer_fleets` means *either* "this is the only store" *or* "nobody declared the siblings", and a note that only appeared when peers were declared would say nothing in precisely the case that produces the wrong conclusion.
 
 **A `peers` block that fails validation is refused whole, and nothing is disclosed** — not the valid subset. An unfinished block that asserts coverage which may be wrong is worse than no block, and the service logs each problem at Critical. The check runs inside the publish rather than only in config validation, because the MCP host loads its own config and deliberately never validates it (its fail-closed checks are host-local), so validation alone would leave the one path that actually broadcasts uncovered.
+
+## frontDoor (optional)
+
+Turns this service into a front door: one MCP address and one web address in front of several Darling stores. It is off unless `frontDoor.enabled` is `true`. The block is file-only, holds the access token of every store, and is never returned by a page or an MCP tool. It is not part of `peers`, because the `peers` text goes to every MCP client. In front-door mode the service has no database of its own, so `postgres` is not required, and no collector runs. Every field, the checks at start and the setup of each store are in [The front door](front-door.md).
 
 ## heartbeat
 
