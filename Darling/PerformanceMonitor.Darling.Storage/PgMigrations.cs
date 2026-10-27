@@ -2438,8 +2438,10 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
     /// index, and <c>hash_built_seq</c> on <c>collect.query_store_compose_stamp_built</c>. The text, the column map and the reasoning are on
     /// <see cref="QueryStoreComposeStamp.HashHourlyCreateSql"/>. The service's hourly tick (V173's builder) fills the table in the stamp's
     /// transaction and the planner rebuilds every hour whose <c>hash_built_seq</c> differs from <c>late_seq</c>, which is every hour built
-    /// before this rung (NULL), so the backfill is the ordinary tick, newest first, six hours a tick. <b>The rung scans nothing</b>: a new
-    /// empty table, an index on it, and a nullable column with no default on the small ledger. The column needs an ACCESS EXCLUSIVE lock
+    /// before this rung (NULL), so the backfill is the ordinary tick, newest first, six hours a tick. The same text also creates the day
+    /// table <c>collect.query_store_hash_daily</c> (#6800, the 7 and 30 day windows), its <c>(day, server_id)</c> index, its ledger
+    /// <c>query_store_hash_daily_built</c> and its failure record; <see cref="QueryStoreHashDaily"/> builds the days after the hours of a
+    /// tick. <b>The rung scans nothing</b>: four new empty tables, two indexes on them, and a nullable column with no default on the small ledger. The column needs an ACCESS EXCLUSIVE lock
     /// on that ledger, which the wide table's late-row triggers take row locks on, so the lock timeout is
     /// <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V173's. Additive: an older build never reads the table, and a build
     /// that rebuilds a stamp hour without writing it leaves the pair stale for the table, which this build then rebuilds.
