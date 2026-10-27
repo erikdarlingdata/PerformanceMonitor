@@ -92,6 +92,8 @@ public static class DarlingQueryTagRollupReader
             await readOnly.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        /* The gate decides per server, on the shared snapshot; the read is then ONE statement over every allowed server (#6794), each
+           bound to its own ReadStart, so a server's rows are the rows a per-server statement would read. */
         foreach (var serverId in serverIds)
         {
             var plan = await QueryStoreIntervalWide.ResolveReadAsync(
@@ -106,19 +108,47 @@ public static class DarlingQueryTagRollupReader
             }
 
             allowed[serverId] = plan.ReadStart;
-            try
-            {
-                await using var command = Command(connection, QueryTagRollupSql.QueryStoreSql, [serverId], plan.ReadStart, windowEnd, readSeconds);
-                facts.AddRange(await ReadFactsFromAsync(command, QueryTagRollupSection.QueryStore, cancellationToken));
-            }
-            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
-            {
-                /* The failed statement aborted the transaction: nothing more can be read on it. */
-                return new QueryStoreRead(allowed, refused, [], true);
-            }
+        }
+
+        if (allowed.Count == 0)
+        {
+            return new QueryStoreRead(allowed, refused, facts, false);
+        }
+
+        try
+        {
+            await using var command = QueryStoreCommand(connection, allowed, windowEnd, readSeconds);
+            facts.AddRange(await ReadFactsFromAsync(command, QueryTagRollupSection.QueryStore, cancellationToken));
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+        {
+            /* The failed statement aborted the transaction: nothing more can be read on it. */
+            return new QueryStoreRead(allowed, refused, [], true);
         }
 
         return new QueryStoreRead(allowed, refused, facts, false);
+    }
+
+    /// <summary>The batched Query Store statement's command (<see cref="QueryTagRollupSql.QueryStoreSql"/>): the allowed servers and each one's
+    /// read start as two parallel arrays, the window end, and the earliest read start.</summary>
+    private static NpgsqlCommand QueryStoreCommand(NpgsqlConnection connection, Dictionary<int, DateTime> allowed, DateTime windowEnd, int readSeconds)
+    {
+        var ordered = allowed.OrderBy(a => a.Key).ToArray();
+        var command = new NpgsqlCommand(QueryTagRollupSql.QueryStoreSql, connection);
+        command.CommandTimeout = readSeconds;
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = ordered.Select(a => a.Key).ToArray() });
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp,
+            Value = ordered.Select(a => DateTime.SpecifyKind(a.Value, DateTimeKind.Unspecified)).ToArray(),
+        });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Timestamp,
+            Value = DateTime.SpecifyKind(ordered.Min(a => a.Value), DateTimeKind.Unspecified),
+        });
+        return command;
     }
 
     /* The deadline is set HERE, on the name the construction is bound to, so the read-surface deadline scan certifies each site itself. */
