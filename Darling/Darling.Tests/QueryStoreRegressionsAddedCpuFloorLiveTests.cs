@@ -36,6 +36,9 @@ namespace Darling.Tests;
 /// Listed for timeouts only: the floor touches the cost test and nothing else.</item>
 /// </list>
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test reaches DARLING_TEST_PG only to CREATE and DROP its
+   own database through ScratchPostgres (QueryStoreRegressionsFailureGroupsLiveTests.OpenAsync) and works entirely inside it. It
+   shares the gap-cache collection with the other regressions table tests, because the gate's cadence check reads a process-wide cache. */
 [Collection("gap-cache-serial")]
 public sealed class QueryStoreRegressionsAddedCpuFloorLiveTests
 {
