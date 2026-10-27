@@ -122,7 +122,9 @@ public sealed class PgStatementStatsCollector : PostgresCollectorDefinitionBase<
         double? StorageBlockReadTimeMs,
         double? OrcacheBlockReadTimeMs,
         /* Nullable from #6836 on: pg_stat_statements before 1.8 (PostgreSQL 12 and older) has no WAL counters, so the
-           query projects NULL for them. NULL means "this version does not report it", not zero. */
+           query projects NULL for them. NULL means "this version does not report it", not zero.
+           wal_records and wal_fpi are stored NULL on those targets too, and no read projects either column yet
+           (only wal_bytes is read, by the top-queries and bad-actor reads), so nothing shows them. */
         long? WalRecords,
         long? WalFpi,
         long? WalBytes,

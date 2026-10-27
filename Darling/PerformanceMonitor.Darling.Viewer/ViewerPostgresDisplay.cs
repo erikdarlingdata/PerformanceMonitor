@@ -1569,7 +1569,8 @@ internal static class PgDisplay
     {
         public string? EventType { get; init; }
         public string? Event { get; init; }
-        public long QueryId { get; init; }
+        /// <summary>Null is a target that does not report a query id (#6836): the grid shows the not-applicable dash, never 0.</summary>
+        public long? QueryId { get; init; }
         public long SampleCount { get; init; }
         public long EstimatedWaitMs { get; init; }
         public int BackendCount { get; init; }

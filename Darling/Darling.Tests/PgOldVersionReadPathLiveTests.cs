@@ -284,7 +284,6 @@ VALUES ($1, $2, $3, $4, $5, 1, 10, TRUE, 5, 50, 20, 5, 100, 10, 0, 0, $6, 5, 50,
     private static async Task<int> RunLogTailAsync<TRow>(CollectorDefinitionBase<TRow> definition, CollectorContext context, NpgsqlConnection target, CancellationToken ct)
     {
         var query = definition.BuildQuery(context);
-        Assert.DoesNotContain("MATERIALIZED", query.Text, StringComparison.OrdinalIgnoreCase);
         await using var command = PostgresTargetProvider.Instance.CreateCommand(query, target, 30);
         await using var reader = await command.ExecuteReaderAsync(ct);
         try

@@ -1004,4 +1004,48 @@ public sealed class ViewerPostgresTabsTests
         Assert.NotEqual(PgDisplay.NotApplicableText, reported.WalWritten);
         Assert.Equal(2_048L, reported.WalWrittenSort);
     }
+
+    /// <summary>
+    /// #6836: the WAL column sorts by <c>WalWrittenSort</c>, which is null for a statement whose target never reported WAL.
+    /// The grid's own sort (a ListCollectionView, which the DataGrid uses) must take those nulls in either direction
+    /// without throwing, with the unreported rows at the low end and the reported ones in order.
+    /// </summary>
+    [Theory]
+    [InlineData(System.ComponentModel.ListSortDirection.Ascending)]
+    [InlineData(System.ComponentModel.ListSortDirection.Descending)]
+    public void StatementGrid_SortsNullWalWithoutError(System.ComponentModel.ListSortDirection direction)
+    {
+        static PgDisplay.StatementRow Row(long id, long? wal) => PgDisplay.Statement(new DarlingPgStatementReader.PgStatementRow(
+            QueryId: id, DatabaseId: 2, Calls: 3, TotalExecTimeMs: 4, RowsReturned: 5, MaxExecTimeMs: 6.0,
+            SharedBlocksHit: 7, SharedBlocksRead: 8, StorageBlocksRead: null, OrcacheBlocksHit: null,
+            TempBlocksRead: 0, TempBlocksWritten: 0, WalBytes: wal, MaxPeakMemBytes: null));
+
+        var rows = new List<PgDisplay.StatementRow> { Row(1, 4_096), Row(2, null), Row(3, 0), Row(4, null), Row(5, 2_048) };
+        var view = new System.Windows.Data.ListCollectionView(rows);
+        view.SortDescriptions.Add(new System.ComponentModel.SortDescription(nameof(PgDisplay.StatementRow.WalWrittenSort), direction));
+
+        var sorted = view.Cast<PgDisplay.StatementRow>().Select(r => r.WalWrittenSort).ToList();
+
+        Assert.Equal(5, sorted.Count);
+        var reported = sorted.Where(w => w is not null).ToList();
+        Assert.Equal(direction == System.ComponentModel.ListSortDirection.Ascending ? new long?[] { 0, 2_048, 4_096 } : new long?[] { 4_096, 2_048, 0 }, reported);
+        /* The unreported rows are together at one end, not mixed in with the measured ones. */
+        var firstNull = sorted.IndexOf(null);
+        Assert.Contains(firstNull, new[] { 0, 3 });
+    }
+
+    /// <summary>
+    /// #6836: a sampled wait whose target does not report a query id carries null to the grid, which the Query ID column
+    /// shows as a dash. It must stay null, not become the 0 that means the wait belongs to no statement.
+    /// </summary>
+    [Fact]
+    public void WaitSamplingRow_KeepsAnUnreportedQueryIdNull_AndAZeroZero()
+    {
+        static DarlingPgWaitSamplingReader.PgWaitSamplingRow Wait(long? queryId) => new(
+            EventType: "IO", Event: "DataFileRead", QueryId: queryId, SampleCount: 3, EstimatedWaitMs: 30,
+            BackendCount: 1, CounterReset: false, CaptureTime: new DateTime(2026, 10, 27, 0, 0, 0, DateTimeKind.Utc));
+
+        Assert.Null(PgDisplay.WaitSampling(Wait(null)).QueryId);
+        Assert.Equal(0L, PgDisplay.WaitSampling(Wait(0)).QueryId);
+    }
 }

@@ -185,6 +185,7 @@ public sealed class PgWaitSamplerArmTests
     /* ───────────────────────── accumulation ───────────────────────── */
 
     private static object[] Snap(string type, string evt, long queryId, int pid) => new object[] { type, evt, queryId, pid };
+    private static object[] SnapNoQueryId(string type, string evt, int pid) => new object[] { type, evt, DBNull.Value, pid };
     private static readonly object[][] Sleep = { new object[] { DBNull.Value } };
     private static readonly object[][] Clear = { new object[] { DBNull.Value } };
 
@@ -271,6 +272,63 @@ public sealed class PgWaitSamplerArmTests
         Assert.Equal(1, roundTrip[("IO", "DataFileRead", 0)]);
     }
 
+    /// <summary>
+    /// #6836: PostgreSQL 10 to 13 has no <c>pg_stat_activity.query_id</c>, so the sampler sends NULL for it. That is
+    /// "not reported", which must reach the rows (and the store) as NULL and never as 0, the value that means "this
+    /// wait belongs to no statement". The tally carries the NULL across cycles as an empty field.
+    /// </summary>
+    [Fact]
+    public async Task APre14Target_ReportsNullQueryId_AndTheTallyCarriesItAcrossCycles()
+    {
+        var first = MakeContext(hasExtension: false, major: 13);
+        var firstRows = await PgWaitSamplingCollector.Instance.ReadAsync(
+            FakeCollectorDataReader.WithResultSets(new[] { SnapNoQueryId("Lock", "relation", 10), SnapNoQueryId("CPU", "Running", 11) }),
+            first, CancellationToken.None);
+
+        Assert.Equal(2, firstRows.Count);
+        Assert.All(firstRows, r => Assert.Null(r.QueryId));
+
+        var carried = new Dictionary<string, string> { [PgWaitSamplingCollector.TallyStateKey] = first.PendingState[PgWaitSamplingCollector.TallyStateKey] };
+        var second = MakeContext(hasExtension: false, major: 13, state: carried);
+        var secondRows = await PgWaitSamplingCollector.Instance.ReadAsync(
+            FakeCollectorDataReader.WithResultSets(new[] { SnapNoQueryId("Lock", "relation", 12) }),
+            second, CancellationToken.None);
+
+        Assert.All(secondRows, r => Assert.Null(r.QueryId));
+        Assert.Equal(2, Assert.Single(secondRows, r => r.EventType == "Lock").SampleCount);
+        var roundTrip = PgWaitSamplingCollector.ParseTally(second.PendingState[PgWaitSamplingCollector.TallyStateKey]);
+        Assert.Equal(2, roundTrip[("Lock", "relation", null)]);
+        Assert.Equal(1, roundTrip[("CPU", "Running", null)]);
+    }
+
+    /// <summary>
+    /// #6836: a tally an older build carried for a target without the column holds 0 for "not reported". The NULL
+    /// series must continue from those counts rather than the old key freezing and being re-emitted every cycle. A
+    /// target that does report the column keeps its 0 ("belongs to no statement") as it was.
+    /// </summary>
+    [Fact]
+    public async Task ACarriedZeroQueryIdTally_FoldsIntoNullOnAPre14Target_ButStaysZeroWhereTheColumnExists()
+    {
+        const string carriedTally = "Lock\trelation\t0\t7\nIO\tDataFileRead\t5\t3\n";
+
+        var old = MakeContext(hasExtension: false, major: 13, state: new Dictionary<string, string> { [PgWaitSamplingCollector.TallyStateKey] = carriedTally });
+        var oldRows = await PgWaitSamplingCollector.Instance.ReadAsync(
+            FakeCollectorDataReader.WithResultSets(new[] { SnapNoQueryId("Lock", "relation", 10) }), old, CancellationToken.None);
+
+        var folded = Assert.Single(oldRows, r => r.EventType == "Lock");
+        Assert.Null(folded.QueryId);
+        Assert.Equal(8, folded.SampleCount);
+        Assert.DoesNotContain(oldRows, r => r.QueryId == 0);
+
+        var current = MakeContext(hasExtension: false, major: 17, state: new Dictionary<string, string> { [PgWaitSamplingCollector.TallyStateKey] = carriedTally });
+        var currentRows = await PgWaitSamplingCollector.Instance.ReadAsync(
+            FakeCollectorDataReader.WithResultSets(new[] { Snap("Lock", "relation", 0, 10) }), current, CancellationToken.None);
+
+        var kept = Assert.Single(currentRows, r => r.EventType == "Lock");
+        Assert.Equal(0L, kept.QueryId);
+        Assert.Equal(8, kept.SampleCount);
+    }
+
     [Fact]
     public async Task AnEmptyWindowOnAnEmptyTallyWritesNothing_AndStillRecordsTheInstrument()
     {
@@ -287,7 +345,7 @@ public sealed class PgWaitSamplerArmTests
     [Fact]
     public async Task TheTallyIsCappedByDroppingTheLeastSampled()
     {
-        var tally = new Dictionary<(string, string, long), long>();
+        var tally = new Dictionary<(string, string, long?), long>();
         for (var i = 0; i < PgWaitSamplingCollector.SamplerTallyCap + 10; i++)
         {
             tally[("Lock", "relation", i)] = i + 1;

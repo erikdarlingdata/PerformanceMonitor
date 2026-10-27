@@ -80,8 +80,8 @@ public static class DarlingPgStatementReader
     /// <summary>
     /// The window's WAL figure for a statement, as one aggregate expression over a differenced series that carries
     /// <c>raw_wal_bytes</c> (the undifferenced column) beside <c>d_wal_bytes</c> (its <c>GREATEST(x - LAG(x), 0)</c>
-    /// delta). NULL when no sample reported the column (pg_stat_statements before 1.8 has no <c>wal_*</c> columns, and
-    /// Aurora types it NULL), 0 when one did and the window holds no interval. The delta alone cannot tell the two
+    /// delta). NULL when no sample reported the column (pg_stat_statements before 1.8 has no <c>wal_*</c> columns, so
+    /// the collector sends NULL for them), 0 when one did and the window holds no interval. The delta alone cannot tell the two
     /// apart: <c>GREATEST(NULL - NULL, 0)</c> is 0 in PostgreSQL, so a series that never reported WAL differences to 0.
     /// <see cref="PgTopQueriesSql"/> and the bad-actor detail read (<c>PgTargetDrillDownCollector</c>) both splice this
     /// text, so the rule lives once (#6836).

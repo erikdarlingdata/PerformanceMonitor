@@ -132,7 +132,10 @@ public sealed class PgWaitSamplingCollector : PostgresCollectorDefinitionBase<Pg
     /// that was NOT waiting is labelled <c>CPU</c>/<c>Running</c> rather than stored as a blank.</param>
     /// <param name="QueryId">Joins <c>pg_statement_stats.queryid</c>. Zero means the wait belongs to no
     /// statement — a background process — and is kept rather than dropped so the attributed and
-    /// unattributed halves of the profile can be told apart instead of silently blended.</param>
+    /// unattributed halves of the profile can be told apart instead of silently blended. NULL (#6836) means the
+    /// target does not report a query id at all: the sampler arm on PostgreSQL 10 to 13, whose
+    /// <c>pg_stat_activity</c> has no <c>query_id</c> column. That is "not reported", a different statement
+    /// from zero, so it is stored as NULL and never as 0.</param>
     /// <param name="SampleCount">A tally of observations, NOT a duration. See the type header.</param>
     /// <param name="ProfilePeriodMs">The sampling period the counts were gathered at. Travels with them
     /// because a count means nothing without it.</param>
@@ -146,7 +149,7 @@ public sealed class PgWaitSamplingCollector : PostgresCollectorDefinitionBase<Pg
     public readonly record struct Row(
         string? EventType,
         string? Event,
-        long QueryId,
+        long? QueryId,
         long SampleCount,
         int ProfilePeriodMs,
         int BackendCount,
@@ -214,14 +217,14 @@ public sealed class PgWaitSamplingCollector : PostgresCollectorDefinitionBase<Pg
     /// that is waiting on something the profile counts or is on CPU. Public so a test can run it alone.
     /// <para><c>query_id</c> exists from PostgreSQL 14; on 13 (or an unknown version reading as 0 — which the
     /// gates treat as "newest", so it selects the column) the caller passes <paramref name="hasQueryId"/>
-    /// false and the column is a constant 0, the same "belongs to no statement" value the extension arm
-    /// stores for a background process.</para>
+    /// false and the column is a constant NULL (#6836): "not reported", not the 0 that means "belongs to no
+    /// statement". The tally and the store both carry the NULL.</para>
     /// </summary>
     public static string SamplerSnapshotSql(bool hasQueryId) => @"
 SELECT
     coalesce(a.wait_event_type, 'CPU')::text AS event_type,
     coalesce(a.wait_event, 'Running')::text  AS event,
-    " + (hasQueryId ? "coalesce(a.query_id, 0)::bigint" : "0::bigint") + @"                AS query_id,
+    " + (hasQueryId ? "coalesce(a.query_id, 0)::bigint" : "NULL::bigint") + @"                AS query_id,
     a.pid::int                               AS pid
 FROM pg_stat_activity AS a
 WHERE a.pid <> pg_backend_pid()
@@ -453,7 +456,7 @@ LIMIT 500";
     /// </summary>
     internal static async ValueTask<List<Row>> ReadSamplerAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
-        var window = new Dictionary<(string Type, string Event, long QueryId), (long Samples, HashSet<int> Pids)>();
+        var window = new Dictionary<(string Type, string Event, long? QueryId), (long Samples, HashSet<int> Pids)>();
         var snapshots = 0;
 
         do
@@ -466,7 +469,7 @@ LIMIT 500";
                     var key = (
                         reader.IsDBNull(0) ? "CPU" : reader.GetString(0),
                         reader.IsDBNull(1) ? "Running" : reader.GetString(1),
-                        reader.IsDBNull(2) ? 0L : reader.GetInt64(2));
+                        reader.IsDBNull(2) ? (long?)null : reader.GetInt64(2));
                     var pid = reader.IsDBNull(3) ? 0 : reader.GetInt32(3);
 
                     if (!window.TryGetValue(key, out var seen))
@@ -488,6 +491,19 @@ LIMIT 500";
         while (await reader.NextResultAsync(cancellationToken));
 
         var tally = ParseTally(context.State.TryGetValue(TallyStateKey, out var carried) ? carried : null);
+        /* #6836: a tally carried from a build that stored 0 for "not reported" on a target without the column.
+           Fold those series into the NULL ones so the cumulative counts continue as one series rather than
+           freezing at the old key and being re-emitted unchanged every cycle. */
+        if (!HasQueryIdColumn(context.Target))
+        {
+            foreach (var (key, count) in tally.Where(kv => kv.Key.QueryId == 0).ToList())
+            {
+                tally.Remove(key);
+                var folded = (key.Type, key.Event, (long?)null);
+                tally[folded] = tally.TryGetValue(folded, out var existing) ? existing + count : count;
+            }
+        }
+
         foreach (var (key, seen) in window)
         {
             tally[key] = tally.TryGetValue(key, out var prior) ? prior + seen.Samples : seen.Samples;
@@ -525,9 +541,9 @@ LIMIT 500";
 
     /// <summary>The tally's text form: one <c>type\tevent\tquery_id\tcount</c> line per key. Tabs because
     /// no wait event name carries one; a line that does not parse is skipped rather than failing the cycle.</summary>
-    public static Dictionary<(string Type, string Event, long QueryId), long> ParseTally(string? text)
+    public static Dictionary<(string Type, string Event, long? QueryId), long> ParseTally(string? text)
     {
-        var tally = new Dictionary<(string, string, long), long>();
+        var tally = new Dictionary<(string, string, long?), long>();
         if (string.IsNullOrEmpty(text))
         {
             return tally;
@@ -537,10 +553,21 @@ LIMIT 500";
         {
             var parts = line.Split('\t');
             if (parts.Length != 4
-                || !long.TryParse(parts[2], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var queryId)
                 || !long.TryParse(parts[3], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var count))
             {
                 continue;
+            }
+
+            /* An empty query_id field is NULL ("not reported", #6836). */
+            long? queryId = null;
+            if (parts[2].Length > 0)
+            {
+                if (!long.TryParse(parts[2], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsedId))
+                {
+                    continue;
+                }
+
+                queryId = parsedId;
             }
 
             tally[(parts[0], parts[1], queryId)] = count;
@@ -549,13 +576,13 @@ LIMIT 500";
         return tally;
     }
 
-    public static string SerializeTally(Dictionary<(string Type, string Event, long QueryId), long> tally)
+    public static string SerializeTally(Dictionary<(string Type, string Event, long? QueryId), long> tally)
     {
         var sb = new System.Text.StringBuilder();
         foreach (var (key, count) in tally.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key.Type, StringComparer.Ordinal).ThenBy(kv => kv.Key.Event, StringComparer.Ordinal))
         {
             sb.Append(key.Type).Append('\t').Append(key.Event).Append('\t')
-              .Append(key.QueryId.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append('\t')
+              .Append(key.QueryId?.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append('\t')
               .Append(count.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append('\n');
         }
 

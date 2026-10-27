@@ -84,6 +84,10 @@ public sealed class DarlingPgReadSqlParsesLiveTests
     private static readonly HashSet<string> NotQueryFields = new(StringComparer.Ordinal)
     {
         "DarlingPgColumnStatsReader.EvidenceStatusList",
+        /* #6836: the window's WAL aggregate, one CASE expression spliced into PgTopQueriesSql (in the parse-checked
+           population) and into the bad-actor detail read of PgTargetDrillDownCollector. Not a statement, and verified
+           where it is spliced. */
+        "DarlingPgStatementReader.WalBytesWindowSql",
         /* #3278's twin of the line above, and the same reasoning: an IN-list fragment built from
            EnumeratedCollectorDriver.FreshnessSuccessStatuses, so it is 'SUCCESS', 'SKIPPED' and not a
            statement. The query it is spliced into - CoverageEvidenceSql - IS in the parse-checked
