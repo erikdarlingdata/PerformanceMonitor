@@ -194,7 +194,7 @@ public sealed partial class ViewerDataService
             runRange: (start, end, ct) => RunRangeAsync(sql, scope, start, end, ct),
             scopeKey: DailySummaryAzureMasterScope.CacheScopeKey(scope),
             cancellationToken: cancellationToken,
-            trustFromUtc: DailySummaryRangeCache<RawDailySummaryDay>.TrustFloorFor(horizon)); // #6809: the horizon day and older are re-read within the hour, never held for a day
+            trustFromUtc: DailySummaryRangeCache.TrustFloorFor(horizon)); // #6809: the horizon day and older are re-read within the hour, never held for a day
 
         /* #4925: an Azure SQL Database master with separately monitored databases counts only its own blocking and
            deadlocks, as get_daily_health does. An empty list (every other target) is today's read, unchanged. A

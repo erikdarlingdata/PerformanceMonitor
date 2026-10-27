@@ -21,7 +21,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// though every day but today (and yesterday, briefly after midnight) is closed and its rows do not change.
 /// This holds the CLOSED portion of one range as one block until the next UTC day boundary plus
 /// <see cref="ClosedGrace"/> (#6809; it was one hour, which made the first load of every hour a cold read of
-/// about 30 closed days), except the days before the retention horizon, which are re-read once per
+/// about 30 closed days), except the retention horizon day and the days before it, which are re-read once per
 /// <see cref="SubHorizonTtl"/> so a purge shows within the hour; every refresh inside that window re-runs the statement only over the days still open
 /// and joins them to the block. After that, one refresh recomputes the whole range and repopulates it. Expired
 /// blocks are dropped on the next miss, and the cache never holds more than <see cref="MaxBlocks"/> blocks at once, evicting the oldest
@@ -92,11 +92,6 @@ public sealed class DailySummaryRangeCache<TRow>
     /// passes (<see cref="SubHorizonTtl"/>), the rest live until <paramref name="ExpiresAtUtc"/>, the next UTC day
     /// boundary plus <see cref="ClosedGrace"/> after the block was built.</summary>
     private sealed record CachedBlock(List<TRow> ClosedRows, DateTime ClosedEndUtc, DateTime TrustFromUtc, DateTime SubHorizonExpiresAtUtc, DateTime ComputedAtUtc, DateTime ExpiresAtUtc);
-
-    /// <summary>#6809: the <c>trustFromUtc</c> both callers pass: the day after the retention horizon. The horizon
-    /// day itself can be half-deleted on the DELETE purge path, so it is read live too. One definition for the
-    /// service and the Viewer.</summary>
-    public static DateTime TrustFloorFor(DateTime retentionHorizon) => retentionHorizon.Date.AddDays(1);
 
     /// <summary>#6809: when a block built at <paramref name="nowUtc"/> stops being served: the next UTC day
     /// boundary plus <see cref="ClosedGrace"/>. By then the day after the block's last closed day has closed too,
@@ -252,11 +247,14 @@ public sealed class DailySummaryRangeCache<TRow>
         _blocks[key] = new CachedBlock(closedRows, closedEndUtc, floorUtc, nowUtc + SubHorizonTtl, nowUtc, BlockExpiryUtc(nowUtc));
         return full;
     }
+}
 
-    /// <summary>#4232: drops every cached block, for a test that needs its next read to hit the store rather than
-    /// serve a block a prior call in the same process warmed. Public rather than <c>internal</c> -- this type's
-    /// assembly (<c>PerformanceMonitor.Darling.Storage</c>) does not grant <c>InternalsVisibleTo</c> to the
-    /// service, only to <c>Darling.Tests</c>, so a caller reaching this through the service's own reset seam
-    /// (<c>DarlingHealthReader.ResetRangeCacheForTests</c>) needs a public member to call.</summary>
-    public void Clear() => _blocks.Clear();
+/// <summary>The non-generic half of <see cref="DailySummaryRangeCache{TRow}"/>: a static member on the generic type
+/// would need a row type to call (CA1000).</summary>
+public static class DailySummaryRangeCache
+{
+    /// <summary>#6809: the <c>trustFromUtc</c> both callers pass: the day after the retention horizon. The horizon
+    /// day itself can be half-deleted on the DELETE purge path, so it is read live too. One definition for the
+    /// service and the Viewer.</summary>
+    public static DateTime TrustFloorFor(DateTime retentionHorizon) => retentionHorizon.Date.AddDays(1);
 }

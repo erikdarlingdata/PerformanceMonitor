@@ -372,7 +372,7 @@ public sealed class DailySummaryRangeCacheTests
     }
 
     [Fact]
-    public async Task PastHorizonDays_AreReadOncePerSubHorizonTtl_NotOncePerCall()
+    public async Task PastHorizonDays_InsideTheSubHorizonTtl_AreServedNotReadPerCall()
     {
         /* A Viewer calendar on an older month: most of the window is before the retention horizon. */
         var now = new DateTime(2026, 9, 25, 10, 0, 0, DateTimeKind.Utc);
@@ -457,7 +457,7 @@ public sealed class DailySummaryRangeCacheTests
     }
 
     [Fact]
-    public async Task RetentionRaisedAfterBlockBuilt_RebuildsInsteadOfServingAHole()
+    public async Task RetentionRaisedAfterBlockBuilt_ServesTheDaysBelowTheOldFloorWithoutAHole()
     {
         var now = new DateTime(2026, 9, 25, 10, 0, 0, DateTimeKind.Utc);
         var cache = new DailySummaryRangeCache<TestRow>(() => now);
@@ -466,11 +466,17 @@ public sealed class DailySummaryRangeCacheTests
         Task<List<TestRow>> Read(DateTime? trustFrom) => cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day,
             store.Run, "", CancellationToken.None, trustFrom);
 
-        await Read(D(10)); // block holds the 10th onward only
-        now = now.AddHours(1);
-        var rows = await Read(D(4)); // retention raised: days 4..9 are trusted now and must not be missing
+        await Read(D(10)); // built under a floor of the 10th: days 1..9 are the sub-horizon segment
+        store.Reads.Clear();
+
+        /* Retention raised: days 4..9 are trusted now. The read stays INSIDE the sub-horizon TTL, so nothing re-reads
+           days 1..9: they can only be here if the block stored every closed day, not just the ones from the floor
+           up. (An hour later the segment refresh would fill the same days from the store and hide the defect.) */
+        now = now.AddMinutes(5);
+        var rows = await Read(D(4));
         Assert.Equal(25, rows.Count);
         Assert.Contains(rows, r => r.Day == D(6));
+        Assert.Equal((D(25), D(26)), Assert.Single(store.Reads)); // the open tail only: a hit, not a rebuild
     }
 
     [Fact]

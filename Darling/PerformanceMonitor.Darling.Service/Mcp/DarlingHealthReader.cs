@@ -562,7 +562,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
             runRange: (start, end, ct) => RunRangeAsync(sql, scope, start, end, ct),
             scopeKey: DailySummaryAzureMasterScope.CacheScopeKey(scope),
             cancellationToken: cancellationToken,
-            trustFromUtc: DailySummaryRangeCache<DailySummaryReadRow>.TrustFloorFor(horizon)); // #6809: the horizon day and older are re-read within the hour, never held for a day
+            trustFromUtc: DailySummaryRangeCache.TrustFloorFor(horizon)); // #6809: the horizon day and older are re-read within the hour, never held for a day
 
         /* #4925: an Azure SQL Database master with separately monitored databases counts only its own blocking and
            deadlocks. A scoping fault (the statement drifted, a graph read timed out) must not take the day away: it
