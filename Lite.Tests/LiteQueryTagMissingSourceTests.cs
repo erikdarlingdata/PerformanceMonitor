@@ -68,4 +68,37 @@ public sealed class LiteQueryTagMissingSourceTests : IDisposable
         var view = QueryTagUsageView.Build(data, [(1, "s")], allServers: false, tagFilter: null);
         Assert.Contains("plan_cache is unavailable: This store has no query stats data yet.", view.Message, StringComparison.Ordinal);
     }
+
+    /// <summary>#6850: every section, with its source dropped, says the same sentence the Darling Viewer says for it (the words, never the view or table name).</summary>
+    [Fact]
+    public async Task EverySection_WithItsSourceMissing_SaysTheSameWordsAsTheViewer()
+    {
+        using var initializer = new DuckDbInitializer(Path.Combine(_tempDir, "every.duckdb"));
+        await initializer.InitializeFromTemplateAsync();
+        var now = DateTime.UtcNow;
+        using (var connection = initializer.CreateConnection())
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            foreach (var drop in new[]
+            {
+                "DROP VIEW IF EXISTS v_query_stats", "DROP VIEW IF EXISTS v_query_store_stats", "DROP VIEW IF EXISTS v_procedure_stats",
+                "DROP VIEW IF EXISTS v_dmv_blocking_snapshots", "DROP TABLE IF EXISTS blocked_process_reports", "DROP TABLE IF EXISTS deadlocks",
+            })
+            {
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = drop;
+                await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            }
+        }
+
+        var data = await new LocalDataService(initializer).GetQueryTagRollupDataAsync([1], now.AddHours(-2), now);
+
+        foreach (var (section, sentence) in LiteQueryTagSourceWordsTests.Expected)
+        {
+            Assert.True(data.Unavailable.TryGetValue(section, out var reason), $"section {section} was served with its source dropped");
+            Assert.Equal(sentence, reason);
+        }
+
+        Assert.Equal(LiteQueryTagSourceWordsTests.Expected.Count, data.Unavailable.Count);
+    }
 }

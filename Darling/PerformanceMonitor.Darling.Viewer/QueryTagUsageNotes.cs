@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using PerformanceMonitor.Common.QueryTags;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -69,8 +70,8 @@ public static class QueryTagUsageNotes
     public static string RawFloor(string sectionName, DateTime effectiveStart, Func<DateTime, string> at) =>
         $"The raw {sectionName} collections no longer hold the whole window. The figures start at {at(effectiveStart)}.";
 
-    /// <summary>"This store has no query stats data yet.": the section's source table is missing, said without the table's name.</summary>
-    public static string Missing(string sourceWords) => $"This store has no {sourceWords} data yet.";
+    /// <summary>"This store has no query stats data yet.": the section's source is missing, said in the words Lite uses (#6850), never the table's name.</summary>
+    public static string Missing(string sectionName) => QueryTagSourceWords.Missing(sectionName);
 
     private static List<string> EdgeSentences(
         DateTime? startDroppedFrom, DateTime servedStart, DateTime? materializedTo, bool endCountedWhole, DateTime? servedEnd, Func<DateTime, string> at)

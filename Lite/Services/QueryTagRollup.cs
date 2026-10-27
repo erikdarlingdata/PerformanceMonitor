@@ -322,18 +322,6 @@ public static class QueryTagRollup
         _ => "deadlocks",
     };
 
-    /// <summary>What a section's data is called in "This store has no ... data yet." (#6831): words, never the store's view or table name.
-    /// The Darling Viewer says the same words for the same missing sources.</summary>
-    public static string SourceWords(QueryTagRollupSection section) => section.Name switch
-    {
-        "plan_cache" => "query stats",
-        "query_store" => "Query Store",
-        "procedures" => "procedure stats",
-        "blocking_reports" => "blocked process report",
-        "blocking_snapshots" => "blocking snapshot",
-        _ => "deadlock",
-    };
-
     /// <summary>The deadlock section for one server or the all-servers view.</summary>
     public static Dictionary<string, object?> DeadlockSection(
         IReadOnlyList<QueryTagDeadlockFact> facts, IReadOnlyList<(int Id, string Name)> scope, bool allServers,

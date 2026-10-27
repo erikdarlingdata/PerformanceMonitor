@@ -146,4 +146,45 @@ public sealed class QueryTagUsageViewLiveTests
             Assert.Equal(10_000, Cell(fleet.Rows.Single(), fleet, "cpu_ms"));
         });
     }
+
+    /// <summary>#6850: with every source table dropped, the Viewer and the get_resource_use_by_tag tool each say each section's missing source in the
+    /// same words Lite uses, never the table's name.</summary>
+    [Fact]
+    public async Task EverySection_WithItsSourceMissing_IsSaidInWords_InTheViewerAndTheTool()
+    {
+        await WithViewAsync(async (store, viewer, ct) =>
+        {
+            foreach (var table in new[]
+            {
+                "query_stats", "query_store_interval_wide", "procedure_stats", "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks",
+            })
+            {
+                await ExecAsync(store, $"DROP TABLE IF EXISTS collect.{table} CASCADE", ct);
+            }
+
+            var end = DateTime.UtcNow;
+            var data = await viewer.GetQueryTagRollupDataAsync([ServerOne], end.AddHours(-24), end, ct);
+            /* Query Store is the one section the gate answers first: with its table gone no server passes the gate, so the reason is the gate's
+               refusal, which names no table either. The "no ... data yet" sentence there is only for a table that vanishes after the gate passed. */
+            var queryStore = QueryTagRollupSection.QueryStore.Name;
+            foreach (var (section, sentence) in QueryTagSourceWordsTests.Expected.Where(e => e.Key != queryStore))
+            {
+                Assert.True(data.Unavailable.TryGetValue(section, out var reason), $"the viewer served {section} with its source dropped");
+                Assert.Equal(sentence, reason);
+            }
+
+            Assert.DoesNotContain("query_store_interval_wide", data.Unavailable[queryStore], StringComparison.Ordinal);
+
+            await using var source = NpgsqlDataSource.Create(store.ConnectionString);
+            var tool = await PerformanceMonitor.Darling.Service.Mcp.DarlingMcpQueryTagRollupTools.GetResourceUseByTagCore(source, null, 24, null, 25, null, null, ct);
+            foreach (var (section, sentence) in QueryTagSourceWordsTests.Expected.Where(e => e.Key != queryStore))
+            {
+                Assert.Contains($"{section} is unavailable: {sentence}", tool, StringComparison.Ordinal);
+            }
+
+            Assert.DoesNotContain("query_store_interval_wide", tool, StringComparison.Ordinal);
+
+            Assert.DoesNotContain("does not exist", tool, StringComparison.OrdinalIgnoreCase);
+        });
+    }
 }

@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common.QueryTags;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -56,7 +57,7 @@ public sealed partial class ViewerDataService
         var at = QueryTagUsageNotes.Stamper(ids.Length);
 
         async Task StatsAsync(
-            QueryTagRollupSection section, string hourlySql, string rawSql, string source, string ioView,
+            QueryTagRollupSection section, string hourlySql, string rawSql, string ioView,
             bool grainHourly, string hourlyView, string dailyView, RawWindowFloor.Table floorTable)
         {
             var tier = RetentionTierRouter.Resolve(now, startUtc, grainHourly, dailyAvailable: false, coverage.For(hourlyView, dailyView));
@@ -79,7 +80,7 @@ public sealed partial class ViewerDataService
                         var floor = await RawWindowFloor.GetAsync(_dataSource, floorTable, id, startUtc, endUtc, seconds, cancellationToken);
                         if (RawWindowFloor.IsTruncated(floor, startUtc))
                         {
-                            notes[section.Name] = QueryTagUsageNotes.RawFloor(source.Replace('_', ' '), RawWindowFloor.EffectiveStart(floor, startUtc), at);
+                            notes[section.Name] = QueryTagUsageNotes.RawFloor(QueryTagSourceWords.For(section.Name), RawWindowFloor.EffectiveStart(floor, startUtc), at);
                             break;
                         }
                     }
@@ -88,19 +89,19 @@ public sealed partial class ViewerDataService
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
             {
                 sections[section.Name] = [];
-                unavailable[section.Name] = QueryTagUsageNotes.Missing(source.Replace('_', ' '));
+                unavailable[section.Name] = QueryTagUsageNotes.Missing(section.Name);
             }
         }
 
         await StatsAsync(QueryTagRollupSection.PlanCache, QueryTagRollupSql.PlanCacheHourlySql, QueryTagRollupSql.PlanCacheRawSql,
-            "query_stats", TimescaleSupport.QueryStatsIoHourlyView, rollups.QueryGrainHourly,
+            TimescaleSupport.QueryStatsIoHourlyView, rollups.QueryGrainHourly,
             TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView, RawWindowFloor.Table.QueryStats);
 
         var qs = await DarlingQueryTagRollupReader.ReadQueryStoreAsync(_dataSource, ids, startUtc, endUtc, null, cancellationToken, seconds);
         if (qs.TableMissing)
         {
             sections[QueryTagRollupSection.QueryStore.Name] = [];
-            unavailable[QueryTagRollupSection.QueryStore.Name] = QueryTagUsageNotes.Missing("Query Store");
+            unavailable[QueryTagRollupSection.QueryStore.Name] = QueryTagUsageNotes.Missing(QueryTagRollupSection.QueryStore.Name);
         }
         else
         {
@@ -119,10 +120,10 @@ public sealed partial class ViewerDataService
         }
 
         await StatsAsync(QueryTagRollupSection.Procedures, QueryTagRollupSql.ProceduresHourlySql, QueryTagRollupSql.ProceduresRawSql,
-            "procedure_stats", TimescaleSupport.ProcedureStatsIoHourlyView, rollups.ProcedureGrainHourly,
+            TimescaleSupport.ProcedureStatsIoHourlyView, rollups.ProcedureGrainHourly,
             TimescaleSupport.ProcedureStatsHourlyView, TimescaleSupport.ProcedureStatsDailyView, RawWindowFloor.Table.ProcedureStats);
 
-        async Task AdditiveAsync(QueryTagRollupSection section, string sql, string source)
+        async Task AdditiveAsync(QueryTagRollupSection section, string sql)
         {
             try
             {
@@ -132,12 +133,12 @@ public sealed partial class ViewerDataService
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
             {
                 sections[section.Name] = [];
-                unavailable[section.Name] = QueryTagUsageNotes.Missing(source.Replace('_', ' '));
+                unavailable[section.Name] = QueryTagUsageNotes.Missing(section.Name);
             }
         }
 
-        await AdditiveAsync(QueryTagRollupSection.BlockingReports, QueryTagRollupSql.BlockingReportsSql, "blocked_process_reports");
-        await AdditiveAsync(QueryTagRollupSection.BlockingSnapshots, QueryTagRollupSql.BlockingSnapshotsSql, "dmv_blocking_snapshots");
+        await AdditiveAsync(QueryTagRollupSection.BlockingReports, QueryTagRollupSql.BlockingReportsSql);
+        await AdditiveAsync(QueryTagRollupSection.BlockingSnapshots, QueryTagRollupSql.BlockingSnapshotsSql);
 
         var deadlocks = new List<QueryTagDeadlockFact>();
         var scanTruncated = false;
@@ -147,7 +148,7 @@ public sealed partial class ViewerDataService
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
-            unavailable[QueryTagRollupSection.Deadlocks.Name] = QueryTagUsageNotes.Missing("deadlock");
+            unavailable[QueryTagRollupSection.Deadlocks.Name] = QueryTagUsageNotes.Missing(QueryTagRollupSection.Deadlocks.Name);
         }
 
         return new QueryTagRollupData(tags, sections, deadlocks, scanTruncated, unavailable, qs.Refused, notes);
