@@ -378,21 +378,34 @@ ON CONFLICT (server_id, database_name, query_id) DO NOTHING";
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
-        /* Text stored before the rung: no key for it, so the insert trigger is off while it is written. */
+        /* Text stored before the rung: no key for it, so the insert trigger is off while it is written. One command per statement: the
+           seed takes a parameter, and Npgsql sends a parameterized command through the extended protocol, which refuses several statements. */
+        await using (var off = new NpgsqlCommand($"ALTER TABLE collect.query_store_text DISABLE TRIGGER {QueryStoreSelfKeys.InsertTriggerName}", connection))
+        {
+            await off.ExecuteNonQueryAsync(ct);
+        }
+
         await using (var seed = new NpgsqlCommand(
-            $@"ALTER TABLE collect.query_store_text DISABLE TRIGGER {QueryStoreSelfKeys.InsertTriggerName};
-INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen)
+            @"INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen)
 SELECT 1, 'db', q,
        CASE WHEN q % 50 = 0 THEN '(@cutoff_time datetime2(7))SELECT /* ' || $1 || ' */ qsrs.plan_id -- ' || q
             WHEN q % 97 = 0 THEN NULL
             ELSE 'SELECT ' || q || repeat('x', 200) END,
        now() AT TIME ZONE 'UTC'
-FROM generate_series(1, 20000) AS q;
-ALTER TABLE collect.query_store_text ENABLE TRIGGER {QueryStoreSelfKeys.InsertTriggerName};
-ANALYZE collect.query_store_text;", connection))
+FROM generate_series(1, 20000) AS q", connection))
         {
             seed.Parameters.Add(new NpgsqlParameter<string> { TypedValue = QueryStoreCollector.SelfQueryMarker });
             await seed.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var on = new NpgsqlCommand($"ALTER TABLE collect.query_store_text ENABLE TRIGGER {QueryStoreSelfKeys.InsertTriggerName}", connection))
+        {
+            await on.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var analyze = new NpgsqlCommand("ANALYZE collect.query_store_text", connection))
+        {
+            await analyze.ExecuteNonQueryAsync(ct);
         }
 
         Assert.Equal(0L, await KeysAsync(connection, ct));
