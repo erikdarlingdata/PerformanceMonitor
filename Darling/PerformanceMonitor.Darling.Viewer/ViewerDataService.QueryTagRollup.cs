@@ -53,6 +53,7 @@ public sealed partial class ViewerDataService
         var sections = new Dictionary<string, List<QueryTagRollupFact>>();
         var unavailable = new Dictionary<string, string>();
         var notes = new Dictionary<string, string>();
+        var at = QueryTagUsageNotes.Stamper(ids.Length);
 
         async Task StatsAsync(
             QueryTagRollupSection section, string hourlySql, string rawSql, string source, string ioView,
@@ -69,8 +70,7 @@ public sealed partial class ViewerDataService
                     _dataSource, hourly ? hourlySql : rawSql, section, ids, startUtc, endUtc, ceiling, cancellationToken, seconds);
                 if (hourly)
                 {
-                    var edges = HourlyWindowEdges.Note(startUtc, null, endUtc, ceiling);
-                    notes[section.Name] = $"Read from the hourly rollup {ioView}" + (string.IsNullOrEmpty(edges) ? "." : ": " + edges + ".");
+                    notes[section.Name] = QueryTagUsageNotes.Hourly(HourlyWindowEdges.Describe(startUtc, null, endUtc, ceiling), at);
                 }
                 else
                 {
@@ -79,7 +79,7 @@ public sealed partial class ViewerDataService
                         var floor = await RawWindowFloor.GetAsync(_dataSource, floorTable, id, startUtc, endUtc, seconds, cancellationToken);
                         if (RawWindowFloor.IsTruncated(floor, startUtc))
                         {
-                            notes[section.Name] = $"The raw {source} table no longer holds the whole window; the figures start at {RawWindowFloor.EffectiveStart(floor, startUtc):u}.";
+                            notes[section.Name] = QueryTagUsageNotes.RawFloor(source.Replace('_', ' '), RawWindowFloor.EffectiveStart(floor, startUtc), at);
                             break;
                         }
                     }
@@ -88,7 +88,7 @@ public sealed partial class ViewerDataService
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
             {
                 sections[section.Name] = [];
-                unavailable[section.Name] = $"{source} does not exist in this store yet.";
+                unavailable[section.Name] = QueryTagUsageNotes.Missing(source.Replace('_', ' '));
             }
         }
 
@@ -100,14 +100,15 @@ public sealed partial class ViewerDataService
         if (qs.TableMissing)
         {
             sections[QueryTagRollupSection.QueryStore.Name] = [];
-            unavailable[QueryTagRollupSection.QueryStore.Name] = "query_store_interval_wide does not exist in this store yet.";
+            unavailable[QueryTagRollupSection.QueryStore.Name] = QueryTagUsageNotes.Missing("Query Store");
         }
         else
         {
             sections[QueryTagRollupSection.QueryStore.Name] = qs.Facts;
             if (qs.UsedHashHourly && !string.IsNullOrEmpty(qs.WindowEdgesNote))
             {
-                notes[QueryTagRollupSection.QueryStore.Name] = $"Read from the {(qs.UsedHashDaily ? "daily and hourly" : "hourly")} Query Store {(qs.UsedHashDaily ? "tables" : "table")}, with the raw intervals for the edges: {qs.WindowEdgesNote}.";
+                var first = qs.RoutedStarts is { Count: > 0 } routed ? routed.Values.Max() : startUtc;
+                notes[QueryTagRollupSection.QueryStore.Name] = QueryTagUsageNotes.QueryStore(qs.UsedHashDaily, first, qs.StartDroppedFrom, endUtc, at);
             }
 
             if (qs.Allowed.Count == 0)
@@ -131,7 +132,7 @@ public sealed partial class ViewerDataService
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
             {
                 sections[section.Name] = [];
-                unavailable[section.Name] = $"{source} does not exist in this store yet.";
+                unavailable[section.Name] = QueryTagUsageNotes.Missing(source.Replace('_', ' '));
             }
         }
 
@@ -146,7 +147,7 @@ public sealed partial class ViewerDataService
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
-            unavailable[QueryTagRollupSection.Deadlocks.Name] = "deadlocks does not exist in this store yet.";
+            unavailable[QueryTagRollupSection.Deadlocks.Name] = QueryTagUsageNotes.Missing("deadlock");
         }
 
         return new QueryTagRollupData(tags, sections, deadlocks, scanTruncated, unavailable, qs.Refused, notes);

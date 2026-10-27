@@ -320,7 +320,7 @@ JOIN (VALUES (1, 'hash1', 'tag-a'), (1, 'hash2', 'tag-b'), (2, 'hash1', 'tag-a')
 
             await using var viewer = new ViewerDataService(a.Scratch.ConnectionString);
             var viewed = await viewer.GetQueryTagRollupDataAsync(Servers, toolStart, a.End, ct);
-            Assert.StartsWith("Read from the daily and hourly Query Store tables, with the raw intervals for the edges: ", viewed.Notes[QueryTagRollupSection.QueryStore.Name], StringComparison.Ordinal);
+            Assert.StartsWith("Read from the daily and hourly Query Store tables, with the raw intervals for the edges, from ", viewed.Notes[QueryTagRollupSection.QueryStore.Name], StringComparison.Ordinal);
 
             /* A window without a whole day reads hours only, and says so in the older words. */
             var hourly = QueryStoreSectionOf(JsonDocument.Parse(await DarlingMcpQueryTagRollupTools.GetResourceUseByTagCore(
@@ -328,7 +328,7 @@ JOIN (VALUES (1, 'hash1', 'tag-a'), (1, 'hash2', 'tag-b'), (2, 'hash1', 'tag-a')
             Assert.Equal("hourly+tail", hourly.GetProperty("tier").GetString());
             Assert.Equal(QueryTagRollupHashRoute.RoutedSourceName, hourly.GetProperty("source").GetString());
             var viewedHourly = await viewer.GetQueryTagRollupDataAsync(Servers, a.End.AddHours(-24), a.End, ct);
-            Assert.StartsWith("Read from the hourly Query Store table, with the raw intervals for the edges: ", viewedHourly.Notes[QueryTagRollupSection.QueryStore.Name], StringComparison.Ordinal);
+            Assert.StartsWith("Read from the hourly Query Store table, with the raw intervals for the edges, from ", viewedHourly.Notes[QueryTagRollupSection.QueryStore.Name], StringComparison.Ordinal);
             bodySucceeded = true;
         }
         finally

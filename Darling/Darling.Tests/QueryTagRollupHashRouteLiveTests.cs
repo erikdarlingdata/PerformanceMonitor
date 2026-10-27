@@ -333,10 +333,11 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             Assert.Equal(McpHelpers.FormatEffectiveStart(snappedStart), section.GetProperty("served_start").GetString());
             Assert.Equal(McpHelpers.FormatEffectiveStart(toolStart), section.GetProperty("start_dropped_from").GetString());
 
-            /* The Viewer's section reads through the same reader and shows the same sentence in its note. */
+            /* The Viewer's section reads through the same reader and says the same edge in its own clock and words (#6831): no ISO stamp. */
             await using var viewer = new ViewerDataService(a.Scratch.ConnectionString);
             var viewed = await viewer.GetQueryTagRollupDataAsync(Servers, toolStart, a.End, ct);
-            Assert.Contains(HourlyWindowEdges.StartNote(toolStart, snappedStart)!, viewed.Notes[QueryTagRollupSection.QueryStore.Name], StringComparison.Ordinal);
+            Assert.Equal(QueryTagUsageNotes.QueryStore(false, snappedStart, toolStart, a.End, QueryTagUsageNotes.Stamper(Servers.Length)),
+                viewed.Notes[QueryTagRollupSection.QueryStore.Name]);
 
             /* The fallback: today's statement, the exact start, no note and no tier. */
             await ExecAsync(a.Connection, "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);
