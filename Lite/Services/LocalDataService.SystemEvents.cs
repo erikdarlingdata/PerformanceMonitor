@@ -582,10 +582,11 @@ AND   cl.collection_time =
     }
 
     /// <summary>
-    /// #6827: the truncated ring-buffer runs of the collector INSIDE one read's window (inclusive, naive UTC): how many,
-    /// the first and last run time, and the note of the newest one. A window is blind if ANY run in it was truncated,
-    /// however clean the run at its end, and a clean past window is not made blind by today's run. Null when no run in the
-    /// window logged a truncated ring buffer. Only SUCCESS runs count, as in <see cref="GetLatestCollectorRunNoteAsync"/>,
+    /// #6827: the truncated ring-buffer runs of the collector that read one read's window (inclusive, naive UTC): how many,
+    /// the first and last run time, and the note of the newest one. A window is blind if ANY run that read it was truncated,
+    /// however clean the run at its end, and a clean past window is not made blind by today's run. Those runs are the ones
+    /// inside the window PLUS the first SUCCESS run after its end: a truncated run hides events, and the hidden ones can
+    /// fall in the window's last minutes. A live read has no run after its end. Null when no run that read the window logged a truncated ring buffer. Only SUCCESS runs count, as in <see cref="GetLatestCollectorRunNoteAsync"/>,
     /// and the pattern is <see cref="PerformanceMonitor.Common.RingBufferTruncationNote.TryParse"/>'s rule (the label with
     /// a value above zero). Darling twin: <c>DarlingSystemHealthReader.GetTruncatedRunsInWindowAsync</c>.
     /// </summary>
@@ -604,7 +605,15 @@ FROM v_collection_log AS cl
 WHERE cl.server_id = $1
 AND   cl.collector_name = $2
 AND   cl.collection_time >= $3
-AND   cl.collection_time <= $4
+AND   cl.collection_time <= COALESCE(
+      (
+          SELECT MIN(a.collection_time)
+          FROM v_collection_log AS a
+          WHERE a.server_id = $1
+          AND   a.collector_name = $2
+          AND   a.collection_time > $4
+          AND   a.status = 'SUCCESS'
+      ), $4)
 AND   cl.status = 'SUCCESS'
 AND   regexp_matches(cl.error_message, 'ring_buffer_truncated=0*[1-9]')";
 

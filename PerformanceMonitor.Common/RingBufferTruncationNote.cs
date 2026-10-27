@@ -111,7 +111,8 @@ public static class RingBufferTruncationNote
     /// <para>#6650: when the read did count events of the type (<paramref name="eventsRead"/> above 0) the first clause
     /// says so, with the filter that left none (<paramref name="noneQualifiedBecause"/>), instead of "No ... events were
     /// found" over a count of hundreds. At 0 it keeps that wording.</para>
-    /// <para>#6827: <paramref name="stretch"/> is the truncated runs INSIDE the read's window. The reads pass it, so the
+    /// <para>#6827: <paramref name="stretch"/> is the truncated runs that read the read's window (the runs inside it and the
+    /// first one after its end). The reads pass it, so the
     /// sentence names how many runs were truncated and when, rather than the collector's newest run today. Null keeps
     /// the "newest run" wording.</para>
     /// </summary>
@@ -135,13 +136,13 @@ public static class RingBufferTruncationNote
                 serverName,
                 hoursBack);
 
-        /* #6827: a read over a window answers for the runs INSIDE it, not for the collector's newest run today. */
+        /* #6827: a read over a window answers for the runs that read it, not for the collector's newest run today. */
         var who = stretch is { } s
             ? s.Count == 1
-                ? string.Format(CultureInfo.InvariantCulture, "the system_health collection run at {0} (inside this window)", FormatStamp(s.First))
+                ? string.Format(CultureInfo.InvariantCulture, "the system_health collection run at {0}, which read events of this window", FormatStamp(s.First))
                 : string.Format(
                     CultureInfo.InvariantCulture,
-                    "{0} system_health collection runs inside this window (the first at {1}, the last at {2})",
+                    "{0} system_health collection runs that read events of this window (the first at {1}, the last at {2})",
                     s.Count, FormatStamp(s.First), FormatStamp(s.Last))
             : "the newest system_health collection run";
 
@@ -153,7 +154,7 @@ public static class RingBufferTruncationNote
     }
 
     /// <summary>
-    /// #6827: the truncated system_health runs that fall inside a read's window: how many, when the first and the last
+    /// #6827: the truncated system_health runs that read a read's window (inside it, or the first after its end): how many, when the first and the last
     /// ran (naive UTC, the frame collection_time is stored in), and the note of the newest of them (the hidden-event
     /// count and age <see cref="Describe"/> turns into a sentence).
     /// </summary>

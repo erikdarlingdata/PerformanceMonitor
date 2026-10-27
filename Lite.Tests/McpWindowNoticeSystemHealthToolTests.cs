@@ -687,7 +687,7 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, $5)",
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
-        Assert.Contains("2 system_health collection runs inside this window", message, StringComparison.Ordinal);
+        Assert.Contains("2 system_health collection runs that read events of this window", message, StringComparison.Ordinal);
         Assert.Contains("the first at " + Minute(pastEnd.AddHours(-5)), message, StringComparison.Ordinal);
         Assert.Contains("the last at " + Minute(pastEnd.AddHours(-2)), message, StringComparison.Ordinal);
         Assert.Contains("240 event(s) are hidden", message, StringComparison.Ordinal);
@@ -725,7 +725,7 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, $5)",
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
-        Assert.Contains("the system_health collection run at " + Minute(middle) + " (inside this window)", message, StringComparison.Ordinal);
+        Assert.Contains("the system_health collection run at " + Minute(middle) + ", which read events of this window", message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -739,6 +739,47 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, $5)",
         await SeedTruncatedRunAsync(Anchor.AddHours(-25));
 
         var root = Root(await CallAsync(tool, hoursBack: 24));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+    }
+
+    /* #6827: a truncated run hides events, and the hidden ones can fall in the window's last minutes. So the run just after an
+       as_of window's end is asked too. A clean window whose FIRST later run is truncated is unavailable, and one whose only
+       the SECOND later run is truncated stays empty. Clean runs every 30 minutes. */
+    [Theory]
+    [InlineData(Tool.SystemHealth)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task ACleanWindow_WhoseFirstRunAfterItsEndIsTruncated_IsUnavailable(Tool tool)
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedEventAsync(tool, Anchor.AddDays(-20));
+        await SeedLogRunsAsync(Anchor.AddDays(-9), Anchor, everyMinutes: 30);
+        var pastEnd = Anchor.AddDays(-3);
+        var after = pastEnd.AddMinutes(10);
+        await SeedTruncatedRunAsync(after, hidden: 321);
+
+        var root = Root(await CallAsync(tool, hoursBack: 24, asOf: AsOfText(pastEnd)));
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+        Assert.Contains("the system_health collection run at " + Minute(after) + ", which read events of this window", message, StringComparison.Ordinal);
+        Assert.Contains("321 event(s) are hidden", message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(Tool.SystemHealth)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task ACleanWindow_WhoseSecondRunAfterItsEndIsTruncated_StaysEmpty(Tool tool)
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedEventAsync(tool, Anchor.AddDays(-20));
+        await SeedLogRunsAsync(Anchor.AddDays(-9), Anchor, everyMinutes: 30);
+        var pastEnd = Anchor.AddDays(-3);
+        /* The seeded clean run at pastEnd + 30 min is the first after the end, so this one is the second. */
+        await SeedTruncatedRunAsync(pastEnd.AddMinutes(45));
+
+        var root = Root(await CallAsync(tool, hoursBack: 24, asOf: AsOfText(pastEnd)));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
     }

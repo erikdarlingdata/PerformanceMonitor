@@ -343,7 +343,7 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, $6)",
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
             var message = root.GetProperty("message").GetString()!;
             Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
-            Assert.Contains("2 system_health collection runs inside this window", message, StringComparison.Ordinal);
+            Assert.Contains("2 system_health collection runs that read events of this window", message, StringComparison.Ordinal);
             Assert.Contains("the first at " + Minute(pastEnd.AddHours(-5)), message, StringComparison.Ordinal);
             Assert.Contains("the last at " + Minute(pastEnd.AddHours(-2)), message, StringComparison.Ordinal);
             Assert.Contains("240 event(s) are hidden", message, StringComparison.Ordinal);
@@ -382,7 +382,7 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, $6)",
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
             var message = root.GetProperty("message").GetString()!;
             Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
-            Assert.Contains("the system_health collection run at " + Minute(middle) + " (inside this window)", message, StringComparison.Ordinal);
+            Assert.Contains("the system_health collection run at " + Minute(middle) + ", which read events of this window", message, StringComparison.Ordinal);
         });
 
     [Theory]
@@ -396,6 +396,47 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, $6)",
             await SeedTruncatedRunAsync(c, "rbedge-" + tool, end.AddHours(-25));
 
             var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbedge-" + tool, 24, end));
+
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+        });
+
+    /* #6827: a truncated run hides events, and the hidden ones can fall in the window's last minutes. So the run just after an
+       as_of window's end is asked too. A clean window whose FIRST later run is truncated is unavailable, and one whose only the
+       SECOND later run is truncated stays empty (that run read nothing of this window's events). Clean runs every 30 minutes. */
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task ACleanWindow_WhoseFirstRunAfterItsEndIsTruncated_IsUnavailable_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rbnext-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbnext-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rbnext-" + tool, tool, end.AddDays(-20));
+            var pastEnd = end.AddDays(-3);
+            var after = pastEnd.AddMinutes(10);
+            await SeedTruncatedRunAsync(c, "rbnext-" + tool, after, hidden: 321);
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbnext-" + tool, 24, pastEnd));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+            Assert.Contains("the system_health collection run at " + Minute(after) + ", which read events of this window", message, StringComparison.Ordinal);
+            Assert.Contains("321 event(s) are hidden", message, StringComparison.Ordinal);
+        });
+
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task ACleanWindow_WhoseSecondRunAfterItsEndIsTruncated_StaysEmpty_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rbnext2-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbnext2-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rbnext2-" + tool, tool, end.AddDays(-20));
+            var pastEnd = end.AddDays(-3);
+            /* The seeded clean run at pastEnd + 30 min is the first after the end, so this one is the second. */
+            await SeedTruncatedRunAsync(c, "rbnext2-" + tool, pastEnd.AddMinutes(45));
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbnext2-" + tool, 24, pastEnd));
 
             Assert.Equal("empty", root.GetProperty("status").GetString());
         });
