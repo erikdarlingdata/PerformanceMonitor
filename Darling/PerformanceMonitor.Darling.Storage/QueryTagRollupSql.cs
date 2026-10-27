@@ -80,9 +80,13 @@ public static class QueryTagRollupSql
     /// there is no constant <c>collection_time</c> floor: either one lets the planner AND the partition's <c>collection_time</c> index into
     /// every server's scan, and that index is not keyed by server, so each of the 42 loops walked the whole day's entries (about 10 million
     /// per loop). Measured on one production store with 42 servers over 24 hours, warm: 13.0 s with the index, 6.0 s without; each server's
-    /// scan is the <c>(server_id, first_execution_time)</c> range instead. The constant upper bound <c>q.collection_time &lt;= $3</c> stays
-    /// and is harmless: $3 is the window end, at or near now, so it keeps almost every row of the window's partitions and the planner has no
-    /// reason to scan the <c>collection_time</c> index for it. It filters the rows the per-server range already found.</para>
+    /// scan is the <c>(server_id, first_execution_time)</c> range instead. The upper bound is written the same way,
+    /// <c>$3 - collection_time &gt;= interval '0'</c> (#6800 part 2, step 3a). It was a plain <c>collection_time &lt;= $3</c> once, on the
+    /// belief that $3 is at or near now and keeps almost every row, so the planner has no reason to use the index for it. Step 2b measured
+    /// otherwise: with the window end 6 hours back the planner chose the <c>collection_time</c> index for that bound alone, the bitmap went
+    /// lossy, and the run took 367 ms against 330 ms at now on a 30-server seed. That index inside the per-server loop is the 13.0 s case
+    /// above, and this statement serves every one-server read and every fleet read the route falls back from (a store before the backfill,
+    /// an <c>as_of</c> older than the built hours). The two forms keep the same rows.</para>
     /// </summary>
     public static readonly string QueryStoreSql = $$"""
         SELECT q.server_id, m.tag_id,
@@ -100,7 +104,7 @@ public static class QueryTagRollupSql
         LEFT JOIN config.query_tag_map AS m
                ON m.server_id = q.server_id AND m.key_kind = 'hash' AND m.key = q.query_hash
         WHERE q.server_id = ANY($1)
-        AND   q.collection_time <= $3
+        AND   $3 - q.collection_time >= interval '0'
         AND   q.first_execution_time >= $4 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
         AND   q.first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
         GROUP BY q.server_id, m.tag_id

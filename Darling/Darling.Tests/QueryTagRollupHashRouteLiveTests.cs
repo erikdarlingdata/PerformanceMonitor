@@ -15,7 +15,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -23,7 +26,8 @@ namespace Darling.Tests;
 /// <summary>
 /// #6800 part 2, step 2: the fleet Query Store tag roll-up reads built hours from <c>collect.query_store_hash_hourly</c> and the rest from
 /// the wide table (<see cref="QueryTagRollupHashRoute"/>), against a real PostgreSQL store (<c>DARLING_TEST_PG</c>). The answer must equal
-/// the single wide statement's (<see cref="QueryTagRollupSql.QueryStoreSql"/>) value for value. The seed is the shared 30-hour one (three
+/// the single wide statement's (<see cref="QueryTagRollupSql.QueryStoreSql"/>) value for value over the window the route actually read, which
+/// starts on the hour (the read start rounded up, #6800 part 2, step 3a). The seed is the shared 30-hour one (three
 /// servers, 28 hours built, the newest two hours unbuilt), read through a window with an unaligned start, with the three measures the
 /// stamp does not carry added, three tags mapped on two servers, and a NULL-hash group on every server.
 /// </summary>
@@ -96,6 +100,9 @@ JOIN (VALUES (1, 'hash1', 'tag-a'), (1, 'hash2', 'tag-b'), (2, 'hash1', 'tag-a')
         return read;
     }
 
+    /// <summary>The starts a read actually began at: the rounded-up starts when the route read, the gate's own when today's statement did (#6800 part 2, step 3a).</summary>
+    private static Dictionary<int, DateTime> Snapped(DarlingQueryTagRollupReader.QueryStoreRead read) => read.RoutedStarts ?? read.Allowed;
+
     /// <summary>The single wide statement, the way the reader builds it, for the starts the gate gave.</summary>
     private static async Task<List<QueryTagRollupFact>> TodaysAsync(Arranged a, Dictionary<int, DateTime> allowed, DateTime end, CancellationToken ct)
     {
@@ -135,8 +142,9 @@ JOIN (VALUES (1, 'hash1', 'tag-a'), (1, 'hash2', 'tag-b'), (2, 'hash1', 'tag-a')
             var before = await FleetAsync(a, Servers, a.Start, a.End, ct);
             Assert.True(before.UsedHashHourly, "a three-server read over built hours must take the route");
             Assert.All(before.Allowed.Values, v => Assert.Equal(a.Start, v));
+            Assert.All(before.RoutedStarts!.Values, v => Assert.Equal(a.HourNow.AddHours(-23), v));
             var beforeText = Canon(before.Facts);
-            Assert.Equal(Canon(await TodaysAsync(a, before.Allowed, a.End, ct)), beforeText);
+            Assert.Equal(Canon(await TodaysAsync(a, Snapped(before), a.End, ct)), beforeText);
             Assert.Contains("|-|", beforeText.Replace("\n", "||"));
 
             /* There is no DELETE trigger on the wide table, so the pairs of the hour stay valid and the table still holds its rows. */
@@ -145,7 +153,7 @@ JOIN (VALUES (1, 'hash1', 'tag-a'), (1, 'hash2', 'tag-b'), (2, 'hash1', 'tag-a')
 
             var after = await FleetAsync(a, Servers, a.Start, a.End, ct);
             Assert.True(after.UsedHashHourly);
-            Assert.NotEqual(beforeText, Canon(await TodaysAsync(a, after.Allowed, a.End, ct)));
+            Assert.NotEqual(beforeText, Canon(await TodaysAsync(a, Snapped(after), a.End, ct)));
             Assert.Equal(beforeText, Canon(after.Facts));
             bodySucceeded = true;
         }
@@ -195,7 +203,8 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
                 var read = await FleetAsync(a, Servers, start, end, ct);
                 Assert.True(read.UsedHashHourly, "start " + start + " end " + end);
                 Assert.NotEmpty(read.Facts);
-                Assert.Equal(Canon(await TodaysAsync(a, read.Allowed, end, ct)), Canon(read.Facts));
+                Assert.Equal(Canon(await TodaysAsync(a, Snapped(read), end, ct)), Canon(read.Facts));
+                Assert.All(Snapped(read).Values, v => Assert.Equal(start.Ticks % TimeSpan.TicksPerHour == 0 ? start : new DateTime(start.Ticks / TimeSpan.TicksPerHour * TimeSpan.TicksPerHour).AddHours(1), v));
             }
 
             bodySucceeded = true;
@@ -226,7 +235,7 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             var during = await FleetAsync(a, Servers, a.Start, a.End, ct);
             Assert.True(during.UsedHashHourly);
             Assert.NotEqual(beforeText, Canon(during.Facts));
-            Assert.Equal(Canon(await TodaysAsync(a, during.Allowed, a.End, ct)), Canon(during.Facts));
+            Assert.Equal(Canon(await TodaysAsync(a, Snapped(during), a.End, ct)), Canon(during.Facts));
 
             Assert.Equal(1, await ComposeStampLiveSupport.BuildAllAsync(a.Source, ct, ComposeStampLiveSupport.ClockWithin(a.HourNow)));
             var rebuilt = await FleetAsync(a, Servers, a.Start, a.End, ct);
@@ -251,22 +260,30 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             var one = await FleetAsync(a, [1], a.Start, a.End, ct);
             Assert.False(one.UsedHashHourly, "one allowed server reads today's statement");
             Assert.Equal(Canon(await TodaysAsync(a, one.Allowed, a.End, ct)), Canon(one.Facts));
+            Assert.Null(one.WindowEdgesNote);
 
             var fleet = await FleetAsync(a, Servers, a.Start, a.End, ct);
             Assert.True(fleet.UsedHashHourly);
+            Assert.NotNull(fleet.RoutedStarts);
             var fleetText = Canon(fleet.Facts);
+            /* The fallback reads from the exact start, the route from the next hour: the fallback is today's statement over the exact start, with no note. */
+            var exactText = Canon(await TodaysAsync(a, fleet.Allowed, a.End, ct));
+            Assert.NotEqual(fleetText, exactText);
 
             /* Right after the upgrade every built hour's pair has hash_built_seq NULL: no table hour, so no route. */
             await ExecAsync(a.Connection, "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);
             var stale = await FleetAsync(a, Servers, a.Start, a.End, ct);
             Assert.False(stale.UsedHashHourly);
-            Assert.Equal(fleetText, Canon(stale.Facts));
+            Assert.Null(stale.RoutedStarts);
+            Assert.Null(stale.WindowEdgesNote);
+            Assert.Equal(exactText, Canon(stale.Facts));
 
             /* A store below 221 has no table. */
             await ExecAsync(a.Connection, "DROP TABLE collect.query_store_hash_hourly", ct);
             var below = await FleetAsync(a, Servers, a.Start, a.End, ct);
             Assert.False(below.UsedHashHourly);
-            Assert.Equal(fleetText, Canon(below.Facts));
+            Assert.Null(below.WindowEdgesNote);
+            Assert.Equal(exactText, Canon(below.Facts));
             bodySucceeded = true;
         }
         finally
@@ -274,6 +291,69 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             await CleanupAsync(a, bodySucceeded);
         }
     }
+
+    /// <summary>
+    /// #6800 part 2, step 3a: the routed read starts on the hour and says so. An unaligned start gives the hourly tier's start sentence (the
+    /// data from the start to the next hour is not included), an aligned start gives no note, and the fallback (one server, no valid hour, no
+    /// table) gives none either and keeps the exact start. Through the tool, the Query Store section carries <c>tier</c>
+    /// <c>hourly+tail</c>, the snapped <c>effective_start</c> and the note, and a fallback section carries none of the three.
+    /// </summary>
+    [Fact]
+    public async Task TheRoutedRead_StartsOnTheHourAndSaysSo_AnAlignedStartAndTheFallbackSayNothing()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), "Set DARLING_TEST_PG to run this.");
+        var ct = TestContext.Current.CancellationToken;
+        var a = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            var snappedStart = a.HourNow.AddHours(-23);
+            var expectedNote = HourlyWindowEdges.StartNote(a.Start, snappedStart);
+            Assert.StartsWith("hourly buckets start on the hour: no bucket before ", expectedNote, StringComparison.Ordinal);
+            Assert.Contains("is not included", expectedNote, StringComparison.Ordinal);
+
+            var unaligned = await FleetAsync(a, Servers, a.Start, a.End, ct);
+            Assert.True(unaligned.UsedHashHourly);
+            Assert.Equal(expectedNote, unaligned.WindowEdgesNote);
+
+            var aligned = await FleetAsync(a, Servers, a.HourNow.AddHours(-24), a.End, ct);
+            Assert.True(aligned.UsedHashHourly);
+            Assert.Null(aligned.WindowEdgesNote);
+            Assert.All(aligned.RoutedStarts!.Values, v => Assert.Equal(a.HourNow.AddHours(-24), v));
+
+            /* The tool's window is 24 hours back from as_of, which is a.End, so its start is 40 minutes past the hour. */
+            var toolStart = a.End.AddHours(-24);
+            var section = QueryStoreSection(await ToolAsync(a, ct));
+            Assert.Equal("hourly+tail", section.GetProperty("tier").GetString());
+            Assert.Equal(HourlyWindowEdges.StartNote(toolStart, snappedStart), section.GetProperty("window_edges_note").GetString());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(snappedStart), section.GetProperty("effective_start").GetString());
+
+            /* The Viewer's section reads through the same reader and shows the same sentence in its note. */
+            await using var viewer = new ViewerDataService(a.Scratch.ConnectionString);
+            var viewed = await viewer.GetQueryTagRollupDataAsync(Servers, toolStart, a.End, ct);
+            Assert.Contains(HourlyWindowEdges.StartNote(toolStart, snappedStart)!, viewed.Notes[QueryTagRollupSection.QueryStore.Name], StringComparison.Ordinal);
+
+            /* The fallback: today's statement, the exact start, no note and no tier. */
+            await ExecAsync(a.Connection, "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);
+            Assert.False((await viewer.GetQueryTagRollupDataAsync(Servers, toolStart, a.End, ct)).Notes.ContainsKey(QueryTagRollupSection.QueryStore.Name));
+            var fallback = QueryStoreSection(await ToolAsync(a, ct));
+            Assert.False(fallback.TryGetProperty("tier", out _));
+            Assert.False(fallback.TryGetProperty("window_edges_note", out _));
+            Assert.Equal(McpHelpers.FormatEffectiveStart(toolStart), fallback.GetProperty("effective_start").GetString());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(a, bodySucceeded);
+        }
+    }
+
+    private static async Task<JsonDocument> ToolAsync(Arranged a, CancellationToken ct) =>
+        JsonDocument.Parse(await DarlingMcpQueryTagRollupTools.GetResourceUseByTagCore(
+            a.Source, null, 24, null, 25, a.End.ToString("o", CultureInfo.InvariantCulture) + "Z", null, ct));
+
+    private static JsonElement QueryStoreSection(JsonDocument doc) =>
+        doc.RootElement.GetProperty("sections").EnumerateArray().Single(s => s.GetProperty("section").GetString() == QueryTagRollupSection.QueryStore.Name);
 
     /// <summary>
     /// The plan of the routed statement, found by what its nodes do: the table arm reaches <c>query_store_hash_hourly</c> only through an
@@ -455,7 +535,8 @@ WHERE server_id = 2 AND query_id IN (1, 2) AND collection_time >= TIMESTAMP '{At
             var routed = await FleetFromAsync(a, starts, ct);
             await ExecAsync(a.Connection, "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);
             await AssertEachServerEqualsItsOwnReadAsync(a, starts, expectRouted: false, ct);
-            Assert.Equal(Canon(routed.Facts), Canon((await FleetFromAsync(a, starts, ct)).Facts));
+            var snappedStarts = starts.ToDictionary(s => s.Key, s => QueryTagRollupHashRoute.CeilHour(s.Value));
+            Assert.Equal(Canon(routed.Facts), Canon((await FleetFromAsync(a, snappedStarts, ct)).Facts));
             bodySucceeded = true;
         }
         finally
@@ -480,7 +561,8 @@ WHERE server_id = 2 AND query_id IN (1, 2) AND collection_time >= TIMESTAMP '{At
         Assert.Equal(3, starts.Values.Distinct().Count());
         foreach (var (server, start) in starts)
         {
-            var own = await FleetFromAsync(a, new Dictionary<int, DateTime> { [server] = start }, ct);
+            /* The routed fleet read starts each server on the hour, so the one-server read it is compared with starts there too. */
+            var own = await FleetFromAsync(a, new Dictionary<int, DateTime> { [server] = expectRouted ? QueryTagRollupHashRoute.CeilHour(start) : start }, ct);
             Assert.False(own.UsedHashHourly, "a one-server read uses today's statement");
             Assert.NotEmpty(own.Facts);
             Assert.Equal(Canon(own.Facts), Canon(fleet.Facts.Where(f => f.ServerId == server)));

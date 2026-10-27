@@ -99,6 +99,9 @@ public sealed class QueryTagUsageBehaviourTests
         Assert.Contains(run.GetProperty("fleetHourlyNote").EnumerateArray().Select(n => n.GetString()),
             n => n!.Contains("materialized only to 2026-10-26T21:00:00Z"));
         Assert.Empty(run.GetProperty("rawMutedNotes").EnumerateArray());
+        // #6800: the Query Store section of a routed fleet read carries the same kind of note, and the page shows it as it does the plan cache's.
+        Assert.Contains(run.GetProperty("fleetQueryStoreNote").EnumerateArray().Select(n => n.GetString()),
+            n => n!.Contains("hourly buckets start on the hour: no bucket before 2026-10-26T23:00:00"));
     }
 
     [Fact]

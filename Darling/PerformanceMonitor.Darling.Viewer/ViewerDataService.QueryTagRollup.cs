@@ -105,6 +105,11 @@ public sealed partial class ViewerDataService
         else
         {
             sections[QueryTagRollupSection.QueryStore.Name] = qs.Facts;
+            if (qs.UsedHashHourly && !string.IsNullOrEmpty(qs.WindowEdgesNote))
+            {
+                notes[QueryTagRollupSection.QueryStore.Name] = $"Read from the hourly table {QueryTagRollupHashRoute.RoutedSourceName}: {qs.WindowEdgesNote}.";
+            }
+
             if (qs.Allowed.Count == 0)
             {
                 unavailable[QueryTagRollupSection.QueryStore.Name] = "Query Store is read from the composed interval table only, and it is not readable here: "

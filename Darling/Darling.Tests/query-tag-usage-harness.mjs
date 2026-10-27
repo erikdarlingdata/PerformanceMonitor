@@ -75,6 +75,8 @@ const deadlocks = () => ({ section: "deadlocks", status: "empty", message: "No d
 
 /* #6794: what a fleet plan-cache section carries when the hourly rollup served it. */
 const HOURLY_NOTE = "the hourly rollup is materialized only to 2026-10-26T21:00:00Z; nothing after it was read";
+/* #6800: what the fleet Query Store section carries when the hourly table served it: the start moved up to the hour. */
+const QS_NOTE = "hourly buckets start on the hour: no bucket before 2026-10-26T23:00:00.0000000Z: the data from 2026-10-26T22:17:00.0000000Z to 2026-10-26T23:00:00.0000000Z is not included";
 const asks = [];
 const answerFor = (name, q) => {
   if (name === "list_servers") return { servers: [{ server_name: "a", display_name: "Server A", engine_kind: "sqlserver" }, { server_name: "b" }] };
@@ -83,7 +85,7 @@ const answerFor = (name, q) => {
     const tagOnly = !!q.get("tag");
     const fleet = !q.get("server");
     const sections = fleet
-      ? [{ section: "plan_cache", status: "ok", source: "collect.query_stats_io_hourly (hourly rollup)", tier: "hourly", window_end: "2026-10-26T21:00:00Z", window_edges_note: HOURLY_NOTE, servers: [planCache("a", tagOnly), planCache("b", tagOnly)], fleet_total: fig(18, 8) }, deadlocks()]
+      ? [{ section: "plan_cache", status: "ok", source: "collect.query_stats_io_hourly (hourly rollup)", tier: "hourly", window_end: "2026-10-26T21:00:00Z", window_edges_note: HOURLY_NOTE, servers: [planCache("a", tagOnly), planCache("b", tagOnly)], fleet_total: fig(18, 8) }, { section: "query_store", status: "empty", source: "collect.query_store_hash_hourly + collect.query_store_interval_wide", tier: "hourly+tail", window_edges_note: QS_NOTE }, deadlocks()]
       : [planCache(null, tagOnly), deadlocks()];
     return { scope: fleet ? "fleet" : "server", hours_back: 24, sections_additive: false, sections };
   }
@@ -143,6 +145,7 @@ const out = {};
   out.fleetText = cardOfSection("plan_cache").textContent;
   /* #6794: the hourly fleet section shows the read's own edges note. */
   out.fleetHourlyNote = all(cardOfSection("plan_cache")).filter((n) => n.className === "muted").map((n) => n.textContent);
+  out.fleetQueryStoreNote = all(cardOfSection("query_store")).filter((n) => n.className === "muted").map((n) => n.textContent);
   /* #6157: a server's heading is its display name; a server with none keeps its key. */
   out.fleetHeadings = all(cardOfSection("plan_cache")).filter((n) => n.tag === "h4").map((n) => n.textContent);
 

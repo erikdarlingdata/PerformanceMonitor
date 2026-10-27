@@ -162,8 +162,15 @@ public sealed class DarlingMcpQueryTagRollupTools
                 if (allowed.Count > 0)
                 {
                     var from = allowed.Values.Max();
-                    reach["effective_start"] = McpHelpers.FormatEffectiveStart(from);
+                    /* #6800: the fleet route starts every server's read on the hour, so the first instant read is the rounded-up start and the
+                       section says what that dropped. window_truncated stays the gate's own judgment (the table floor), not the rounding's. */
+                    reach["effective_start"] = McpHelpers.FormatEffectiveStart(read.RoutedStarts is { Count: > 0 } routed ? routed.Values.Max() : from);
                     reach["window_truncated"] = RawWindowFloor.IsTruncated(from, windowStart);
+                    if (read.UsedHashHourly)
+                    {
+                        reach["tier"] = "hourly+tail";
+                        reach["window_edges_note"] = string.IsNullOrEmpty(read.WindowEdgesNote) ? null : read.WindowEdgesNote;
+                    }
                 }
 
                 anyWork |= facts.Count > 0;

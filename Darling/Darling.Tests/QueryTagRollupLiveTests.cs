@@ -726,6 +726,93 @@ public sealed class QueryTagRollupLiveTests
         });
     }
 
+    /// <summary>
+    /// #6800 part 2, step 3a: today's batched Query Store statement must not scan the wide table by its <c>collection_time</c> index for
+    /// the window-end bound. Step 2b measured that with the window end 6 hours back (an <c>as_of</c> in the past) a plain
+    /// <c>collection_time &lt;= $3</c> made the planner choose that index, the bitmap went lossy, and inside the per-server loop that index is
+    /// the 13.0 s against 6.0 s case. The statement still serves every one-server read and every fleet read the route falls back from.
+    /// Found by what the plan's nodes do: no scan of the wide table or of one of its partitions has an index condition on
+    /// <c>collection_time</c> (sequential scans are off, the seed is small, so the plan shows the paths the statement allows). The seed is
+    /// 30 servers, the heap is laid out in <c>collection_time</c> order as the store's is, the store's two indexes are present, and the seed
+    /// and the read are anchored at <see cref="LiveClock.AnchoredEnd"/> (#5608).
+    /// </summary>
+    [Fact]
+    public async Task TodaysQueryStoreStatement_WithTheWindowEndSixHoursBack_DoesNotUseTheCollectionTimeIndexForTheEndBound()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), "Set DARLING_TEST_PG to run this.");
+        var ct = TestContext.Current.CancellationToken;
+        const int Servers = 30;
+        var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct, servers: 3, build: false, at: LiveClock.AnchoredEnd());
+        var bodySucceeded = false;
+        try
+        {
+            /* 30 servers: the three seeded ones copied to servers 4 to 30. */
+            await ExecAsync(connection, @"
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+ module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us, replica_role,
+ runtime_stats_interval_id, interval_start_time_utc)
+SELECT w.collection_time, s.server_id, w.database_name, w.query_id, w.plan_id, w.execution_type_desc, w.first_execution_time, w.last_execution_time,
+       w.module_name, w.query_hash, w.execution_count, w.avg_duration_us, w.avg_cpu_time_us, w.max_duration_us, w.max_cpu_time_us, w.replica_role,
+       w.runtime_stats_interval_id, w.interval_start_time_utc
+FROM collect.query_store_interval_wide AS w
+CROSS JOIN generate_series(4, 30) AS s (server_id)
+WHERE w.server_id = 1", ct);
+
+            /* The store appends rows in collection_time order, which is what the BRIN index on that column is for: lay the heap out that way. */
+            await ExecAsync(connection, "CREATE INDEX ix_zz_cluster_collection_time ON collect.query_store_interval_wide (collection_time)", ct);
+            await ExecAsync(connection, "CLUSTER collect.query_store_interval_wide USING ix_zz_cluster_collection_time", ct);
+            await ExecAsync(connection, "DROP INDEX collect.ix_zz_cluster_collection_time", ct);
+            await ExecAsync(connection, "CREATE INDEX IF NOT EXISTS ix_query_store_interval_wide_server_first_exec ON collect.query_store_interval_wide (server_id, first_execution_time)", ct);
+            await ExecAsync(connection, "CREATE INDEX IF NOT EXISTS ix_query_store_interval_wide_collection_time_brin ON collect.query_store_interval_wide USING brin (collection_time) WITH (pages_per_range = 4)", ct);
+            await ExecAsync(connection, "ANALYZE collect.query_store_interval_wide", ct);
+
+            var end = DateTime.SpecifyKind(hourNow.AddHours(-6), DateTimeKind.Unspecified);
+            var start = end.AddHours(-24);
+            var ids = Enumerable.Range(1, Servers).ToArray();
+            await using var transaction = await connection.BeginTransactionAsync(ct);
+            await ExecAsync(connection, "SET LOCAL enable_seqscan = off", ct);
+            await using var explain = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + QueryTagRollupSql.QueryStoreSql, connection) { Transaction = transaction, CommandTimeout = 120 };
+            explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = ids });
+            explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = ids.Select(_ => start).ToArray() });
+            explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = end });
+            explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = start });
+            var json = Convert.ToString(await explain.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture)!;
+            using var document = JsonDocument.Parse(json);
+            var nodes = new List<JsonElement>();
+            void Walk(JsonElement node)
+            {
+                nodes.Add(node);
+                if (node.TryGetProperty("Plans", out var children))
+                {
+                    foreach (var child in children.EnumerateArray())
+                    {
+                        Walk(child);
+                    }
+                }
+            }
+
+            Walk(document.RootElement[0].GetProperty("Plan"));
+            string Text(JsonElement n, string name) => n.TryGetProperty(name, out var v) ? v.GetString() ?? string.Empty : string.Empty;
+
+            var wideNodes = nodes.Where(n =>
+                Text(n, "Relation Name").StartsWith("query_store_interval_wide", StringComparison.Ordinal)
+                || Text(n, "Index Name").Contains("query_store_interval_wide", StringComparison.Ordinal)).ToList();
+            Assert.NotEmpty(wideNodes);
+            var byCollectionTime = wideNodes.Where(n => Text(n, "Index Cond").Contains("collection_time", StringComparison.Ordinal)).ToList();
+            Assert.True(
+                byCollectionTime.Count == 0,
+                "the window-end bound must not become an index condition on collection_time; nodes: "
+                + string.Join(" | ", byCollectionTime.Select(n => Text(n, "Node Type") + " " + Text(n, "Index Name") + " " + Text(n, "Index Cond"))));
+            await transaction.RollbackAsync(ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await ComposeStampLiveSupport.CleanupAsync(scratch, connection, source, bodySucceeded);
+        }
+    }
+
     [Fact]
     public void TheToolsHeadNamesTheNeverSummedRule_AndPointsAtTheGuide()
     {

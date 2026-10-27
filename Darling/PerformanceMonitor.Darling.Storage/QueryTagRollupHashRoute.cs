@@ -23,10 +23,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// narrow table's rows instead of the wide table's.
 ///
 /// <para>The source of a (server, hour) is decided in C# from two small reads in the read's own snapshot: the window's built hours and
-/// the pairs whose table rows are no longer valid. A table hour is a WHOLE hour inside <c>[read start, window end]</c> that the builder has
-/// done, for a pair whose <c>hash_built_seq</c> equals its <c>late_seq</c>. Everything else is a wide range: the partial first hour (the
-/// read start stays exact), every unbuilt hour (the open hour and the newest two or three included), every stale pair and the tail. Wide
-/// hours that touch are merged into one range. A later source (the daily table of step 3) adds a third list to <see cref="Plan"/> and a
+/// the pairs whose table rows are no longer valid. Each server's read STARTS ON THE HOUR: its read start snapped up to the next whole hour
+/// (itself when already on the hour, #6800 part 2, step 3a), so the partial first hour is not read and the section says so
+/// (<see cref="HourlyWindowEdges.StartNote"/>). A table hour is a WHOLE hour inside <c>[snapped start, window end]</c> that the builder has
+/// done, for a pair whose <c>hash_built_seq</c> equals its <c>late_seq</c>. Everything else is a wide range: every unbuilt hour (the open
+/// hour and the newest two or three included), every stale pair and the tail. Wide hours that touch are merged into one range. A later source (the daily table of step 3) adds a third list to <see cref="Plan"/> and a
 /// third arm to <see cref="QueryTagRollupSql.QueryStoreRoutedSqlFor"/>: this class only decides which hours each source answers.</para>
 /// </summary>
 public static class QueryTagRollupHashRoute
@@ -59,34 +60,45 @@ public static class QueryTagRollupHashRoute
         AND   b.hash_built_seq IS DISTINCT FROM b.late_seq
         """;
 
-    /// <summary>Which source answers what: the (hour, server) pairs read from the table and the (server, from, to) ranges read from the wide table, each range <c>[from, to)</c> with the statement's window-end bound applied on top.</summary>
+    /// <summary>Which source answers what: the (hour, server) pairs read from the table and the (server, from, to) ranges read from the wide table, each range <c>[from, to)</c> with the statement's window-end bound applied on top.
+    /// <paramref name="Starts"/> is each server's snapped start (the first instant it reads) and <paramref name="RequestedStart"/> the latest read start before snapping, the start the section's note names.</summary>
     public sealed record Plan(
         List<(DateTime Hour, int ServerId)> TablePairs,
-        List<(int ServerId, DateTime From, DateTime To)> WideRanges);
+        List<(int ServerId, DateTime From, DateTime To)> WideRanges,
+        Dictionary<int, DateTime> Starts,
+        DateTime RequestedStart)
+    {
+        /// <summary>The section's start-edge note: null when no server's start moved.</summary>
+        public string? EdgesNote => HourlyWindowEdges.StartNote(RequestedStart, CeilHour(RequestedStart));
+    }
 
     private static readonly TimeSpan Hour = TimeSpan.FromHours(1);
 
     private static DateTime FloorHour(DateTime value) => new(value.Ticks - (value.Ticks % Hour.Ticks), DateTimeKind.Unspecified);
 
-    private static DateTime CeilHour(DateTime value) => value.Ticks % Hour.Ticks == 0 ? FloorHour(value) : FloorHour(value).Add(Hour);
+    internal static DateTime CeilHour(DateTime value) => value.Ticks % Hour.Ticks == 0 ? FloorHour(value) : FloorHour(value).Add(Hour);
 
     /// <summary>
-    /// Splits each server's span <c>[read start, window end]</c> into table hours and wide ranges. Pure: no connection. A whole hour is
-    /// <c>[H, H + 1 h)</c> with <c>H</c> at or after the read start and <c>H + 1 h</c> at or before the window end, so every row the table
-    /// holds for it passes both of the wide statement's bounds. The last range always runs through the window end's hour (its upper bound is
-    /// the next hour start, the statement's own <c>collection_time &lt;= window end</c> cuts it), which also keeps a window end that falls
-    /// exactly on an hour start: a row stamped at that instant is in no whole hour.
+    /// Splits each server's span <c>[snapped start, window end]</c> into table hours and wide ranges, the snapped start being the read start
+    /// rounded up to a whole hour. Pure: no connection. A whole hour is <c>[H, H + 1 h)</c> with <c>H</c> at or after the snapped start and
+    /// <c>H + 1 h</c> at or before the window end, so every row the table holds for it passes both of the wide statement's bounds. Each instant
+    /// of the span is in exactly one source. The last range runs through the window end's hour (its upper bound is the next hour start, the
+    /// statement's own window-end bound cuts it), which also keeps a window end that falls exactly on an hour start: a row stamped at that
+    /// instant is in no whole hour. A snapped start past the window end (a read start inside the window's last hour) reads nothing.
     /// </summary>
     public static Plan Split(
         IReadOnlyDictionary<int, DateTime> readStarts, DateTime windowEnd, ISet<DateTime> builtHours, ISet<(DateTime Hour, int ServerId)> stalePairs)
     {
         var tablePairs = new List<(DateTime Hour, int ServerId)>();
         var wideRanges = new List<(int ServerId, DateTime From, DateTime To)>();
+        var starts = new Dictionary<int, DateTime>();
         var wholeEnd = FloorHour(windowEnd);
-        foreach (var (serverId, start) in readStarts.OrderBy(r => r.Key))
+        foreach (var (serverId, readStart) in readStarts.OrderBy(r => r.Key))
         {
-            DateTime? run = DateTime.SpecifyKind(start, DateTimeKind.Unspecified);
-            for (var hour = CeilHour(start); hour < wholeEnd; hour = hour.Add(Hour))
+            var start = CeilHour(readStart);
+            starts[serverId] = start;
+            DateTime? run = null;
+            for (var hour = start; hour < wholeEnd; hour = hour.Add(Hour))
             {
                 if (builtHours.Contains(hour) && !stalePairs.Contains((hour, serverId)))
                 {
@@ -104,10 +116,14 @@ public static class QueryTagRollupHashRoute
                 }
             }
 
-            wideRanges.Add((serverId, run ?? wholeEnd, wholeEnd.Add(Hour)));
+            var tail = run ?? (start > wholeEnd ? start : wholeEnd);
+            if (tail < wholeEnd.Add(Hour))
+            {
+                wideRanges.Add((serverId, tail, wholeEnd.Add(Hour)));
+            }
         }
 
-        return new Plan(tablePairs, wideRanges);
+        return new Plan(tablePairs, wideRanges, starts, readStarts.Count == 0 ? windowEnd : DateTime.SpecifyKind(readStarts.Values.Max(), DateTimeKind.Unspecified));
     }
 
     /// <summary>
@@ -131,7 +147,7 @@ public static class QueryTagRollupHashRoute
             }
         }
 
-        var first = FloorHour(allowed.Values.Min());
+        var first = CeilHour(allowed.Values.Min());
         var wholeEnd = FloorHour(windowEnd);
         var built = new HashSet<DateTime>();
         var stale = new HashSet<(DateTime Hour, int ServerId)>();
