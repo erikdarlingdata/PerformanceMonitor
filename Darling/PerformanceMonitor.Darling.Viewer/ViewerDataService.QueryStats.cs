@@ -282,6 +282,16 @@ public sealed partial class ViewerDataService
                 WHERE server_id = $1
                 AND   sql_handle IS NOT NULL
                 AND   sql_handle <> ''
+                /* #6804: only the handles of the ranked groups. Without this the ROW_NUMBER below ranked EVERY
+                   procedure_stats row the server retains (2.9 million rows in, 2,302 out, 10 to 12 s of a 13 s read on a large
+                   server): the cost grew with retention, not with the window. The page joins on r.sql_handle alone, so a handle
+                   outside the ranked groups was never used, and a handle inside them keeps the same newest row: the answer is
+                   exactly what the unfiltered read gave, including a handle whose newest procedure_stats row is older than the
+                   window. There is deliberately no collection_time bound. It would be faster still, but it would turn that
+                   handle into 'ad hoc', and this table has no (server_id, sql_handle) index to look a handle up by (#4247
+                   dropped it for its WAL cost), so the read cannot skip the other handles' rows and instead stops them before
+                   the sort. */
+                AND   sql_handle IN (SELECT sql_handle FROM ranked)
             ) AS ranked_modules
             WHERE rn = 1
         ),
