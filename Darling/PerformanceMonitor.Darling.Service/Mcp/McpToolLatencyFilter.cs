@@ -322,7 +322,8 @@ public sealed class McpToolLatencyFilter
         var gcf = (request.Services?.GetService(typeof(IGcfOutputFormat)) as IGcfOutputFormat)?.Enabled ?? GcfOutput.Enabled;
         var types = request.Services?.GetService(typeof(McpToolParameterTypes)) as McpToolParameterTypes;
         var ttl = ReadResultCache.TtlFor(toolName, windowBand, fleetRead);
-        var key = ReadCacheKey.ForMcp(toolName, request.Params?.Arguments, types, gcf, cache.Generation, cache, ttl);
+        var key = ReadCacheKey.ForMcp(toolName, request.Params?.Arguments, types, gcf, cache.Generation, cache, ttl,
+            heldFromStore: ReadAdmission.FleetTtlApplies(toolName, fleetRead));
         if (cache.TryGet(key, out var stored))
         {
             scope.Uncount();

@@ -143,4 +143,31 @@ public sealed class QueryTagUsageBehaviourTests
         Assert.Equal(0, byText["none"].GetProperty("pills").GetArrayLength());
         Assert.Equal("Prod / Web", byText["web"].GetProperty("pills")[0].GetString());
     }
+
+    private static string[] StripClasses(JsonElement strips) =>
+        strips.EnumerateArray().Select(s => s.GetProperty("cls").GetString()!).ToArray();
+
+    /// <summary>#6800: the fleet read can be refused busy (429, Retry-After) once its learned p90 makes it a long read. The page shows a
+    /// notice, not an error, while it waits, sends the read once more after the Retry-After, and draws the answer.</summary>
+    [Fact]
+    public void ARefusedBusyRead_ShowsANoticeNotAnError_AndIsSentOnceMoreAfterTheRetryAfter()
+    {
+        var busy = Run().GetProperty("busyOnce");
+        Assert.Equal(1, busy.GetProperty("readsBefore").GetInt32());
+        Assert.Contains("strip notice", StripClasses(busy.GetProperty("stripsBefore")));
+        Assert.DoesNotContain("strip error", StripClasses(busy.GetProperty("stripsBefore")));
+        Assert.Equal(2, busy.GetProperty("readsAfter").GetInt32());
+        Assert.True(busy.GetProperty("planCardAfter").GetBoolean());
+        Assert.DoesNotContain("strip error", StripClasses(busy.GetProperty("stripsAfter")));
+    }
+
+    /// <summary>#6800: a second refusal is shown as the error it is, and the page does not ask a third time.</summary>
+    [Fact]
+    public void ASecondBusyRefusal_IsShownAsAnError_AndNotRetriedAgain()
+    {
+        var busy = Run().GetProperty("busyTwice");
+        Assert.Equal(2, busy.GetProperty("readsAfter").GetInt32());
+        Assert.Contains("strip error", StripClasses(busy.GetProperty("stripsAfter")));
+        Assert.False(busy.GetProperty("planCardAfter").GetBoolean());
+    }
 }

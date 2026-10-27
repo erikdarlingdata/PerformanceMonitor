@@ -574,7 +574,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                        which ?database=x%2Cy also gives); the key escapes every name and value. */
                     var key = ReadCacheKey.ForWeb(name,
                         context.Request.Query.SelectMany(q => q.Value.Select(v => new KeyValuePair<string, string?>(q.Key, v))),
-                        cache.Generation, cache, ttl);
+                        cache.Generation, cache, ttl, heldFromStore: ReadAdmission.FleetTtlApplies(name, fleetRead));
                     if (cache.TryGet(key, out var stored))
                     {
                         /* Round 2, L3: a hit runs no read, so it does not count as one in flight. */

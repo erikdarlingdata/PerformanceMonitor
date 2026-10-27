@@ -92,6 +92,72 @@ public sealed class FleetTagReadCacheTests
         Assert.NotEqual(bodies[0], bodies[2]);
     }
 
+    /// <summary>A web fleet read that runs for <paramref name="readTakes"/> on the test clock (the handler moves it), then reads at the
+    /// offsets in <paramref name="advanceBefore"/>, each after the one before has answered. Returns how many times the read ran.</summary>
+    private static async Task<int> RunTimedAsync(TimeSpan startAt, TimeSpan readTakes, TimeSpan[] advanceBefore)
+    {
+        var clock = new TimerTimeProvider();
+        var admission = LightAdmission(clock);
+        var calls = 0;
+        using var entry = new ReadLatencyWebRecordingTests.ExtraDispatchEntryScope((Route, (_, _, _) =>
+        {
+            clock.Advance(readTakes);
+            return Task.FromResult("{\"rows\":[" + Interlocked.Increment(ref calls).ToString(System.Globalization.CultureInfo.InvariantCulture) + "]}");
+        }));
+        var (app, postgres) = await ReadCacheWebEndToEndTests.BuildServer(admission, new ReadLatencyAccumulator());
+        await using var _app = app;
+        await using var _postgres = postgres;
+        using var client = app.GetTestServer().CreateClient();
+
+        clock.Advance(startAt);
+        await client.GetStringAsync($"/api/read/{Route}?hours=24", TestContext.Current.CancellationToken);
+        foreach (var advance in advanceBefore)
+        {
+            clock.Advance(advance);
+            await client.GetStringAsync($"/api/read/{Route}?hours=24", TestContext.Current.CancellationToken);
+        }
+
+        return calls;
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task AFleetRead_StartedLateInAFiveMinuteSpan_IsStillAHit90SecondsAfterItIsStored()
+    {
+        /* The test clock starts on a 5-minute boundary. The read starts at +4:00, takes 61 s (as the cold read did on a 42-server store),
+           so it is stored at +5:01, past that boundary. A read 90 s later (+6:31) is inside the 5 minutes from the store. A wall-clock
+           bucket key stored the answer under the +0:00 bucket, which no request after +5:00 could reach. */
+        Assert.Equal(1, await RunTimedAsync(TimeSpan.FromMinutes(4), TimeSpan.FromSeconds(61), [TimeSpan.FromSeconds(90)]));
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task AFleetRead_IsAMiss_OnceFiveMinutesHavePassedSinceItWasStored()
+    {
+        /* Stored at +5:01. A hit at +9:59 (4:58 after the store, inside the TTL), then a miss at +10:02 (5:01 after the store). */
+        Assert.Equal(1, await RunTimedAsync(TimeSpan.FromMinutes(4), TimeSpan.FromSeconds(61), [TimeSpan.FromSeconds(298)]));
+        Assert.Equal(2, await RunTimedAsync(TimeSpan.FromMinutes(4), TimeSpan.FromSeconds(61), [TimeSpan.FromSeconds(298), TimeSpan.FromSeconds(3)]));
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task AFleetRead_IsDroppedByAWrite_ThoughItsKeyHasNoBucket()
+    {
+        var clock = new TimerTimeProvider();
+        var admission = LightAdmission(clock);
+        var calls = 0;
+        using var entry = new ReadLatencyWebRecordingTests.ExtraDispatchEntryScope((Route, (_, _, _) =>
+            Task.FromResult("{\"rows\":[" + Interlocked.Increment(ref calls).ToString(System.Globalization.CultureInfo.InvariantCulture) + "]}")));
+        var (app, postgres) = await ReadCacheWebEndToEndTests.BuildServer(admission, new ReadLatencyAccumulator());
+        await using var _app = app;
+        await using var _postgres = postgres;
+        using var client = app.GetTestServer().CreateClient();
+
+        await client.GetStringAsync($"/api/read/{Route}?hours=24", TestContext.Current.CancellationToken);
+        await client.GetStringAsync($"/api/read/{Route}?hours=24", TestContext.Current.CancellationToken);
+        Assert.Equal(1, calls);
+        admission.Cache.BumpGeneration();
+        await client.GetStringAsync($"/api/read/{Route}?hours=24", TestContext.Current.CancellationToken);
+        Assert.Equal(2, calls);
+    }
+
     [Theory(Timeout = 60_000)]
     [InlineData(1)]
     [InlineData(2)]
@@ -170,7 +236,7 @@ public sealed class FleetTagReadCacheTests
     }
 
     [Fact(Timeout = 60_000)]
-    public async Task AFleetRead_TakesNoSlot_SoItNeverAnswersBusy_WhileEverySlotIsHeld()
+    public async Task ALightPair_TakesNoSlot_WhileEverySlotIsHeld()
     {
         var clock = new TimerTimeProvider();
         var admission = new ReadAdmission(clock, ReadAdmission.DefaultWaitCap, null, 1);
@@ -182,7 +248,9 @@ public sealed class FleetTagReadCacheTests
         await using var _postgres = postgres;
         using var client = app.GetTestServer().CreateClient();
 
-        /* The only slot is held by a heavy read of another route (a 7-day band is heavy by its prior). */
+        /* The only slot is held by a heavy read of another route (a 7-day band is heavy by its prior). The pair has no learned p90 here,
+           so it is light and takes no slot; once its p90 is over the threshold it is heavy and takes one like any long read (the page
+           retries a busy answer once, QueryTagUsageBehaviourTests). Caching it does not change which it is. */
         using var held = await Task.Run(() => admission.AdmitAsync(ReadSurface.Mcp, "get_other", ReadWindowBand.SevenDays, TestContext.Current.CancellationToken));
         Assert.Equal(1, admission.Stats().Running);
 
@@ -286,15 +354,22 @@ public sealed class FleetTagReadCacheTests
     {
         public static int Runs;
 
+        /// <summary>Runs inside each call before it answers (a test moves its clock here, as a slow read would).</summary>
+        public static Action? OnRun;
+
         [McpServerTool(Name = "get_resource_use_by_tag"), Description("counts")]
-        public static string Run(string? server_name = null, int hours_back = 24) =>
-            "{\"rows\":[" + Interlocked.Increment(ref Runs).ToString(System.Globalization.CultureInfo.InvariantCulture) + "]}";
+        public static string Run(string? server_name = null, int hours_back = 24)
+        {
+            OnRun?.Invoke();
+            return "{\"rows\":[" + Interlocked.Increment(ref Runs).ToString(System.Globalization.CultureInfo.InvariantCulture) + "]}";
+        }
     }
 
-    private static async Task<int> CallThroughTheFilterAsync(int[] hoursBack, TimeSpan[] advanceBefore)
+    private static async Task<int> CallThroughTheFilterAsync(int[] hoursBack, TimeSpan[] advanceBefore, TimeSpan readTakes = default)
     {
         CountingTagTool.Runs = 0;
         var clock = new TimerTimeProvider();
+        CountingTagTool.OnRun = readTakes > TimeSpan.Zero ? () => clock.Advance(readTakes) : null;
         var admission = LightAdmission(clock);
         var filter = new McpToolLatencyFilter(new ReadLatencyAccumulator(), null, null, admission);
         var clientToServer = new Pipe();
@@ -324,6 +399,7 @@ public sealed class FleetTagReadCacheTests
         }
         finally
         {
+            CountingTagTool.OnRun = null;
             await stop.CancelAsync();
             try { await run; } catch (OperationCanceledException) { }
         }
@@ -335,6 +411,16 @@ public sealed class FleetTagReadCacheTests
     public async Task AnMcpFleetCall_At24Hours_RunsTheToolOnceInsideFiveMinutes()
     {
         Assert.Equal(1, await CallThroughTheFilterAsync([24, 24], [TimeSpan.Zero, TimeSpan.FromMinutes(4)]));
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task AnMcpFleetCall_StartedLateInAFiveMinuteSpan_IsStillAHit90SecondsAfterItIsStored()
+    {
+        /* Called at +4:00, the tool takes 61 s, so the answer is stored at +5:01. A call at +6:31 is 90 s after the store: a hit. */
+        Assert.Equal(1, await CallThroughTheFilterAsync([24, 24], [TimeSpan.FromMinutes(4), TimeSpan.FromSeconds(90)], TimeSpan.FromSeconds(61)));
+        /* Two calls after the first: +9:59 is a hit (4:58 after the store), +10:02 a miss (5:01 after it). */
+        Assert.Equal(2, await CallThroughTheFilterAsync([24, 24, 24],
+            [TimeSpan.FromMinutes(4), TimeSpan.FromSeconds(298), TimeSpan.FromSeconds(3)], TimeSpan.FromSeconds(61)));
     }
 
     [Fact(Timeout = 60_000)]

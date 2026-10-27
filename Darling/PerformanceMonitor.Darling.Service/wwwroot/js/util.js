@@ -970,7 +970,7 @@ export async function apiGetJoined(path, signal) {
     const shared = await Promise.race([entry.body, cancelled]);
     if (!shared || shared.aborted) return { kind: "aborted" };
     if (shared.transportError) return { kind: "error", message: shared.transportError };
-    return await classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+    return await classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw, retryAfter: shared.retryAfter });
   } finally {
     if (signal && onAbort) signal.removeEventListener("abort", onAbort);
     if (entry) {
@@ -1021,7 +1021,7 @@ export async function apiGetFleet() {
 async function fetchBody(path, signal) {
   try {
     const resp = await fetch(path, { headers: { Accept: "application/json" }, signal });
-    return { ok: resp.ok, status: resp.status, raw: await resp.text() };
+    return { ok: resp.ok, status: resp.status, raw: await resp.text(), retryAfter: retryAfterOf(resp) };
   } catch (e) {
     if (e && e.name === "AbortError") return { aborted: true };
     return { transportError: "Network error: " + (e && e.message ? e.message : String(e)) };
@@ -1155,6 +1155,55 @@ export function reportSessionExpired(message, login) {
  * and-braces detector in case a future gate answers the same way again); anything else (including a 204/empty
  * body -> data:null) -> "data".
  */
+/** The Retry-After header of a response, or null when it has none (or no headers at all). */
+function retryAfterOf(resp) {
+  return resp && resp.headers && typeof resp.headers.get === "function" ? resp.headers.get("Retry-After") : null;
+}
+
+/** Whole seconds from a Retry-After header in its delta-seconds form, or null for none or any other form. */
+function retryAfterSecondsOf(header) {
+  const seconds = Number(header);
+  return header != null && String(header).trim() !== "" && Number.isInteger(seconds) && seconds >= 0 ? seconds : null;
+}
+
+/** #6800: when a read was refused busy (HTTP 429), the seconds to wait before trying again (the reply's Retry-After, at least 1). */
+export function busyRetryAfter(res) {
+  return res && res.kind === "error" && res.status === 429 ? Math.max(1, res.retryAfterSeconds || 5) : null;
+}
+
+/** The strip a page shows while it waits to send a read refused busy again. */
+export function busyRetryStrip(seconds) {
+  return noticeStrip("The service is running as many long reads as it allows. Retrying in " + seconds + (seconds === 1 ? " second…" : " seconds…"));
+}
+
+/**
+ * #6800: runs `read`, and when the service refuses it busy (429) calls `onBusy(seconds)`, waits the Retry-After the reply named and
+ * runs it once more. The second answer is the caller's, whatever it is, so a second refusal shows as the error it is. An abort of
+ * `signal` during the wait returns { kind: "aborted" } without the second read.
+ */
+export async function retryOnceWhenBusy(read, onBusy, signal) {
+  const first = await read();
+  const seconds = busyRetryAfter(first);
+  if (seconds === null) return first;
+  if (signal && signal.aborted) return { kind: "aborted" };
+  if (onBusy) onBusy(seconds);
+  const waited = await new Promise((resolve) => {
+    let onAbort = null;
+    const timer = setTimeout(() => {
+      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, seconds * 1000);
+    if (signal) {
+      onAbort = () => {
+        clearTimeout(timer);
+        resolve(false);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+  return waited ? read() : { kind: "aborted" };
+}
+
 async function classifyResponse(resp) {
   const raw = await resp.text();
   let body = null;
@@ -1179,7 +1228,9 @@ async function classifyResponse(resp) {
     const msg = body && typeof body.error === "string" ? body.error
       : isEnvelope ? plainText(body.message)
       : "Request failed (HTTP " + resp.status + ")";
-    return { kind: "error", message: msg, status: resp.status };
+    /* #6800: a read refused busy (429) carries the seconds its Retry-After names, for retryOnceWhenBusy. */
+    const retryAfterSeconds = resp.status === 429 ? retryAfterSecondsOf(resp.retryAfter !== undefined ? resp.retryAfter : retryAfterOf(resp)) : null;
+    return retryAfterSeconds === null ? { kind: "error", message: msg, status: resp.status } : { kind: "error", message: msg, status: resp.status, retryAfterSeconds };
   }
 
   /* The envelope is exactly {status, message[, hints]}: a top-level string status AND string message.

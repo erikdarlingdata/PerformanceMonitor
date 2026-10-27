@@ -105,8 +105,10 @@ public sealed class ReadAdmission
     /// <summary>
     /// #6800: the routes whose whole-fleet form (no server named) is cached for the TTL in the table when the window asked for is at
     /// least <see cref="FleetMinWindowHours"/> hours (<see cref="FleetTtlApplies"/>), not by the p90 table or the band prior. The fleet <c>get_resource_use_by_tag</c> reads its
-    /// Query Store section over the whole window and took about 61 s cold on a 42-server store (7.5 s warm), yet its 24-hour band is
-    /// light, so it was never kept and every visit, every user and every page picker ran it again. The one-server form takes about
+    /// Query Store section over the whole window and took about 61 s cold on a 42-server store (7.5 s warm). With no history its
+    /// 24-hour band is light, so it was never kept, and once the learned p90 made the pair heavy it was kept for the band's 30 s in a
+    /// 30 s wall-clock bucket that had passed before a 61 s read could store anything. Either way every visit, every user and every
+    /// page picker ran it again. The one-server form takes about
     /// 1.3 s and is left to the band as before, and so is a window under 24 hours. The floor is the length of the window asked for, not
     /// its band: the <c>24h</c> band starts just above 1 hour, so a band gate would also hold the page's Past 4 hours preset
     /// (<c>?hours=4</c>) for 5 minutes. 24 hours is where the Query Store section starts (the tool reads it only from
@@ -118,9 +120,13 @@ public sealed class ReadAdmission
     /// answer can be up to five collection cycles old for those four sections: a blocked process report or a deadlock that landed a
     /// minute ago can be missing from the fleet page for up to 5 minutes, where the band TTL made it 30 s. What the page shows is a
     /// 24-hour total by tag, which moves by under 1/288th in 5 minutes, and a live blocking or deadlock event has its own reads and
-    /// alerts, which this does not touch. A TTL of 1 minute would match the fastest collector but expires about as soon as a cold
-    /// read finishes (61 s or more), so a page reload or a second user would still pay the cold read, which is the defect. A write
-    /// (the tag map, a rule) moves the cache's generation and drops the entry at once.</para>
+    /// alerts, which this does not touch. The entry is held for its TTL from the moment it is stored, not for what is left of a
+    /// wall-clock bucket (its key carries no bucket, <c>ReadCacheKey</c> <c>heldFromStore</c>, and the entry expires at store time
+    /// plus the TTL, as an <c>as_of</c> entry does): with a bucket key a cold read of 61 to 118 s started late in a 5-minute bucket
+    /// stores an entry nothing can reach (20 to 39% of cold reads) and the rest live about 55 to 95 s. A TTL of 1 minute would match
+    /// the fastest collector, but a reload or a second user more than a minute after the read finished would pay the cold read again,
+    /// and the page itself re-renders every 60 s, so the entry would expire about as each poll arrives. A write (the tag map, a rule)
+    /// moves the cache's generation and drops the entry at once.</para>
     /// </summary>
     internal static readonly IReadOnlyDictionary<string, TimeSpan> FleetCachedRoutes = new Dictionary<string, TimeSpan>(StringComparer.Ordinal)
     {
