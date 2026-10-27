@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -24,7 +25,7 @@ namespace Darling.Tests;
 /// No test framework in here, so the same file also runs from a console harness on a machine that cannot host the
 /// Windows-only test project. The expected rows come from a plain C# model of the seed, not from SQL.
 /// </summary>
-internal static class QueryStoreClutterChurnProbe
+internal static partial class QueryStoreClutterChurnProbe
 {
     internal const int ServerId = 6808;
     internal const string ServerName = "churn-6808";
@@ -200,17 +201,49 @@ internal static class QueryStoreClutterChurnProbe
     /// <summary>The index <c>PlanChurnSql</c>'s projection is cut to: <c>PgTableTuning</c> creates it, <c>MigrateAsync</c> does not.</summary>
     internal const string CoveringIndex = "idx_query_store_stats_server_db_query_plan_time";
 
-    /// <summary>True when some node of the plan is an index-only scan of <see cref="CoveringIndex"/> (a chunk index is named <c>&lt;chunk&gt;_&lt;index&gt;</c> cut to 63 characters, so the match is on the first 40 characters of the index name).</summary>
-    internal static bool WalksCoveringIndexOnly(string planText) =>
-        planText.Split('\n').Any(line => line.Contains("Index Only Scan", StringComparison.Ordinal) && line.Contains(CoveringIndex[..40], StringComparison.Ordinal));
+    /// <summary>
+    /// The plan lines that scan a chunk of <c>query_store_stats</c> (or the table itself when it is not a hypertable), found by what
+    /// they do: a scan node whose relation is such a chunk. A bitmap heap scan counts, its bitmap index scan names no relation and does not.
+    /// </summary>
+    internal static List<string> StatsTableScans(string planText) =>
+        planText.Split('\n')
+            .Select(line => line.Trim())
+            .Where(t => t.Contains("Scan", StringComparison.Ordinal)
+                && !t.Contains("Custom Scan", StringComparison.Ordinal)
+                && StatsRelation().IsMatch(t))
+            .ToList();
 
-    /// <summary>Why a plan spilled to disk, or null when it did not: an external sort, a hash aggregate that wrote batches, or a materialized CTE that went to temp files.</summary>
+    [GeneratedRegex(@"\bon\s+(\w+\.)?(_hyper_\d+_\d+_chunk|query_store_stats)\b")]
+    private static partial Regex StatsRelation();
+
+    /// <summary>
+    /// True when EVERY scan of the stats table's chunks is an index-only scan of <see cref="CoveringIndex"/> (a chunk index is named
+    /// <c>&lt;chunk&gt;_&lt;index&gt;</c> cut to 63 characters, so the match is on the first 40 characters of the index name). The
+    /// statement reads its <c>NOT MATERIALIZED</c> CTE twice, so at least two scans are expected, and no scan at all fails (#6816).
+    /// </summary>
+    internal static bool WalksCoveringIndexOnly(string planText)
+    {
+        var scans = StatsTableScans(planText);
+        return scans.Count >= 2
+            && scans.All(t => t.Contains("Index Only Scan", StringComparison.Ordinal) && t.Contains(CoveringIndex[..40], StringComparison.Ordinal));
+    }
+
+    [GeneratedRegex(@"\bBatches:\s+(\d+)")]
+    private static partial Regex HashBatches();
+
+    /// <summary>Why a plan spilled to disk, or null when it did not: an external sort, a hash aggregate that wrote batches, a materialized CTE that went to temp files, or a hash join split into more than one batch (#6816).</summary>
     internal static string? SpillIn(string planText)
     {
         foreach (var line in planText.Split('\n'))
         {
             var t = line.Trim();
             if (t.Contains("Sort Method: external", StringComparison.Ordinal) || t.Contains("Disk Usage:", StringComparison.Ordinal) || t.Contains("Storage: Disk", StringComparison.Ordinal))
+            {
+                return t;
+            }
+
+            var batches = HashBatches().Match(t);
+            if (batches.Success && int.Parse(batches.Groups[1].Value, CultureInfo.InvariantCulture) > 1)
             {
                 return t;
             }
