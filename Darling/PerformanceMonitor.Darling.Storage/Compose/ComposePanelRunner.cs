@@ -434,7 +434,12 @@ internal static class ComposePanelRunner
            HERE, in the runner, before compiling, because ComposeCompiler.Compile stays pure and never opens
            a connection. Only checked for a panel that actually reads query_store_stats; every other panel
            pays nothing extra. */
+        /* #6807: ask the router first. A window older than RetentionTierRouter.RawMaxAge routes to the corrected hourly rollup
+           (ComposeCompiler.BuildFactRelation returns it before any wide-table branch), so the wide table is never read: its
+           eligibility gate, its size guard and its notes would all describe a table this panel does not touch. A panel the
+           router sends to a rollup skips them; one that reads the wide table (a recent window, or a dimension no rollup carries) is unchanged. */
         var wideResolution = plan!.Measure.SourceTable == "query_store_stats"
+            && !ComposeCompiler.ResolveFactRoute(plan, now, start, rollups, coverage).IsCagg
             ? await ResolveQueryStoreWideEligibleAsync(postgres, serverScope, start, end, hasWindowEnd ? end : (DateTime?)null, cancellationToken, plan)
             : default;
         var queryStoreWideEligible = wideResolution.Eligible;
@@ -743,8 +748,12 @@ internal static class ComposePanelRunner
             string? settingServer = null;
 
             /* The floors are one store-wide answer: the first server to reach that step reads them into this
-               cache and the rest reuse them; a check that refuses before that step never reads them. */
+               cache and the rest reuse them; a check that refuses before that step never reads them.
+               #6807: that first arrival also reads the table floor of every server here that reaches the floor step, in one statement,
+               not once per server (42 round trips, about 0.75 s a panel, on a store with 42 servers). The gate takes each floor from the
+               cache and gives the answer it gave before. This connection is autocommit, so a failed statement takes nothing with it. */
             var storeWide = new QueryStoreIntervalWide.StoreWideInputsCache();
+            storeWide.ReadTableFloorsTogether(wideServers.Select(s => s.Id), inTransaction: false);
 
             /* #6115: the gate decides per server, and a server that fails no longer sends the whole panel to raw: it reads raw, and the
                servers that pass read the interval table (the split). Each server is in exactly one set, so no row is read twice.
