@@ -1377,7 +1377,7 @@ export function dailySummaryPanels(server) {
       /* "empty" is a span with no day while the server has history elsewhere, so the calendar still opens, every day "no data", and an
          earlier month can be stepped to (#6294); "unavailable" is a server nothing was ever collected for, which has no month to show. */
       if (res.status !== "empty") return mount(calendar.body, emptyStrip(res.message));
-      return renderInto(calendar.body, () => dailyHealthCalendar({ server, initial: null, read: readTool, renderTable: (month) => dailyRangeGrid(month.rows, month.missing) }));
+      return renderInto(calendar.body, () => dailyHealthCalendar({ server, initial: null, read: (tool, params) => readTool(tool, params, signal), renderTable: (month) => dailyRangeGrid(month.rows, month.missing) }));
     }
 
     /* Each panel renders on its own, the way fanout() guards its specs: a render fault in one says so in that
@@ -1392,7 +1392,7 @@ export function dailySummaryPanels(server) {
     });
 
     /* The month calendar (#6294, daily-calendar.js) over the same fetch; "Show as table" is the grid this panel was, over the shown month. */
-    renderInto(calendar.body, () => dailyHealthCalendar({ server, initial: data, read: readTool, renderTable: (month) => dailyRangeGrid(month.rows, month.missing) }));
+    renderInto(calendar.body, () => dailyHealthCalendar({ server, initial: data, read: (tool, params) => readTool(tool, params, signal), renderTable: (month) => dailyRangeGrid(month.rows, month.missing) }));
   })();
   return [tile.panel, calendar.panel];
 }

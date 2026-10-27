@@ -87,6 +87,8 @@ const fetchLog = [];        // { at, url, signal, abortedAtStart, aborted }
 let slowReadMs = 140_000;
 const isSlow = (url) => url.includes("get_job_history") || url.includes("get_resource_use_by_tag") || (slowRegistry && url.includes("list_servers")) || (slowTrend && url.includes("get_server_trend")) || (slowFanout && url.includes("get_memory_grants")) || (slowDatabases && url.includes("/api/server-databases")) || (slowPanels && url.includes("/api/read/") && !url.includes("list_investigation_requests"));
 let slowPanels = false;     // a scenario sets this to leave every server panel read out
+let dailyEmpty = false;     // a scenario sets this: get_daily_summary_range answers "empty", and every second read (the calendar's month read) is held
+let dailyReads = 0;
 let slowTrend = false;      // a scenario sets this to leave the server page's trend reads out
 let slowFanout = false;     // a scenario sets this to leave the Memory tab's fanout() read (get_memory_grants) out
 let slowDatabases = false;  // a scenario sets this to leave the FinOps Database box's name list read out
@@ -98,6 +100,7 @@ const json = (body, status = 200) => ({ status, body });
 /* What a read answers once it is due. Anything a scenario does not name answers 500, as before. */
 const answerFor = (url) => {
   if (url.includes("/api/fleet")) return fleetBody ? json(fleetBody) : json({}, 500);
+  if (dailyEmpty && url.includes("get_daily_summary_range")) return json({ status: "empty", message: "No day collected in this span." });
   if (url.includes("get_resource_use_by_tag") && tagBody) return json(tagBody);
   if (url.includes("/api/read/list_servers")) return json({ servers: [{ server_name: "alpha", display_name: "alpha" }] });
   if (url.includes("/api/session")) return json({ can_edit: false });
@@ -117,7 +120,8 @@ globalThis.fetch = (url, opts = {}) => {
       const a = answerFor(url);
       resolve({ ok: a.status < 400, status: a.status, json: async () => a.body, text: async () => (a.status === 500 && !Object.keys(a.body).length ? "" : JSON.stringify(a.body)) });
     };
-    const hold = holdFleet && url.includes("/api/fleet");
+    const heldMonth = dailyEmpty && url.includes("get_daily_summary_range") && (++dailyReads % 2 === 0);
+    const hold = (holdFleet && url.includes("/api/fleet")) || heldMonth;
     const p = { at: hold ? Infinity : isSlow(url) ? now + slowReadMs : now, done: answer, hold, url };
     pending.push(p);
     if (opts.signal) opts.signal.addEventListener("abort", () => {
@@ -305,6 +309,18 @@ const scenarios = {
     const errorStripsDrawn = readErrorCount() - strips0;
     await settle();
     return { before, reads: grants().length, perRead: grants().map((r) => (r.url.includes("chart") ? "chart" : "fanout") + ":" + r.aborted), allAborted: grants().length > 0 && grants().every((r) => r.aborted), errorStripsDrawn };
+  },
+  /* The Health tab's calendar opens on an "empty" range and reads its month itself: that read was unsignalled and stayed out after the leave. */
+  async leaveHealthWithCalendarReadOut() {
+    dailyEmpty = true;
+    await boot("#/server/alpha");
+    await advance(2);
+    const ranges = () => fetchLog.filter((r) => r.url.includes("get_daily_summary_range"));
+    const before = { reads: ranges().length, aborted: ranges().some((r) => r.aborted) };
+    await go("#/investigations"); await settle();
+    const afterLeave = { reads: ranges().length, monthReadAborted: ranges().length > 1 && ranges()[1].aborted };
+    await go("#/server/alpha"); await advance(2);
+    return { before, afterLeave, monthReadsAfterReturn: ranges().length - afterLeave.reads };
   },
   /* The FinOps Locking tab's Database box reads the server's database names with the tab's own signal. */
   async finopsDatabaseBoxReadOut() {

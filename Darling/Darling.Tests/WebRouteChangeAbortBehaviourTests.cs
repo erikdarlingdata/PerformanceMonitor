@@ -176,6 +176,18 @@ public sealed class WebRouteChangeAbortBehaviourTests
     }
 
     [Fact]
+    public void LeavingTheHealthTab_AbortsTheCalendarMonthRead_AndReturningReadsTheMonthAgain()
+    {
+        var r = Run("leaveHealthWithCalendarReadOut");
+        var before = r.GetProperty("before");
+        Assert.Equal(2, before.GetProperty("reads").GetInt32());
+        Assert.False(before.GetProperty("aborted").GetBoolean());
+        Assert.True(r.GetProperty("afterLeave").GetProperty("monthReadAborted").GetBoolean());
+        // The tab's own range read and the calendar's month read both start again: the aborted month was not cached as empty.
+        Assert.Equal(2, r.GetProperty("monthReadsAfterReturn").GetInt32());
+    }
+
+    [Fact]
     public void LeavingFinops_AbortsTheDatabaseBoxNameRead()
     {
         var r = Run("finopsDatabaseBoxReadOut");
