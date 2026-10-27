@@ -503,6 +503,18 @@ LIMIT 500";
                 tally[folded] = tally.TryGetValue(folded, out var existing) ? existing + count : count;
             }
         }
+        else
+        {
+            /* #6849: the mirror. A target upgraded in place from PostgreSQL 13 to 14 now samples
+               coalesce(query_id, 0), so the carried NULL series would stop growing and be re-emitted frozen every
+               cycle. Fold them into the 0 keys so each series continues. */
+            foreach (var (key, count) in tally.Where(kv => kv.Key.QueryId == null).ToList())
+            {
+                tally.Remove(key);
+                var folded = (key.Type, key.Event, (long?)0);
+                tally[folded] = tally.TryGetValue(folded, out var existing) ? existing + count : count;
+            }
+        }
 
         foreach (var (key, seen) in window)
         {

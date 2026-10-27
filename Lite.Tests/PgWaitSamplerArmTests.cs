@@ -329,6 +329,31 @@ public sealed class PgWaitSamplerArmTests
         Assert.Equal(8, kept.SampleCount);
     }
 
+    /// <summary>
+    /// #6849: a target upgraded in place from PostgreSQL 13 to 14 carries NULL keys (stored while the column was
+    /// absent). Once the column exists the sampler writes 0 for an unattributed wait, so the NULL series must fold
+    /// into the 0 series, its count added to any existing 0 key, rather than freezing and being re-emitted.
+    /// </summary>
+    [Fact]
+    public async Task ACarriedNullQueryIdTally_FoldsIntoZeroOnATargetThatHasTheColumn()
+    {
+        const string carriedTally = "Lock\trelation\t\t7\nLock\trelation\t0\t2\nIO\tDataFileRead\t\t3\nIO\tDataFileRead\t5\t4\n";
+
+        var upgraded = MakeContext(hasExtension: false, major: 14, state: new Dictionary<string, string> { [PgWaitSamplingCollector.TallyStateKey] = carriedTally });
+        var rows = await PgWaitSamplingCollector.Instance.ReadAsync(
+            FakeCollectorDataReader.WithResultSets(new[] { Snap("Lock", "relation", 0, 10) }), upgraded, CancellationToken.None);
+
+        Assert.DoesNotContain(rows, r => r.QueryId == null);
+        var lockRow = Assert.Single(rows, r => r.EventType == "Lock");
+        Assert.Equal(0L, lockRow.QueryId);
+        Assert.Equal(10, lockRow.SampleCount);
+        Assert.Equal(3, Assert.Single(rows, r => r.EventType == "IO" && r.QueryId == 0).SampleCount);
+        Assert.Equal(4, Assert.Single(rows, r => r.EventType == "IO" && r.QueryId == 5).SampleCount);
+
+        var roundTrip = PgWaitSamplingCollector.ParseTally(upgraded.PendingState[PgWaitSamplingCollector.TallyStateKey]);
+        Assert.DoesNotContain(roundTrip.Keys, k => k.QueryId == null);
+    }
+
     [Fact]
     public async Task AnEmptyWindowOnAnEmptyTallyWritesNothing_AndStillRecordsTheInstrument()
     {
