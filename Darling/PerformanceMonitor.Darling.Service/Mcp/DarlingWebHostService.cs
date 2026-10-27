@@ -34,6 +34,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -167,8 +168,14 @@ public sealed class DarlingWebHostService : BackgroundService
     /* #6236: the store's pseudonym key, so the dashboard's investigation export numbers a login as the command line does. */
     private readonly PseudonymKeySource? _pseudonymKeys;
 
-    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null)
+    /* #6840: the service's container, null in a host built outside it. The front door's directory and secrets are internal types, so they
+       are looked up here, and only when darling.json has frontDoor.enabled (which replaces the dashboard's endpoint map with
+       DarlingFrontDoorWebProxy). */
+    private readonly IServiceProvider? _services;
+
+    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null, IServiceProvider? services = null)
     {
+        _services = services;
         _pseudonymKeys = pseudonymKeys;
         _ownerSource = ownerSource;
         _slowReads = slowReads;
@@ -810,83 +817,113 @@ public sealed class DarlingWebHostService : BackgroundService
                     effectivePort, networkMode, networkMode ? allowedCidr.ToString() : null, stoppingToken);
             }
 
-            /* Managed mode: the WORKER owns the bundled server's lifecycle; the web host only derives the
-               least-privilege VIEWER-role connection string from the stored DPAPI credential. */
-            string? storeConnectionString;
-            if (config.Postgres.Managed)
+            /* #6840: a front door holds no store of its own, so it skips the store wait and everything built on the store connection: the
+               viewer-role pool, the Admin arm and the endpoint map. The web host's sign-in, role gate, Host guard and session cookie are
+               the same ones; only the routes behind them change (DarlingFrontDoorWebProxy replaces DarlingWebEndpoints.MapAll). */
+            NpgsqlDataSource? postgres = null;
+            DarlingFrontDoorWebProxy? frontDoorProxy = null;
+            if (config.IsFrontDoor)
             {
-                if (!OperatingSystem.IsWindows())
+                var frontDoorDirectory = _services?.GetService<IFrontDoorDirectory>();
+                var frontDoorSecrets = _services?.GetService<IFrontDoorSecrets>();
+                if (frontDoorDirectory is null || frontDoorSecrets is null)
                 {
-                    _logger.LogError("Web dashboard not started: postgres.managed = true requires Windows");
+                    _logger.LogError("Web dashboard not started: frontDoor.enabled is set but this host has no front-door directory to route with");
                     await DisposeFailedStartAsync();
                     return false;
                 }
 
-                storeConnectionString = await WaitForManagedConnectionStringAsync(config.Postgres, stoppingToken);
-                if (storeConnectionString is null)
+                frontDoorProxy = DarlingFrontDoorWebProxy.Create(frontDoorDirectory, frontDoorSecrets, config.FrontDoor, _logger);
+
+                /* Every user who signs in with no role mapping holds the edit seat, and through the front door a change they make runs on
+                   whichever store it is sent to. */
+                if (_oidcClient is { } frontDoorOidc && frontDoorOidc.Options.RoleClaim is null)
                 {
-                    await DisposeFailedStartAsync();
-                    return false;
+                    _logger.LogWarning(
+                        "web.network.oidc has no role mapping, so every user who signs in has the edit seat at the front door, and a change they make runs on the store it is sent to. "
+                        + "Set web.network.oidc.roleClaim with adminRoles and viewerRoles to limit who can edit.");
                 }
             }
             else
             {
-                /* #3914: not the owner by default any more — postgres.webConnectionString, the viewer role the
-                   service provisioned on the compose store, or the owner with a warning, in that order. */
-                storeConnectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
-                    DarlingStoreLogins.Surface.Web, config.Postgres, _logger, stoppingToken);
-                if (storeConnectionString is null)
+                /* Managed mode: the WORKER owns the bundled server's lifecycle; the web host only derives the
+                   least-privilege VIEWER-role connection string from the stored DPAPI credential. */
+                string? storeConnectionString;
+                if (config.Postgres.Managed)
                 {
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        _logger.LogError("Web dashboard not started: postgres.managed = true requires Windows");
+                        await DisposeFailedStartAsync();
+                        return false;
+                    }
+
+                    storeConnectionString = await WaitForManagedConnectionStringAsync(config.Postgres, stoppingToken);
+                    if (storeConnectionString is null)
+                    {
+                        await DisposeFailedStartAsync();
+                        return false;
+                    }
+                }
+                else
+                {
+                    /* #3914: not the owner by default any more — postgres.webConnectionString, the viewer role the
+                       service provisioned on the compose store, or the owner with a warning, in that order. */
+                    storeConnectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
+                        DarlingStoreLogins.Surface.Web, config.Postgres, _logger, stoppingToken);
+                    if (storeConnectionString is null)
+                    {
+                        await DisposeFailedStartAsync();
+                        return false;
+                    }
+                }
+
+                /* A string Npgsql cannot use throws from the Create below into the catch at the end of this method,
+                   which logs the exception's message, and Npgsql's text for that can quote part of the string (a password
+                   with an unquoted ';' makes the text after it the "keyword", and a password tail that becomes a Host
+                   value with a ':' in it makes the text after the ':' a bad port). So prove it first, with Npgsql's own
+                   construction step (the guard builds and disposes a data source, and opens nothing), and log the
+                   formatter's text instead. The keywords added below (application name, session time zone) take part in
+                   none of Npgsql's construction checks, so a string that passes here does not throw from the Create below
+                   for a parse or a validation reason. */
+                if (DarlingStoreConnection.TryDescribeParseFailure(storeConnectionString) is { } unusableStoreString)
+                {
+                    _logger.LogError(
+                        "Web dashboard not started this attempt: its store connection string (postgres.webConnectionString, or postgres.connectionString when that is not set) is unusable: {Detail}",
+                        unusableStoreString);
                     await DisposeFailedStartAsync();
                     return false;
                 }
+
+                /* Lifetime tied to the running app: disposed by StopServerAsync, not this method's scope. #4479:
+                   the viewer-role connection string built by DarlingManagedPostgres already carries
+                   WebApplicationName, but a CONFIGURED (postgres.webConnectionString) or owner-fallback login
+                   never runs through that builder — set-if-absent here so every path this string can take still
+                   names the surface. */
+                /* #6630: a store the operator brings gets the worker's collect/config search path the same way (set-if-absent), because the
+                   bare names the reads use (servers, config_service, ...) only resolve through it, and the database default is best effort. */
+                postgres = DarlingWorker.CreateHostStoreDataSource(storeConnectionString, DarlingManagedPostgres.WebApplicationName);
+                _appDataSource = postgres;
+
+                /* #6600: on the managed store, a signed-in admin's Admin writes use a second, small pool on the stored admin login. It opens
+                   nothing until the first such request. A store you bring yourself, or web.allowAdminWrites off, builds none. */
+                if (OperatingSystem.IsWindows())
+                {
+                    _adminArm = WebAdminArm.ForHost(config.Postgres, web.AllowAdminWrites, _logger);
+                }
+
+                /* The MCP host warns the same way while its twin setting is on: the state of this gate is otherwise visible nowhere at start. */
+                if (web.AllowWindowsAuthOverUnverifiedTls)
+                {
+                    _logger.LogWarning(
+                        "{Setting} is on: the dashboard's server add and edit accept Windows authentication with trust_server_certificate or " +
+                        "optional encryption, so a signed-in editor can point this service's own account at a server it cannot verify.",
+                        DarlingUnverifiedWindowsAuthScreen.WebSetting);
+                }
+
+                /* Off Windows there is no managed store and no admin pool, but OIDC without a role mapping still gives every signed-in user the edit seat. */
+                WebAdminArm.WarnWhenOidcHasNoRoleMapping(_oidcClient, DarlingWebStoreWrites.IsManaged(config.Postgres), _adminArm, _logger);
             }
-
-            /* A string Npgsql cannot use throws from the Create below into the catch at the end of this method,
-               which logs the exception's message, and Npgsql's text for that can quote part of the string (a password
-               with an unquoted ';' makes the text after it the "keyword", and a password tail that becomes a Host
-               value with a ':' in it makes the text after the ':' a bad port). So prove it first, with Npgsql's own
-               construction step (the guard builds and disposes a data source, and opens nothing), and log the
-               formatter's text instead. The keywords added below (application name, session time zone) take part in
-               none of Npgsql's construction checks, so a string that passes here does not throw from the Create below
-               for a parse or a validation reason. */
-            if (DarlingStoreConnection.TryDescribeParseFailure(storeConnectionString) is { } unusableStoreString)
-            {
-                _logger.LogError(
-                    "Web dashboard not started this attempt: its store connection string (postgres.webConnectionString, or postgres.connectionString when that is not set) is unusable: {Detail}",
-                    unusableStoreString);
-                await DisposeFailedStartAsync();
-                return false;
-            }
-
-            /* Lifetime tied to the running app: disposed by StopServerAsync, not this method's scope. #4479:
-               the viewer-role connection string built by DarlingManagedPostgres already carries
-               WebApplicationName, but a CONFIGURED (postgres.webConnectionString) or owner-fallback login
-               never runs through that builder — set-if-absent here so every path this string can take still
-               names the surface. */
-            /* #6630: a store the operator brings gets the worker's collect/config search path the same way (set-if-absent), because the
-               bare names the reads use (servers, config_service, ...) only resolve through it, and the database default is best effort. */
-            var postgres = DarlingWorker.CreateHostStoreDataSource(storeConnectionString, DarlingManagedPostgres.WebApplicationName);
-            _appDataSource = postgres;
-
-            /* #6600: on the managed store, a signed-in admin's Admin writes use a second, small pool on the stored admin login. It opens
-               nothing until the first such request. A store you bring yourself, or web.allowAdminWrites off, builds none. */
-            if (OperatingSystem.IsWindows())
-            {
-                _adminArm = WebAdminArm.ForHost(config.Postgres, web.AllowAdminWrites, _logger);
-            }
-
-            /* The MCP host warns the same way while its twin setting is on: the state of this gate is otherwise visible nowhere at start. */
-            if (web.AllowWindowsAuthOverUnverifiedTls)
-            {
-                _logger.LogWarning(
-                    "{Setting} is on: the dashboard's server add and edit accept Windows authentication with trust_server_certificate or " +
-                    "optional encryption, so a signed-in editor can point this service's own account at a server it cannot verify.",
-                    DarlingUnverifiedWindowsAuthScreen.WebSetting);
-            }
-
-            /* Off Windows there is no managed store and no admin pool, but OIDC without a role mapping still gives every signed-in user the edit seat. */
-            WebAdminArm.WarnWhenOidcHasNoRoleMapping(_oidcClient, DarlingWebStoreWrites.IsManaged(config.Postgres), _adminArm, _logger);
 
             /* FOOTGUN (load-bearing): pin BOTH the content root AND the web root to the binary's directory. A
                Windows service's CWD is System32, so the parameterless CreateBuilder would 404 every static file
@@ -975,7 +1012,10 @@ public sealed class DarlingWebHostService : BackgroundService
             builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
             /* The VIEWER-role store pool the read endpoints query (registered for DI + passed to MapAll). */
-            builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
+            if (postgres is not null)
+            {
+                builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
+            }
 
             /* #4188: Brotli/gzip for the JSON API and the static JS/CSS/HTML. A services-collection step, so it
                has to run on the BUILDER, ahead of Build() - see ConfigureResponseCompression's own doc for why
@@ -1008,7 +1048,7 @@ public sealed class DarlingWebHostService : BackgroundService
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
                ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
                loopback-only admits loopback names only, whatever it parsed. */
-            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpToken: mcpToken, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls);
+            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpToken: mcpToken, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -1242,7 +1282,7 @@ public sealed class DarlingWebHostService : BackgroundService
     /// serves reads only and a write is answered with <see cref="ShortTokenWriteRefusedMessage"/>; OIDC seats are unchanged.</param>
     internal void ConfigurePipeline(
         WebApplication app,
-        NpgsqlDataSource postgres,
+        NpgsqlDataSource? postgres,
         bool networkMode,
         IPAddress? networkListenIp,
         CidrAllowList allowedCidr,
@@ -1260,7 +1300,8 @@ public sealed class DarlingWebHostService : BackgroundService
         string? mcpToken = null,
         string? sharedTokenReadsOnlyProblem = null,
         WebAdminArm? adminArm = null,
-        bool allowWindowsAuthOverUnverifiedTls = false)
+        bool allowWindowsAuthOverUnverifiedTls = false,
+        DarlingFrontDoorWebProxy? frontDoorProxy = null)
     {
         /* A caller that does not say whether the token is under the length floor gets the same answer the start path
            computes: a short shared token serves reads only. Without this a forgotten argument meant writes. */
@@ -1639,7 +1680,17 @@ public sealed class DarlingWebHostService : BackgroundService
             });
         }
 
-        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls);
+        if (frontDoorProxy is not null)
+        {
+            /* #6840: a front door answers the four local routes and forwards the rest of /api/* to a store. It sits exactly where MapAll
+               does, behind the gates above, so a request reaches it only after sign-in, the CIDR test and the role gate. */
+            frontDoorProxy.Map(app);
+        }
+        else
+        {
+            DarlingWebEndpoints.MapAll(app, postgres ?? throw new ArgumentNullException(nameof(postgres)), _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls);
+        }
+
         app.UseDefaultFiles();
 
         /* Static assets carry an ETag/Last-Modified already (the framework default); no-cache (#4188) makes
