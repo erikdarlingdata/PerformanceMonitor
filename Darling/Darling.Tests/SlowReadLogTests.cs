@@ -190,7 +190,11 @@ public sealed class SlowReadLogTests
 
         log.Offer(scope, ReadSurface.Web, "route", ReadOutcome.Timeout, 100, null, "57014", null);
         Assert.True(log.TryRead(out var record));
-        Assert.Equal(50, JsonNode.Parse(record!.StatementsJson)!.AsArray().Count);
+        var stored = JsonNode.Parse(record!.StatementsJson)!.AsArray();
+        Assert.Equal(50, stored.Count);
+        /* #6795: the slowest fifty (the last fifty here, each one slower than the one before), not the first fifty. */
+        Assert.Equal(11, (int)stored[0]!["ordinal"]!);
+        Assert.Equal(60, (int)stored[^1]!["ordinal"]!);
         Assert.Equal(60, record.StatementCount);
         Assert.True(record.StatementsTruncated);
         Assert.Equal("57014", record.ErrorClass);
