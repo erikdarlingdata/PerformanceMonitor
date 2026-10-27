@@ -247,7 +247,8 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
         foreach (var (queryId, database) in new[] { (20L, Db), (30L, Gone) })
         {
             await SeedAsync(baseNow.AddHours(-40), 100, 1000, 1000, intervalId: 1, queryId: queryId, database: database);
-            await SeedAsync(baseNow.AddMinutes(-30), 100, 3000, 3000, intervalId: 2, queryId: queryId, database: database);
+            /* #6781: 600 recent runs at +2 ms add 1.2 s of CPU, over the 1 s floor. */
+            await SeedAsync(baseNow.AddMinutes(-30), 600, 3000, 3000, intervalId: 2, queryId: queryId, database: database);
         }
 
         var connection = await SeedConnectionAsync();

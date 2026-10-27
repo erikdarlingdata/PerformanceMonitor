@@ -53,7 +53,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// compares), Aborted (timeouts, cancels) and Exception (errors), each with an execution count and CPU and duration per
 /// execution (weighted by execution count, NULL when the count is 0), and a count per hour for each, because the recent window
 /// and the baseline differ in length. The Aborted and Exception rows are read live from the wide table (or the raw table) for
-/// both sides; the daily totals hold none. A query is flagged for COST (Regular CPU up more than <see cref="CostGatePercent"/>%),
+/// both sides; the daily totals hold none. A query is flagged for COST (Regular CPU up more than <see cref="CostGatePercent"/>%, with at least <see cref="CostMinAddedCpuMs"/> ms of added CPU over the window, #6781),
 /// for TIMEOUTS or ERRORS (that group's per-hour rate in the recent window at least <see cref="FailureRateMultiple"/> times the
 /// baseline's, or any at all where the baseline had none, with at least <see cref="FailureMinRecentRuns"/> such runs in the
 /// recent window), or for several; <c>regression_reason</c> says which.</para>

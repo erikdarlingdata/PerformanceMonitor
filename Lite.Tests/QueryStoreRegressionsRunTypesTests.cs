@@ -210,7 +210,7 @@ public sealed class QueryStoreRegressionsRunTypesTests : IClassFixture<SharedDuc
         var rows = json.GetProperty("regressions").EnumerateArray()
             .Select(r => (r.GetProperty("query_id").GetInt64(), r.GetProperty("regression_reason").GetString())).ToArray();
 
-        Assert.Equal(new[] { (62L, "cost"), (63L, "cost"), (64L, "cost"), (65L, "timeouts") }, rows);
+        Assert.Equal(new (long, string?)[] { (62L, "cost"), (63L, "cost"), (64L, "cost"), (65L, "timeouts") }, rows);
         Assert.Equal(4, json.GetProperty("regression_count").GetInt32());
     }
 
