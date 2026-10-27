@@ -2434,6 +2434,20 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
     WHERE step_id = 0 AND run_status = 1;";
 
     /// <summary>
+    /// V221 (#6800): <c>collect.query_store_hash_hourly</c>, the narrow hourly source of the fleet tag roll-up, its <c>(hour, server_id)</c>
+    /// index, and <c>hash_built_seq</c> on <c>collect.query_store_compose_stamp_built</c>. The text, the column map and the reasoning are on
+    /// <see cref="QueryStoreComposeStamp.HashHourlyCreateSql"/>. The service's hourly tick (V173's builder) fills the table in the stamp's
+    /// transaction and the planner rebuilds every hour whose <c>hash_built_seq</c> differs from <c>late_seq</c>, which is every hour built
+    /// before this rung (NULL), so the backfill is the ordinary tick, newest first, six hours a tick. <b>The rung scans nothing</b>: a new
+    /// empty table, an index on it, and a nullable column with no default on the small ledger. The column needs an ACCESS EXCLUSIVE lock
+    /// on that ledger, which the wide table's late-row triggers take row locks on, so the lock timeout is
+    /// <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V173's. Additive: an older build never reads the table, and a build
+    /// that rebuilds a stamp hour without writing it leaves the pair stale for the table, which this build then rebuilds.
+    /// </summary>
+    private static readonly string V221Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.HashHourlyCreateSql;
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2828,6 +2842,7 @@ $rung$;";
         new Migration(218, "server-action-recompile-module", V218Sql),
         new Migration(219, "query-store-self-keys", V219Sql),
         new Migration(220, "job-history-success-index", V220Sql),
+        new Migration(221, "query-store-hash-hourly", V221Sql),
     };
 
     /// <summary>
