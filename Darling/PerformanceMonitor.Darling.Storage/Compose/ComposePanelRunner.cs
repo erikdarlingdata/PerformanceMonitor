@@ -434,7 +434,12 @@ internal static class ComposePanelRunner
            HERE, in the runner, before compiling, because ComposeCompiler.Compile stays pure and never opens
            a connection. Only checked for a panel that actually reads query_store_stats; every other panel
            pays nothing extra. */
+        /* #6807: ask the router first. A window older than RetentionTierRouter.RawMaxAge routes to the corrected hourly rollup
+           (ComposeCompiler.BuildFactRelation returns it before any wide-table branch), so the wide table is never read: its
+           eligibility gate, its size guard and its notes would all describe a table this panel does not touch. A panel the
+           router sends to a rollup skips them; one that reads the wide table (a recent window, or a dimension no rollup carries) is unchanged. */
         var wideResolution = plan!.Measure.SourceTable == "query_store_stats"
+            && !ComposeCompiler.ResolveFactRoute(plan, now, start, rollups, coverage).IsCagg
             ? await ResolveQueryStoreWideEligibleAsync(postgres, serverScope, start, end, hasWindowEnd ? end : (DateTime?)null, cancellationToken, plan)
             : default;
         var queryStoreWideEligible = wideResolution.Eligible;
@@ -746,6 +751,13 @@ internal static class ComposePanelRunner
                cache and the rest reuse them; a check that refuses before that step never reads them. */
             var storeWide = new QueryStoreIntervalWide.StoreWideInputsCache();
 
+            /* #6807: the gate's per-server table floor, read for every server that has a coverage row in one statement and not once per
+               server (42 round trips, about 0.75 s a panel, on a store with 42 servers). A server with no coverage row refuses ahead of
+               the floor step, so it is left out. The gate takes each floor from the cache and gives the answer it gave before. */
+            var covered = await ReadQueryStoreCoveredServersAsync(connection, cancellationToken);
+            await storeWide.PrefetchTableFloorsAsync(
+                connection, wideServers.Where(s => covered.Contains(s.Id)).Select(s => s.Id).ToList(), StorageCommandDeadlines.ComposedReadSeconds, cancellationToken);
+
             /* #6115: the gate decides per server, and a server that fails no longer sends the whole panel to raw: it reads raw, and the
                servers that pass read the interval table (the split). Each server is in exactly one set, so no row is read twice.
                A server with no coverage row AND no Query Store row in the window is neither: it adds no cost to either half, so it
@@ -754,7 +766,6 @@ internal static class ComposePanelRunner
                wide start, because it has no history to bound. A server with no coverage row and rows in the window cannot use the
                interval table, so it reads raw like any refused server. Decided from the two small probes below, never from the gate,
                whose own answer for such a server is always "refuse". */
-            var covered = await ReadQueryStoreCoveredServersAsync(connection, cancellationToken);
             var rawServers = new List<int>();
             var passed = 0;
             foreach (var (serverId, serverName) in wideServers)

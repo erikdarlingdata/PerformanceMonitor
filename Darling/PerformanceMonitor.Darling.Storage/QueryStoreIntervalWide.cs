@@ -472,6 +472,26 @@ FROM collect.query_store_interval_wide AS t
 WHERE t.server_id = $1;";
 
     /// <summary>
+    /// <see cref="PlainTableFloorSql"/> for many servers in ONE statement (#6807): <c>$1</c> is the <c>int[]</c> of server ids, and each
+    /// id gets its own LATERAL <c>MIN</c>, so each server is still one index seek on <c>(server_id, first_execution_time)</c> in every
+    /// partition, exactly the plan the one-server statement gets. A server with no rows answers NULL, as the one-server statement does.
+    /// A fleet gate (<c>ComposePanelRunner.ResolveQueryStoreWideEligibleAsync</c>, <c>DarlingQueryTagRollupReader</c>) used to run the
+    /// one-server statement once per server, 42 round trips at 17 to 20 ms each on a store with 42 servers.
+    /// </summary>
+    public const string PlainTableFloorsSql = @"
+SELECT
+    ids.server_id,
+    f.floor
+FROM unnest($1::integer[]) AS ids(server_id)
+CROSS JOIN LATERAL
+(
+    SELECT
+        MIN(t.first_execution_time) AS floor
+    FROM collect.query_store_interval_wide AS t
+    WHERE t.server_id = ids.server_id
+) AS f;";
+
+    /// <summary>
     /// Clause 6's probe (2026 field review of #4310 site 3): whether the window holds any pre-tier-2 row (no
     /// <c>runtime_stats_interval_id</c>, no reconstructable identity) for this server. The upsert's identity
     /// (<see cref="IdentityColumns"/>) does not carry <c>collection_time</c>, so a legacy row re-fetched across
@@ -1246,6 +1266,44 @@ FROM (
     public sealed class StoreWideInputsCache
     {
         internal StoreWideInputs? Value;
+
+        /// <summary>The servers' table floors read ahead by <see cref="PrefetchTableFloorsAsync"/>; null until then.</summary>
+        internal Dictionary<int, DateTime?>? TableFloors;
+
+        /// <summary>
+        /// Reads <see cref="PlainTableFloorSql"/>'s answer for every server in <paramref name="serverIds"/> in one statement
+        /// (<see cref="PlainTableFloorsSql"/>), so a fleet gate pays one round trip instead of one per server (#6807).
+        /// <see cref="ResolveReadAsync"/> then takes a server's floor from here and runs the one-server statement only for a server
+        /// not read. A fault leaves nothing cached, so each server decides for itself as it did before; cancellation propagates.
+        /// </summary>
+        public async Task PrefetchTableFloorsAsync(
+            NpgsqlConnection connection, IReadOnlyCollection<int> serverIds, int commandTimeoutSeconds, CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(connection);
+            ArgumentNullException.ThrowIfNull(serverIds);
+            if (serverIds.Count == 0)
+            {
+                return;
+            }
+
+            try
+            {
+                var floors = new Dictionary<int, DateTime?>(serverIds.Count);
+                await using var command = new NpgsqlCommand(PlainTableFloorsSql, connection) { CommandTimeout = commandTimeoutSeconds };
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = serverIds.Distinct().ToArray() });
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    floors[reader.GetInt32(0)] = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+                }
+
+                TableFloors = floors;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                TableFloors = null;
+            }
+        }
     }
 
     /// <summary>
@@ -1334,8 +1392,13 @@ FROM (
             }
 
             DateTime? tableFloor;
-            await using (var plain = new NpgsqlCommand(PlainTableFloorSql, connection) { CommandTimeout = commandTimeoutSeconds })
+            if (storeWide?.TableFloors is { } prefetched && prefetched.TryGetValue(serverId, out var prefetchedFloor))
             {
+                tableFloor = prefetchedFloor;
+            }
+            else
+            {
+                await using var plain = new NpgsqlCommand(PlainTableFloorSql, connection) { CommandTimeout = commandTimeoutSeconds };
                 plain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
                 tableFloor = await plain.ExecuteScalarAsync(cancellationToken) as DateTime?;
             }

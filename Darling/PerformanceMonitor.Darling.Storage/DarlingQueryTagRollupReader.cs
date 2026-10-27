@@ -92,11 +92,15 @@ public static class DarlingQueryTagRollupReader
             await readOnly.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        /* #6807: the gate's per-server table floor for every server in one statement, and the store-wide raw floor once, inside this same
+           snapshot, instead of one floor statement per server. Each server's answer is the one it got before. */
+        var storeWide = new QueryStoreIntervalWide.StoreWideInputsCache();
+        await storeWide.PrefetchTableFloorsAsync(connection, serverIds, readSeconds, cancellationToken);
         foreach (var serverId in serverIds)
         {
             var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                 connection, serverId, windowStart, windowEnd, windowEnd, QueryStoreMinWindow,
-                readSeconds, logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
+                readSeconds, logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken, storeWide: storeWide);
             if (!plan.UseTable)
             {
                 refused[serverId] = plan.DecisionFailed
