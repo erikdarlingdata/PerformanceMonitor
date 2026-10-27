@@ -679,14 +679,17 @@ public sealed class McpHealthParserTools
            returns is THIS type's newest capture rather than the server-level witness standing in for it. */
         var lastOfType = await dataService.GetLastSystemHealthCaptureOfTypeAsync(serverId, eventType);
 
-        /* #6441, ahead of every rung: when the newest collection run found the ring buffer truncated, the read is blind
-           to the newest events, so none of "healthy", "quiet" or "never fired" is true. */
-        var runNote = await dataService.GetLatestCollectorRunNoteAsync(serverId, SystemHealthCollectorName);
-        if (RingBufferTruncationNote.Describe(runNote) is { } truncation)
+        /* #6441, ahead of every rung: when a collection run found the ring buffer truncated, the read is blind to the newest
+           events of that run, so none of "healthy", "quiet" or "never fired" is true. #6827: that is asked of the runs INSIDE
+           this read's window (any one of them, not only the last), so an as_of replay answers for its own window and not
+           for today's run. */
+        var stretch = await dataService.GetTruncatedCollectorRunsInWindowAsync(
+            serverId, SystemHealthCollectorName, windowEnd.AddHours(-hoursBack), windowEnd);
+        if (stretch is { } truncatedRuns && RingBufferTruncationNote.Describe(truncatedRuns.NewestNote) is { } truncation)
         {
             return WitnessStatus(
                 "unavailable",
-                RingBufferTruncationNote.HealthParserMessage(eventType, serverName, hoursBack, truncation, captured, noneQualifiedBecause),
+                RingBufferTruncationNote.HealthParserMessage(eventType, serverName, hoursBack, truncation, truncatedRuns, captured, noneQualifiedBecause),
                 sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: captured);
         }
 
@@ -734,6 +737,7 @@ public sealed class McpHealthParserTools
            event_file target (no ring buffer fallback, no truncation): a running session was read to the end and held no
            events. That is a true negative. Every other newest run (a ring buffer read, a fallback, no run) keeps the
            unavailable text below, because the ring buffer path also records SUCCESS for a dead session. */
+        var runNote = await dataService.GetLatestCollectorRunNoteAsync(serverId, SystemHealthCollectorName);
         if (SystemHealthSourceNote.ReadThroughEventFile(runNote))
         {
             return WitnessStatus(

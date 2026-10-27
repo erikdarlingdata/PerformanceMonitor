@@ -582,6 +582,54 @@ AND   cl.collection_time =
     }
 
     /// <summary>
+    /// #6827: the truncated ring-buffer runs of the collector that read one read's window (inclusive, naive UTC): how many,
+    /// the first and last run time, and the note of the newest one. A window is blind if ANY run that read it was truncated,
+    /// however clean the run at its end, and a clean past window is not made blind by today's run. Those runs are the ones
+    /// inside the window PLUS the first SUCCESS run after its end: a truncated run hides events, and the hidden ones can
+    /// fall in the window's last minutes. A live read has no run after its end. Null when no run that read the window logged a truncated ring buffer. Only SUCCESS runs count, as in <see cref="GetLatestCollectorRunNoteAsync"/>.
+    /// <para>The SQL pattern is only a pre-filter, built from <see cref="PerformanceMonitor.Common.RingBufferTruncationNote.TruncatedLabel"/>
+    /// (a substring with a value above zero, looser than <see cref="PerformanceMonitor.Common.RingBufferTruncationNote.TryParse"/>),
+    /// so <c>TruncatedStretch.FromRuns</c> decides every returned row by TryParse.</para>
+    /// Darling twin: <c>DarlingSystemHealthReader.GetTruncatedRunsInWindowAsync</c>.
+    /// </summary>
+    public async Task<PerformanceMonitor.Common.RingBufferTruncationNote.TruncatedStretch?> GetTruncatedCollectorRunsInWindowAsync(
+        int serverId, string collectorName, DateTime startUtc, DateTime endUtc)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = $@"
+SELECT cl.collection_time,
+       cl.error_message
+FROM v_collection_log AS cl
+WHERE cl.server_id = $1
+AND   cl.collector_name = $2
+AND   cl.collection_time >= $3
+AND   cl.collection_time <= COALESCE(
+      (
+          SELECT MIN(a.collection_time)
+          FROM v_collection_log AS a
+          WHERE a.server_id = $1
+          AND   a.collector_name = $2
+          AND   a.collection_time > $4
+          AND   a.status = 'SUCCESS'
+      ), $4)
+AND   cl.status = 'SUCCESS'
+AND   regexp_matches(cl.error_message, '{PerformanceMonitor.Common.RingBufferTruncationNote.TruncatedLabel}=0*[1-9]')
+ORDER BY cl.collection_time";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = collectorName });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+        using var reader = await command.ExecuteReaderAsync();
+        var runs = new List<(DateTime CollectionTime, string? Note)>();
+        while (await reader.ReadAsync())
+            runs.Add((reader.GetDateTime(0), reader.IsDBNull(1) ? null : reader.GetString(1)));
+        return PerformanceMonitor.Common.RingBufferTruncationNote.TruncatedStretch.FromRuns(runs);
+    }
+
+    /// <summary>
     /// How many raw events of one type the window held BEFORE any shred or significance gate - the count that
     /// lets a zero-row answer say "captured and gated out" (healthy) rather than "nothing here" (#3541 A12).
     /// <para>Run only on the empty path, and over the SAME window arithmetic the typed readers use
