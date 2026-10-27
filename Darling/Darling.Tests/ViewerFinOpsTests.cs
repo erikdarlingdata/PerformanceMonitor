@@ -9,6 +9,7 @@
 using System;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -155,36 +156,39 @@ public sealed class ViewerFinOpsSqlTests
     public void ExpensiveQueriesSql_GroupsByHandleAndText_LimitParam()
     {
         var sql = ViewerDataService.ExpensiveQueriesSql;
-        Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("LEFT(query_text, 200)", sql, StringComparison.Ordinal);
+        /* #6803: grouped on the narrow keys (the digests) over the base table, the text and plan resolved after the group and the cut. */
+        Assert.Contains("FROM query_stats AS f", sql, StringComparison.Ordinal);
+        Assert.Contains("LEFT(t.query_text, 200)", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY", sql, StringComparison.Ordinal);
         Assert.Contains("sql_handle", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $3", sql, StringComparison.Ordinal);
-        /* The stored statement-level plan is aggregated per group so "View Plan" opens it (Darling stores
-           plans) — restores the plan action the port had wrongly dropped as "no live SQL". */
-        Assert.Contains("MAX(query_plan_xml)", sql, StringComparison.Ordinal);
-        /* #2069: plans written since V54 are gzip bytes with the text NULL — the aggregate must carry
+        /* The stored statement-level plan is carried per statement so "View Plan" opens it (Darling stores
+           plans) - restores the plan action the port had wrongly dropped as "no live SQL". */
+        Assert.Contains("query_plan_xml", sql, StringComparison.Ordinal);
+        /* #2069: plans written since V54 are gzip bytes with the text NULL - the statement must carry
            both forms or the plan action goes dark as the GC retires the last text rows. */
-        Assert.Contains("MAX(query_plan_gz)", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(p.query_plan_gz)", sql, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void HighImpactQueriesSql_ReadsTheResolvingViewForItsCorrelatedSampleTextAndPlan()
+    public void HighImpactSql_RanksOnTheResolvingView_AndLooksUpTextAndPlanForTheKeptHashesOnly()
     {
         var sql = ViewerDataService.HighImpactQueriesSql;
-        /* Aggregates to query_hash level; the correlated subqueries pull sample text, full text and the
-           stored plan, so every one of them must read v_query_stats — the #1767 resolving view. On the base
-           table their `query_text IS NOT NULL AND query_text != ''` filters match nothing on rows written
-           since the migration, and the panel just goes empty with no error anywhere. */
+        /* Aggregates to query_hash level with no text and no plan (#6803: those ran per hash in the window, before the
+           scorer kept the top few dozen); the lookup is a second statement over the kept hashes. */
         Assert.Contains("FROM v_query_stats AS qs", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM v_query_stats qs2", sql, StringComparison.Ordinal);
-        Assert.Equal(4, sql.Split("FROM v_query_stats qs2").Length - 1); /* sample text, full text, plan text, plan gz (#2069) */
+        Assert.DoesNotContain("qs2", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY query_hash", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY qs2.delta_execution_count DESC NULLS LAST", sql, StringComparison.Ordinal);
-        /* The stored statement-level plan is fetched by the correlated subquery so "View Plan" opens it —
-           one subquery per content form (#2069): post-V54 plans are gzip bytes with the text NULL. */
-        Assert.Contains("qs2.query_plan_xml", sql, StringComparison.Ordinal);
-        Assert.Contains("qs2.query_plan_gz IS NOT NULL", sql, StringComparison.Ordinal);
+
+        /* The lookup reads v_query_stats, the #1767 resolving view: on the base table the `query_text IS NOT NULL AND
+           query_text != ''` filters match nothing on rows written since the migration, and the panel goes empty with no
+           error anywhere. One lookup per content form (#2069): post-V54 plans are gzip bytes with the text NULL. */
+        var lookup = DarlingFinOpsHighImpactReader.HighImpactSampleLookupSql;
+        Assert.Equal(3, lookup.Split("FROM v_query_stats qs2").Length - 1); /* text, plan text, plan gz */
+        Assert.Contains("unnest($3::text[])", lookup, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY qs2.delta_execution_count DESC NULLS LAST", lookup, StringComparison.Ordinal);
+        Assert.Contains("qs2.query_plan_xml", lookup, StringComparison.Ordinal);
+        Assert.Contains("qs2.query_plan_gz IS NOT NULL", lookup, StringComparison.Ordinal);
 
         var ddl = PgSchemaGenerator.CreateTable(QueryStatsCollector.Instance);
         foreach (var col in new[]
