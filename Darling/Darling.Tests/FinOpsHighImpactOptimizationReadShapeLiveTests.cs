@@ -111,8 +111,12 @@ LIMIT $3";
         return Convert.ToHexString(bytes);
     }
 
-    /* A fixed anchor an hour inside the 24 hour window, so the seed never straddles the cutoff. */
-    private static DateTime At => DateTime.SpecifyKind(DateTime.UtcNow.AddHours(-2), DateTimeKind.Unspecified);
+    /* #5608: the seed ends at LiveClock.AnchoredEnd(), so its chunk layout (and so every plan read) is the same at any hour. */
+    private static DateTime At => LiveClock.AnchoredEnd();
+
+    /* The window starts an hour before the first seeded row, and the hours the product reader looks back reach it from the real clock. */
+    private static DateTime Cutoff => At.AddHours(-1);
+    private static int HoursBack => (int)Math.Ceiling((DateTime.UtcNow - Cutoff).TotalHours);
 
     private static async Task<(ScratchPostgres Scratch, NpgsqlDataSource DataSource)?> SeedAsync(CancellationToken ct)
     {
@@ -295,7 +299,7 @@ LIMIT $3";
         foreach (var topN in new[] { 3, 10 })
         {
             /* The oracle: the statement as it stood, then the same scorer. */
-            var cutoff = DateTime.UtcNow.AddHours(-24);
+            var cutoff = Cutoff;
             var oldRows = new List<HighImpactQuery>();
             await using (var command = Bind(dataSource, OldHighImpactSql, cutoff))
             await using (var reader = await command.ExecuteReaderAsync(ct))
@@ -322,7 +326,7 @@ LIMIT $3";
             }
             var expected = HighImpactScorer.Score(oldRows, topN);
 
-            var actual = await DarlingFinOpsHighImpactReader.ReadAsync(dataSource, ServerId, 24, 60, ct, topN);
+            var actual = await DarlingFinOpsHighImpactReader.ReadAsync(dataSource, ServerId, HoursBack, 60, ct, topN);
 
             Assert.True(expected.Count > topN, "the seed must keep more than one measure's top rows");
             Assert.Equal(expected.Count, actual.Count);
@@ -356,13 +360,13 @@ LIMIT $3";
         var seeded = await SeedAsync(ct);
         await using var scratch = seeded!.Value.Scratch;
         await using var dataSource = seeded.Value.DataSource;
-        var cutoff = DateTime.UtcNow.AddHours(-24);
+        var cutoff = Cutoff;
 
         /* The ranking statement carries no correlated subquery at all. Before the fix it evaluated four per hash: 60 hashes, 240 evaluations. */
         Assert.Equal(0, SubPlanEvaluations(await ExplainAsync(dataSource, DarlingFinOpsHighImpactReader.HighImpactQueriesSql, cutoff)));
 
         /* The kept rows: the lookup then runs once per kept hash, never once per hash in the window. */
-        var kept = (await DarlingFinOpsHighImpactReader.ReadAsync(dataSource, ServerId, 24, 60, ct, topN: 2)).Select(q => q.QueryHash).ToArray();
+        var kept = (await DarlingFinOpsHighImpactReader.ReadAsync(dataSource, ServerId, HoursBack, 60, ct, topN: 2)).Select(q => q.QueryHash).ToArray();
         Assert.InRange(kept.Length, 2, HashCount / 2);
         var plan = await ExplainAsync(dataSource, DarlingFinOpsHighImpactReader.HighImpactSampleLookupSql, cutoff, arrayParameter: string.Join(",", kept));
         using var document = JsonDocument.Parse(plan);
@@ -384,7 +388,7 @@ LIMIT $3";
         var seeded = await SeedAsync(ct);
         await using var scratch = seeded!.Value.Scratch;
         await using var dataSource = seeded.Value.DataSource;
-        var cutoff = DateTime.UtcNow.AddHours(-24);
+        var cutoff = Cutoff;
 
         foreach (var topN in new[] { 5, 20, 200 })
         {
@@ -408,7 +412,7 @@ LIMIT $3";
         var seeded = await SeedAsync(ct);
         await using var scratch = seeded!.Value.Scratch;
         await using var dataSource = seeded.Value.DataSource;
-        var cutoff = DateTime.UtcNow.AddHours(-24);
+        var cutoff = Cutoff;
 
         /* 360 rows of the window, each joined to a plan of 8 KB: the old statement sorted that payload by the grouping keys. */
         var before = TempBlocksWritten(await ExplainAsync(dataSource, OldExpensiveSql, cutoff, 20, workMem: "64kB"));
@@ -423,7 +427,13 @@ LIMIT $3";
     private static double TempBlocksWritten(string explainJson)
     {
         using var document = JsonDocument.Parse(explainJson);
-        var plan = document.RootElement[0].GetProperty("Plan");
-        return plan.TryGetProperty("Temp Written Blocks", out var written) ? written.GetDouble() : 0.0;
+        /* Each node's counter already includes its children, so the largest one is the statement's total, whatever the plan layout. */
+        return Largest(document.RootElement[0].GetProperty("Plan"));
+
+        static double Largest(JsonElement node)
+        {
+            var own = node.TryGetProperty("Temp Written Blocks", out var written) ? written.GetDouble() : 0.0;
+            return Math.Max(own, node.TryGetProperty("Plans", out var kids) ? kids.EnumerateArray().Select(Largest).DefaultIfEmpty(0).Max() : 0.0);
+        }
     }
 }
