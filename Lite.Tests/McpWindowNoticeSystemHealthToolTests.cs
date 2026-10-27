@@ -659,10 +659,27 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, 'ring_buffer_t
         Assert.DoesNotContain("quiet", message, StringComparison.Ordinal);
     }
 
-    private Task SeedTruncatedRunAsync(DateTime at, int hidden = 773) => ExecuteAsync(@"
+    private Task SeedTruncatedRunAsync(DateTime at, int hidden = 773, string? note = null) => ExecuteAsync(@"
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
 VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, $5)",
-        _nextId++, _serverId, ServerName, Naive(at), $"ring_buffer_truncated=1 ring_buffer_events_hidden={hidden} newest_visible_event_age_s=19380");
+        _nextId++, _serverId, ServerName, Naive(at), note ?? $"ring_buffer_truncated=1 ring_buffer_events_hidden={hidden} newest_visible_event_age_s=19380");
+
+    /// <summary>The note the collector itself writes for a truncated read: its own measurement labels through the same render the run's note takes.</summary>
+    private static string CollectorWrittenTruncatedNote(long hidden)
+    {
+        var context = new PerformanceMonitor.Collectors.CollectorContext
+        {
+            ServerId = 1,
+            ServerName = ServerName,
+            CollectionTime = Anchor,
+            Deltas = null!,
+            Target = new PerformanceMonitor.Collectors.CollectorTargetInfo(),
+        };
+        context.Measure(PerformanceMonitor.Collectors.RingBufferXml.TruncatedMeasurement, 1);
+        context.Measure(PerformanceMonitor.Collectors.RingBufferXml.EventsHiddenMeasurement, hidden);
+        context.Measure(PerformanceMonitor.Collectors.RingBufferXml.NewestVisibleAgeMeasurement, 19380);
+        return PerformanceMonitor.Collectors.CollectorMeasurementNote.Render(context.Measurements)!;
+    }
 
     private static string Minute(DateTime at) => at.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture) + " UTC";
 
@@ -725,7 +742,7 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, $5)",
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
-        Assert.Contains("the system_health collection run at " + Minute(middle) + ", which read events of this window", message, StringComparison.Ordinal);
+        Assert.Contains("the system_health collection run at " + Minute(middle) + ", which read events of this window, reported that", message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -763,7 +780,7 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, $5)",
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
-        Assert.Contains("the system_health collection run at " + Minute(after) + ", which read events of this window", message, StringComparison.Ordinal);
+        Assert.Contains("the system_health collection run at " + Minute(after) + ", which read events of this window, reported that", message, StringComparison.Ordinal);
         Assert.Contains("321 event(s) are hidden", message, StringComparison.Ordinal);
     }
 
@@ -782,6 +799,86 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, $5)",
         var root = Root(await CallAsync(tool, hoursBack: 24, asOf: AsOfText(pastEnd)));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
+    }
+
+    /* #6827: the window read finds the note the collector WRITES, through the collector's own labels. A label renamed in the writer
+       or the Common reader alone, or left as a literal in the SQL when the constant moves, and this window reads clean again. */
+    [Theory]
+    [InlineData(Tool.SystemHealth)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task ATruncatedRun_WrittenByTheCollectorsOwnLabels_IsFoundByTheWindowRead(Tool tool)
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedEventAsync(tool, Anchor.AddDays(-20));
+        await SeedLogRunsAsync(Anchor.AddDays(-9), Anchor, everyMinutes: 30);
+        await SeedTruncatedRunAsync(Anchor.AddHours(-12), note: CollectorWrittenTruncatedNote(hidden: 555));
+
+        var root = Root(await CallAsync(tool, hoursBack: 24));
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        Assert.Contains("555 event(s) are hidden", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    /* #6827: a note can match the SQL's pre-filter and still not be a truncated note by TryParse (a value of 1x). The newest
+       truncated-looking run is such a note here, and the older run in the window is a real one: it must still be named. */
+    [Theory]
+    [InlineData(Tool.SystemHealth)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task ANewestTruncatedLookingRunThatDoesNotParse_DoesNotHideAnOlderOneThatDoes(Tool tool)
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedEventAsync(tool, Anchor.AddDays(-20));
+        await SeedLogRunsAsync(Anchor.AddDays(-9), Anchor, everyMinutes: 30);
+        var older = Anchor.AddHours(-12);
+        await SeedTruncatedRunAsync(older, hidden: 240);
+        await SeedTruncatedRunAsync(Anchor.AddHours(-6), note: "ring_buffer_truncated=1x ring_buffer_events_hidden=9 newest_visible_event_age_s=60");
+
+        var root = Root(await CallAsync(tool, hoursBack: 24));
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("the system_health collection run at " + Minute(older) + ", which read events of this window, reported that", message, StringComparison.Ordinal);
+        Assert.Contains("240 event(s) are hidden", message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(Tool.SystemHealth)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task ARunWhoseNoteOnlyLooksTruncated_StaysEmpty(Tool tool)
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedEventAsync(tool, Anchor.AddDays(-20));
+        await SeedLogRunsAsync(Anchor.AddDays(-9), Anchor, everyMinutes: 30);
+        await SeedTruncatedRunAsync(Anchor.AddHours(-6), note: "ring_buffer_truncated=1x ring_buffer_events_hidden=9");
+        await SeedTruncatedRunAsync(Anchor.AddHours(-5), note: "old_ring_buffer_truncated=1 ring_buffer_events_hidden=9");
+
+        var root = Root(await CallAsync(tool, hoursBack: 24));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+    }
+
+    /* #6827: the check now answers for the read's own window. A collector whose NEWEST run is truncated but sits before the
+       window (stale, nothing since) used to be `unavailable` on that run. No run inside the window read its events and none
+       after its end did, so it is `empty` with the cut-window claim: the window's own runs are the witness. */
+    [Theory]
+    [InlineData(Tool.SystemHealth)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task AStaleCollector_WhoseNewestTruncatedRunIsBeforeTheWindow_IsEmptyAndSaysTheWindowIsCut(Tool tool)
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedEventAsync(tool, Anchor.AddDays(-20));
+        await SeedLogRunsAsync(Anchor.AddDays(-9), Anchor.AddHours(-4), everyMinutes: 30);
+        await SeedTruncatedRunAsync(Anchor.AddHours(-3));
+
+        var root = Root(await CallAsync(tool, hoursBack: 1));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.DoesNotContain("NOT an all-clear", message, StringComparison.Ordinal);
+        var hints = root.GetProperty("hints");
+        Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+        var start = hints.TryGetProperty("effective_start", out var e) && e.ValueKind == JsonValueKind.String ? e.GetString() : null;
+        Assert.Contains(McpHelpers.CutWindowClaim(start), message, StringComparison.Ordinal);
     }
 
     /* #6650: events of the tool's type WERE read in the window and its gate dropped them. The truncation answer must say

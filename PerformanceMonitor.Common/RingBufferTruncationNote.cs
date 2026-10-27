@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 
 namespace PerformanceMonitor.Common;
@@ -139,7 +140,7 @@ public static class RingBufferTruncationNote
         /* #6827: a read over a window answers for the runs that read it, not for the collector's newest run today. */
         var who = stretch is { } s
             ? s.Count == 1
-                ? string.Format(CultureInfo.InvariantCulture, "the system_health collection run at {0}, which read events of this window", FormatStamp(s.First))
+                ? string.Format(CultureInfo.InvariantCulture, "the system_health collection run at {0}, which read events of this window,", FormatStamp(s.First))
                 : string.Format(
                     CultureInfo.InvariantCulture,
                     "{0} system_health collection runs that read events of this window (the first at {1}, the last at {2})",
@@ -158,7 +159,46 @@ public static class RingBufferTruncationNote
     /// ran (naive UTC, the frame collection_time is stored in), and the note of the newest of them (the hidden-event
     /// count and age <see cref="Describe"/> turns into a sentence).
     /// </summary>
-    public readonly record struct TruncatedStretch(int Count, DateTime First, DateTime Last, string NewestNote);
+    public readonly record struct TruncatedStretch(int Count, DateTime First, DateTime Last, string NewestNote)
+    {
+        /// <summary>
+        /// The stretch of the runs <paramref name="runs"/> (collection_time naive UTC, the run's note) whose note
+        /// <see cref="TryParse"/> calls truncated, or null when none does. The readers' SQL only pre-filters on the
+        /// label, so this is where a run is decided: a row that matches the SQL but does not parse (a suffixed label,
+        /// a value of 1x, a later <c>ring_buffer_truncated=0</c>) is not counted, and it does not hide the runs that
+        /// do parse. The newest note is the newest PARSING run's, a tie on time going to the greater note so the two
+        /// products name the same one.
+        /// </summary>
+        public static TruncatedStretch? FromRuns(IEnumerable<(DateTime CollectionTime, string? Note)> runs)
+        {
+            ArgumentNullException.ThrowIfNull(runs);
+            var count = 0;
+            var first = DateTime.MaxValue;
+            var last = DateTime.MinValue;
+            string? newest = null;
+            foreach (var (time, note) in runs)
+            {
+                if (!TryParse(note, out _, out _))
+                {
+                    continue;
+                }
+
+                count++;
+                if (time < first)
+                {
+                    first = time;
+                }
+
+                if (time > last || (time == last && string.CompareOrdinal(note, newest) > 0))
+                {
+                    last = time;
+                    newest = note;
+                }
+            }
+
+            return count == 0 ? null : new TruncatedStretch(count, first, last, newest!);
+        }
+    }
 
     private static string FormatStamp(DateTime utc) =>
         utc.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC";

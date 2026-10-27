@@ -176,6 +176,57 @@ public sealed class RingBufferTruncationSignalTests
         Assert.Contains("773 event(s) are hidden", none, StringComparison.Ordinal);
     }
 
+    /* #6827: the one-run sentence closes its appositive before "reported that", as the assembled message reads on the wire. */
+    [Fact]
+    public void HealthParserMessage_WithOneTruncatedRun_ClosesTheClauseBeforeReportedThat()
+    {
+        var stamp = new DateTime(2026, 10, 24, 7, 0, 0, DateTimeKind.Utc);
+        var one = new RingBufferTruncationNote.TruncatedStretch(1, stamp, stamp, TruncatedNote);
+
+        var message = RingBufferTruncationNote.HealthParserMessage(
+            "wait_info", "srv", 24, RingBufferTruncationNote.Describe(TruncatedNote)!, stretch: one);
+
+        Assert.Contains("the system_health collection run at 2026-10-24 07:00 UTC, which read events of this window, reported that the Extended Events ring buffer", message, StringComparison.Ordinal);
+    }
+
+    /* #6827: the readers' SQL only pre-filters, so a row it returns that TryParse does not call truncated is not counted, and the
+       newest note named is the newest one that parses. */
+    [Fact]
+    public void TruncatedStretch_FromRuns_CountsOnlyNotesThatParse_AndNamesTheNewestOfThose()
+    {
+        var t0 = new DateTime(2026, 10, 24, 1, 0, 0, DateTimeKind.Utc);
+        var runs = new (DateTime, string?)[]
+        {
+            (t0, "ring_buffer_truncated=1 ring_buffer_events_hidden=5 newest_visible_event_age_s=60"),
+            (t0.AddHours(1), "ring_buffer_truncated=1x ring_buffer_events_hidden=9"),
+            (t0.AddHours(2), "old_ring_buffer_truncated=1"),
+            (t0.AddHours(3), "ring_buffer_truncated=1 ring_buffer_truncated=0"),
+            (t0.AddHours(4), null),
+            (t0.AddHours(5), "ring_buffer_truncated=2 ring_buffer_events_hidden=7 newest_visible_event_age_s=120"),
+        };
+
+        var stretch = RingBufferTruncationNote.TruncatedStretch.FromRuns(runs);
+
+        Assert.NotNull(stretch);
+        Assert.Equal(2, stretch!.Value.Count);
+        Assert.Equal(t0, stretch.Value.First);
+        Assert.Equal(t0.AddHours(5), stretch.Value.Last);
+        Assert.Equal("ring_buffer_truncated=2 ring_buffer_events_hidden=7 newest_visible_event_age_s=120", stretch.Value.NewestNote);
+        Assert.Null(RingBufferTruncationNote.TruncatedStretch.FromRuns(runs.Skip(1).Take(4)));
+    }
+
+    /* Two runs sharing one collection_time name the same note whichever order a store returns them in, so the two products agree. */
+    [Fact]
+    public void TruncatedStretch_FromRuns_BreaksATieOnTimeByTheGreaterNote_InEitherOrder()
+    {
+        var at = new DateTime(2026, 10, 24, 1, 0, 0, DateTimeKind.Utc);
+        var low = "ring_buffer_truncated=1 ring_buffer_events_hidden=5";
+        var high = "ring_buffer_truncated=1 ring_buffer_events_hidden=6";
+
+        Assert.Equal(high, RingBufferTruncationNote.TruncatedStretch.FromRuns(new (DateTime, string?)[] { (at, low), (at, high) })!.Value.NewestNote);
+        Assert.Equal(high, RingBufferTruncationNote.TruncatedStretch.FromRuns(new (DateTime, string?)[] { (at, high), (at, low) })!.Value.NewestNote);
+    }
+
     [Theory]
     [InlineData(45, "45 s")]
     [InlineData(1200, "20 min")]
