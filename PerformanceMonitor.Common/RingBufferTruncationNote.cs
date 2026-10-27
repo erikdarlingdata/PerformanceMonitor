@@ -106,20 +106,19 @@ public static class RingBufferTruncationNote
     }
 
     /// <summary>
-    /// The health-parser reads' answer (Lite and Darling, one string) when a category came back empty and the newest
-    /// system_health collection run says the ring buffer was truncated. Without it those reads called the window
+    /// The health-parser reads' answer (Lite and Darling, one string) when a category came back empty and the
+    /// system_health collection runs of the read's window say the ring buffer was truncated. Without it those reads called the window
     /// "genuinely quiet" or "the healthy answer" while the newest events sat on the server unread (#6441).
     /// <para>#6650: when the read did count events of the type (<paramref name="eventsRead"/> above 0) the first clause
     /// says so, with the filter that left none (<paramref name="noneQualifiedBecause"/>), instead of "No ... events were
     /// found" over a count of hundreds. At 0 it keeps that wording.</para>
     /// <para>#6827: <paramref name="stretch"/> is the truncated runs that read the read's window (the runs inside it and the
-    /// first one after its end). The reads pass it, so the
-    /// sentence names how many runs were truncated and when, rather than the collector's newest run today. Null keeps
-    /// the "newest run" wording.</para>
+    /// first one after its end). The sentence names how many runs were truncated and when, rather than the collector's
+    /// newest run today. Both reads only get here with a stretch in hand, so it is required.</para>
     /// </summary>
     public static string HealthParserMessage(
-        string eventType, string serverName, int hoursBack, string truncation,
-        int eventsRead = 0, string? noneQualifiedBecause = null, TruncatedStretch? stretch = null)
+        string eventType, string serverName, int hoursBack, string truncation, TruncatedStretch stretch,
+        int eventsRead = 0, string? noneQualifiedBecause = null)
     {
         var first = eventsRead > 0
             ? string.Format(
@@ -138,14 +137,12 @@ public static class RingBufferTruncationNote
                 hoursBack);
 
         /* #6827: a read over a window answers for the runs that read it, not for the collector's newest run today. */
-        var who = stretch is { } s
-            ? s.Count == 1
-                ? string.Format(CultureInfo.InvariantCulture, "the system_health collection run at {0}, which read events of this window,", FormatStamp(s.First))
-                : string.Format(
-                    CultureInfo.InvariantCulture,
-                    "{0} system_health collection runs that read events of this window (the first at {1}, the last at {2})",
-                    s.Count, FormatStamp(s.First), FormatStamp(s.Last))
-            : "the newest system_health collection run";
+        var who = stretch.Count == 1
+            ? string.Format(CultureInfo.InvariantCulture, "the system_health collection run at {0}, which read events of this window,", FormatStamp(stretch.First))
+            : string.Format(
+                CultureInfo.InvariantCulture,
+                "{0} system_health collection runs that read events of this window (the first at {1}, the last at {2})",
+                stretch.Count, FormatStamp(stretch.First), FormatStamp(stretch.Last));
 
         return first + string.Format(
             CultureInfo.InvariantCulture,

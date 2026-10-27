@@ -908,7 +908,9 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, 'ring_buffer_t
         Assert.Contains("773 event(s) are hidden", message, StringComparison.Ordinal);
     }
 
-    /* #6441: a clean newest run after a truncated one clears the warning; the read answers as it did before. */
+    /* #6441, #6827: the truncated run is at WindowStart minus 3 days, outside the read's window, so the window read never asks
+       it and the read keeps the quiet answer. It is not a clean newest run clearing the warning: a clean newest run does not
+       clear a truncated run inside the window (TruncatedRunsInsideAPastWindow_WithACleanNewestRun_... above). */
     [Fact]
     public async Task ATruncatedOlderRun_ThenACleanNewestRun_KeepsTheQuietAnswer()
     {

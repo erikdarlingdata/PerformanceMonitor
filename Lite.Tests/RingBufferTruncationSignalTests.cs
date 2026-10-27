@@ -40,6 +40,17 @@ public sealed class RingBufferTruncationSignalTests
 
     private static object[][] NoRows => Array.Empty<object[]>();
 
+    /* #6827: the collector writes these three labels and the health reads (and their SQL pre-filter) are built from the Common
+       constants. The collector's constants stay literals (the Measure( label gate reads them from the file), so this is what
+       keeps a one-sided rename from turning every truncated run into one the reads cannot see. */
+    [Fact]
+    public void TheCollectorsLabels_EqualTheCommonLabels()
+    {
+        Assert.Equal(RingBufferTruncationNote.TruncatedLabel, PerformanceMonitor.Collectors.RingBufferXml.TruncatedMeasurement);
+        Assert.Equal(RingBufferTruncationNote.EventsHiddenLabel, PerformanceMonitor.Collectors.RingBufferXml.EventsHiddenMeasurement);
+        Assert.Equal(RingBufferTruncationNote.NewestVisibleAgeLabel, PerformanceMonitor.Collectors.RingBufferXml.NewestVisibleAgeMeasurement);
+    }
+
     [Fact]
     public async Task SystemHealth_ATruncatedBuffer_IsMeasured_FromTheTrailingResult()
     {
@@ -163,15 +174,17 @@ public sealed class RingBufferTruncationSignalTests
     public void HealthParserMessage_WithEventsRead_SaysHowManyAndWhyNoneQualified_NotThatNoneWereFound()
     {
         var truncation = RingBufferTruncationNote.Describe(TruncatedNote)!;
+        var stamp = new DateTime(2026, 10, 24, 7, 0, 0, DateTimeKind.Utc);
+        var one = new RingBufferTruncationNote.TruncatedStretch(1, stamp, stamp, TruncatedNote);
 
         var counted = RingBufferTruncationNote.HealthParserMessage(
-            "memory_broker", "srv", 24, truncation, eventsRead: 412, noneQualifiedBecause: "none passed the significance gate");
+            "memory_broker", "srv", 24, truncation, one, eventsRead: 412, noneQualifiedBecause: "none passed the significance gate");
 
         Assert.StartsWith("412 memory_broker event(s) were read for srv in the last 24 hour(s), and none passed the significance gate, and this is NOT an all-clear", counted, StringComparison.Ordinal);
         Assert.DoesNotContain("were found", counted, StringComparison.Ordinal);
         Assert.Contains("773 event(s) are hidden", counted, StringComparison.Ordinal);
 
-        var none = RingBufferTruncationNote.HealthParserMessage("memory_broker", "srv", 24, truncation);
+        var none = RingBufferTruncationNote.HealthParserMessage("memory_broker", "srv", 24, truncation, one);
         Assert.StartsWith("No memory_broker events were found for srv in the last 24 hour(s), and this is NOT an all-clear", none, StringComparison.Ordinal);
         Assert.Contains("773 event(s) are hidden", none, StringComparison.Ordinal);
     }
@@ -184,7 +197,7 @@ public sealed class RingBufferTruncationSignalTests
         var one = new RingBufferTruncationNote.TruncatedStretch(1, stamp, stamp, TruncatedNote);
 
         var message = RingBufferTruncationNote.HealthParserMessage(
-            "wait_info", "srv", 24, RingBufferTruncationNote.Describe(TruncatedNote)!, stretch: one);
+            "wait_info", "srv", 24, RingBufferTruncationNote.Describe(TruncatedNote)!, one);
 
         Assert.Contains("the system_health collection run at 2026-10-24 07:00 UTC, which read events of this window, reported that the Extended Events ring buffer", message, StringComparison.Ordinal);
     }
