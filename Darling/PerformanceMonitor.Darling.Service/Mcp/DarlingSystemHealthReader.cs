@@ -147,6 +147,47 @@ internal static class DarlingSystemHealthReader
         LIMIT 1
         """;
 
+    /// <summary>
+    /// #6827: the truncated ring-buffer runs of the collector INSIDE one read's window [$3, $4] (inclusive, naive UTC):
+    /// how many, the first and last run time, and the note of the newest one. A window is blind if ANY run in it was
+    /// truncated, however clean the run at its end, and a clean past window is not made blind by today's run. A zero
+    /// count comes back as one row with NULL times. Only SUCCESS runs count, as in <see cref="LatestRunNoteSql"/>, and the
+    /// regex is <see cref="RingBufferTruncationNote.TryParse"/>'s rule (the label with a value above zero). Rides the
+    /// same <c>idx_collection_log_watermark</c> range.
+    /// <para>$1 server_id, $2 collector_name, $3 window start, $4 window end.</para>
+    /// </summary>
+    public const string TruncatedRunsInWindowSql = """
+        SELECT COUNT(*),
+               MIN(collection_time),
+               MAX(collection_time),
+               (ARRAY_AGG(error_message ORDER BY collection_time DESC))[1]
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collector_name = $2
+        AND   collection_time >= $3
+        AND   collection_time <= $4
+        AND   status = 'SUCCESS'
+        AND   error_message ~ 'ring_buffer_truncated=0*[1-9]'
+        """;
+
+    /// <summary>Runs <see cref="TruncatedRunsInWindowSql"/>: null when no run in the window logged a truncated ring buffer.</summary>
+    public static async Task<RingBufferTruncationNote.TruncatedStretch?> GetTruncatedRunsInWindowAsync(
+        NpgsqlDataSource postgres, int serverId, string collectorName, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(TruncatedRunsInWindowSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddText(command, collectorName);
+        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken) || reader.GetInt64(0) == 0)
+            return null;
+        return new RingBufferTruncationNote.TruncatedStretch(
+            (int)reader.GetInt64(0), reader.GetDateTime(1), reader.GetDateTime(2), reader.GetString(3));
+    }
+
     /// <summary>Runs <see cref="LatestRunNoteSql"/>: null when the collector never ran or its newest run left no note.</summary>
     public static async Task<string?> GetLatestRunNoteAsync(
         NpgsqlDataSource postgres, int serverId, string collectorName, CancellationToken cancellationToken = default)

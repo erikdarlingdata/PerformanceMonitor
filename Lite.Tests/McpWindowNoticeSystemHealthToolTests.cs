@@ -100,20 +100,21 @@ public sealed class McpWindowNoticeSystemHealthToolTests : IDisposable
 
     /* ───────────────────────── per-tool wiring ───────────────────────── */
 
-    private Task<string> CallAsync(Tool tool, int hoursBack = HoursBack, int limit = 50)
+    private Task<string> CallAsync(Tool tool, int hoursBack = HoursBack, int limit = 50, string? asOf = null)
     {
         var service = Service();
+        asOf ??= AsOf;
         return tool switch
         {
-            Tool.SystemHealth => McpHealthParserTools.GetSystemHealth(service, _serverManager, ServerName, hoursBack, limit, AsOf),
-            Tool.SevereErrors => McpHealthParserTools.GetSevereErrors(service, _serverManager, ServerName, hoursBack, limit, AsOf),
-            Tool.IoIssues => McpHealthParserTools.GetIOIssues(service, _serverManager, ServerName, hoursBack, limit, AsOf),
-            Tool.SchedulerIssues => McpHealthParserTools.GetSchedulerIssues(service, _serverManager, ServerName, hoursBack, limit, AsOf),
-            Tool.MemoryConditions => McpHealthParserTools.GetMemoryConditions(service, _serverManager, ServerName, hoursBack, limit, AsOf),
-            Tool.CpuTasks => McpHealthParserTools.GetCPUTasks(service, _serverManager, ServerName, hoursBack, limit, AsOf),
-            Tool.MemoryBroker => McpHealthParserTools.GetMemoryBroker(service, _serverManager, ServerName, hoursBack, limit, AsOf),
-            Tool.MemoryNodeOom => McpHealthParserTools.GetMemoryNodeOOM(service, _serverManager, ServerName, hoursBack, limit, AsOf),
-            Tool.SignificantWaits => McpHealthParserTools.GetSignificantWaits(service, _serverManager, ServerName, hoursBack, limit, AsOf),
+            Tool.SystemHealth => McpHealthParserTools.GetSystemHealth(service, _serverManager, ServerName, hoursBack, limit, asOf),
+            Tool.SevereErrors => McpHealthParserTools.GetSevereErrors(service, _serverManager, ServerName, hoursBack, limit, asOf),
+            Tool.IoIssues => McpHealthParserTools.GetIOIssues(service, _serverManager, ServerName, hoursBack, limit, asOf),
+            Tool.SchedulerIssues => McpHealthParserTools.GetSchedulerIssues(service, _serverManager, ServerName, hoursBack, limit, asOf),
+            Tool.MemoryConditions => McpHealthParserTools.GetMemoryConditions(service, _serverManager, ServerName, hoursBack, limit, asOf),
+            Tool.CpuTasks => McpHealthParserTools.GetCPUTasks(service, _serverManager, ServerName, hoursBack, limit, asOf),
+            Tool.MemoryBroker => McpHealthParserTools.GetMemoryBroker(service, _serverManager, ServerName, hoursBack, limit, asOf),
+            Tool.MemoryNodeOom => McpHealthParserTools.GetMemoryNodeOOM(service, _serverManager, ServerName, hoursBack, limit, asOf),
+            Tool.SignificantWaits => McpHealthParserTools.GetSignificantWaits(service, _serverManager, ServerName, hoursBack, limit, asOf),
             _ => throw new ArgumentOutOfRangeException(nameof(tool))
         };
     }
@@ -656,6 +657,90 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, 'ring_buffer_t
         Assert.Contains("773 event(s) are hidden", message, StringComparison.Ordinal);
         Assert.Contains("5 h 23 min old", message, StringComparison.Ordinal);
         Assert.DoesNotContain("quiet", message, StringComparison.Ordinal);
+    }
+
+    private Task SeedTruncatedRunAsync(DateTime at, int hidden = 773) => ExecuteAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
+VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, $5)",
+        _nextId++, _serverId, ServerName, Naive(at), $"ring_buffer_truncated=1 ring_buffer_events_hidden={hidden} newest_visible_event_age_s=19380");
+
+    private static string Minute(DateTime at) => at.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture) + " UTC";
+
+    private static string AsOfText(DateTime at) => at.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+
+    /* #6827: the truncation check reads the runs INSIDE the read's window, not the collector's newest run. Before the fix a
+       replay of a truncated window said `empty` and a clean past window said `unavailable` because of the newest run. */
+    [Theory]
+    [InlineData(Tool.SystemHealth)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task TruncatedRunsInsideAPastWindow_WithACleanNewestRun_AreUnavailableAndNameTheStretch(Tool tool)
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedEventAsync(tool, Anchor.AddDays(-20));
+        await SeedLogRunsAsync(Anchor.AddDays(-9), Anchor, everyMinutes: 30);
+        var pastEnd = Anchor.AddDays(-3);
+        await SeedTruncatedRunAsync(pastEnd.AddHours(-5), hidden: 99);
+        await SeedTruncatedRunAsync(pastEnd.AddHours(-2), hidden: 240);
+
+        var root = Root(await CallAsync(tool, hoursBack: 24, asOf: AsOfText(pastEnd)));
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+        Assert.Contains("2 system_health collection runs inside this window", message, StringComparison.Ordinal);
+        Assert.Contains("the first at " + Minute(pastEnd.AddHours(-5)), message, StringComparison.Ordinal);
+        Assert.Contains("the last at " + Minute(pastEnd.AddHours(-2)), message, StringComparison.Ordinal);
+        Assert.Contains("240 event(s) are hidden", message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(Tool.SystemHealth)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task ACleanPastWindow_WithATruncatedNewestRun_StaysEmpty(Tool tool)
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedEventAsync(tool, Anchor.AddDays(-20));
+        await SeedLogRunsAsync(Anchor.AddDays(-9), Anchor.AddMinutes(-30), everyMinutes: 30);
+        await SeedTruncatedRunAsync(Anchor);
+
+        var root = Root(await CallAsync(tool, hoursBack: 24, asOf: AsOfText(Anchor.AddDays(-3))));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        Assert.DoesNotContain("all-clear", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(Tool.SystemHealth)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task AWindowTruncatedOnlyInItsMiddle_IsUnavailable_AndNamesTheOneRun(Tool tool)
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedEventAsync(tool, Anchor.AddDays(-20));
+        await SeedLogRunsAsync(Anchor.AddDays(-9), Anchor, everyMinutes: 30);
+        var middle = Anchor.AddHours(-12);
+        await SeedTruncatedRunAsync(middle);
+
+        var root = Root(await CallAsync(tool, hoursBack: 24));
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+        Assert.Contains("the system_health collection run at " + Minute(middle) + " (inside this window)", message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(Tool.SystemHealth)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task ACleanWindow_BesideATruncatedRunJustOutsideIt_StaysEmpty(Tool tool)
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedEventAsync(tool, Anchor.AddDays(-20));
+        await SeedLogRunsAsync(Anchor.AddDays(-9), Anchor, everyMinutes: 30);
+        await SeedTruncatedRunAsync(Anchor.AddHours(-25));
+
+        var root = Root(await CallAsync(tool, hoursBack: 24));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
     }
 
     /* #6650: events of the tool's type WERE read in the window and its gate dropped them. The truncation answer must say

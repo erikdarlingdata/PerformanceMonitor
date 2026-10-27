@@ -582,6 +582,44 @@ AND   cl.collection_time =
     }
 
     /// <summary>
+    /// #6827: the truncated ring-buffer runs of the collector INSIDE one read's window (inclusive, naive UTC): how many,
+    /// the first and last run time, and the note of the newest one. A window is blind if ANY run in it was truncated,
+    /// however clean the run at its end, and a clean past window is not made blind by today's run. Null when no run in the
+    /// window logged a truncated ring buffer. Only SUCCESS runs count, as in <see cref="GetLatestCollectorRunNoteAsync"/>,
+    /// and the pattern is <see cref="PerformanceMonitor.Common.RingBufferTruncationNote.TryParse"/>'s rule (the label with
+    /// a value above zero). Darling twin: <c>DarlingSystemHealthReader.GetTruncatedRunsInWindowAsync</c>.
+    /// </summary>
+    public async Task<PerformanceMonitor.Common.RingBufferTruncationNote.TruncatedStretch?> GetTruncatedCollectorRunsInWindowAsync(
+        int serverId, string collectorName, DateTime startUtc, DateTime endUtc)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT COUNT(*),
+       MIN(cl.collection_time),
+       MAX(cl.collection_time),
+       ARG_MAX(cl.error_message, cl.collection_time)
+FROM v_collection_log AS cl
+WHERE cl.server_id = $1
+AND   cl.collector_name = $2
+AND   cl.collection_time >= $3
+AND   cl.collection_time <= $4
+AND   cl.status = 'SUCCESS'
+AND   regexp_matches(cl.error_message, 'ring_buffer_truncated=0*[1-9]')";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = collectorName });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+        using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync() || reader.GetInt64(0) == 0)
+            return null;
+        return new PerformanceMonitor.Common.RingBufferTruncationNote.TruncatedStretch(
+            (int)reader.GetInt64(0), reader.GetDateTime(1), reader.GetDateTime(2), reader.GetString(3));
+    }
+
+    /// <summary>
     /// How many raw events of one type the window held BEFORE any shred or significance gate - the count that
     /// lets a zero-row answer say "captured and gated out" (healthy) rather than "nothing here" (#3541 A12).
     /// <para>Run only on the empty path, and over the SAME window arithmetic the typed readers use

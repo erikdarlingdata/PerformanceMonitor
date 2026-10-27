@@ -889,14 +889,17 @@ public sealed class DarlingMcpHealthParserTools
            than the server-level witness standing in for it. */
         var lastOfType = await DarlingSystemHealthReader.GetLastCaptureOfTypeAsync(postgres, c.ServerId, eventType, cancellationToken);
 
-        /* #6441, ahead of every rung: when the newest collection run found the ring buffer truncated, the read is blind
-           to the newest events, so none of "healthy", "quiet" or "never fired" is true. */
-        var runNote = await DarlingSystemHealthReader.GetLatestRunNoteAsync(postgres, c.ServerId, SystemHealthCollectorName, cancellationToken);
-        if (RingBufferTruncationNote.Describe(runNote) is { } truncation)
+        /* #6441, ahead of every rung: when a collection run found the ring buffer truncated, the read is blind to the newest
+           events of that run, so none of "healthy", "quiet" or "never fired" is true. #6827: that is asked of the runs INSIDE
+           this read's window (any one of them, not only the last), so an as_of replay answers for its own window and not
+           for today's run. */
+        var stretch = await DarlingSystemHealthReader.GetTruncatedRunsInWindowAsync(
+            postgres, c.ServerId, SystemHealthCollectorName, c.WindowEnd.AddHours(-hoursBack), c.WindowEnd, cancellationToken);
+        if (stretch is { } truncatedRuns && RingBufferTruncationNote.Describe(truncatedRuns.NewestNote) is { } truncation)
         {
             return WitnessStatus(
                 "unavailable",
-                RingBufferTruncationNote.HealthParserMessage(eventType, c.DisplayName, hoursBack, truncation, c.RawEventCount, noneQualifiedBecause),
+                RingBufferTruncationNote.HealthParserMessage(eventType, c.DisplayName, hoursBack, truncation, c.RawEventCount, noneQualifiedBecause, truncatedRuns),
                 sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: c.RawEventCount);
         }
 
@@ -944,6 +947,7 @@ public sealed class DarlingMcpHealthParserTools
            events. That is a true negative. Every other newest run (a ring buffer read, a fallback, no run) keeps the
            unavailable text below, because the ring buffer path also records SUCCESS for a dead session. Lite's
            EmptyAsync is the twin, sentence for sentence. */
+        var runNote = await DarlingSystemHealthReader.GetLatestRunNoteAsync(postgres, c.ServerId, SystemHealthCollectorName, cancellationToken);
         if (SystemHealthSourceNote.ReadThroughEventFile(runNote))
         {
             return WitnessStatus(

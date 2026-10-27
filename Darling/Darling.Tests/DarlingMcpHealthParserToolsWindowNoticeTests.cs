@@ -311,6 +311,95 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, 'ring_buffer_truncated=1 ring_buff
             Assert.DoesNotContain("quiet", message, StringComparison.Ordinal);
         });
 
+    private static Task SeedTruncatedRunAsync(NpgsqlConnection c, string scenario, DateTime at, int hidden = 773)
+    {
+        var name = HealthName(scenario);
+        return DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+            @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
+VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, $6)",
+            CollectionIdGenerator.Next(), ServerIdHelper.GetDeterministicHashCode(name), name, Collector, DarlingMcpTestData.Naive(at),
+            $"ring_buffer_truncated=1 ring_buffer_events_hidden={hidden} newest_visible_event_age_s=19380");
+    }
+
+    private static string Minute(DateTime at) => at.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture) + " UTC";
+
+    /* #6827: the truncation check reads the runs INSIDE the read's window, not the collector's newest run. Four windows over
+       the same seeded history (clean runs every 30 minutes for 8 days). Before the fix the first two were answered backwards
+       (a replay of a truncated window said `empty`, a clean past window said `unavailable` because of today's run). */
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task TruncatedRunsInsideAPastWindow_WithACleanNewestRun_AreUnavailableAndNameTheStretch_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rbpast-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbpast-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rbpast-" + tool, tool, end.AddDays(-20));
+            var pastEnd = end.AddDays(-3);
+            await SeedTruncatedRunAsync(c, "rbpast-" + tool, pastEnd.AddHours(-5), hidden: 99);
+            await SeedTruncatedRunAsync(c, "rbpast-" + tool, pastEnd.AddHours(-2), hidden: 240);
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbpast-" + tool, 24, pastEnd));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+            Assert.Contains("2 system_health collection runs inside this window", message, StringComparison.Ordinal);
+            Assert.Contains("the first at " + Minute(pastEnd.AddHours(-5)), message, StringComparison.Ordinal);
+            Assert.Contains("the last at " + Minute(pastEnd.AddHours(-2)), message, StringComparison.Ordinal);
+            Assert.Contains("240 event(s) are hidden", message, StringComparison.Ordinal);
+        });
+
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task ACleanPastWindow_WithATruncatedNewestRun_StaysEmpty_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rbclean-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbclean-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rbclean-" + tool, tool, end.AddDays(-20));
+            /* A minute after the seeded clean run at `end`, so it is unambiguously the newest. */
+            await SeedTruncatedRunAsync(c, "rbclean-" + tool, end.AddMinutes(1));
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbclean-" + tool, 24, end.AddDays(-3)));
+
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+            Assert.DoesNotContain("all-clear", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        });
+
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task AWindowTruncatedOnlyInItsMiddle_IsUnavailable_AndNamesTheOneRun_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rbmid-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbmid-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rbmid-" + tool, tool, end.AddDays(-20));
+            var middle = end.AddHours(-12);
+            await SeedTruncatedRunAsync(c, "rbmid-" + tool, middle);
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbmid-" + tool, 24, end));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+            Assert.Contains("the system_health collection run at " + Minute(middle) + " (inside this window)", message, StringComparison.Ordinal);
+        });
+
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task ACleanWindow_BesideTruncatedRunsJustOutsideIt_StaysEmpty_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rbedge-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbedge-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rbedge-" + tool, tool, end.AddDays(-20));
+            await SeedTruncatedRunAsync(c, "rbedge-" + tool, end.AddHours(-25));
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbedge-" + tool, 24, end));
+
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+        });
+
     /* #6650: events of the tool's type WERE read in the window and its gate dropped them. The truncation answer must say
        how many were read, not "No ... events were found" over a count of one or more. */
     [Fact]

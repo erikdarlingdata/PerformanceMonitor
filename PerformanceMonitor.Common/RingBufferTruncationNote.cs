@@ -111,10 +111,13 @@ public static class RingBufferTruncationNote
     /// <para>#6650: when the read did count events of the type (<paramref name="eventsRead"/> above 0) the first clause
     /// says so, with the filter that left none (<paramref name="noneQualifiedBecause"/>), instead of "No ... events were
     /// found" over a count of hundreds. At 0 it keeps that wording.</para>
+    /// <para>#6827: <paramref name="stretch"/> is the truncated runs INSIDE the read's window. The reads pass it, so the
+    /// sentence names how many runs were truncated and when, rather than the collector's newest run today. Null keeps
+    /// the "newest run" wording.</para>
     /// </summary>
     public static string HealthParserMessage(
         string eventType, string serverName, int hoursBack, string truncation,
-        int eventsRead = 0, string? noneQualifiedBecause = null)
+        int eventsRead = 0, string? noneQualifiedBecause = null, TruncatedStretch? stretch = null)
     {
         var first = eventsRead > 0
             ? string.Format(
@@ -132,11 +135,32 @@ public static class RingBufferTruncationNote
                 serverName,
                 hoursBack);
 
+        /* #6827: a read over a window answers for the runs INSIDE it, not for the collector's newest run today. */
+        var who = stretch is { } s
+            ? s.Count == 1
+                ? string.Format(CultureInfo.InvariantCulture, "the system_health collection run at {0} (inside this window)", FormatStamp(s.First))
+                : string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0} system_health collection runs inside this window (the first at {1}, the last at {2})",
+                    s.Count, FormatStamp(s.First), FormatStamp(s.Last))
+            : "the newest system_health collection run";
+
         return first + string.Format(
             CultureInfo.InvariantCulture,
-            ", and this is NOT an all-clear: the newest system_health collection run reported that {0}. Events of this type may exist on the server and not be stored here. Restarting the system_health session empties its ring buffer, and collection resumes until the buffer fills again.",
+            ", and this is NOT an all-clear: {0} reported that {1}. Events of this type may exist on the server and not be stored here. Restarting the system_health session empties its ring buffer, and collection resumes until the buffer fills again.",
+            who,
             truncation);
     }
+
+    /// <summary>
+    /// #6827: the truncated system_health runs that fall inside a read's window: how many, when the first and the last
+    /// ran (naive UTC, the frame collection_time is stored in), and the note of the newest of them (the hidden-event
+    /// count and age <see cref="Describe"/> turns into a sentence).
+    /// </summary>
+    public readonly record struct TruncatedStretch(int Count, DateTime First, DateTime Last, string NewestNote);
+
+    private static string FormatStamp(DateTime utc) =>
+        utc.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC";
 
     /// <summary>An age in seconds as <c>5 h 23 min</c>, <c>20 min</c> or <c>45 s</c>.</summary>
     public static string FormatAge(long seconds)
