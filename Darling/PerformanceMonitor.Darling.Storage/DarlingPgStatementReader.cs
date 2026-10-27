@@ -44,7 +44,8 @@ public static class DarlingPgStatementReader
         long? OrcacheBlocksHit,
         long TempBlocksRead,
         long TempBlocksWritten,
-        long WalBytes,
+        /* Nullable from #6836 on: NULL when the target's pg_stat_statements has no WAL counters (before 1.8). */
+        long? WalBytes,
         long? MaxPeakMemBytes,
         /* #2219: the statement text, or null when none has been captured for this queryid yet. Null is the
            HONEST answer rather than a placeholder: text is refreshed hourly, so a statement first seen minutes
@@ -128,6 +129,7 @@ public static class DarlingPgStatementReader
                    Only the undifferenced column can tell them apart. */
                 storage_blks_read AS raw_storage_blks_read,
                 orcache_blks_hit  AS raw_orcache_blks_hit,
+                wal_bytes         AS raw_wal_bytes,
                 GREATEST(shared_blks_hit    - LAG(shared_blks_hit)    OVER series, 0) AS d_shared_blks_hit,
                 GREATEST(shared_blks_read   - LAG(shared_blks_read)   OVER series, 0) AS d_shared_blks_read,
                 GREATEST(storage_blks_read  - LAG(storage_blks_read)  OVER series, 0) AS d_storage_blks_read,
@@ -169,7 +171,10 @@ public static class DarlingPgStatementReader
                  ELSE CAST(coalesce(SUM(d_orcache_blks_hit), 0) AS bigint) END AS orcache_blks_hit,
             CAST(coalesce(SUM(d_temp_blks_read), 0) AS bigint) AS temp_blks_read,
             CAST(coalesce(SUM(d_temp_blks_written), 0) AS bigint) AS temp_blks_written,
-            CAST(coalesce(SUM(d_wal_bytes), 0) AS bigint) AS wal_bytes,
+            /* #6836: NULL when the source never reported WAL (pg_stat_statements before 1.8 has no wal_* columns),
+               0 when it did and the window holds no interval. */
+            CASE WHEN COUNT(raw_wal_bytes) = 0 THEN NULL
+                 ELSE CAST(coalesce(SUM(d_wal_bytes), 0) AS bigint) END AS wal_bytes,
             CAST(MAX(max_exec_peakmem_bytes) AS bigint) AS max_exec_peakmem_bytes,
             /* #2219: the statement text, from the (server_id, queryid) store. MAX rather than a join column
                because the grain here is (queryid, database_id) while text is keyed on queryid alone — one text
@@ -240,7 +245,7 @@ public static class DarlingPgStatementReader
                 reader.IsDBNull(9) ? null : reader.GetInt64(9),
                 reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
                 reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
-                reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
+                reader.IsDBNull(12) ? null : reader.GetInt64(12),
                 reader.IsDBNull(13) ? null : reader.GetInt64(13),
                 /* #2219: null stays null — see PgStatementRow.QueryText for why an empty string would be a lie. */
                 reader.IsDBNull(14) ? null : reader.GetString(14)));

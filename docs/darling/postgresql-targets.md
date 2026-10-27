@@ -95,6 +95,14 @@ The two Aurora-only collectors — `pg_wait_stats` and `pg_cpu_utilization`, the
 
 Cadences and retention are the shared defaults, with no knobs, exactly as for SQL Server.
 
+## Supported PostgreSQL versions
+
+Darling has three support tiers for a PostgreSQL target.
+
+- Supported: PostgreSQL 14 to 18, the versions the PostgreSQL project still fixes, plus Amazon RDS, Aurora and Azure Database for PostgreSQL.
+- Best effort: PostgreSQL 10 to 13. The collectors change their queries to fit the version, and a column that the version does not have is stored as NULL. Bugs on these versions are fixed when they are reported.
+- Not supported: PostgreSQL below 10.
+
 ## Oldest PostgreSQL version per collector
 
 Each collector sends a query that works on the version of the target it connects to. A column that a version does not have is stored as NULL. A collector never sends a query that fails on the target, so an older target writes no error lines to its log for these collectors.
@@ -110,7 +118,7 @@ Each collector sends a query that works on the version of the target it connects
 | `pg_wait_sampling` | 10 | `query_id` needs 14 and is NULL below it. |
 | Every other PostgreSQL collector | 10 | No version difference. `pg_wait_stats` and `pg_cpu_utilization` run on Aurora only. |
 
-The queries for versions before 13 were run against real PostgreSQL 10 and 12 servers for #6206. PostgreSQL 11 and 13 are checked against the documentation only.
+The queries for versions before 13 were run against real PostgreSQL 10 and 12 servers for #6206. Their rows were not read back at that time, and #6836 was the result: `pg_statement_stats` failed on the NULL WAL columns of every PostgreSQL 10 and 12 target. Since #6836, tests also make each of these collectors send its old-version query to a current server. They then run the collector's reader and the store write on the rows that come back. The one exception is `pg_write_stats` below 17, which reads columns that a current server does not have, so its test uses the Aurora form of the query, which sends the same NULL WAL columns. PostgreSQL 11 and 13 are checked against the documentation only.
 
 Three of the 29 are outage predictors rather than performance metrics, which is deliberate: PostgreSQL's most damaging failures are quiet, slow, and fully predictable days ahead, and nothing in the engine raises its hand about them. They are read through the MCP tools (see [the tool list](configuration-mcp.md#mcp)), a web tab and — since #2530 — a WPF viewer tab: a PostgreSQL target gets **seven** inner tabs (Overview, Activity, Vacuum, Waits, I/O, Replication, Storage) in place of the nineteen SQL Server ones, chosen from `collect.servers.engine_kind`. The placement is derived from the collector catalog in both directions, so a new PostgreSQL collector cannot ship without a screen — or without the coverage pin's explicit, dated exemption, which is where `pg_database_size_stats` sits until its consumer lanes land (#3691).
 

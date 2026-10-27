@@ -830,7 +830,7 @@ internal static class PgDisplay
         /* Aurora-only too: core PostgreSQL has no per-statement peak-memory figure at all, so this is
            not-applicable rather than a zero-byte grant. */
         PeakMemory = row.MaxPeakMemBytes is { } peak ? Bytes(peak) : NotApplicableText,
-        WalWritten = Bytes(row.WalBytes),
+        WalWritten = row.WalBytes is { } wal ? Bytes(wal) : NotApplicableText,
         /* Null is "no text captured for this queryid yet" — text refreshes hourly, and a major-version
            upgrade re-keys every queryid — which is a different statement from an empty query. */
         QueryText = row.QueryText ?? "(statement text not captured yet)",
@@ -844,7 +844,7 @@ internal static class PgDisplay
         TempReadSort = Raw(row.TempBlocksRead),
         TempWrittenSort = Raw(row.TempBlocksWritten),
         PeakMemorySort = row.MaxPeakMemBytes is { } peakSort ? Raw(peakSort) : null,
-        WalWrittenSort = Raw(row.WalBytes),
+        WalWrittenSort = row.WalBytes is { } walSort ? Raw(walSort) : null,
     };
 
     internal sealed class DatabaseRow
