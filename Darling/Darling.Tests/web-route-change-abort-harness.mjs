@@ -89,6 +89,7 @@ const isSlow = (url) => url.includes("get_job_history") || url.includes("get_res
 let slowPanels = false;     // a scenario sets this to leave every server panel read out
 let dailyEmpty = false;     // a scenario sets this: get_daily_summary_range answers "empty", and every second read (the calendar's month read) is held
 let dailyReads = 0;
+let rangeBody = null;       // a scenario sets this: the body get_daily_summary_range answers with, whose last day is the read's to_date
 let slowTrend = false;      // a scenario sets this to leave the server page's trend reads out
 let slowFanout = false;     // a scenario sets this to leave the Memory tab's fanout() read (get_memory_grants) out
 let slowDatabases = false;  // a scenario sets this to leave the FinOps Database box's name list read out
@@ -101,6 +102,7 @@ const json = (body, status = 200) => ({ status, body });
 const answerFor = (url) => {
   if (url.includes("/api/fleet")) return fleetBody ? json(fleetBody) : json({}, 500);
   if (dailyEmpty && url.includes("get_daily_summary_range")) return json({ status: "empty", message: "No day collected in this span." });
+  if (rangeBody && url.includes("get_daily_summary_range")) return json(rangeBody);
   if (url.includes("get_resource_use_by_tag") && tagBody) return json(tagBody);
   if (url.includes("/api/read/list_servers")) return json({ servers: [{ server_name: "alpha", display_name: "alpha" }] });
   if (url.includes("/api/session")) return json({ can_edit: false });
@@ -321,6 +323,21 @@ const scenarios = {
     const afterLeave = { reads: ranges().length, monthReadAborted: ranges().length > 1 && ranges()[1].aborted };
     await go("#/server/alpha"); await advance(2);
     return { before, afterLeave, monthReadsAfterReturn: ranges().length - afterLeave.reads };
+  },
+  /* The Overview tab draws today's tile and the month calendar from ONE get_daily_summary_range read, and asks no get_daily_summary beside it. */
+  async overviewReadsTheRangeOnce() {
+    rangeBody = { to_date: "2026-10-03", days: [{ summary_date: "2026-10-01", top_wait_type: "WAIT_OLD" }, { summary_date: "2026-10-03", top_wait_type: "WAIT_TODAY" }] };
+    await boot("#/server/alpha/overview");
+    await advance(2);
+    const has = (t) => !!byId.main.find((x) => x.textContent === t);
+    const read = (re) => fetchLog.filter((r) => re.test(r.url));
+    return {
+      rangeReads: read(/get_daily_summary_range/).length,
+      singleDayReads: read(/get_daily_summary(?!_range)/).length,
+      todayInTile: has("WAIT_TODAY"),
+      calendarDrawn: !!byId.main.find((x) => x.textContent === "Daily Health Calendar"),
+      anyAborted: fetchLog.some((r) => r.aborted),
+    };
   },
   /* The FinOps Locking tab's Database box reads the server's database names with the tab's own signal. */
   async finopsDatabaseBoxReadOut() {

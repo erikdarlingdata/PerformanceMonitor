@@ -80,33 +80,6 @@ public sealed class DailySummaryReadShapeSqlTests
         Assert.DoesNotContain("TimescaleSupport.DetectRollupsAsync(", reader, StringComparison.Ordinal);
         Assert.DoesNotContain("TimescaleSupport.DetectRollupCoverageAsync(", reader, StringComparison.Ordinal);
     }
-
-    /// <summary>
-    /// The web server page's Overview tab draws today's tile and the month grid from ONE fetch of
-    /// get_daily_summary_range: the tile is the row whose date is the read's own <c>to_date</c> (the anchor
-    /// day), so the page derives no date of its own. It used to fetch get_daily_summary beside the range, which
-    /// ran the day's aggregate twice per load and could print two different query counts for today on one
-    /// page.
-    /// </summary>
-    [Fact]
-    public void TheOverviewTab_DrawsTodaysTileFromTheRangeRead_OneFetchForTwoPanels()
-    {
-        var page = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
-
-        var overviewAt = page.IndexOf("id: \"overview\",", StringComparison.Ordinal);
-        var nextTabAt = page.IndexOf("id: \"", overviewAt + 1, StringComparison.Ordinal);
-        Assert.True(overviewAt > 0 && nextTabAt > overviewAt, "the Overview tab's block must be found before it can be read");
-        var overview = page[overviewAt..nextTabAt];
-        Assert.Contains("...dailySummaryPanels(server),", overview, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"get_daily_summary\"", overview, StringComparison.Ordinal);
-
-        var composite = page[page.IndexOf("export function dailySummaryPanels(server)", StringComparison.Ordinal)..];
-        composite = composite[..composite.IndexOf("\n}", StringComparison.Ordinal)];
-        Assert.Equal(1, composite.Split("readTool(").Length - 1);
-        Assert.Contains("days.find((day) => day.summary_date === data.to_date)", composite, StringComparison.Ordinal);
-        Assert.Contains("VIZ.stat(today, { stats: DAILY_STATS })", composite, StringComparison.Ordinal);
-        Assert.Contains("return [tile.panel, calendar.panel];", composite, StringComparison.Ordinal);
-    }
 }
 
 /// <summary>

@@ -187,6 +187,22 @@ public sealed class WebRouteChangeAbortBehaviourTests
         Assert.Equal(2, r.GetProperty("monthReadsAfterReturn").GetInt32());
     }
 
+    /// <summary>
+    /// The Overview tab draws today's tile and the month calendar from ONE get_daily_summary_range read and asks no get_daily_summary
+    /// beside it (#3905: two fetches ran the day's aggregate twice per load and could print two query counts for today). This ran as a
+    /// count of the text <c>readTool(</c> in the panel's source until #6793 added signalled month reads there, which are not a second fetch.
+    /// </summary>
+    [Fact]
+    public void TheOverviewTab_DrawsTodaysTileAndTheCalendarFromOneRangeRead()
+    {
+        var r = Run("overviewReadsTheRangeOnce");
+        Assert.Equal(1, r.GetProperty("rangeReads").GetInt32());
+        Assert.Equal(0, r.GetProperty("singleDayReads").GetInt32());
+        Assert.True(r.GetProperty("todayInTile").GetBoolean());
+        Assert.True(r.GetProperty("calendarDrawn").GetBoolean());
+        Assert.False(r.GetProperty("anyAborted").GetBoolean());
+    }
+
     [Fact]
     public void LeavingFinops_AbortsTheDatabaseBoxNameRead()
     {
