@@ -36,9 +36,6 @@ public sealed class ViewerTopQueriesModuleLiveTests
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static DateTime Naive(DateTime value) =>
-        DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
-
     [Fact]
     public async Task ModuleLookup_NamesAnOldHandle_AndSortsOnlyTheRankedHandlesRows_AgainstDevPostgres()
     {
@@ -51,8 +48,9 @@ public sealed class ViewerTopQueriesModuleLiveTests
         await PerformanceMonitor.Darling.Storage.PgMigrations.MigrateAsync(connection, ct);
         await CleanupAsync(connection, ct);
 
-        var end = Naive(DateTime.UtcNow);
-        var start = end.AddHours(-24);
+        /* #5608: the window ends at the anchored point and spans four hours, so it sits inside one raw chunk at any hour the test runs. */
+        var end = LiveClock.AnchoredEnd();
+        var start = end.AddHours(-4);
         var succeeded = false;
         try
         {
@@ -105,20 +103,20 @@ public sealed class ViewerTopQueriesModuleLiveTests
         }
     }
 
-    /// <summary>The most rows any ROW_NUMBER over procedure_stats takes in, over every loop (-1 when the plan has none, which fails the bound above).</summary>
+    /// <summary>
+    /// The rows the module lookup's ROW_NUMBER takes in, read from the plan. The WindowAgg is found by what it does, not by what it scans:
+    /// it is the one whose input is sorted on sql_handle (the page's own WindowAgg sorts on the elapsed total). Its input is the node under
+    /// the Sort, or the node under a Gather Merge when the plan runs it in parallel, and the count is that node's rows times its loops.
+    /// A plan with no such WindowAgg throws with the plan in the message, so a changed plan shape fails loudly instead of reading as zero.
+    /// </summary>
     private static double RowsRankedFromProcedureStats(JsonElement plan)
     {
-        var best = -1.0;
+        var found = new System.Collections.Generic.List<double>();
         void Visit(JsonElement node)
         {
-            if (node.TryGetProperty("Node Type", out var type) && type.GetString() == "WindowAgg"
-                && node.TryGetProperty("Plans", out var children) && ReadsProcedureStats(node))
+            if (node.TryGetProperty("Node Type", out var type) && type.GetString() == "WindowAgg" && SortsOnSqlHandle(node))
             {
-                /* The WindowAgg reads a Sort, and the Sort reads the rows to be ranked: those are the rows the lookup pays for. The Sort
-                   itself emits only the few its run condition needs, so its own row count would hide the cost. */
-                var sort = children.EnumerateArray().First();
-                var input = sort.TryGetProperty("Plans", out var sortChildren) ? sortChildren.EnumerateArray().First() : sort;
-                best = Math.Max(best, input.GetProperty("Actual Rows").GetDouble() * input.GetProperty("Actual Loops").GetDouble());
+                found.Add(RowsIn(node));
             }
 
             if (node.TryGetProperty("Plans", out var plans))
@@ -131,17 +129,48 @@ public sealed class ViewerTopQueriesModuleLiveTests
         }
 
         Visit(plan);
-        return best;
-    }
-
-    private static bool ReadsProcedureStats(JsonElement node)
-    {
-        if (node.TryGetProperty("Alias", out var alias) && alias.GetString() == "procedure_stats")
+        if (found.Count == 0)
         {
-            return true;
+            throw new Xunit.Sdk.XunitException("no WindowAgg that sorts on sql_handle (the module lookup's ROW_NUMBER) was found in the plan: " + plan.GetRawText());
         }
 
-        return node.TryGetProperty("Plans", out var plans) && plans.EnumerateArray().Any(ReadsProcedureStats);
+        return found.Max();
+    }
+
+    private static System.Collections.Generic.IEnumerable<JsonElement> Children(JsonElement node) =>
+        node.TryGetProperty("Plans", out var plans) ? plans.EnumerateArray() : Enumerable.Empty<JsonElement>();
+
+    /// <summary>The first Sort or Incremental Sort under the WindowAgg, looking through nodes that only pass rows on (Gather Merge, Result, Materialize).</summary>
+    private static JsonElement? SortUnder(JsonElement node)
+    {
+        foreach (var child in Children(node))
+        {
+            var type = child.TryGetProperty("Node Type", out var t) ? t.GetString() : null;
+            if (type is "Sort" or "Incremental Sort")
+            {
+                return child;
+            }
+
+            if (type is "Gather Merge" or "Gather" or "Result" or "Materialize" && SortUnder(child) is { } deeper)
+            {
+                return deeper;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool SortsOnSqlHandle(JsonElement windowAgg) =>
+        SortUnder(windowAgg) is { } sort
+        && sort.TryGetProperty("Sort Key", out var keys)
+        && keys.EnumerateArray().Any(k => (k.GetString() ?? string.Empty).Contains(".sql_handle", StringComparison.Ordinal));
+
+    private static double RowsIn(JsonElement windowAgg)
+    {
+        /* The Sort emits only the few rows the run condition needs, so its own row count would hide the cost: read what it takes in. */
+        var sort = SortUnder(windowAgg)!.Value;
+        var input = Children(sort).FirstOrDefault();
+        return input.ValueKind == JsonValueKind.Undefined ? 0 : input.GetProperty("Actual Rows").GetDouble() * input.GetProperty("Actual Loops").GetDouble();
     }
 
     private static Task CleanupAsync(NpgsqlConnection connection, CancellationToken ct) =>
