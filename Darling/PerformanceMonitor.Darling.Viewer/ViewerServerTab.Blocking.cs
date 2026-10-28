@@ -36,6 +36,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public partial class ViewerServerTab
 {
+    /// <summary>#6878: the Blocking Trends chart's left-axis title. It is drawn rotated along a plot only about 80 px long at 1366x768, so it stays short enough that
+    /// <see cref="PerformanceMonitor.Ui.ChartAxisTitle.Fit"/> keeps all of it. The answering collector (blocked-process-report or DMV snapshot) is named in the legend entry instead,
+    /// where there is a whole line of width for it.</summary>
+    internal const string BlockingTrendAxisTitle = "Blocking events";
+
     private ChartHoverHelper? _lockWaitTrendHover;
     private ChartHoverHelper? _blockingTrendHover;
     private ChartHoverHelper? _deadlockTrendHover;
@@ -616,7 +621,7 @@ public partial class ViewerServerTab
             BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(BlockingTrendChart);
-            BlockingTrendChart.Plot.YLabel("Blocking events");
+            BlockingTrendChart.Plot.YLabel(BlockingTrendAxisTitle);
             SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, 1);
             ShowChartLegend(BlockingTrendChart);
             BlockingTrendChart.Refresh();
@@ -650,7 +655,7 @@ public partial class ViewerServerTab
         expandedCounts.Add(0);
 
         var plot = BlockingTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
-        plot.LegendText = "Blocking Incidents";
+        plot.LegendText = PerformanceMonitor.Ui.BlockingSourceLabel.For("Blocking Incidents", data.Select(d => d.Source));
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
         plot.MarkerSize = 0; /* No markers, just lines */
         _blockingTrendHover?.Add(plot, "Blocking Incidents");
@@ -658,7 +663,7 @@ public partial class ViewerServerTab
         BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTrendChart);
-        BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingSourceLabel.For("Blocking events", data.Select(d => d.Source)));
+        BlockingTrendChart.Plot.YLabel(BlockingTrendAxisTitle);
         SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(BlockingTrendChart);
         BlockingTrendChart.Refresh();

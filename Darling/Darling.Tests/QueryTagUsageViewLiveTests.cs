@@ -118,9 +118,9 @@ public sealed class QueryTagUsageViewLiveTests
             var result = QueryTagUsageView.Build(data, [(ServerOne, "srv-one")], allServers: false, tagFilter: null);
 
             var plan = result.Tables.Single(t => t.Section == "plan_cache");
-            var tagSum = plan.Rows.Where(r => r.Kind == "tag").Sum(r => Cell(r, plan, "cpu_ms"));
-            var untagged = Cell(plan.Rows.Single(r => r.Kind == "untagged"), plan, "cpu_ms");
-            var total = Cell(plan.Rows.Single(r => r.Kind == "total"), plan, "cpu_ms");
+            var tagSum = plan.Rows.Where(r => r.Kind == "tag").Sum(r => Cell(r, plan, "CPU (ms)"));
+            var untagged = Cell(plan.Rows.Single(r => r.Kind == "untagged"), plan, "CPU (ms)");
+            var total = Cell(plan.Rows.Single(r => r.Kind == "total"), plan, "CPU (ms)");
             Assert.Equal(["A", "B"], plan.Rows.Where(r => r.Kind == "tag").Select(r => r.Label).Order().ToArray());
             Assert.Equal(2_000, untagged);
             Assert.Equal(10_000, total);
@@ -128,7 +128,7 @@ public sealed class QueryTagUsageViewLiveTests
 
             /* Query Store holds nothing here: its table stays its own, so the plan cache's figures are not carried into it. */
             var queryStore = result.Tables.Single(t => t.Section == "query_store");
-            Assert.Equal(0, Cell(queryStore.Rows.Single(r => r.Kind == "total"), queryStore, "cpu_ms"));
+            Assert.Equal(0, Cell(queryStore.Rows.Single(r => r.Kind == "total"), queryStore, "CPU (ms)"));
         });
     }
 
@@ -148,14 +148,14 @@ public sealed class QueryTagUsageViewLiveTests
             var result = QueryTagUsageView.Build(data, scope, allServers: true, tagFilter: null);
 
             var plan = result.Tables.Where(t => t.Section == "plan_cache").ToList();
-            Assert.Equal(["plan_cache - srv-one", "plan_cache - srv-two", "plan_cache - all servers"], plan.Select(t => t.Title).ToArray());
+            Assert.Equal(["Plan cache - srv-one", "Plan cache - srv-two", "Plan cache - all servers"], plan.Select(t => t.Title).ToArray());
             var one = plan[0];
             var two = plan[1];
             var fleet = plan[2];
-            Assert.Equal(4_000, Cell(one.Rows.Single(r => r.Kind == "total"), one, "cpu_ms"));
+            Assert.Equal(4_000, Cell(one.Rows.Single(r => r.Kind == "total"), one, "CPU (ms)"));
             /* A key tagged on one server is untagged on the other. */
-            Assert.Equal(6_000, Cell(two.Rows.Single(r => r.Kind == "untagged"), two, "cpu_ms"));
-            Assert.Equal(10_000, Cell(fleet.Rows.Single(), fleet, "cpu_ms"));
+            Assert.Equal(6_000, Cell(two.Rows.Single(r => r.Kind == "untagged"), two, "CPU (ms)"));
+            Assert.Equal(10_000, Cell(fleet.Rows.Single(), fleet, "CPU (ms)"));
         });
     }
 

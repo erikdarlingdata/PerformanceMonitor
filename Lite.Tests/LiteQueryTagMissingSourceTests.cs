@@ -78,7 +78,7 @@ public sealed class LiteQueryTagMissingSourceTests : IDisposable
         }
 
         var view = QueryTagUsageView.Build(data, [(1, "s")], allServers: false, tagFilter: null);
-        Assert.Contains("plan_cache is unavailable: This store has no query stats data yet.", view.Message, StringComparison.Ordinal);
+        Assert.Contains("Plan cache is unavailable: This store has no query stats data yet.", view.Message, StringComparison.Ordinal);
     }
 
     /// <summary>#6850: every section, with its source dropped, says the same sentence the Darling Viewer says for it (the words, never the view or table name).</summary>
