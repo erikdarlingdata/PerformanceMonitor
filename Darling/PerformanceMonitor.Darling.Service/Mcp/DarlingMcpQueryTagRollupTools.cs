@@ -169,9 +169,9 @@ public sealed class DarlingMcpQueryTagRollupTools
                     reach["window_truncated"] = RawWindowFloor.IsTruncated(from, windowStart) || read.BacklogHoursWaiting > 0;
                     if (read.BacklogHoursWaiting > 0)
                     {
-                        /* #6865: the full window ran into the store's statement timeout while hours wait for the hourly builder, so this is the newest span that needs none of them. */
+                        /* #6865: the route never reads the hours that wait for the hourly builder from the wide table, so this is the newest span that needs none of them. */
                         reach["backlog_hours_waiting"] = read.BacklogHoursWaiting;
-                        reach["backlog_note"] = $"The full window timed out because {read.BacklogHoursWaiting} hour(s) are still being built into the hourly Query Store table, so this answer starts at {reach["effective_start"]} instead of the start of the window. The full window answers once they are built.";
+                        reach["backlog_note"] = $"{read.BacklogHoursWaiting} hour(s) of this window are still being built into the hourly Query Store table, so the figures start at {reach["effective_start"]} instead of the start of the window. The full window answers once they are built.";
                     }
 
                     if (read.UsedHashHourly)
