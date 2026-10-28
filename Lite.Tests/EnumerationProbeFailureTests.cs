@@ -298,7 +298,7 @@ public class EnumerationProbeFailureTests
             Deltas = new RecordingCollectorDeltaCalculator(),
         });
 
-        Assert.Contains("HAS_DBACCESS(d.name) = 1", plan!.Text, StringComparison.Ordinal);
+        Assert.Contains("IF HAS_DBACCESS(@db) = 0", plan!.Text, StringComparison.Ordinal);
     }
 
     /* ── helpers ── */

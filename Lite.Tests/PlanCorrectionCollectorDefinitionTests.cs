@@ -80,7 +80,7 @@ public sealed class PlanCorrectionCollectorDefinitionTests
 
         Assert.Contains("sys.dm_hadr_database_replica_states", plan.Text, StringComparison.Ordinal);
         Assert.Contains("is_primary_replica = 1", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("HAS_DBACCESS(d.name) = 1", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("s.has_access = 1", plan.Text, StringComparison.Ordinal);
         Assert.Contains("AND d.name NOT IN (@excl_db_0)", plan.Text, StringComparison.Ordinal);
         Assert.Equal("SO", Assert.Single(plan.Parameters).Value);
     }
