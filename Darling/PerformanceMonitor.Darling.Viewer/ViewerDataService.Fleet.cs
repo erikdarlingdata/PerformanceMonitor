@@ -53,6 +53,19 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>
+    /// The gaps in one server's SQL Server Agent alert setup (#6874) for its Overview card. It reads the newest capture inside
+    /// <see cref="DarlingAgentAlertReader.FreshCaptureWindow"/> through the same reader and <see cref="AgentAlertStatus.Evaluate"/> as
+    /// the Agent Alerts tab and the web fleet card, so a lagging feed shows no gaps and makes no claim (Collection Stopped owns it).
+    /// </summary>
+    public async Task<IReadOnlyList<AgentAlertGap>> GetAgentAlertGapsAsync(int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        var read = await DarlingAgentAlertReader.ReadAsync(
+            _dataSource, serverId, nowUtc - DarlingAgentAlertReader.FreshCaptureWindow, nowUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        return read.HasCapture ? AgentAlertStatus.Evaluate(read.Alerts).Gaps : Array.Empty<AgentAlertGap>();
+    }
+
+    /// <summary>
     /// The cross-server fleet totals over a window — the read only Darling's central store can serve.
     /// <c>total_blocking_events</c> respects the Overview card's XE-preferred / DMV-fallback rule PER
     /// server before summing: each source is counted per <c>server_id</c> (a GROUP BY), a FULL OUTER JOIN

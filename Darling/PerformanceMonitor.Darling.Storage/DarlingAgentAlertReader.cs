@@ -171,6 +171,9 @@ public static class AgentAlertStatus
 /// </summary>
 public static class DarlingAgentAlertReader
 {
+    /// <summary>How old the newest capture may be and still count for the alert and the fleet card chip (#6874): eight passes of the 15-minute collector.</summary>
+    public static readonly TimeSpan FreshCaptureWindow = TimeSpan.FromHours(2);
+
     /// <summary>
     /// The newest capture's rows, each beside the same alert's count in the oldest capture, and the capture bounds. One pass stamps
     /// one <c>collection_time</c>, so the joins are on equality. $1 server, $2 start, $3 end.

@@ -1123,6 +1123,7 @@
                                                         <RowDefinition Height="Auto"/>
                                                         <RowDefinition Height="Auto"/>
                                                         <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
                                                     </Grid.RowDefinitions>
 
                                                     <!-- CPU -->
@@ -1161,9 +1162,20 @@
                                                     <TextBlock Grid.Row="5" Grid.Column="2" Text="{Binding CollectorDisplay}" FontSize="11" Foreground="{Binding CollectorSeverityBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
                                                     <TextBlock Grid.Row="5" Grid.Column="3" Text="{Binding CollectorDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
 
+                                                    <!-- Agent alerts (#6874): shown only when the SQL Server Agent alert setup has a gap, the way the web
+                                                         fleet card's chip is. Not a band: nothing above reads it. -->
+                                                    <Ellipse Grid.Row="6" Grid.Column="0" Width="9" Height="9" Fill="{Binding AgentAlertsBrush}" VerticalAlignment="Center" Margin="0,2,6,2"
+                                                             Visibility="{Binding HasAgentAlertGaps, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="6" Grid.Column="1" Text="Agent alerts:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"
+                                                               Visibility="{Binding HasAgentAlertGaps, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="6" Grid.Column="2" Text="{Binding AgentAlertsDisplay}" FontSize="11" Foreground="{Binding AgentAlertsBrush}" FontWeight="SemiBold" Margin="0,2,8,2"
+                                                               Visibility="{Binding HasAgentAlertGaps, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="6" Grid.Column="3" Text="{Binding AgentAlertsDetail}" ToolTip="{Binding AgentAlertsDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"
+                                                               Visibility="{Binding HasAgentAlertGaps, Converter={StaticResource BoolToVisibility}}"/>
+
                                                     <!-- Last Collect (footer row, no severity dot) -->
-                                                    <TextBlock Grid.Row="6" Grid.Column="1" Text="Last Collect:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
-                                                    <TextBlock Grid.Row="6" Grid.Column="2" Text="{Binding LastCollectionDisplay}" FontSize="11" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
+                                                    <TextBlock Grid.Row="7" Grid.Column="1" Text="Last Collect:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
+                                                    <TextBlock Grid.Row="7" Grid.Column="2" Text="{Binding LastCollectionDisplay}" FontSize="11" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
                                                 </Grid>
                                             </StackPanel>
                                             <!-- Offline overlay -->

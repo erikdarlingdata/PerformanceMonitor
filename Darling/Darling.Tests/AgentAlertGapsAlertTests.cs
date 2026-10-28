@@ -168,6 +168,22 @@ public sealed class AgentAlertGapsAlertTests
         Assert.Equal(without.CollectorSeverity, with.CollectorSeverity);
     }
 
+    [Fact]
+    public void TheViewerOverviewCard_ShowsAnAgentAlertsRowOnlyWhenThereAreGaps_AndItsBandIsUnchanged()
+    {
+        var none = new PerformanceMonitor.Darling.Viewer.ServerSummaryItem();
+        var gap = new AgentAlertGap("no_alerts_defined", "No SQL Server Agent alert is defined on this instance.", Array.Empty<string>(), Array.Empty<int>());
+        var one = new PerformanceMonitor.Darling.Viewer.ServerSummaryItem { AgentAlertGaps = new[] { gap } };
+        var two = new PerformanceMonitor.Darling.Viewer.ServerSummaryItem { AgentAlertGaps = new[] { gap, gap } };
+
+        Assert.False(none.HasAgentAlertGaps);
+        Assert.True(one.HasAgentAlertGaps);
+        Assert.Equal("1 gap", one.AgentAlertsDisplay);
+        Assert.Equal("2 gaps", two.AgentAlertsDisplay);
+        Assert.Equal(gap.Message, one.AgentAlertsDetail);
+        Assert.Equal(PerformanceMonitor.Darling.Viewer.FleetRollup.ClassifyBand(none), PerformanceMonitor.Darling.Viewer.FleetRollup.ClassifyBand(one));
+    }
+
     /* ---------------- live: a seeded store ---------------- */
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -219,8 +235,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             Assert.Contains("No alert for severity 20, 21, 22, 23, 24, 25.", fired.DetailText, StringComparison.Ordinal);
 
             /* A newer, complete capture clears it. */
-            foreach (var a in CompleteSetup())
-                await InsertAsync(await OpenAsync(postgres, ct), ct, DateTime.UtcNow.AddMinutes(-1), a);
+            await InsertCaptureAsync(postgres, ct, DateTime.UtcNow.AddMinutes(-1), CompleteSetup());
             h.Now = DateTime.UtcNow;
             Assert.Equal(1, await Sweep(e, h, postgres, ct));
             Assert.Contains(h.History.Records, r => r.MetricName == "Agent Alert Gaps Cleared");
@@ -229,6 +244,14 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
     }
 
     private static async Task<NpgsqlConnection> OpenAsync(NpgsqlDataSource postgres, CancellationToken ct) => await postgres.OpenConnectionAsync(ct);
+
+    /* A capture is every row of one pass, all at one collection_time: the readers take the newest collection_time as the capture. */
+    private static async Task InsertCaptureAsync(NpgsqlDataSource postgres, CancellationToken ct, DateTime at, IEnumerable<AgentAlertFact> alerts)
+    {
+        await using var connection = await OpenAsync(postgres, ct);
+        foreach (var a in alerts)
+            await InsertAsync(connection, ct, at, a);
+    }
 
     [Fact]
     public async Task ASeededStore_DoesNotFire_ForAStaleCaptureOrForNoCaptureAtAll_AndNotWhenTheSwitchIsOff()
@@ -266,10 +289,17 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             var gap = Assert.Single(gaps[ServerId], g => g.Code == "no_alerts_defined");
             Assert.Contains("No SQL Server Agent alert", gap.Message, StringComparison.Ordinal);
 
+            /* The Viewer's Overview card reads the same gaps through the same reader. */
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(postgres.ConnectionString);
+            var viewerGap = Assert.Single(await viewer.GetAgentAlertGapsAsync(ServerId, DateTime.UtcNow, ct));
+            Assert.Equal(gap.Code, viewerGap.Code);
+            Assert.Equal(gap.Message, viewerGap.Message);
+
             /* A newer complete capture leaves the server out. */
-            foreach (var a in CompleteSetup())
-                await InsertAsync(await OpenAsync(postgres, ct), ct, DateTime.UtcNow.AddMinutes(-1), a);
+            await InsertCaptureAsync(postgres, ct, DateTime.UtcNow.AddMinutes(-1), CompleteSetup());
             Assert.False((await DarlingFleetReader.ReadAgentAlertGapsAsync(postgres, DateTime.UtcNow, ct)).ContainsKey(ServerId));
+            Assert.Empty(await viewer.GetAgentAlertGapsAsync(ServerId, DateTime.UtcNow, ct));
+            Assert.Empty(await viewer.GetAgentAlertGapsAsync(ServerId, DateTime.UtcNow.AddHours(3), ct));
 
             /* The same capture read three hours later is past the freshness window: no gaps and no claim. */
             Assert.Empty(await DarlingFleetReader.ReadAgentAlertGapsAsync(postgres, DateTime.UtcNow.AddHours(3), ct));

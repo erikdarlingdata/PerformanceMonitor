@@ -1653,7 +1653,7 @@ JOIN collect.agent_alerts AS a ON a.server_id = n.server_id AND a.collection_tim
     }
 
     /// <summary>How old the newest Agent alert capture may be and still count (#6874): eight passes of the 15-minute collector.</summary>
-    internal static readonly TimeSpan AgentAlertCaptureFreshness = TimeSpan.FromHours(2);
+    internal static readonly TimeSpan AgentAlertCaptureFreshness = DarlingAgentAlertReader.FreshCaptureWindow;
 
     private static async Task<Dictionary<int, CpuRow>> ReadCpuAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
