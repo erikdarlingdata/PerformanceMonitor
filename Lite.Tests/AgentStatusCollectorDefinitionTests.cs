@@ -127,4 +127,28 @@ public sealed class AgentStatusCollectorDefinitionTests
 
         Assert.Empty(s_deltas.Calls);
     }
+
+    [Fact]
+    public async Task ManagedInstanceRow_MapsToRunning_WithThePlatformDescription_AndTheNextRunDecode()
+    {
+        /* #6886: the query reports EngineEdition 8 as running (no startup type, the view has no row there) and
+           still carries the next-run decode. The row passes through the mapping and the payload unchanged. */
+        var context = MakeContext(isAzureManagedInstance: true);
+        var nextRun = new DateTime(2026, 7, 12, 1, 0, 0, DateTimeKind.Unspecified);
+
+        using var reader = new FakeCollectorDataReader(
+            new object[] { true, "Running (managed by Azure SQL Managed Instance)", DBNull.Value, nextRun });
+        var row = Assert.Single(await AgentStatusCollector.Instance.ReadAsync(reader, context, CancellationToken.None));
+
+        Assert.True(row.AgentRunning);
+        Assert.Equal("Running (managed by Azure SQL Managed Instance)", row.AgentStatusDesc);
+        Assert.Null(row.AgentStartupDesc);
+
+        var writer = new RecordingCollectorRowWriter();
+        AgentStatusCollector.Instance.WritePayload(row, writer, context);
+        Assert.Equal(true, writer.Values[0]);
+        Assert.Equal("Running (managed by Azure SQL Managed Instance)", writer.Values[1]);
+        Assert.Null(writer.Values[2]);
+        Assert.Equal(nextRun, writer.Values[3]);
+    }
 }
