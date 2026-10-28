@@ -180,9 +180,9 @@ public static class ClientTimeoutsRead
     }
 
     /// <summary>
-    /// SSMS IntelliSense's own cancels (#6552), which the Client Timeouts alert leaves out: how many sampled events in the range came from it,
-    /// and the count and rate the alert judges without them. The judged count is the exact count times the share of sampled events that
-    /// are not IntelliSense, the same proportion <see cref="AttentionEvaluator.Evaluate"/> applies, so it is an estimate whenever
+    /// The cancels the Client Timeouts alert leaves out, SSMS IntelliSense's own (#6552) and the VS Code mssql extension's metadata
+    /// connections (#6856): how many sampled events in the range came from them, and the count and rate the alert judges without them.
+    /// The judged count is the exact count times the share of sampled events that are not left out, the same proportion <see cref="AttentionEvaluator.Evaluate"/> applies, so it is an estimate whenever
     /// <c>sampled_events</c> is above zero. <c>count</c> and <c>rate_per_minute</c> stay the exact event_counter figures.
     /// </summary>
     private static object Excluded(AttentionReading reading, double rate)

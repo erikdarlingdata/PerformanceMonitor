@@ -268,6 +268,8 @@ public sealed class AttentionAlertTests
 
     /* ---------------- #6856: the VS Code mssql extension's metadata connections ---------------- */
 
+    /* The first four rows were seen in the field, in the client application names a production store recorded (#6856). The fifth, the
+       language service alone, comes from the extension's source only. */
     [Theory]
     [InlineData("vscode-mssql-GeneralConnection", true)]
     [InlineData("vscode-mssql-GeneralConnection-languageService", true)]
@@ -322,6 +324,14 @@ public sealed class AttentionAlertTests
         return doc.RootElement.GetProperty("excluded_from_alert").GetProperty("client_apps").EnumerateArray().Select(a => a.GetString()!).ToArray();
     }
 
+    private static string ExcludedNote(AttentionWindow window)
+    {
+        var (_, reading) = ClientTimeoutsRead.Classify(window, T0);
+        using var doc = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(
+            ClientTimeoutsRead.Payload(reading!, window, Array.Empty<ClientTimeoutSample>(), 20, 2000)));
+        return doc.RootElement.GetProperty("excluded_from_alert").GetProperty("note").GetString()!;
+    }
+
     [Fact]
     public void SsmsOnlyWindow_NamesOnlySsmsIntelliSense_EverywhereTheLeftOutCancelsAreExplained()
     {
@@ -342,6 +352,8 @@ public sealed class AttentionAlertTests
         Assert.Contains("came from SSMS IntelliSense cancelling", ExcludedContextLine(finding, window), StringComparison.Ordinal);
         Assert.DoesNotContain("VS Code", ExcludedContextLine(finding, window), StringComparison.Ordinal);
         Assert.Equal(new[] { AttentionEvaluator.IntelliSenseClientApp }, ExcludedClientApps(window));
+        /* The get_client_timeouts note describes the rule in general, so it names both tools even here. */
+        Assert.Contains("SSMS IntelliSense and VS Code mssql metadata connections", ExcludedNote(window), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -364,6 +376,7 @@ public sealed class AttentionAlertTests
         Assert.Contains("came from VS Code mssql metadata connections cancelling", ExcludedContextLine(finding, window), StringComparison.Ordinal);
         Assert.DoesNotContain("SSMS", ExcludedContextLine(finding, window), StringComparison.Ordinal);
         Assert.Equal(new[] { "vscode-mssql-ObjectExplorer", "vscode-mssql-languageService" }, ExcludedClientApps(window));
+        Assert.Contains("SSMS IntelliSense and VS Code mssql metadata connections", ExcludedNote(window), StringComparison.Ordinal);
     }
 
     [Fact]

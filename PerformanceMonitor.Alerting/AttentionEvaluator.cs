@@ -94,7 +94,7 @@ public sealed record AttentionReading(
     /// <summary>All sampled events in the span.</summary>
     public long SampleTotal => Groups.Sum(g => g.Samples);
 
-    /// <summary>Sampled events in the span from the application <see cref="AttentionEvaluator.IsExcludedApp"/> leaves out (#6552).</summary>
+    /// <summary>Sampled events in the span from the applications <see cref="AttentionEvaluator.IsExcludedApp"/> leaves out: SSMS IntelliSense (#6552) and the VS Code mssql extension's metadata connections (#6856).</summary>
     public long ExcludedSamples => Groups.Where(g => AttentionEvaluator.IsExcludedApp(g.ClientAppName)).Sum(g => g.Samples);
 
     /// <summary>Sampled events in the span from SSMS IntelliSense, the part of <see cref="ExcludedSamples"/> that names that tool (#6856).</summary>
@@ -166,10 +166,11 @@ public static class AttentionEvaluator
     public const string IntelliSenseClientApp = "Microsoft SQL Server Management Studio - Transact-SQL IntelliSense";
 
     /// <summary>
-    /// True for a sampled event whose client application is SSMS IntelliSense (#6552): the alert judges the count without it, and
-    /// <c>get_client_timeouts</c> marks it excluded. The filter lives at READ time (here and in <see cref="ClientTimeoutsRead"/>); the
-    /// collector still stores every event, so a mute rule, the sampled-event list and the history keep seeing them. Matches
-    /// "Microsoft SQL Server Management Studio" followed by anything and ending in "IntelliSense", so a renamed SSMS build still matches.
+    /// True for a sampled event whose client application is SSMS IntelliSense (#6552) or one of the VS Code mssql extension's metadata
+    /// connections (#6856): the alert judges the count without it, and <c>get_client_timeouts</c> marks it excluded. The filter lives at
+    /// READ time (here and in <see cref="ClientTimeoutsRead"/>); the collector still stores every event, so a mute rule, the sampled-event
+    /// list and the history keep seeing them. SSMS matches "Microsoft SQL Server Management Studio" followed by anything and ending in
+    /// "IntelliSense", so a renamed SSMS build still matches. VS Code matches a closed list, see <see cref="IsVsCodeMssqlMetadata"/>.
     /// </summary>
     public static bool IsExcludedApp(string? clientAppName) =>
         IsSsmsIntelliSense(clientAppName) || IsVsCodeMssqlMetadata(clientAppName);
@@ -183,7 +184,8 @@ public static class AttentionEvaluator
     /// <summary>
     /// The tool-naming part of every sentence that says where the left-out cancels came from (#6856): the alert summary, the alert context
     /// line and the <c>get_client_timeouts</c> note all call this, so a tool added to the rule is named in one place. Names only the tools
-    /// whose flag is set, so an SSMS-only server is not told about VS Code.
+    /// whose flag is set, so an SSMS-only server is not told about VS Code. The one exception is the <c>get_client_timeouts</c> note, which
+    /// describes the rule in general rather than one window, so it passes both flags.
     /// </summary>
     public static string ExcludedToolNames(bool ssmsIntelliSense, bool vsCodeMetadata) =>
         (ssmsIntelliSense, vsCodeMetadata) switch
@@ -195,9 +197,11 @@ public static class AttentionEvaluator
 
     /// <summary>The VS Code mssql extension's metadata connections (#6856). The SQL Tools Service it runs appends the connection purpose to
     /// the application name "vscode-mssql" (ConnectionService.GetApplicationNameWithFeature), and the language service adds "-languageService".
-    /// Metadata work is the General connection and Object Explorer, each with or without that suffix, plus the language service alone. No
-    /// source line names the query editor's application, so the rule is a closed list: any name not on it, "vscode-mssql" included, stays
-    /// counted, the way SSMS "- Query" does.</summary>
+    /// Metadata work is the General connection and Object Explorer, each with or without that suffix, plus the language service alone.
+    /// Four of the five names were seen in the field, in the client application names a production store recorded (the report in #6856),
+    /// the two double-suffix names among them. Only "vscode-mssql-languageService" rests on the extension's source alone. No source line
+    /// names the query editor's application, so the rule is a closed list: any name not on it, "vscode-mssql" included, stays counted,
+    /// the way SSMS "- Query" does, and shows in the alert's top client apps.</summary>
     private static readonly string[] VsCodeMetadataApps =
     {
         "vscode-mssql-GeneralConnection",
@@ -608,7 +612,7 @@ public static class AttentionEvaluator
     /// <param name="Muted">True when the exact count crossed a bar and the judged count did not: record the fire as Muted.</param>
     /// <param name="NewestRunTime">The newest run's time (naive UTC).</param>
     /// <param name="Bars">Where the bars came from (#5736), null when the grading used fixed bars only.</param>
-    /// <param name="ExcludedSamples">Sampled events in the span from SSMS IntelliSense (<see cref="IsExcludedApp"/>), left out of the judged count (#6552).</param>
+    /// <param name="ExcludedSamples">Sampled events in the span from SSMS IntelliSense and the VS Code mssql metadata connections (<see cref="IsExcludedApp"/>), left out of the judged count (#6552, #6856).</param>
     /// <param name="ExcludedSsmsSamples">The part of <paramref name="ExcludedSamples"/> from SSMS IntelliSense (#6856).</param>
     /// <param name="ExcludedVsCodeSamples">The part of <paramref name="ExcludedSamples"/> from the VS Code mssql extension's metadata connections (#6856).</param>
     public sealed record Finding(
