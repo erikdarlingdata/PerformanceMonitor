@@ -926,7 +926,7 @@ resume AS (
     public const string ForeignZoneLinesNote =
         "Skipped log lines whose time this target's log_timezone did not write. With a UTC setting that is a line "
         + "stamped in another zone. With a named local zone it is a line whose text no instant in that zone renders "
-        + "back as, or two instants do. A client can plant one with a failed login, since %u and %d in "
+        + "back as, or two instants do. A client can forge one with a failed login, since %u and %d in "
         + "log_line_prefix echo its role and database names unescaped, and lines from before a log_timezone change "
         + "look the same. The read went on without them (#4046, #6866)";
 

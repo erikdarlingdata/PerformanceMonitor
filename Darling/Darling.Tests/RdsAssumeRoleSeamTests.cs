@@ -222,9 +222,9 @@ public sealed class RdsAssumeRoleSeamTests
             "plan" => new RdsPlanIngestor(UnusedDataSource(), verifier: verifier, roles: cache)
                 .IngestAsync(1, "s", InstanceHost, false, ConnectionString, KeyA, CancellationToken.None),
             "deadlock" => new RdsDeadlockIngestor(UnusedDataSource(), verifier: verifier, roles: cache)
-                .IngestAsync(1, "s", InstanceHost, false, false, ConnectionString, KeyA, CancellationToken.None),
+                .IngestAsync(1, "s", InstanceHost, false, false, ConnectionString, KeyA, cancellationToken: CancellationToken.None),
             "events" => new RdsLogEventIngestor(UnusedDataSource(), TestLogHashKeys.Fixed, verifier: verifier, roles: cache)
-                .IngestAsync(1, "s", InstanceHost, false, false, ConnectionString, KeyA, CancellationToken.None),
+                .IngestAsync(1, "s", InstanceHost, false, false, ConnectionString, KeyA, cancellationToken: CancellationToken.None),
             _ => throw new ArgumentOutOfRangeException(nameof(reader)),
         };
 
@@ -272,9 +272,9 @@ public sealed class RdsAssumeRoleSeamTests
             "plan" => new RdsPlanIngestor(UnusedDataSource(), verifier: verifier, roles: cache)
                 .IngestAsync(1, "s", InstanceHost, false, ConnectionString, KeyA, CancellationToken.None),
             "deadlock" => new RdsDeadlockIngestor(UnusedDataSource(), verifier: verifier, roles: cache)
-                .IngestAsync(1, "s", InstanceHost, false, false, ConnectionString, KeyA, CancellationToken.None),
+                .IngestAsync(1, "s", InstanceHost, false, false, ConnectionString, KeyA, cancellationToken: CancellationToken.None),
             _ => new RdsLogEventIngestor(UnusedDataSource(), TestLogHashKeys.Fixed, verifier: verifier, roles: cache)
-                .IngestAsync(1, "s", InstanceHost, false, false, ConnectionString, KeyA, CancellationToken.None),
+                .IngestAsync(1, "s", InstanceHost, false, false, ConnectionString, KeyA, cancellationToken: CancellationToken.None),
         };
 
         var ex = Assert.IsType<AwsRoleAssumeException>(await Record.ExceptionAsync(() => call));

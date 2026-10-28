@@ -94,8 +94,8 @@ public sealed class RdsLogEventIngestor
         bool pgLogUsesCsvlog = false,
         string? loginConnectionString = null,
         AwsRoleKey? role = null,
-        CancellationToken cancellationToken = default,
-        PgLogZoneCheck? zoneCheck = null)
+        PgLogZoneCheck? zoneCheck = null,
+        CancellationToken cancellationToken = default)
     {
         /* #4708: what the last process saved for this server is loaded once, before its first read, so a
            restart resumes from the saved file and marker instead of the newest file's last lines. */
