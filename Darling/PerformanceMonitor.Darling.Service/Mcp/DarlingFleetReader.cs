@@ -1599,8 +1599,10 @@ GROUP BY server_id, collector_name";
     /// fleet (#6874): the latest capture's rows. Shaped like the other per-server reads in this file: <c>servers</c> drives a lateral that
     /// seeks <c>idx_agent_alerts_time</c> (<c>server_id, collection_time</c>) once per server for the newest capture time, then the capture's
     /// rows are read by the same index, so a fleet load never walks the 30-day table. A server whose newest capture is the all-NULL marker
-    /// row has no alert_id, which is "collected, none defined". $1 is the window start.</summary>
-    internal const string FleetAgentAlertsSql = @"
+    /// row has no alert_id, which is "collected, none defined". Like <see cref="FleetCpuSql"/>, it skips disabled servers and the
+    /// PostgreSQL and Aurora targets (<see cref="SqlServerCollectedTargetSql"/>): they never write this table, so a lateral probe for
+    /// them would be spent on every fleet read for nothing. $1 is the window start.</summary>
+    internal const string FleetAgentAlertsSql = $@"
 SELECT a.server_id, a.alert_id, a.alert_name, a.enabled, a.message_id, a.severity, a.has_notification, a.operator_count
 FROM servers AS s
 CROSS JOIN LATERAL
@@ -1610,7 +1612,9 @@ CROSS JOIN LATERAL
     WHERE x.server_id = s.server_id
     AND   x.collection_time >= $1
 ) AS n
-JOIN collect.agent_alerts AS a ON a.server_id = s.server_id AND a.collection_time = n.collection_time";
+JOIN collect.agent_alerts AS a ON a.server_id = s.server_id AND a.collection_time = n.collection_time
+WHERE s.is_enabled
+AND   {SqlServerCollectedTargetSql}";
 
     /// <summary>The Agent alert setup's gaps per server, for the servers that have any (#6874). The status itself is
     /// <see cref="AgentAlertStatus.Evaluate"/>; this only batches the read.</summary>
