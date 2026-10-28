@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -27,6 +28,17 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class QueryTagUsageViewLiveTests
 {
+    /// <summary>The sentence each section must say when its source is missing: the same words in Lite and the Viewer (#6850).</summary>
+    private static readonly IReadOnlyDictionary<string, string> Expected = new Dictionary<string, string>
+    {
+        ["plan_cache"] = "This store has no query stats data yet.",
+        ["query_store"] = "This store has no Query Store data yet.",
+        ["procedures"] = "This store has no procedure stats data yet.",
+        ["blocking_reports"] = "This store has no blocked process report data yet.",
+        ["blocking_snapshots"] = "This store has no blocking snapshot data yet.",
+        ["deadlocks"] = "This store has no deadlock data yet.",
+    };
+
     private const int ServerOne = 7801;
     private const int ServerTwo = 7802;
 
@@ -144,6 +156,47 @@ public sealed class QueryTagUsageViewLiveTests
             /* A key tagged on one server is untagged on the other. */
             Assert.Equal(6_000, Cell(two.Rows.Single(r => r.Kind == "untagged"), two, "cpu_ms"));
             Assert.Equal(10_000, Cell(fleet.Rows.Single(), fleet, "cpu_ms"));
+        });
+    }
+
+    /// <summary>#6850: with every source table dropped, the Viewer and the get_resource_use_by_tag tool each say each section's missing source in the
+    /// same words Lite uses, never the table's name.</summary>
+    [Fact]
+    public async Task EverySection_WithItsSourceMissing_IsSaidInWords_InTheViewerAndTheTool()
+    {
+        await WithViewAsync(async (store, viewer, ct) =>
+        {
+            foreach (var table in new[]
+            {
+                "query_stats", "query_store_interval_wide", "procedure_stats", "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks",
+            })
+            {
+                await ExecAsync(store, $"DROP TABLE IF EXISTS collect.{table} CASCADE", ct);
+            }
+
+            var end = DateTime.UtcNow;
+            var data = await viewer.GetQueryTagRollupDataAsync([ServerOne], end.AddHours(-24), end, ct);
+            /* Query Store is the one section the gate answers first: with its table gone no server passes the gate, so the reason is the gate's
+               refusal, which names no table either. The "no ... data yet" sentence there is only for a table that vanishes after the gate passed. */
+            var queryStore = QueryTagRollupSection.QueryStore.Name;
+            foreach (var (section, sentence) in Expected.Where(e => e.Key != queryStore))
+            {
+                Assert.True(data.Unavailable.TryGetValue(section, out var reason), $"the viewer served {section} with its source dropped");
+                Assert.Equal(sentence, reason);
+            }
+
+            Assert.DoesNotContain("query_store_interval_wide", data.Unavailable[queryStore], StringComparison.Ordinal);
+
+            await using var source = NpgsqlDataSource.Create(store.ConnectionString);
+            var tool = await PerformanceMonitor.Darling.Service.Mcp.DarlingMcpQueryTagRollupTools.GetResourceUseByTagCore(source, null, 24, null, 25, null, null, ct);
+            foreach (var (section, sentence) in Expected.Where(e => e.Key != queryStore))
+            {
+                Assert.Contains($"{section} is unavailable: {sentence}", tool, StringComparison.Ordinal);
+            }
+
+            Assert.DoesNotContain("query_store_interval_wide", tool, StringComparison.Ordinal);
+
+            Assert.DoesNotContain("does not exist", tool, StringComparison.OrdinalIgnoreCase);
         });
     }
 }

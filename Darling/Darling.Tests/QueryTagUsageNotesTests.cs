@@ -149,7 +149,7 @@ public sealed class QueryTagUsageNotesTests : IDisposable
     public void The_raw_floor_and_missing_table_messages_carry_no_table_name_or_stamp()
     {
         var floor = QueryTagUsageNotes.RawFloor("query stats", Utc(26, 13, 0), QueryTagUsageNotes.Stamper(1));
-        var missing = QueryTagUsageNotes.Missing("query stats");
+        var missing = QueryTagUsageNotes.Missing("plan_cache");
 
         AssertPlain(floor);
         AssertPlain(missing);
