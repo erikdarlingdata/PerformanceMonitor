@@ -196,6 +196,33 @@ public sealed class FrontDoorViewerRoleTests
         Assert.Equal(HttpStatusCode.OK, editor.StatusCode);
     }
 
+    /// <summary>
+    /// A store answers some requests before its sign-in gate runs (its Host check, a rate limit, a throttle), so those answers carry
+    /// no role confirmation and no data. The viewer gets the store's own refusal, not the 502 for a store that is out of date.
+    /// </summary>
+    [Theory(Timeout = 60_000)]
+    [InlineData(429)]
+    [InlineData(400)]
+    public async Task AStoresRefusalWithoutTheRoleConfirmation_ReachesAViewerAsTheStoresOwnStatus(int status)
+    {
+        await using var peer = await FakeWebPeer.StartAsync("use1");
+        peer.OlderBuild = true;
+        if (status == 429)
+        {
+            peer.RateLimitSeconds = 7;
+        }
+        else
+        {
+            peer.AnswerStatus = status;
+        }
+
+        await using var door = await FrontDoorWebHarness.StartAsync(new[] { (peer, new[] { "sql-east-1" }) });
+
+        var (viewer, viewerBody) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/fleet", FrontDoorSeat.Viewer, store: "use1"), TestContext.Current.CancellationToken);
+        Assert.Equal((HttpStatusCode)status, viewer.StatusCode);
+        Assert.DoesNotContain("did not confirm", viewerBody, StringComparison.Ordinal);
+    }
+
     [Fact(Timeout = 60_000)]
     public async Task TheRoleHeader_RidesEveryViewerRequest_IncludingComposeRun_AndNoEditorsRequest()
     {

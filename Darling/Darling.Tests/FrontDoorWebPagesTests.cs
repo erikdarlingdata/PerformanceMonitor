@@ -114,6 +114,46 @@ public sealed class FrontDoorWebPagesTests
     }
 
     [Fact]
+    public void BrowserState_KeyedByAStoreLocalId_FollowsTheStore_AndStateKeyedByAServerIdFollowsTheServer()
+    {
+        var r = Run("browserState");
+        var inUse1 = r.GetProperty("inUse1");
+        var inUse2 = r.GetProperty("inUse2");
+
+        // set in use1
+        Assert.Equal("use1", inUse1.GetProperty("store").GetString());
+        Assert.True(inUse1.GetProperty("collapsed5").GetBoolean());
+
+        // tag 5 collapsed in use1 is not tag 5 of use2, and the groups use2 collapses stay in use2
+        Assert.Equal("use2", inUse2.GetProperty("store").GetString());
+        Assert.False(inUse2.GetProperty("collapsed5").GetBoolean());
+        Assert.True(r.GetProperty("inUse2After").GetProperty("collapsed6").GetBoolean());
+        Assert.False(r.GetProperty("inUse2After").GetProperty("collapsed5").GetBoolean());
+        Assert.True(r.GetProperty("backInUse1").GetProperty("collapsed5").GetBoolean());
+        Assert.False(r.GetProperty("backInUse1").GetProperty("collapsed6").GetBoolean());
+
+        // a server id is the same server in every store, so its favourite, acknowledgement and database filter show in both
+        Assert.True(inUse2.GetProperty("favorite").GetBoolean());
+        Assert.True(inUse2.GetProperty("acknowledged").GetBoolean());
+        Assert.Equal(new[] { "db1" }, inUse2.GetProperty("dbFilter").EnumerateArray().Select(e => e.GetString()).ToArray());
+
+        // the groups store mode left are untouched, and the shared choices are still written to the sidebar key
+        Assert.Equal(new[] { 9 }, r.GetProperty("legacyGroups").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        Assert.True(r.GetProperty("legacyGrouped").GetBoolean());
+        Assert.False(inUse1.GetProperty("collapsed9").GetBoolean());
+    }
+
+    [Fact]
+    public void WithoutAFrontDoor_TheBrowserKeepsItsStateUnderTheKeysItAlwaysUsed()
+    {
+        var r = Run("browserStatePlain");
+        Assert.Equal(new[] { 5 }, r.GetProperty("sidebar").GetProperty("collapsedGroups").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        Assert.Equal(
+            new[] { "darling.local.acks.v1", "darling.local.dbFilter.v1", "darling.local.favorites.v1", "darling.local.sidebar.v1" },
+            r.GetProperty("keys").EnumerateArray().Select(e => e.GetString()).ToArray());
+    }
+
+    [Fact]
     public void TheStoreHashPrefix_IsAddedAndStrippedAndRoundTrips()
     {
         var r = Run("address");

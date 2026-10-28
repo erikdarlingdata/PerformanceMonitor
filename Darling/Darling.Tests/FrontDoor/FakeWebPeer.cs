@@ -94,6 +94,9 @@ internal sealed class FakeWebPeer : IAsyncDisposable
     /// <summary>When set, the peer acts as a build without the front door's role header (#6840): it never confirms it.</summary>
     internal bool OlderBuild;
 
+    /// <summary>When set, every signed-in <c>/api/*</c> call answers this status with a small JSON refusal and no data (#6840).</summary>
+    internal int? AnswerStatus;
+
     /// <summary>When set, every signed-in <c>/api/*</c> call answers this <c>Content-Type</c> instead of JSON.</summary>
     internal string? AnswerContentType;
 
@@ -213,6 +216,14 @@ internal sealed class FakeWebPeer : IAsyncDisposable
         context.Response.Cookies.Append("peer_marker", "1", new CookieOptions { Path = "/" });
         context.Response.Headers.ContentSecurityPolicy = PeerCsp;
         context.Response.Headers["X-Peer-Marker"] = "yes";
+
+        if (AnswerStatus is { } refusal)
+        {
+            context.Response.StatusCode = refusal;
+            context.Response.ContentType = "application/json; charset=utf-8";
+            await context.Response.WriteAsync("{\"error\":\"store refusal\"}");
+            return;
+        }
 
         if (RateLimitSeconds is { } wait)
         {

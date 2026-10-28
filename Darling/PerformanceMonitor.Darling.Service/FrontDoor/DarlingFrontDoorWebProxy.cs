@@ -52,8 +52,10 @@ namespace PerformanceMonitor.Darling.Service.FrontDoor;
 /// <para><b>A viewer's role at the store.</b> The store's session is the shared token's, which can edit. For a person whose seat cannot
 /// edit, every forwarded request carries <see cref="DarlingWebSeat.FrontDoorRoleHeader"/>, and the store answers it as a reads-only
 /// caller (<see cref="DarlingWebSeat.ApplyFrontDoorRole"/>): its own handlers refuse what they refuse a viewer and report a viewer's
-/// flags. An answer without <see cref="DarlingWebSeat.FrontDoorRoleAppliedHeader"/> is refused with 502, because a store on a build
-/// without this support would have answered as the shared-token seat.</para>
+/// flags. A successful (2xx) answer without <see cref="DarlingWebSeat.FrontDoorRoleAppliedHeader"/> is refused with 502, because a
+/// store on a build without this support would have answered as the shared-token seat. An answer that is not successful carries the
+/// store's own refusal and no data, and a store sends some of those before its sign-in gate runs (its Host check, a rate limit, a
+/// throttle), so it passes on as it is.</para>
 /// </summary>
 internal sealed class DarlingFrontDoorWebProxy
 {
@@ -325,7 +327,7 @@ internal sealed class DarlingFrontDoorWebProxy
                         store.Name, $"Store '{store.Name}' answered with a redirect (HTTP {status}). Check that the store's webUrl in the front door's configuration is the address it serves.");
                 }
 
-                if (viewer && !response.Headers.Contains(DarlingWebSeat.FrontDoorRoleAppliedHeader))
+                if (viewer && status is >= 200 and < 300 && !response.Headers.Contains(DarlingWebSeat.FrontDoorRoleAppliedHeader))
                 {
                     throw new FrontDoorPeerUnavailableException(
                         store.Name, $"Store '{store.Name}' did not confirm it answered as a viewer, so its answer is not passed on. Update it to a build whose dashboard reads the front door's role header.");

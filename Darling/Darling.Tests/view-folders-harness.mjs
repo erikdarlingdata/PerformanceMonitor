@@ -270,6 +270,7 @@ try {
       viewList: {}, serverList: {}, statusbar: {}, main: {},
       el: () => ({}), mount: () => { calls.mounts++; },
       isSessionExpired: () => expired,
+      frontDoor: () => false, currentStore: () => null,
       getSession: async () => ({ can_edit: true, can_own: true }),
       listViews: () => (release ? new Promise((r) => { release = () => r({ kind: "data", data: as(views, "alice") }); }) : Promise.resolve({ kind: "data", data: as(views, "alice") })),
       currentRoute: () => ({ name: "home", id: null, param: null }),

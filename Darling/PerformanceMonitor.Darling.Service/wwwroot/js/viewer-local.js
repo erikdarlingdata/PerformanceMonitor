@@ -33,6 +33,11 @@ export const KEY_SEVERITY_COLORS = "darling.local.severityColors.v1";
 export const KEY_SIDEBAR = "darling.local.sidebar.v1";
 export const KEY_DB_FILTER = "darling.local.dbFilter.v1";
 export const KEY_VIEW_GROUPS = "darling.local.viewGroups.v1";
+/** The collapsed sidebar groups of ONE store at a front door (#6840), under this key plus "/" and the store's name. A tag id is
+ *  handed out by each store on its own, so tag 5 in one store is not tag 5 in another. Server ids are not scoped this way: they
+ *  are a hash of the server's name, the same server has the same id in every store, and favourites, acknowledgements and the
+ *  database filters follow the server. With no front door the groups stay in KEY_SIDEBAR exactly as they were. */
+export const KEY_SIDEBAR_GROUPS = "darling.local.sidebarGroups.v1";
 const VERSION = 1;
 const MAX_IDS = 5000;
 
@@ -73,6 +78,7 @@ let sidebarGrouped = false;
 let dbFilters = new Map(); // server_id -> the chosen database names (1 to MAX_DB_NAMES, kept exactly as chosen)
 let viewGroups = new Set(); // collapsed Custom Views sidebar groups (#6214): "my", or "folder:" + the folder's name
 let sidebarGroups = new Set(); // collapsed sidebar groups: tag ids, plus the fixed ids "favourites" and "untagged"
+let storeScope = null; // the front door's picked store, or null (store mode: the keys are what they always were)
 let attention = new Map(); // server_id -> { count, critical, latestMs } from the last alert read
 const listeners = new Set();
 
@@ -153,10 +159,22 @@ export function reload() {
   const s = readJson(KEY_SIDEBAR);
   sidebarCollapsed = !!(s && s.collapsed === true);
   sidebarGrouped = !!(s && s.grouped === true);
-  sidebarGroups = new Set(s && Array.isArray(s.collapsedGroups) ? s.collapsedGroups.filter(isGroupId).slice(0, MAX_IDS) : []);
+  const g0 = storeScope === null ? s : readJson(sidebarGroupsKey());
+  sidebarGroups = new Set(g0 && Array.isArray(g0.collapsedGroups) ? g0.collapsedGroups.filter(isGroupId).slice(0, MAX_IDS) : []);
 
   const g = readJson(KEY_VIEW_GROUPS, sessionStore);
   viewGroups = new Set(g && Array.isArray(g.collapsed) ? g.collapsed.filter(isViewGroupId).slice(0, MAX_VIEW_GROUPS) : []);
+}
+
+function sidebarGroupsKey() {
+  return KEY_SIDEBAR_GROUPS + "/" + encodeURIComponent(storeScope);
+}
+
+/** Names the store the front door picked (null for store mode), so the values keyed by a store-local id are kept per store, and
+ *  re-reads. store-picker.js calls it wherever it picks a store. */
+export function setStoreScope(name) {
+  storeScope = typeof name === "string" && name !== "" ? name : null;
+  reload();
 }
 
 /** Test seam: replaces the session Storage (the view-group collapse set) and re-reads. */
@@ -413,7 +431,15 @@ export function setSidebarCollapsed(collapsed) {
 
 /** One writer for the sidebar key, so a change to one field never drops the others. */
 function writeSidebar() {
-  writeJson(KEY_SIDEBAR, { collapsed: sidebarCollapsed, grouped: sidebarGrouped, collapsedGroups: [...sidebarGroups] });
+  if (storeScope === null) {
+    writeJson(KEY_SIDEBAR, { collapsed: sidebarCollapsed, grouped: sidebarGrouped, collapsedGroups: [...sidebarGroups] });
+    return;
+  }
+  /* At a front door the collapsed/grouped choices stay shared, the legacy groups stay as store mode left them, and this
+     store's groups go under its own key. */
+  const legacy = readJson(KEY_SIDEBAR);
+  writeJson(KEY_SIDEBAR, { collapsed: sidebarCollapsed, grouped: sidebarGrouped, collapsedGroups: legacy && Array.isArray(legacy.collapsedGroups) ? legacy.collapsedGroups : [] });
+  writeJson(sidebarGroupsKey(), { collapsedGroups: [...sidebarGroups] });
 }
 
 /** Whether the sidebar lists servers grouped by tag (false: the flat list). */

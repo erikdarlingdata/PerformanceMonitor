@@ -18,6 +18,7 @@
  */
 
 import { el, mount, apiGet, currentStore, setStore, setFrontDoor, storeHash, splitStoreHash } from "./util.js";
+import { setStoreScope } from "./viewer-local.js";
 
 const REMEMBER_KEY = "darling.frontDoor.store";
 
@@ -94,6 +95,7 @@ export async function initFrontDoor(host, hash) {
   const last = remembered();
   const pick = [named, last].find((n) => n && isKnownStore(n)) || (stores.length ? stores[0].name : null);
   setStore(pick);
+  setStoreScope(pick);
   if (pick) rememberStore(pick);
   paintPicker();
 }
@@ -106,6 +108,7 @@ export async function refreshPicker() {
 /** Makes `name` the store to work in from now on, and remembers it for the next visit. */
 export function chooseStore(name) {
   setStore(name);
+  setStoreScope(name);
   rememberStore(name);
 }
 

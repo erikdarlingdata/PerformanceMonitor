@@ -244,6 +244,54 @@ try {
       }
       return { sections, fleetCalls: calls.filter((c) => c.url === "/api/fleet").map((c) => c.headers["X-Darling-Store"] ?? null).sort(), hashes };
     },
+    /* What the browser keeps, per store (#6840). A tag id is handed out by each store on its own, so the collapsed sidebar groups
+       follow the store. A server id is a hash of the server's name, the same in every store, so favourites, acknowledgements and
+       database filters follow the server and show in every store. */
+    browserState: async () => {
+      handler = (url) => (url === "/api/front-door"
+        ? reply(200, { front_door: true, stores: [
+            { name: "use1", health: "ok", server_count: 1, last_ok_utc: null },
+            { name: "use2", health: "ok", server_count: 1, last_ok_utc: null }] })
+        : reply(200, {}));
+      const local = await load("viewer-local.js");
+      mem.clear();
+      mem.set("darling.local.sidebar.v1", JSON.stringify({ v: 1, collapsed: false, grouped: true, collapsedGroups: [9] }));
+      local.reload();
+      await picker.initFrontDoor(new FakeNode("div"), "#/s/use1/fleet");
+      const view = () => ({
+        store: util.currentStore(),
+        favorite: local.isFavorite(3),
+        acknowledged: local.isAcknowledged(3),
+        dbFilter: local.getDatabaseFilter(3),
+        collapsed5: local.isSidebarGroupCollapsed(5),
+        collapsed6: local.isSidebarGroupCollapsed(6),
+        collapsed9: local.isSidebarGroupCollapsed(9),
+        grouped: local.isSidebarGrouped(),
+      });
+      local.toggleFavorite(3);
+      local.acknowledge(3, 1000);
+      local.setDatabaseFilter(3, ["db1"]);
+      local.toggleSidebarGroup(5);
+      const inUse1 = view();
+      picker.chooseStore("use2");
+      const inUse2 = view();
+      local.toggleSidebarGroup(6);
+      const inUse2After = view();
+      picker.chooseStore("use1");
+      const backInUse1 = view();
+      const legacy = JSON.parse(mem.get("darling.local.sidebar.v1"));
+      return { inUse1, inUse2, inUse2After, backInUse1, legacyGroups: legacy.collapsedGroups, legacyGrouped: legacy.grouped, keys: [...mem.keys()].sort() };
+    },
+    browserStatePlain: async () => {
+      const local = await load("viewer-local.js");
+      mem.clear();
+      local.reload();
+      local.toggleFavorite(3);
+      local.acknowledge(3, 1000);
+      local.setDatabaseFilter(3, ["db1"]);
+      local.toggleSidebarGroup(5);
+      return { sidebar: JSON.parse(mem.get("darling.local.sidebar.v1")), keys: [...mem.keys()].sort() };
+    },
     sidebar: async () => {
       util.setFrontDoor(true);
       util.setStore("use1");
