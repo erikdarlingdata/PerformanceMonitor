@@ -576,6 +576,14 @@ public sealed class CollectorContext
     public Encoding? PgLogEncoding { get; set; }
 
     /// <summary>
+    /// How a log reader asks the target to prove the time of lines stamped in a NAMED local zone (#6866). Set by the
+    /// host for the collectors that read a PostgreSQL server log, on a connection of its own, since the log read
+    /// holds the main one open while it parses. Null (the default, and every host that never sets it) keeps the
+    /// refusal for a target whose <c>log_timezone</c> is not UTC. See <see cref="PgLogNamedZone"/>.
+    /// </summary>
+    public PgLogZoneResolver? PgLogZoneResolver { get; set; }
+
+    /// <summary>
     /// Whether this target has granted read access to <c>pg_file_settings</c> (#4251), resolved by the host
     /// through <see cref="PgFileSettingsCapability.IsReadableAsync"/> BEFORE <c>BuildQuery</c> runs, for
     /// <see cref="PgServerConfigCollector"/> alone. False (the default) keeps today's query, which computes
