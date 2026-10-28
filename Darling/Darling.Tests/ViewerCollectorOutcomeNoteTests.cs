@@ -85,6 +85,21 @@ public sealed class ViewerCollectorOutcomeNoteTests
         Assert.Contains(Refused, reader, StringComparison.Ordinal);
     }
 
+    /// <summary>#6869: the DEGRADED answer's "Act on that sentence" sentence tells an MCP client what to do with the stored sentence. A person reading the panel or the page cannot use it.</summary>
+    [Fact]
+    public void ReaderMessage_ForDegraded_LeavesOutTheMcpClientSentence_WhileTheMcpMessageKeepsIt()
+    {
+        var mcp = CollectorRuntimePrecondition.CollectionOutcomeMessage(ServerName, "tempdb_stats", CollectorRuntimePrecondition.DegradedStatus, Refused, Ran)!;
+        var reader = CollectorRuntimePrecondition.CollectionOutcomeReaderMessage(ServerName, "tempdb_stats", CollectorRuntimePrecondition.DegradedStatus, Refused, Ran)!;
+
+        Assert.Contains(CollectorRuntimePrecondition.DegradedClientSentence, mcp, StringComparison.Ordinal);
+        Assert.StartsWith("Act on that sentence", CollectorRuntimePrecondition.DegradedClientSentence, StringComparison.Ordinal);
+        Assert.DoesNotContain("Act on that sentence", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("switched off", reader, StringComparison.Ordinal);
+        Assert.Contains(Refused, reader, StringComparison.Ordinal);
+        Assert.EndsWith(Refused, reader.TrimEnd(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ReaderMessage_IsNullWhereTheMcpMessageIs()
     {
