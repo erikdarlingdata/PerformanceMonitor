@@ -782,7 +782,17 @@ VALUES (TIMESTAMP '{At(stuck)}', 6, '57014', 'canceling statement due to stateme
     /// <c>UsedHashHourly</c>, the section's <c>tier</c> and its <c>source</c> say only what served it, and the figures are the wide statement over the tail.
     /// </summary>
     [Fact]
-    public async Task AReadWhoseEveryHashHourIsBacklog_IsServedByTheTailAlone_AndNamesNoHashTable()
+    public Task AReadWhoseEveryHashHourIsBacklog_IsServedByTheTailAlone_AndNamesNoHashTable() => ServedByTheTailAloneAsync(everyBuiltHourIsBacklog: false);
+
+    /// <summary>
+    /// #6865: the state right after V221, where no built hour has a late write either, so literally every built hour of the window is backlog. The cut
+    /// is the newest built hour plus one, the hours after it are the builder's own lag and are not built, so the plan holds no table pair and no day
+    /// pair, only the wide tail. The section must say so: no tier, the wide table as the only source.
+    /// </summary>
+    [Fact]
+    public Task RightAfterTheUpgrade_WhereEveryBuiltHourIsBacklog_TheSectionNamesTheWideTableAlone() => ServedByTheTailAloneAsync(everyBuiltHourIsBacklog: true);
+
+    private static async Task ServedByTheTailAloneAsync(bool everyBuiltHourIsBacklog)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
@@ -790,7 +800,9 @@ VALUES (TIMESTAMP '{At(stuck)}', 6, '57014', 'canceling statement due to stateme
         var bodySucceeded = false;
         try
         {
-            await ExecAsync(a.Connection, "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);
+            await ExecAsync(a.Connection, everyBuiltHourIsBacklog
+                ? "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL, late_seq = built_seq WHERE built_seq IS NOT NULL"
+                : "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);
             await ExecAsync(a.Connection, "DELETE FROM collect.query_store_hash_hourly", ct);
             var starts = Servers.ToDictionary(s => s, _ => a.Start);
 
@@ -805,6 +817,13 @@ VALUES (TIMESTAMP '{At(stuck)}', 6, '57014', 'canceling statement due to stateme
             await using var newest = new NpgsqlCommand($"SELECT max(hour) {backlogWhere}", a.Connection);
             var cut = DateTime.SpecifyKind((DateTime)(await newest.ExecuteScalarAsync(ct))!, DateTimeKind.Unspecified).AddHours(1);
             Assert.True(backlogHours > 0);
+            if (everyBuiltHourIsBacklog)
+            {
+                var builtHours = await ComposeStampLiveSupport.CountAsync(a.Connection,
+                    $"SELECT count(*) FROM collect.query_store_compose_stamp_hours WHERE hour >= TIMESTAMP '{At(first)}' AND hour < TIMESTAMP '{At(a.HourNow)}'", ct);
+                Assert.Equal(builtHours, backlogHours);
+            }
+
             Assert.Equal(backlogHours, read.BacklogHoursWaiting);
             Assert.Equal((int)(cut - first).TotalHours, read.BacklogHoursLeftOut);
             Assert.All(read.RoutedStarts!.Values, start => Assert.Equal(cut, start));
@@ -822,6 +841,12 @@ VALUES (TIMESTAMP '{At(stuck)}', 6, '57014', 'canceling statement due to stateme
             Assert.DoesNotContain("query_store_hash", section.GetRawText(), StringComparison.Ordinal);
             Assert.True(section.GetProperty("window_truncated").GetBoolean());
             Assert.Equal(backlogHours, section.GetProperty("backlog_hours_waiting").GetInt32());
+            /* The sentence, the count and the start name one instant: the count is the whole hours from the window's first whole hour to effective_start. */
+            var effectiveStart = section.GetProperty("effective_start").GetString()!;
+            Assert.Equal(McpHelpers.FormatEffectiveStart(cut), effectiveStart);
+            var leftOut = section.GetProperty("hours_left_out").GetInt32();
+            Assert.Equal((int)(cut - QueryTagRollupHashRoute.CeilHour(a.End.AddHours(-24))).TotalHours, leftOut);
+            Assert.Equal(QueryTagRollupHashRoute.BacklogNote(effectiveStart, leftOut, (int)backlogHours), section.GetProperty("backlog_note").GetString());
             bodySucceeded = true;
         }
         finally
