@@ -338,7 +338,7 @@ public partial class RemoteCollectorService
             /* #1875: this path reads the trailing probe-failure set once PER DATABASE, so the note and the
                log cap are decided for the cycle after the loop rather than inside it — see
                CycleProbeFailures for why neither generalizes from the single-read plain path. */
-            var cycleProbeFailures = new CycleProbeFailures();
+            var cycleProbeFailures = new CycleProbeFailures(context.Target.IsAwsRds);
 
             /* One DuckDB connection for the whole body; one appender per database on it (disposing an
                appender flushes that database — commit-1..N-1 semantics on abort). */
@@ -534,7 +534,7 @@ public partial class RemoteCollectorService
                         if (definition.EmitsProbeFailures)
                         {
                             cycleProbeFailures.Add(
-                                await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken));
+                                await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken, context.Target.IsAwsRds));
                         }
                     }
                     /* Read ONCE: the stopwatch is still running, so a second read a few statements later
@@ -747,7 +747,7 @@ public partial class RemoteCollectorService
                     /* Shared read (#1837): the item list, then the OPTIONAL second result set of items the
                        enumeration could not probe. Both hosts route through it so the item read, the
                        failure read, and the note wording cannot drift. */
-                    enumeration = await EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken);
+                    enumeration = await EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken, context.Target.IsAwsRds);
 
                     /* #6254: the third result set (each database's flush interval), present only with a replica set. */
                     if (replicaConfigured)
@@ -1319,7 +1319,7 @@ public partial class RemoteCollectorService
                        exactly what they were. */
                     if (definition.EmitsProbeFailures)
                     {
-                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, itemToken);
+                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, itemToken, context.Target.IsAwsRds);
                         telemetry.HostNote = EnumeratedCollectorDriver.MergeNotes(telemetry.HostNote, probes.Note);
                         LogEnumerationProbeFailures(definition, server, probes.ProbeFailures);
                     }

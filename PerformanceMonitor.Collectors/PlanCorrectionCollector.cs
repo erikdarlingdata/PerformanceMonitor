@@ -447,8 +447,7 @@ DECLARE
     @product_major integer =
         CONVERT(integer, PARSENAME(CONVERT(sysname, SERVERPROPERTY('PRODUCTVERSION')), 4));
 
-SELECT /* PerformanceMonitorLite */
-    d.name
+" + NoDatabaseAccessNote.ScopeProjection + @"
 FROM sys.databases AS d
 LEFT JOIN sys.dm_hadr_database_replica_states AS drs
     ON d.database_id = drs.database_id
@@ -458,7 +457,6 @@ AND   (d.database_id > 4 OR d.database_id = 2)
 AND   d.database_id < 32761
 AND   d.name <> N'PerformanceMonitor'
 AND   d.state_desc = N'ONLINE'
-AND   HAS_DBACCESS(d.name) = 1 /*a least-privilege login without per-db access raised 916 per db per cycle (#1823)*/
 AND
 (
     drs.database_id IS NULL          /*not in any AG*/
@@ -466,7 +464,7 @@ AND
 )
 /*EXCLUSION_FILTER*/
 ORDER BY d.name
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);" + NoDatabaseAccessNote.ScopeResults;
 
     public override string Name => "plan_correction";
 

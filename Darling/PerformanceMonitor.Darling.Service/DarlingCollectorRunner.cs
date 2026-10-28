@@ -2961,7 +2961,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             /* #1875: this path reads the trailing probe-failure set once PER DATABASE, so the note and the
                log cap are decided for the cycle after the loop rather than inside it — see
                CycleProbeFailures for why neither generalizes from the single-read plain path. */
-            var cycleProbeFailures = new CycleProbeFailures();
+            var cycleProbeFailures = new CycleProbeFailures(context.Target.IsAwsRds);
 
             /* One pooled store connection for the whole body; one binary COPY per database on it
                (completing an importer commits that database — commit-1..N-1 semantics on abort). */
@@ -3282,7 +3282,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                         if (definition.EmitsProbeFailures)
                         {
                             cycleProbeFailures.Add(
-                                await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken));
+                                await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken, context.Target.IsAwsRds));
                         }
                     }
                     /* #6182: procedure_stats' plan phase on Azure SQL Database. #5449 moved the plan out of the main query into a second
@@ -3713,7 +3713,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                     /* Shared read (#1837): the item list, then the OPTIONAL second result set of items the
                        enumeration could not probe. Both hosts route through it so the item read, the
                        failure read, and the note wording cannot drift. */
-                    enumeration = await EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken);
+                    enumeration = await EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken, context.Target.IsAwsRds);
                     if (qsRun is { Configured: true })
                     {
                         foreach (var fact in await QueryStoreCollector.ReadPrimaryFactsAsync(enumerationReader, cancellationToken))
@@ -4473,7 +4473,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                        exactly what they were. */
                     if (definition.EmitsProbeFailures)
                     {
-                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, itemToken);
+                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, itemToken, context.Target.IsAwsRds);
                         collectionNote = EnumeratedCollectorDriver.MergeNotes(collectionNote, probes.Note);
                         LogEnumerationProbeFailures(definition, server, probes.ProbeFailures);
                     }

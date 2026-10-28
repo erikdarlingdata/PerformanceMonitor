@@ -490,15 +490,14 @@ OPTION(RECOMPILE);";
         var (exclusionClause, exclusionParameters) = DatabaseScopeFilter.BuildEnumerationPredicate(context, "d.name");
         var text = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-SELECT /* PerformanceMonitorLite */
-    d.name
+{NoDatabaseAccessNote.ScopeProjection}
 FROM sys.databases AS d
 WHERE d.state_desc = N'ONLINE'
 AND   d.database_id > 0
-AND   HAS_DBACCESS(d.name) = 1
 {exclusionClause}
 ORDER BY
-    d.name;";
+    d.name;
+{NoDatabaseAccessNote.ScopeResults}";
 
         return new CollectorQuery(text, exclusionParameters);
     }

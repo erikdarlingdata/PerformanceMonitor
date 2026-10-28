@@ -132,8 +132,7 @@ public sealed class QueryStoreForcedPlansCollector : CollectorDefinitionBase<Que
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT /* PerformanceMonitorLite */
-    d.name
+" + NoDatabaseAccessNote.ScopeProjection + @"
 FROM sys.databases AS d
 LEFT JOIN sys.dm_hadr_database_replica_states AS drs
     ON d.database_id = drs.database_id
@@ -142,7 +141,6 @@ WHERE d.database_id > 4
 AND   d.database_id < 32761
 AND   d.state_desc = N'ONLINE'
 AND   d.name <> N'PerformanceMonitor'
-AND   HAS_DBACCESS(d.name) = 1
 AND   d.name NOT IN
       (
           N'master', N'model', N'msdb', N'tempdb',
@@ -158,7 +156,7 @@ AND
 )
 /*EXCLUSION_FILTER*/
 ORDER BY d.name
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);" + NoDatabaseAccessNote.ScopeResults;
 
     public override CollectorQuery? BuildEnumerationQuery(CollectorContext context)
     {

@@ -203,6 +203,13 @@ public sealed record ProbeFailureOutcome(
 public sealed class CycleProbeFailures
 {
     private readonly List<EnumerationProbeFailure> _failures = new();
+    private readonly bool _awsRds;
+
+    /// <param name="awsRds">True for an Amazon RDS target, so a no-access sentence names the CREATE USER that fixes it (#6889).</param>
+    public CycleProbeFailures(bool awsRds = false)
+    {
+        _awsRds = awsRds;
+    }
 
     /// <summary>Every failure this cycle's databases reported, in the order they were read.</summary>
     public IReadOnlyList<EnumerationProbeFailure> Failures => _failures;
@@ -212,7 +219,7 @@ public sealed class CycleProbeFailures
     /// both other channels use, so its wording cannot drift from theirs. Null when nothing failed —
     /// identical to the pre-#1875 behavior, where this path never set a note at all.
     /// </summary>
-    public string? Note => EnumeratedCollectorDriver.BuildNote(enumerationWasEmpty: false, _failures.Count);
+    public string? Note => EnumeratedCollectorDriver.BuildNote(enumerationWasEmpty: false, _failures, _awsRds);
 
     /// <summary>
     /// Folds one database's read into the cycle. The outcome's own note is discarded on purpose (see the
@@ -584,7 +591,7 @@ public static class EnumeratedCollectorDriver
     /// </para>
     /// </summary>
     /// <param name="reader">An open reader positioned on the enumeration's first result set.</param>
-    public static async Task<EnumerationOutcome> ReadEnumerationAsync(DbDataReader reader, CancellationToken cancellationToken)
+    public static async Task<EnumerationOutcome> ReadEnumerationAsync(DbDataReader reader, CancellationToken cancellationToken, bool awsRds = false)
     {
         ArgumentNullException.ThrowIfNull(reader);
 
@@ -595,7 +602,7 @@ public static class EnumeratedCollectorDriver
         }
 
         var probeFailures = await ReadProbeFailuresAsync(reader, cancellationToken);
-        return new EnumerationOutcome(items, probeFailures, BuildNote(items.Count == 0, probeFailures.Count));
+        return new EnumerationOutcome(items, probeFailures, BuildNote(items.Count == 0, probeFailures, awsRds));
     }
 
     /// <summary>
@@ -626,7 +633,8 @@ public static class EnumeratedCollectorDriver
     /// <param name="reader">The payload reader, already drained by the definition's own read.</param>
     public static async Task<ProbeFailureOutcome> ReadPayloadProbeFailuresAsync(
         DbDataReader reader,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool awsRds = false)
     {
         ArgumentNullException.ThrowIfNull(reader);
 
@@ -651,7 +659,7 @@ public static class EnumeratedCollectorDriver
 
         /* enumerationWasEmpty: false — a payload collector has no enumeration whose emptiness could be
            reported, and its own empty-payload case is already visible as rows_collected = 0. */
-        return new ProbeFailureOutcome(failures, BuildNote(enumerationWasEmpty: false, failures.Count));
+        return new ProbeFailureOutcome(failures, BuildNote(enumerationWasEmpty: false, failures, awsRds));
     }
 
     /// <summary>
@@ -660,6 +668,21 @@ public static class EnumeratedCollectorDriver
     /// ordinary path. The single place either note text is built, so the two hosts write the same string
     /// and an operator can grep for one wording.
     /// </summary>
+    public static string? BuildNote(bool enumerationWasEmpty, IReadOnlyList<EnumerationProbeFailure> probeFailures, bool awsRds = false)
+    {
+        ArgumentNullException.ThrowIfNull(probeFailures);
+
+        /* #6889: the rows that say "the login has no user in this database" are not failures to probe; they get their
+           own sentence, naming the databases, and the generic count covers only the rest. */
+        var noAccess = probeFailures
+            .Where(f => string.Equals(f.Error, NoDatabaseAccessNote.ProbeErrorText, StringComparison.Ordinal))
+            .Select(f => f.Item)
+            .ToList();
+        var generic = BuildNote(enumerationWasEmpty, probeFailures.Count - noAccess.Count);
+        return MergeNotes(generic, NoDatabaseAccessNote.Sentence(noAccess, awsRds));
+    }
+
+    /// <summary>The count-only form of <see cref="BuildNote(bool, IReadOnlyList{EnumerationProbeFailure}, bool)"/>.</summary>
     public static string? BuildNote(bool enumerationWasEmpty, int probeFailureCount)
     {
         var probeNote = probeFailureCount > 0

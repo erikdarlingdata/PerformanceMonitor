@@ -862,7 +862,17 @@ FROM pg_catalog.pg_control_system() AS s";
             }
 
             var who = reader.IsDBNull(entries.Count) ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.PlaceholderLogin : reader.GetString(entries.Count);
-            return PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeMissingGrants(PerformanceMonitor.Darling.Storage.MonitoringGrantScript.MissingGrants(entries, held, who));
+            var missingText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeMissingGrants(PerformanceMonitor.Darling.Storage.MonitoringGrantScript.MissingGrants(entries, held, who));
+
+            /* #6889: the count of online user databases the login cannot enter rides after the login name (server scope only). */
+            long noUserDatabases = 0;
+            if (reader.FieldCount > entries.Count + 1 && !reader.IsDBNull(entries.Count + 1))
+            {
+                noUserDatabases = Convert.ToInt64(reader.GetValue(entries.Count + 1), System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            var noUserText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeNoUserDatabases(noUserDatabases, who, isAwsRds);
+            return missingText is null ? noUserText : noUserText is null ? missingText : missingText + " " + noUserText;
         }
         catch (OperationCanceledException)
         {

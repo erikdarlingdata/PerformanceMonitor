@@ -432,7 +432,7 @@ public static class MonitoringGrantScript
 
         if (awsRds)
         {
-            Line("/* Optional: SQL Agent job history. RDS refuses the grants on sysjobsteps, sysjobschedules, syscategories, syssessions and agent_datetime, so they are left out: a Long-Running Query alert cannot name the Agent job and step, and Running Jobs and Agent Status do not collect on RDS. msdb.dbo.backupset needs no grant, public already reads it. */");
+            Line("/* Optional: SQL Agent job history. RDS refuses the grants on sysjobsteps, sysjobschedules, syscategories, syssessions and agent_datetime, so they are left out: a Long-Running Query alert cannot name the Agent job and step, and Running Jobs and Agent Status do not collect on RDS. Job History is complete without them apart from the job category, which shows as empty (the collector reads it as NULL when the login cannot read syscategories). msdb.dbo.backupset needs no grant, public already reads it. */");
         }
         else
         {
@@ -588,7 +588,15 @@ public static class MonitoringGrantScript
             .ToList();
 
         /* The last column names who connected, so a missing grant's statement is for the login that lacks it. */
-        columns.Add(entries.Any(e => e.Scope == GrantScope.Server) ? "SUSER_SNAME() AS who" : "USER_NAME() AS who");
+        var serverScope = entries.Any(e => e.Scope == GrantScope.Server);
+        columns.Add(serverScope ? "SUSER_SNAME() AS who" : "USER_NAME() AS who");
+        if (serverScope)
+        {
+            /* #6889: online user databases the login cannot enter. The grants above can all be held and these still be empty to it,
+               because a database needs a user (or CONNECT ANY DATABASE); the per-database collectors drop such a database silently. */
+            columns.Add("(SELECT COUNT_BIG(*) FROM sys.databases AS d WHERE d.database_id > 4 AND d.database_id < 32761 AND d.state = 0 AND d.name <> N'rdsadmin' AND HAS_DBACCESS(d.name) = 0) AS no_user_dbs");
+        }
+
         return "SELECT " + string.Join(", ", columns) + ";";
     }
 
@@ -611,6 +619,24 @@ public static class MonitoringGrantScript
 
         return missing;
     }
+
+    /// <summary>
+    /// The warning the connection test adds when online user databases cannot be entered by the login (#6889), or null for none.
+    /// </summary>
+    public static string? DescribeNoUserDatabases(long count, string principal, bool awsRds)
+    {
+        if (count <= 0)
+        {
+            return null;
+        }
+
+        var text = $"{count} online user database(s) cannot be entered by this login, so the per-database collectors skip them";
+        return awsRds
+            ? text + $": Amazon RDS has no CONNECT ANY DATABASE, so run CREATE USER {Quote(principal)} FOR LOGIN {Quote(principal)} in each of them. The --grant-script --rds command prints it for every current database."
+            : text + $": run CREATE USER {Quote(principal)} FOR LOGIN {Quote(principal)} in each of them, or grant CONNECT ANY DATABASE.";
+    }
+
+    private static string Quote(string name) => "[" + name.Replace("]", "]]", StringComparison.Ordinal) + "]";
 
     /// <summary>
     /// The warning the connection test adds for missing grants, or null when none is missing. One sentence per grant, each with the
