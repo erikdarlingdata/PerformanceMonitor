@@ -551,6 +551,47 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         }
     }
 
+    /// <summary>#6860: the fleet form names each row by the one answer-name rule (#6179), not by the reader's own SQL label. A display name
+    /// one server holds answers by that name, and two servers that share a display name answer by their keys, which pick exactly one server
+    /// when passed back as <c>server_name</c>.</summary>
+    [Fact]
+    public async Task TheFleetForm_NamesEachRowByTheAnswerNameRule()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            const string shared = "Payroll Agent Box";
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1 WHERE server_id = $2", shared, ServerA);
+
+            var held = await DarlingMcpJobTools.GetJobHistory(postgres, null, as_of: AsOfText, cancellationToken: ct);
+            using (var doc = JsonDocument.Parse(held))
+            {
+                var names = doc.RootElement.GetProperty("runs").EnumerateArray().Select(r => r.GetProperty("server").GetString()).Distinct().Order().ToArray();
+                Assert.Equal(new[] { NameB, shared }.Order().ToArray(), names);
+            }
+
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1 WHERE server_id = $2", shared, ServerB);
+            var clash = await DarlingMcpJobTools.GetJobHistory(postgres, null, as_of: AsOfText, cancellationToken: ct);
+            using (var doc = JsonDocument.Parse(clash))
+            {
+                var names = doc.RootElement.GetProperty("runs").EnumerateArray().Select(r => r.GetProperty("server").GetString()).Distinct().Order().ToArray();
+                Assert.Equal(new[] { NameA, NameB }.Order().ToArray(), names);
+            }
+
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
     [Fact]
     public async Task Filters_AndFleetMode_AndLimit()
     {

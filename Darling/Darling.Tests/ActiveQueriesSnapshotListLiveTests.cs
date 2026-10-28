@@ -152,6 +152,58 @@ public sealed class ActiveQueriesSnapshotListLiveTests
         }
     }
 
+    /// <summary>#6860: the snapshots form names a display-named server by its display name (#6179), not its connection key, in the
+    /// answer's <c>server</c>, in both empty sentences and in the not_collected sentence, as the row-list form does.</summary>
+    [Fact]
+    public async Task ADisplayNamedServer_IsAnsweredByItsDisplayName_NotItsConnectionKey()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live active-queries snapshot list test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedAsync(cs!, ct);
+            await using (var connection = new NpgsqlConnection(cs))
+            {
+                await connection.OpenAsync(ct);
+                await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET display_name = 'Orders Primary' WHERE server_id = $1", ServerId);
+            }
+
+            var list = Parse(await DarlingMcpSessionTools.GetActiveQueries(postgres, ServerName, snapshots_only: true, cancellationToken: ct));
+            Assert.Equal("Orders Primary", list.GetProperty("server").GetString());
+            Assert.DoesNotContain(ServerName, list.GetRawText(), StringComparison.Ordinal);
+
+            var filtered = Parse(await DarlingMcpSessionTools.GetActiveQueries(postgres, "Orders Primary", database_name: "no_such_db", snapshots_only: true, cancellationToken: ct));
+            Assert.Equal("empty", filtered.GetProperty("status").GetString());
+            Assert.Contains("Orders Primary", filtered.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(ServerName, filtered.GetRawText(), StringComparison.Ordinal);
+
+            var miss = Parse(await DarlingMcpSessionTools.GetActiveQueries(postgres, ServerName, collection_time: "2001-01-01T00:00:00.0000000", cancellationToken: ct));
+            Assert.Contains("Orders Primary", miss.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(ServerName, miss.GetRawText(), StringComparison.Ordinal);
+
+            await using (var connection = new NpgsqlConnection(cs))
+            {
+                await connection.OpenAsync(ct);
+                await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM query_snapshots WHERE server_id = {ServerId}");
+                await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET engine_kind = 'postgres' WHERE server_id = $1", ServerId);
+            }
+
+            var unmet = Parse(await DarlingMcpSessionTools.GetActiveQueries(postgres, ServerName, snapshots_only: true, cancellationToken: ct));
+            Assert.Equal("not_collected", unmet.GetProperty("status").GetString());
+            Assert.Contains("Orders Primary", unmet.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(ServerName, unmet.GetRawText(), StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /// <summary>
     /// Four captures at 5, 4, 3 and 2 minutes before now, each with 123456 microseconds. 1: sessions 51 (A, a victim of 91), 91 (B, its head
     /// blocker) and 52 (A). 2: 53 (A) and 54 (B). 3: 55 (A) and an idle WAITFOR shell (A). 4: a WAITFOR shell alone. 51 waits on LCK_M_S.

@@ -140,11 +140,12 @@ public sealed class DarlingMcpJobTools
             /* Fleet-wide when no server is named: the resolver would auto-pick or refuse, and neither is the
                answer to "every server". A named server resolves through the registry as everywhere else. */
             (int ServerId, string DisplayName)? scope = null;
+            /* #6860: the registry is read in both forms: the one rule for the name an answer shows (AnswerNameOf, #6179) names every row. */
+            var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
+            if (fault != null) return fault;
             if (!string.IsNullOrWhiteSpace(server_name))
             {
-                var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
-                if (fault != null) return fault;
-                /* #6860: the answer names the server by its display name (#6179), like every other tool, not the registry connection key. */
+                /* #6860: the answer names the server by its display name (#6179), not the registry connection key. */
                 var (resolved, error) = DarlingServerResolver.ResolveOrErrorForAnswer(servers, server_name);
                 if (error != null) return error;
                 scope = (resolved.ServerId, resolved.DisplayName);
@@ -161,7 +162,12 @@ public sealed class DarlingMcpJobTools
             var fetched = await DarlingJobHistoryReader.GetAsync(
                 postgres, requestedStart, scope?.ServerId, limit + 1, McpCommandDeadlines.ReadSeconds, filter, cancellationToken);
             var truncated = fetched.Count > limit;
-            var rows = fetched.Take(limit).ToList();
+            /* The reader's SQL label is the Viewer's column. The answer takes its name from AnswerNameOf instead, so a row of a server the
+               enabled registry no longer holds keeps the raw collected name. */
+            var answerNames = servers.ToDictionary(x => x.ServerId, x => DarlingServerResolver.AnswerNameOf(servers, x));
+            var rows = fetched.Take(limit)
+                .Select(r => answerNames.TryGetValue(r.ServerId, out var named) ? r with { ServerName = named } : r)
+                .ToList();
 
             var source = DataWindowFloor.Source.ForCollectorTable("job_history");
             var floor = scope is { } one
