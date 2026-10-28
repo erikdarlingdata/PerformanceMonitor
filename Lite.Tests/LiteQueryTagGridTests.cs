@@ -154,7 +154,7 @@ public sealed class LiteQueryTagGridTests : IClassFixture<SharedDuckDbFixture>
 
         var plan = view.Tables.Single(t => t.Section == "plan_cache");
         Assert.Equal("Tag", plan.Columns[0]);
-        double Cpu(QueryTagUsageRow r) => double.Parse(r.Cells[plan.Columns.ToList().IndexOf("cpu_ms") - 1], System.Globalization.CultureInfo.InvariantCulture);
+        double Cpu(QueryTagUsageRow r) => double.Parse(r.Cells[plan.Columns.ToList().IndexOf("CPU (ms)") - 1], System.Globalization.CultureInfo.InvariantCulture);
         var own = plan.Rows.Where(r => r.Kind == "tag").Sum(r => OwnCpu(r, plan));
         Assert.Equal(Cpu(plan.Rows.Single(r => r.Kind == "total")), own + Cpu(plan.Rows.Single(r => r.Kind == "untagged")), 3);
         Assert.Equal(15_000, Cpu(plan.Rows.Single(r => r.Kind == "total")), 3);
@@ -166,7 +166,7 @@ public sealed class LiteQueryTagGridTests : IClassFixture<SharedDuckDbFixture>
     }
 
     private static double OwnCpu(QueryTagUsageRow row, QueryTagUsageTable table) =>
-        double.Parse(row.Cells[table.Columns.ToList().IndexOf("cpu_ms") - 1], System.Globalization.CultureInfo.InvariantCulture);
+        double.Parse(row.Cells[table.Columns.ToList().IndexOf("CPU (ms)") - 1], System.Globalization.CultureInfo.InvariantCulture);
 
     [Fact]
     public async Task ByTagView_ATagThatMatchesNothing_SaysSoAtTheTop()
@@ -188,9 +188,9 @@ public sealed class LiteQueryTagGridTests : IClassFixture<SharedDuckDbFixture>
 
         var view = QueryTagUsageView.Build(data, [(Server, "one"), (Server + 1, "two")], true, null);
 
-        Assert.Contains(view.Tables, t => t.Title == "plan_cache - one");
-        Assert.Contains(view.Tables, t => t.Title == "plan_cache - two" && t.Status == "empty");
-        Assert.Contains(view.Tables, t => t.Title == "plan_cache - all servers");
+        Assert.Contains(view.Tables, t => t.Title == "Plan cache - one");
+        Assert.Contains(view.Tables, t => t.Title == "Plan cache - two" && t.Status == "empty");
+        Assert.Contains(view.Tables, t => t.Title == "Plan cache - all servers");
     }
 
     [Fact]

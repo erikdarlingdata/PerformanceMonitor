@@ -2,6 +2,7 @@
 // Licensed under the terms in the LICENSE file in the repository root.
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -849,6 +850,45 @@ public sealed class PgDeadlockLogParserTests
             async () => await PgDeadlocksCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None));
 
         Assert.Equal("EST", ex.ObservedZone);
+    }
+
+    /// <summary>
+    /// #6866: a target whose log_timezone is a named local zone. The collector reads the zone column, asks the
+    /// target to prove the stamp, and stores the proven UTC instant, never the local clock reading. A stamp the
+    /// target does not prove is skipped and counted, not stored.
+    /// </summary>
+    [Fact]
+    public async Task UnderANamedLocalLogTimezone_TheCollectorStoresTheProvenInstant_AndSkipsAnUnprovenStamp()
+    {
+        var berlin = RealBlock.Replace(" UTC [", " CEST [", StringComparison.Ordinal);
+        var asked = new List<PgLogZonePair>();
+
+        var context = MakeContext();
+        context.PgLogZoneResolver = (setting, pairs, _) =>
+        {
+            Assert.Equal("Europe/Berlin", setting);
+            asked.AddRange(pairs);
+            return Task.FromResult<PgLogZoneMap?>(PgLogZoneMap.FromMatches(new[]
+            {
+                ("2026-08-26 22:25:24.100", "CEST", 1, new DateTime(2026, 8, 26, 20, 25, 24, 100, DateTimeKind.Utc)),
+            }));
+        };
+
+        var rows = await PgDeadlocksCollector.Instance.ReadAsync(
+            new FakeCollectorDataReader(new object[] { berlin, "Europe/Berlin" }), context, CancellationToken.None);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(new DateTime(2026, 8, 26, 20, 25, 24, 100, DateTimeKind.Utc), row.OccurredAtUtc);
+        Assert.Equal(new PgLogZonePair("2026-08-26 22:25:24.100", "CEST"), Assert.Single(asked));
+
+        var unproven = MakeContext();
+        unproven.PgLogZoneResolver = (_, _, _) => Task.FromResult<PgLogZoneMap?>(PgLogZoneMap.Empty);
+
+        var none = await PgDeadlocksCollector.Instance.ReadAsync(
+            new FakeCollectorDataReader(new object[] { berlin, "Europe/Berlin" }), unproven, CancellationToken.None);
+
+        Assert.Empty(none);
+        Assert.Equal(3, Assert.Single(unproven.Measurements).Value);
     }
 
     /// <summary>

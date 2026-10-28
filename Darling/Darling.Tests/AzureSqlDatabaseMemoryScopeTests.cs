@@ -186,6 +186,21 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
         }
     }
 
+    /// <summary>#6878: the OVER_PROVISIONED verdict comes from the CPU test, so its memory clause states the buffer pool share without
+    /// judging it ("only"), while RIGHT_SIZED says "well-utilized" only at or above the 50% bar, so 74% and 53% read alike.</summary>
+    [Fact]
+    public void OverProvisionedAndRightSizedSentences_StateTheBufferPoolShare_WithoutContradictingEachOther()
+    {
+        var over = ServerHardwareScope.OverProvisionedExplanation(1.1m, 31, 74.0, azureSqlDatabase: false);
+        Assert.Equal(
+            "CPU is lightly loaded (avg 1.1%, max 31%) and the buffer pool uses 74% of physical RAM. This server may have more resources than it needs.",
+            over);
+        Assert.DoesNotContain("only", over, StringComparison.Ordinal);
+        Assert.Equal(
+            "CPU is moderately loaded (avg 40.0%, p95 62.0%) and memory is well-utilized (buffer pool uses 53% of physical RAM). No action needed.",
+            ServerHardwareScope.RightSizedExplanation(40m, 62m, 62, 0m, 53.0, azureSqlDatabase: false));
+    }
+
     [Fact]
     public void OverProvisionedSentence_OnAzureSqlDatabase_CitesTheBufferPoolShare_OfTheDatabasesMemoryLimit()
     {
@@ -193,11 +208,11 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
         var onBox = ServerHardwareScope.OverProvisionedExplanation(3.2m, 11, 40.0, azureSqlDatabase: false);
 
         Assert.Equal(
-            "CPU is lightly loaded (avg 3.2%, max 11%) and buffer pool uses only 40% of the database's memory limit. This database may have more resources than it needs.",
+            "CPU is lightly loaded (avg 3.2%, max 11%) and the buffer pool uses 40% of the database's memory limit. This database may have more resources than it needs.",
             onAzure);
         Assert.DoesNotContain("physical RAM", onAzure, StringComparison.Ordinal);
         Assert.Equal(
-            "CPU is lightly loaded (avg 3.2%, max 11%) and buffer pool uses only 40% of physical RAM. This server may have more resources than it needs.",
+            "CPU is lightly loaded (avg 3.2%, max 11%) and the buffer pool uses 40% of physical RAM. This server may have more resources than it needs.",
             onBox);
     }
 

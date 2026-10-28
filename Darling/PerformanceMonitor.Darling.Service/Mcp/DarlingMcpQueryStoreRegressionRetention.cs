@@ -39,7 +39,7 @@ internal static class RetentionCause
             return null;
         }
 
-        if (!await CollectedBeforeAsync(postgres, serverId, baselineStart, cancellationToken))
+        if (!await CollectedBeforeAsync(postgres, serverId, baselineStart, registrationStandsIn: false, cancellationToken))
         {
             return null;
         }
@@ -48,6 +48,42 @@ internal static class RetentionCause
            data's start. The baseline is then the partial span from there, never the whole 7 days, which the kept data cannot hold. */
         return $"The baseline window ({Date(baselineStart)} to {Date(baselineEnd)}) is older than this server's {DataKind(fromTables)}, which starts {Date(kept)}, "
             + $"so there is no baseline to compare against. An hours_back shorter than the span from {Date(kept)} to the window's end moves the baseline's end past that date, and the read then compares against the partial baseline from {Date(kept)} to that end.";
+    }
+
+    /// <summary>#6877: the answer for a window that holds nothing on either side because it ENDS before the kept data starts, which an
+    /// <c>as_of</c> replay can ask for. Null (keep the first-interval and never-collected answers) unless the data starts at or after
+    /// the window's end (less the slack) and the server was being monitored before the window began. The sentence says where the kept
+    /// data starts and that the window's data may have been dropped by retention, never that it was: the evidence is a productive run
+    /// at or before the window's start (or, past the collection log's horizon, the registration date), not one inside the window.
+    /// The caller carries the same window-floor hints.</summary>
+    internal static async Task<(string Message, DateTime Floor)?> ForWindowAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime windowStart, DateTime windowEnd, DateTime? floor, bool fromTables,
+        CancellationToken cancellationToken)
+    {
+        /* On the raw path the window-floor probe is no help for a window that ends before the data starts: with no row at or before
+           the window's end it falls back to the server's registration date, which is older than the data. So the server's oldest
+           stored row is read here and stands for where the data starts. The table path's floor is the arms' own start, a real row. */
+        if (!fromTables)
+        {
+            await using var oldest = postgres.CreateCommand("SELECT min(collection_time) FROM collect.query_store_stats WHERE server_id = $1");
+            oldest.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(oldest, serverId);
+            floor = await oldest.ExecuteScalarAsync(cancellationToken) is DateTime first ? first : null;
+        }
+
+        if (floor is not { } kept || kept + DurationTrendRouting.TruncationSlack < windowEnd)
+        {
+            return null;
+        }
+
+        if (!await CollectedBeforeAsync(postgres, serverId, windowStart, registrationStandsIn: true, cancellationToken))
+        {
+            return null;
+        }
+
+        return ($"This window ({Date(windowStart)} to {Date(windowEnd)}) is older than this server's {DataKind(fromTables)}, which starts {Date(kept)}, "
+            + "so there is nothing to compare. This server was already being monitored before this window began, so the window's data may have been dropped by retention. "
+            + "get_collection_health shows whether the collector was running then.", kept);
     }
 
     /// <summary>The answer for a database filter, reached only when the server has a baseline. The kept data starts inside the baseline
@@ -62,7 +98,7 @@ internal static class RetentionCause
             return null;
         }
 
-        if (!await CollectedBeforeAsync(postgres, serverId, baselineStart, cancellationToken))
+        if (!await CollectedBeforeAsync(postgres, serverId, baselineStart, registrationStandsIn: false, cancellationToken))
         {
             return null;
         }
@@ -80,18 +116,28 @@ internal static class RetentionCause
     /// start plus the shared slack: Query Store was being collected then, so data from the baseline window existed and retention is
     /// what removed it. Registration is not enough, because Query Store can be turned on weeks after a server is registered. The log
     /// keeps 60 days (<see cref="DarlingRetentionHorizons.CollectionLogRetentionDays"/>), so it reaches back past any baseline window
-    /// a read without as_of asks for.</summary>
-    private static async Task<bool> CollectedBeforeAsync(NpgsqlDataSource postgres, int serverId, DateTime baselineStart, CancellationToken cancellationToken)
+    /// a read without as_of asks for.
+    /// <para>#6877: <paramref name="registrationStandsIn"/> is true only for <see cref="ForWindowAsync"/>, whose sentence claims no more
+    /// than "monitored before the window": for a window older than the log's horizon the registration date then stands in for the
+    /// aged-out log. <see cref="ForServerAsync"/> and <see cref="ForDatabaseAsync"/> say retention dropped the baseline, which
+    /// registration does not support, so they pass false and keep #6829's log-only answer however old the replay is.</para></summary>
+    private static async Task<bool> CollectedBeforeAsync(NpgsqlDataSource postgres, int serverId, DateTime baselineStart, bool registrationStandsIn, CancellationToken cancellationToken)
     {
         await using var command = postgres.CreateCommand(CollectedBeforeSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddText(command, "query_store");
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(baselineStart.Add(DurationTrendRouting.TruncationSlack), DateTimeKind.Unspecified) });
+        var cutoff = DateTime.SpecifyKind(baselineStart.Add(DurationTrendRouting.TruncationSlack), DateTimeKind.Unspecified);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DarlingRetentionHorizons.CollectionLogHorizon(DateTime.UtcNow) });
+        DarlingMcpReadParameters.AddBoolean(command, registrationStandsIn);
         return await command.ExecuteScalarAsync(cancellationToken) is true;
     }
 
-    /// <summary>$1 server_id, $2 collector_name, $3 the latest run time that counts (naive UTC).</summary>
+    /// <summary>$1 server_id, $2 collector_name, $3 the latest run time that counts (naive UTC), $4 the collection log's horizon (naive UTC),
+    /// $5 whether the registration date may stand in. #6877: for the window answer only, a window older than the log's horizon (60 days) cannot be answered by the log, whose rows aged out, so the server's oldest
+    /// stored evidence stands in: the day it was added to monitoring (servers.created_date). That is weaker than a productive run, and
+    /// is used only where the log cannot say, so a window the log still covers is never decided by it.</summary>
     internal const string CollectedBeforeSql = """
         SELECT EXISTS
         (
@@ -102,6 +148,18 @@ internal static class RetentionCause
             AND   status = 'SUCCESS'
             AND   rows_collected > 0
             AND   collection_time <= $3
+        )
+        OR
+        (
+            $5
+            AND $3 < $4
+            AND EXISTS
+            (
+                SELECT 1
+                FROM servers
+                WHERE server_id = $1
+                AND   created_date <= $3
+            )
         )
         """;
 }
