@@ -96,8 +96,8 @@ public sealed class PgLogZoneMap
 /// match, and is skipped and counted, never converted.</para>
 ///
 /// <para><b>One round trip per read.</b> The distinct stamps go in as two arrays and the matches come out of one
-/// command, never one trip per line. The session zone is set with <c>set_config(.., is_local := true)</c>, which
-/// lasts to the end of the command and leaves the pooled connection as it found it.</para>
+/// command, never one trip per line. The session zone is set with <c>set_config(.., is_local := true)</c> inside a
+/// transaction of its own, which ends with the read and leaves the pooled connection as it found it.</para>
 /// </summary>
 public static class PgLogNamedZone
 {
@@ -131,7 +131,7 @@ FROM (
                c.candidate,
                CASE WHEN p.stamp LIKE '%.%' THEN 'YYYY-MM-DD HH24:MI:SS.MS' ELSE 'YYYY-MM-DD HH24:MI:SS' END)
                || ' ' || pg_catalog.to_char(c.candidate, 'TZ') AS rendered
-    FROM pg_catalog.unnest(@stamps::text[], @zones::text[]) AS p(stamp, zone)
+    FROM ROWS FROM (pg_catalog.unnest(@stamps::text[]), pg_catalog.unnest(@zones::text[])) AS p(stamp, zone)
     CROSS JOIN LATERAL (
         SELECT DISTINCT (p.stamp::timestamp AT TIME ZONE 'UTC')
                - pg_catalog.date_part('timezone', (p.stamp::timestamp AT TIME ZONE 'UTC') + h.h * interval '1 hour')::integer
@@ -240,7 +240,12 @@ GROUP BY m.stamp, m.zone;";
 
         var askable = pairs.Where(p => IsAskable(p.Stamp)).Distinct().ToList();
 
+        /* An explicit transaction, so the local session zone set by statement one holds for statement two whatever the
+           driver does about implicit transactions across a multi-statement command. Rolled back on dispose: it reads only. */
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandTimeout = commandTimeoutSeconds;
         command.CommandText = ResolveSql;
         AddParameter(command, "zone", logTimezoneSetting.Trim());
