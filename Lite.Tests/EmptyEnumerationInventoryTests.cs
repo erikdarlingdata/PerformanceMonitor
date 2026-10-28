@@ -114,7 +114,7 @@ public sealed class EmptyEnumerationInventoryTests : IClassFixture<SharedDuckDbF
 
         /* Named outright as well as compared, so the failure message names the drift rather than a set. */
         Assert.Equal(
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "query_store", "database_scoped_config", "index_object_stats", "plan_correction", "query_store_health", "query_store_forced_plans", "query_store_hints" },
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "query_store", "database_scoped_config", "index_object_stats", "plan_correction", "query_store_health", "query_store_forced_plans", "query_store_hints", "identity_capacity" },
             enumerators);
 
         foreach (var name in CollectorCatalog.All.Select(c => c.Name))

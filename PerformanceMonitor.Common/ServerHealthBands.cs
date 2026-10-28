@@ -1662,6 +1662,7 @@ namespace PerformanceMonitor.Common
             "query_store_health",
             "query_store_forced_plans",
             "query_store_hints",
+            "identity_capacity",
         };
 
         /// <summary>

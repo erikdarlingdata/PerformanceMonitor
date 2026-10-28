@@ -2450,6 +2450,39 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
         "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.HashHourlyCreateSql;
 
     /// <summary>
+    /// V222 (#6875) - <c>collect.identity_capacity</c>: how full the identity columns are, read from <c>sys.identity_columns</c> by
+    /// <c>IdentityCapacityCollector</c> every six hours, per database: the top 20 columns above 10 percent used (value, seed, increment,
+    /// type, precision and the percent) plus ONE all-NULL marker row (<c>column_name</c> NULL) per scanned database, so a database with no
+    /// high column reads as scanned and clean, and one that was not scanned has no marker. A PLAIN table on every store
+    /// (<c>StaysPlainTable</c>), 90-day time-sliced DELETE, at most 21 rows per database per pass. Columns and the (server_id,
+    /// collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a fresh store (V1's catalog walk) and an upgraded one
+    /// agree. The marker index finds a database's newest scan by one seek. New table, no data moves, no grant (the <c>collect</c> schema
+    /// carries blanket SELECT). Every statement is idempotent.
+    /// </summary>
+    private const string V222Sql = @"
+CREATE TABLE IF NOT EXISTS collect.identity_capacity (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    table_name text,
+    column_name text,
+    data_type text,
+    type_precision integer,
+    last_value numeric(38,0),
+    seed_value numeric(38,0),
+    increment_value numeric(38,0),
+    percent_used double precision
+);
+
+CREATE INDEX IF NOT EXISTS idx_identity_capacity_time ON collect.identity_capacity(server_id, collection_time);
+
+CREATE INDEX IF NOT EXISTS idx_identity_capacity_markers
+    ON collect.identity_capacity (server_id, database_name, collection_time) WHERE column_name IS NULL;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2845,6 +2878,7 @@ $rung$;";
         new Migration(219, "query-store-self-keys", V219Sql),
         new Migration(220, "job-history-success-index", V220Sql),
         new Migration(221, "query-store-hash-hourly", V221Sql),
+        new Migration(222, "identity-capacity", V222Sql),
     };
 
     /// <summary>

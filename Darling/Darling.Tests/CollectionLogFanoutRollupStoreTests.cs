@@ -346,7 +346,7 @@ public class CollectionLogFanoutRollupStoreTests
             .Select(f => System.IO.Path.GetFileNameWithoutExtension(f))
             .ToList();
 
-        Assert.Equal(7, enumerating.Count);
+        Assert.Equal(8, enumerating.Count);
 
         foreach (var typeName in enumerating)
         {

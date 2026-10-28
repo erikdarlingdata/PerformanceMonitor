@@ -25,8 +25,8 @@ GRANT VIEW SERVER STATE TO [YourLogin];
 GRANT CONNECT ANY DATABASE TO [YourLogin];
 
 /* Catalog visibility. Catalog views enforce permissions by HIDING ROWS, not by erroring:
-   without this, sys.tables / sys.indexes (the index and object collectors) and the AG
-   catalog views return zero rows that look exactly like "no data" (see the AG note below). */
+   without this, sys.tables / sys.indexes (the index and object collectors), sys.identity_columns
+   (the identity column capacity collector) and the AG catalog views return zero rows that look exactly like "no data" (see the AG note below). */
 GRANT VIEW ANY DEFINITION TO [YourLogin];
 
 /* The deadlock, blocked-process and attention Extended Events sessions, and the opt-in long-query trace session.
