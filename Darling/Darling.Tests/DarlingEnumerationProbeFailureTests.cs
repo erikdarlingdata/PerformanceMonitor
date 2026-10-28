@@ -280,7 +280,8 @@ public sealed class DarlingEnumerationProbeFailureTests
             Deltas = null!,
         });
 
-        Assert.Contains("HAS_DBACCESS(d.name) = 1", plan!.Text, StringComparison.Ordinal);
+        /* #6889: the screen moved into the loop so the skipped databases are reported instead of dropped. */
+        Assert.Contains("IF HAS_DBACCESS(@db) = 0", plan!.Text, StringComparison.Ordinal);
     }
 
     /* ── helpers ── */
