@@ -55,19 +55,26 @@ public static class QueryTagRollupHashRoute
     /// pair of the allowed servers whose table rows are not valid (<c>hash_built_seq</c> NULL or different from <c>late_seq</c>). $1 first hour,
     /// $2 end of the last whole hour (exclusive), $3 the allowed server ids. <c>late_write</c> (#6865) is true for a pair whose rollup rows are
     /// stale too (<c>built_seq</c> differs from <c>late_seq</c>: a late writer touched the hour), false for a pair stale only for the hash table.
+    /// <c>failing</c> (#6865) marks a third kind of row: a NULL <c>server_id</c> with <c>failing</c> true is an hour with a record in
+    /// <c>collect.query_store_compose_stamp_failures</c>, an hour the builder does not build in its backlog pass (in back-off or being retried).
     /// </summary>
     internal const string LedgerSql = """
-        SELECT h.hour, NULL::integer AS server_id, false AS late_write
+        SELECT h.hour, NULL::integer AS server_id, false AS late_write, false AS failing
         FROM collect.query_store_compose_stamp_hours AS h
         WHERE h.hour >= $1
         AND   h.hour < $2
         UNION ALL
-        SELECT b.hour, b.server_id, b.built_seq IS DISTINCT FROM b.late_seq AS late_write
+        SELECT b.hour, b.server_id, b.built_seq IS DISTINCT FROM b.late_seq AS late_write, false AS failing
         FROM collect.query_store_compose_stamp_built AS b
         WHERE b.hour >= $1
         AND   b.hour < $2
         AND   b.server_id = ANY($3)
         AND   b.hash_built_seq IS DISTINCT FROM b.late_seq
+        UNION ALL
+        SELECT f.hour, NULL::integer AS server_id, false AS late_write, true AS failing
+        FROM collect.query_store_compose_stamp_failures AS f
+        WHERE f.hour >= $1
+        AND   f.hour < $2
         """;
 
     /// <summary>Which source answers what: the (day, server) pairs read from the day table, the (hour, server) pairs read from the hourly table and the (server, from, to) ranges read from the wide table, each range <c>[from, to)</c> with the statement's window-end bound applied on top.
@@ -182,8 +189,9 @@ public static class QueryTagRollupHashRoute
     /// are read exactly as without a backlog (table hours, day rows, the tail, and real late-write stale pairs from the wide table).
     /// Pure. <paramref name="backlogHours"/> are the backlog hours of the ledger. Returns each server's start moved to the end of the newest backlog hour
     /// when that is later than its own start (the starts are the snapped ones), and how many distinct backlog hours lie in the span the read would
-    /// otherwise have covered (<c>HoursWaiting</c>), and how many whole hours the read leaves out, from the first whole hour of the window to the cut
-    /// (<c>HoursLeftOut</c>: the backlog hours plus every other hour before the newest one, which is the size of the gap the notes state);
+    /// otherwise have covered (<c>HoursWaiting</c>), and how many whole hours the read leaves out, from the first whole hour of the window to where the
+    /// figures start (<c>HoursLeftOut</c>: the latest server's start after the move, which is the cut unless a server's own start is already past it,
+    /// so the count and the start the notes name are the same instant; it holds the backlog hours plus every other hour before that start);
     /// an empty dictionary and 0, 0 when no backlog hour is in the span.
     /// </summary>
     public static (Dictionary<int, DateTime> Starts, int HoursWaiting, int HoursLeftOut) SpanPastBacklog(
@@ -211,7 +219,10 @@ public static class QueryTagRollupHashRoute
             moved[serverId] = CeilHour(readStart) < cut ? cut : readStart;
         }
 
-        return (moved, inSpan.Count, (int)((cut - first).TotalHours));
+        /* The count runs to the instant every surface names as the start of the figures: the latest server's snapped start, which is the cut
+           unless a server's own start (a server added later) is already past it. */
+        var figuresStart = moved.Values.Select(CeilHour).Max();
+        return (moved, inSpan.Count, (int)((figuresStart - first).TotalHours));
     }
 
     /// <summary>
@@ -252,6 +263,7 @@ public static class QueryTagRollupHashRoute
         var built = new HashSet<DateTime>();
         var stale = new HashSet<(DateTime Hour, int ServerId)>();
         var lateWriteHours = new HashSet<DateTime>();
+        var failingHours = new HashSet<DateTime>();
         await using (var ledger = new NpgsqlCommand(LedgerSql, connection) { CommandTimeout = readSeconds })
         {
             ledger.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = first });
@@ -263,7 +275,14 @@ public static class QueryTagRollupHashRoute
                 var hour = reader.GetDateTime(0);
                 if (reader.IsDBNull(1))
                 {
-                    built.Add(hour);
+                    if (reader.GetBoolean(3))
+                    {
+                        failingHours.Add(hour);
+                    }
+                    else
+                    {
+                        built.Add(hour);
+                    }
                 }
                 else
                 {
@@ -285,8 +304,10 @@ public static class QueryTagRollupHashRoute
         }
 
         /* #6865: a built hour whose pairs are stale only for the hash table (and no pair of it is a late write) is backlog: the read starts after the
-           newest one instead of reading it from the wide table. */
-        var backlog = stale.Select(p => p.Hour).Where(h => built.Contains(h) && !lateWriteHours.Contains(h)).ToHashSet();
+           newest one instead of reading it from the wide table. An hour with a failure record is not: the builder's backlog pass skips it (it is in
+           back-off, or retried by the normal selection), so it may not build for a day or more, and an hour that stays stale must not pin the cut
+           and take every older hour with it. Such an hour is read wide, as before, unless a backlog hour newer than it puts it before the cut. */
+        var backlog = stale.Select(p => p.Hour).Where(h => built.Contains(h) && !lateWriteHours.Contains(h) && !failingHours.Contains(h)).ToHashSet();
         var (moved, waiting, leftOut) = SpanPastBacklog(allowed, windowEnd, backlog);
         var plan = Split(waiting == 0 ? allowed : moved, windowEnd, built, stale, validDays) with { BacklogHoursWaiting = waiting, BacklogHoursLeftOut = leftOut };
         /* With hours left out the route answers even with no table hour in the span: today's statement would read the whole window wide. */

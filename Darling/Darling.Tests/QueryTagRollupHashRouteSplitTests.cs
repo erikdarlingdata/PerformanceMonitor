@@ -330,6 +330,24 @@ public sealed class QueryTagRollupHashRouteSplitTests
         Assert.Equal(T(9, 30), moved[2]);
         Assert.Equal(T(8), moved[3]);
         Assert.Equal(2, waiting);
-        Assert.Equal(6, leftOut);
+        /* Server 2's own start (10, snapped) is past the cut (8), so the figures start at 10 and the count runs from hour 2 to hour 10. */
+        Assert.Equal(8, leftOut);
+    }
+
+    /// <summary>
+    /// #6865: the hours left out are counted to the instant every surface names as the start of the figures, the latest server's start. A server
+    /// added later (start 9) is already past the cut (6), so the count is 7 (hour 2 to hour 9), not the 4 hours to the cut.
+    /// </summary>
+    [Fact]
+    public void SpanPastBacklog_CountsTheHoursLeftOutToTheLatestStart_WhenAServerStartsAfterTheCut()
+    {
+        var starts = new Dictionary<int, DateTime> { [1] = T(2), [2] = T(2), [3] = T(9) };
+        var (moved, waiting, leftOut) = QueryTagRollupHashRoute.SpanPastBacklog(starts, T(12, 20), Backlog(5));
+        Assert.Equal(T(6), moved[1]);
+        Assert.Equal(T(6), moved[2]);
+        Assert.Equal(T(9), moved[3]);
+        Assert.Equal(1, waiting);
+        Assert.Equal(7, leftOut);
+        Assert.Equal(T(9), moved.Values.Select(QueryTagRollupHashRoute.CeilHour).Max());
     }
 }

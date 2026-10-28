@@ -670,6 +670,113 @@ AND first_execution_time <= LEAST(TIMESTAMP '{At(group.Key.To)}', TIMESTAMP '{At
     }
 
     /// <summary>
+    /// #6865: an hour the builder will not build soon (a record in <c>collect.query_store_compose_stamp_failures</c>, here in daily back-off) is not
+    /// backlog, so it does not pin the cut. A 168-hour fleet read keeps every older hour and reads the stuck hour from the wide table, exactly as before the
+    /// backlog cut existed. With the record gone the same hour is backlog and the read does cut there: that is what the record changes.
+    /// The 168-hour window is read through the reader with starts of its own (the seed holds 28 built hours, the older ones are plain wide hours),
+    /// and the tool is read for the seed's own 24-hour window.
+    /// </summary>
+    [Fact]
+    public async Task AnHourInBackoff_DoesNotPinTheCut_SoTheOlderHoursStayInTheRead()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var a = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            var stuck = a.HourNow.AddHours(-20);
+            await ExecAsync(a.Connection, $"UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL WHERE hour = TIMESTAMP '{At(stuck)}'", ct);
+            await ExecAsync(a.Connection, $"DELETE FROM collect.query_store_hash_hourly WHERE hour = TIMESTAMP '{At(stuck)}'", ct);
+            await ExecAsync(a.Connection, $@"
+INSERT INTO collect.query_store_compose_stamp_failures (hour, failures, last_sqlstate, last_reason, last_timeout_seconds, first_failed_at, last_failed_at, retry_at)
+VALUES (TIMESTAMP '{At(stuck)}', 6, '57014', 'canceling statement due to statement timeout', 900,
+        (now() AT TIME ZONE 'UTC') - interval '3 days', (now() AT TIME ZONE 'UTC') - interval '1 hour', (now() AT TIME ZONE 'UTC') + interval '23 hours')", ct);
+
+            var windowStart = a.HourNow.AddHours(-168).AddMinutes(17);
+            var starts = Servers.ToDictionary(s => s, _ => windowStart);
+            var first = QueryTagRollupHashRoute.CeilHour(windowStart);
+
+            /* In back-off: the hour is read wide, nothing is cut, and the figures are the wide statement over the whole 168 hours. */
+            var kept = await FleetFromAsync(a, starts, ct);
+            Assert.True(kept.UsedHashHourly);
+            Assert.Equal(0, kept.BacklogHoursWaiting);
+            Assert.Equal(0, kept.BacklogHoursLeftOut);
+            Assert.All(kept.RoutedStarts!.Values, start => Assert.Equal(first, start));
+            var keptText = Canon(kept.Facts);
+            Assert.Equal(Canon(await TodaysAsync(a, Snapped(kept), a.End, ct)), keptText);
+
+            using (var doc = await ToolAsync(a, ct))
+            {
+                var section = QueryStoreSection(doc);
+                Assert.False(section.TryGetProperty("backlog_note", out _));
+                Assert.False(section.TryGetProperty("hours_left_out", out _));
+                Assert.False(section.TryGetProperty("backlog_hours_waiting", out _));
+            }
+
+            /* The record gone: the same hour is backlog, and the read starts after it, leaving out the 148 hours from the first whole hour to the cut. */
+            await ExecAsync(a.Connection, "DELETE FROM collect.query_store_compose_stamp_failures", ct);
+            var cut = await FleetFromAsync(a, starts, ct);
+            Assert.Equal(1, cut.BacklogHoursWaiting);
+            Assert.Equal((int)(stuck.AddHours(1) - first).TotalHours, cut.BacklogHoursLeftOut);
+            Assert.All(cut.RoutedStarts!.Values, start => Assert.Equal(stuck.AddHours(1), start));
+            Assert.NotEqual(keptText, Canon(cut.Facts));
+
+            using (var doc = await ToolAsync(a, ct))
+            {
+                var section = QueryStoreSection(doc);
+                Assert.Equal(1, section.GetProperty("backlog_hours_waiting").GetInt32());
+                var windowFirst = QueryTagRollupHashRoute.CeilHour(DateTime.Parse(doc.RootElement.GetProperty("window_start").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+                Assert.Equal((int)(stuck.AddHours(1) - windowFirst).TotalHours, section.GetProperty("hours_left_out").GetInt32());
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(a, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// #6865: a server added later starts after the cut. Every surface names the latest server's start as where the figures start, so the hours left
+    /// out are counted to that same instant, not to the cut. Servers 1 and 2 read from the window start, server 3 from 8 hours back, and the
+    /// backlog (hours 13 and more back) ends before server 3 starts.
+    /// </summary>
+    [Fact]
+    public async Task AServerStartingAfterTheCut_HasTheHoursLeftOutCountedToTheStartTheFiguresNameAsTheirOwn()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var a = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            var backlogBelow = a.HourNow.AddHours(-12);
+            await ExecAsync(a.Connection, $"UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL WHERE hour < TIMESTAMP '{At(backlogBelow)}'", ct);
+            await ExecAsync(a.Connection, $"DELETE FROM collect.query_store_hash_hourly WHERE hour < TIMESTAMP '{At(backlogBelow)}'", ct);
+            var later = a.HourNow.AddHours(-8).AddMinutes(17);
+            var starts = new Dictionary<int, DateTime> { [1] = a.Start, [2] = a.Start, [3] = later };
+
+            var read = await FleetFromAsync(a, starts, ct);
+            Assert.Equal(11, read.BacklogHoursWaiting);
+            var figuresStart = read.RoutedStarts!.Values.Max();
+            Assert.Equal(QueryTagRollupHashRoute.CeilHour(later), figuresStart);
+            Assert.True(figuresStart > backlogBelow, "the later server must start after the cut");
+            Assert.Equal(backlogBelow, read.RoutedStarts![1]);
+            Assert.Equal(figuresStart, read.RoutedStarts![3]);
+            /* From the first whole hour (23 back) to the later server's start (7 back), 16 hours, not the 11 to the cut. */
+            Assert.Equal((int)(figuresStart - QueryTagRollupHashRoute.CeilHour(a.Start)).TotalHours, read.BacklogHoursLeftOut);
+            Assert.Equal(16, read.BacklogHoursLeftOut);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(a, bodySucceeded);
+        }
+    }
+
+    /// <summary>
     /// #6865: when backlog covers every hash hour of the window, nothing after the cut is a valid table hour and the wide table's tail serves the whole
     /// answer. The route still answers (today's statement would read the whole window wide), but the section must not name the hash tables as a source:
     /// <c>UsedHashHourly</c>, the section's <c>tier</c> and its <c>source</c> say only what served it, and the figures are the wide statement over the tail.
