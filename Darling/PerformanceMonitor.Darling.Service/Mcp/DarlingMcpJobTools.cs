@@ -173,11 +173,10 @@ public sealed class DarlingMcpJobTools
             var keys = new Dictionary<int, string>();
             if (otherIds.Length > 0)
             {
-                await using var keyConnection = await postgres.OpenConnectionAsync(cancellationToken);
-                using var keyCommand = new NpgsqlCommand("SELECT server_id, server_name FROM servers WHERE server_id = ANY($1)", keyConnection);
-                keyCommand.Parameters.AddWithValue(otherIds);
+                await using var keyCommand = postgres.CreateCommand("SELECT server_id, server_name FROM servers WHERE server_id = ANY($1)");
                 keyCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-                using var keyReader = await keyCommand.ExecuteReaderAsync(cancellationToken);
+                keyCommand.Parameters.AddWithValue(otherIds);
+                await using var keyReader = await keyCommand.ExecuteReaderAsync(cancellationToken);
                 while (await keyReader.ReadAsync(cancellationToken))
                 {
                     keys[keyReader.GetInt32(0)] = keyReader.GetString(1);

@@ -168,7 +168,7 @@ public sealed class ActiveQueriesSnapshotListLiveTests
             await using (var connection = new NpgsqlConnection(cs))
             {
                 await connection.OpenAsync(ct);
-                await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET display_name = 'Orders Primary' WHERE server_id = $1", ServerId);
+                await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE collect.servers SET display_name = 'Orders Primary' WHERE server_id = $1", ServerId);
             }
 
             var list = Parse(await DarlingMcpSessionTools.GetActiveQueries(postgres, ServerName, snapshots_only: true, cancellationToken: ct));
@@ -187,8 +187,8 @@ public sealed class ActiveQueriesSnapshotListLiveTests
             await using (var connection = new NpgsqlConnection(cs))
             {
                 await connection.OpenAsync(ct);
-                await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM query_snapshots WHERE server_id = {ServerId}");
-                await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET engine_kind = 'postgres' WHERE server_id = $1", ServerId);
+                await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM collect.query_snapshots WHERE server_id = {ServerId}");
+                await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE collect.servers SET engine_kind = 'postgres' WHERE server_id = $1", ServerId);
             }
 
             var unmet = Parse(await DarlingMcpSessionTools.GetActiveQueries(postgres, ServerName, snapshots_only: true, cancellationToken: ct));
@@ -241,7 +241,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM query_snapshots WHERE server_id = {ServerId}; DELETE FROM servers WHERE server_id = {ServerId};",
+            $"DELETE FROM collect.query_snapshots WHERE server_id = {ServerId}; DELETE FROM collect.servers WHERE server_id = {ServerId};",
             connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
