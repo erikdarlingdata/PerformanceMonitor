@@ -20,7 +20,7 @@
     get_ word that is no tool (a procedure dbo.get_orders, a server get_prod), and it must reach the page as written.
     WebPlainTextTests checks this list against the MCP tool registry both ways, so it cannot drift. */
 export const MCP_TOOL_NAMES = [
-  "get_active_queries", "get_active_query_plan_xml", "get_ag_health", "get_alert_history", "get_alert_settings",
+  "get_active_queries", "get_active_query_plan_xml", "get_ag_health", "get_agent_alerts", "get_alert_history", "get_alert_settings",
   "get_analysis_facts", "get_analysis_findings", "get_blocked_process_xml", "get_blocking", "get_blocking_plan_xml",
   "get_blocking_stats", "get_blocking_trend", "get_change_watches", "get_known_patterns", "get_client_timeouts", "get_collection_health", "get_collection_log", "get_collection_state", "get_collector_cost", "get_collector_schedules",
   "get_collector_stall_probes", "get_agent_changes", "get_command_result", "get_compiles_after_evict", "get_cpu_by_database", "get_cpu_scheduler_pressure", "get_cpu_utilization", "get_current_waits_trend",

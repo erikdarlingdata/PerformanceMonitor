@@ -43,7 +43,10 @@ public partial class ViewerServerTab
     /// collection, so a load-time collector would read as switched off a day after it ran.
     /// </summary>
     internal static string? SwitchedOffReasonsFor(string collectorName) =>
-        string.Equals(collectorName, "running_jobs", StringComparison.Ordinal) ? CollectorRuntimePrecondition.RunningJobsPossibleCauses : null;
+        string.Equals(collectorName, "running_jobs", StringComparison.Ordinal) ? CollectorRuntimePrecondition.RunningJobsPossibleCauses
+        /* #6874: agent_alerts has the same AppliesTo rule on AWS RDS, which the registry cannot tell from a plain SQL Server, and the tool says the same. */
+        : string.Equals(collectorName, "agent_alerts", StringComparison.Ordinal) ? CollectorRuntimePrecondition.AgentAlertsPossibleCauses
+        : null;
 
     /// <summary>
     /// The sentence for a collector that has no <c>collection_log</c> row for this server in all retained history, on a server
