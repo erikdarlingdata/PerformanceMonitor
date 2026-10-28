@@ -117,16 +117,17 @@ public sealed class CollectorEngineCapabilityTests
 
     /// <summary>
     /// The box editions and Managed Instance have NO permanent gaps: every gate in the library that names
-    /// Azure names Azure SQL DATABASE specifically. Stated as a derived zero rather than as prose, so the day
-    /// a gate starts excluding Managed Instance this says so instead of a message quietly never appearing.
+    /// Azure names Azure SQL DATABASE specifically, with one exception: agent_alerts (#6874) also excludes Managed
+    /// Instance, which refuses SQL Server Agent alerts. Stated as a derived list rather than as prose, so the day
+    /// another gate starts excluding Managed Instance this says so instead of a message quietly never appearing.
     /// </summary>
     [Fact]
-    public void BoxEditionsAndManagedInstance_HaveNoPermanentGaps()
+    public void BoxEditionsHaveNoPermanentGaps_AndManagedInstanceHasOnlyTheAgentAlertsGap()
     {
         Assert.Empty(GapsOn(Enterprise));
         Assert.Empty(GapsOn(2));
         Assert.Empty(GapsOn(4));
-        Assert.Empty(GapsOn(AzureMi));
+        Assert.Equal(new[] { "agent_alerts" }, GapsOn(AzureMi).ToArray());
     }
 
     /// <summary>A non-vacuity floor: the sweep must actually be finding gaps on Azure SQL DB, or every
