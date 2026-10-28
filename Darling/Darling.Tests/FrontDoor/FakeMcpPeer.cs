@@ -122,6 +122,12 @@ internal sealed class FakeMcpPeer : IAsyncDisposable
                         snapshot = self._servers.ToArray();
                     }
 
+                    /* A store with nothing registered answers the `empty` status envelope, as DarlingMcpDataTools.ListServers does (#6277). */
+                    if (snapshot.Length == 0)
+                    {
+                        return JsonSerializer.Serialize(new { status = "empty", message = "No servers are registered yet." });
+                    }
+
                     return JsonSerializer.Serialize(new
                     {
                         server_count = snapshot.Length,

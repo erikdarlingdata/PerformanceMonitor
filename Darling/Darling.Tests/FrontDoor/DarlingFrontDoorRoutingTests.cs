@@ -452,6 +452,19 @@ public sealed class DarlingFrontDoorRoutingTests
     }
 
     [Fact]
+    public async Task AFanOut_WithNoStoreToAsk_IsUnavailable_NotAnEmptyAllClear()
+    {
+        var directory = new FakeFrontDoorDirectory(Array.Empty<string>());
+        var peers = new FakeFrontDoorPeers { Handler = call => Task.FromResult(FakeFrontDoorPeers.Text("{}")) };
+
+        var result = await RouterOf(directory, peers).CallAsync("get_fleet_overview", Args(), agentRole: false, CancellationToken.None);
+
+        Assert.True(result.IsError);
+        Assert.Equal("unavailable", Parse(TextOf(result)).GetProperty("status").GetString());
+        Assert.Empty(peers.Calls);
+    }
+
+    [Fact]
     public async Task AFanOut_WhereEveryStoreAnswersWithAnErrorResult_IsAnError_AndOneErrorResultAmongGoodOnesIsNot()
     {
         var directory = new FakeFrontDoorDirectory("use1", "use2");

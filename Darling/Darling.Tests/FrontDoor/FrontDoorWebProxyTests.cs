@@ -55,6 +55,14 @@ internal sealed class WebFakeDirectory : IFrontDoorDirectory
 
     internal int RefreshCalls { get; private set; }
 
+    /// <summary>Makes a store read as <paramref name="health"/> with <paramref name="error"/>, the way the directory reports a store it tried.</summary>
+    internal void SetHealth(string name, FrontDoorStoreHealth health, string? error)
+    {
+        var i = _states.FindIndex(s => string.Equals(s.Store.Name, name, StringComparison.OrdinalIgnoreCase));
+        var old = _states[i];
+        _states[i] = new FrontDoorStoreState(old.Store, health, old.Servers, old.LastOkUtc, error);
+    }
+
     public IReadOnlyList<FrontDoorStoreState> Stores => _states;
 
     public FrontDoorStore? Find(string name)
@@ -138,7 +146,7 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
 
     internal static Task<FrontDoorWebHarness> StartAsync(
         IReadOnlyList<(FakeWebPeer Peer, string[] Servers)> peers, TimeSpan? peerTimeout = null, TimeProvider? time = null,
-        CancellationToken ct = default, ILogger? logger = null)
+        CancellationToken ct = default, ILogger? logger = null, CollectorRuntimeState? collector = null)
     {
         var secrets = new WebFakeSecrets();
         var directory = new WebFakeDirectory(peers.Select(p =>
@@ -146,13 +154,14 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
             secrets.SetWebToken(p.Peer.Name, p.Peer.Token);
             return (new FrontDoorStore(p.Peer.Name, new Uri("http://127.0.0.1:1/"), p.Peer.BaseUri, null), p.Servers);
         }));
-        return StartAsync(directory, secrets, peerTimeout, time, ct, logger);
+        return StartAsync(directory, secrets, peerTimeout, time, ct, logger, collector);
     }
 
     internal static async Task<FrontDoorWebHarness> StartAsync(
         WebFakeDirectory directory, WebFakeSecrets secrets, TimeSpan? peerTimeout = null, TimeProvider? time = null,
-        CancellationToken ct = default, ILogger? logger = null)
+        CancellationToken ct = default, ILogger? logger = null, CollectorRuntimeState? collector = null)
     {
+        collector ??= new CollectorRuntimeState();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Service"),
@@ -164,7 +173,7 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
         var app = builder.Build();
 
         var session = new DarlingFrontDoorWebSession(secrets, time);
-        var proxy = new DarlingFrontDoorWebProxy(directory, session, peerTimeout ?? TimeSpan.FromSeconds(30), logger ?? NullLogger.Instance, time);
+        var proxy = new DarlingFrontDoorWebProxy(directory, session, peerTimeout ?? TimeSpan.FromSeconds(30), logger ?? NullLogger.Instance, time, collector.Read);
 
         app.Use(next => context =>
         {
@@ -173,7 +182,7 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
         });
 
         var host = new DarlingWebHostService(
-            NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState());
+            NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), collector, new WebTlsCertificateState());
         host.ConfigurePipeline(app, null, networkMode: false, networkListenIp: null,
             allowedCidr: IPNetwork.Parse("127.0.0.1/32"), accessToken: FrontDoorToken, oidcClient: null,
             requireTokenWhenLoopbackOnly: true, sessionSigningKeyForTests: SigningKey, frontDoorProxy: proxy);
@@ -664,6 +673,41 @@ public sealed class FrontDoorWebProxyTests
         Assert.Equal("store_required", (string?)Json(writeBody)["status"]);
         Assert.Equal(2, only.Api.Count);
         Assert.True(door.Directory.RefreshCalls >= 1, "a name no store knows asks the directory to refresh once");
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task ThePing_AnswersStopped_WhenTheWorkerRefusedTheConfiguration()
+    {
+        var collector = new CollectorRuntimeState();
+        collector.PublishConfigurationProblems(new DarlingConfig { FrontDoor = new FrontDoorConfig { Enabled = true, Stores = new() } });
+        var a = await FakeWebPeer.StartAsync("use1");
+        await using var _a = a;
+        await using var door = await FrontDoorWebHarness.StartAsync(new[] { (a, UseServers) }, collector: collector, ct: TestContext.Current.CancellationToken);
+
+        var (ping, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/ping"));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, ping.StatusCode);
+        Assert.Equal("stopped", (string?)Json(body)["status"]);
+        Assert.Equal("configuration", (string?)Json(body)["step"]);
+        Assert.NotNull(Json(body)["detail"]);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task ThePing_AnswersDegraded_WhenEveryStoreWasTriedAndCannotBeUsed_AndOkWhenOneAnswers()
+    {
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
+        await using var _a = a;
+        await using var _b = b;
+        await using var _door = door;
+
+        door.Directory.SetHealth("use1", FrontDoorStoreHealth.Unreachable, "timed out");
+        var (oneUp, _) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/ping"));
+        door.Directory.SetHealth("usw2", FrontDoorStoreHealth.AuthFailed, "refused");
+        var (noneUp, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/ping"));
+
+        Assert.Equal(HttpStatusCode.OK, oneUp.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, noneUp.StatusCode);
+        Assert.Equal("degraded", (string?)Json(body)["status"]);
     }
 
     [Fact(Timeout = 60_000)]

@@ -289,6 +289,16 @@ internal sealed class DarlingFrontDoorDirectory : IFrontDoorDirectory, IDisposab
         var text = result.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text
             ?? throw new InvalidOperationException("the store's list_servers answer had no text");
         using var doc = JsonDocument.Parse(text);
+        /* A store with no server registered yet answers the `empty` status envelope, not a servers array (#6277): that is a
+           store that is up and answering, with zero servers, and not a store that could not be read. */
+        if (doc.RootElement.ValueKind == JsonValueKind.Object
+            && doc.RootElement.TryGetProperty("status", out var status)
+            && status.ValueKind == JsonValueKind.String
+            && status.GetString() == "empty")
+        {
+            return new List<RegisteredServer>();
+        }
+
         if (doc.RootElement.ValueKind != JsonValueKind.Object
             || !doc.RootElement.TryGetProperty("servers", out var array)
             || array.ValueKind != JsonValueKind.Array)

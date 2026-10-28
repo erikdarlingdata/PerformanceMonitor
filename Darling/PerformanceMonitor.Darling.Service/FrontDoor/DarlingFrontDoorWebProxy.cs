@@ -75,6 +75,7 @@ internal sealed class DarlingFrontDoorWebProxy
     private readonly TimeSpan _peerTimeout;
     private readonly ILogger _logger;
     private readonly TimeProvider _time;
+    private readonly Func<CollectorRuntimeState.Snapshot?>? _collector;
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastLogged = new();
 
     /* Each store's own admin_writes_off and managed_store, as its /api/session last said (null: it did not say), and when. */
@@ -87,8 +88,10 @@ internal sealed class DarlingFrontDoorWebProxy
     private readonly record struct StoreFlags(bool? AdminWritesOff, bool? ManagedStore);
 
     internal DarlingFrontDoorWebProxy(
-        IFrontDoorDirectory directory, DarlingFrontDoorWebSession session, TimeSpan peerTimeout, ILogger logger, TimeProvider? time = null)
+        IFrontDoorDirectory directory, DarlingFrontDoorWebSession session, TimeSpan peerTimeout, ILogger logger, TimeProvider? time = null,
+        Func<CollectorRuntimeState.Snapshot?>? collector = null)
     {
+        _collector = collector;
         _directory = directory;
         _session = session;
         _peerTimeout = peerTimeout;
@@ -98,12 +101,14 @@ internal sealed class DarlingFrontDoorWebProxy
 
     /// <summary>The proxy the service builds when it starts as a front door: <c>frontDoor.peerTimeoutSeconds</c> bounds each call.</summary>
     internal static DarlingFrontDoorWebProxy Create(
-        IFrontDoorDirectory directory, IFrontDoorSecrets secrets, FrontDoorConfig config, ILogger logger)
+        IFrontDoorDirectory directory, IFrontDoorSecrets secrets, FrontDoorConfig config, ILogger logger,
+        Func<CollectorRuntimeState.Snapshot?>? collector = null)
         => new(
             directory,
             new DarlingFrontDoorWebSession(secrets),
             config.EffectivePeerTimeout(),
-            logger);
+            logger,
+            collector: collector);
 
     /// <summary>Maps every <c>/api/*</c> route. It runs where the dashboard's own endpoints would, after the sign-in and role gates.</summary>
     internal void AddRoutes(WebApplication app)
@@ -157,9 +162,37 @@ internal sealed class DarlingFrontDoorWebProxy
 
     /* ── local routes ── */
 
-    /// <summary>The front door holds no store and runs no collector, so there is no collection verdict to report: it is up when it answers.</summary>
-    private static Task PingAsync(HttpContext context)
-        => WriteJsonAsync(context, StatusCodes.Status200OK, new JsonObject { ["status"] = "ok", ["front_door"] = true });
+    /// <summary>The front door runs no collector, so it has no collection verdict. Its ping still says the two things a store's does that apply
+    /// here: a <c>darling.json</c> the worker refused answers 503 <c>stopped</c> with the problems (the web host starts anyway, because it does
+    /// not validate the file), and a front door whose every store was tried and cannot be used answers 503 <c>degraded</c>. Otherwise it is
+    /// up when it answers.</summary>
+    private Task PingAsync(HttpContext context)
+    {
+        if (_collector?.Invoke() is { Phase: CollectorRuntimeState.CollectorPhase.Stopped } stopped)
+        {
+            var report = DarlingWebEndpoints.DescribePing(stopped);
+            var body = JsonSerializer.SerializeToNode(report, DarlingWebEndpoints.PingJsonOptions)!.AsObject();
+            body["front_door"] = true;
+            return WriteJsonAsync(context, report.HttpStatus, body);
+        }
+
+        /* A store that has not been tried yet (no error, not held) is not a failed one: right after start the front door is not degraded. */
+        var states = _directory.Stores;
+        var unusable = states.Count > 0 && states.All(s =>
+            s.Health == FrontDoorStoreHealth.AuthFailed
+            || (s.Health == FrontDoorStoreHealth.Unreachable && s.Error is not null));
+        if (unusable)
+        {
+            return WriteJsonAsync(context, StatusCodes.Status503ServiceUnavailable, new JsonObject
+            {
+                ["status"] = "degraded",
+                ["front_door"] = true,
+                ["detail"] = "No store can be reached right now.",
+            });
+        }
+
+        return WriteJsonAsync(context, StatusCodes.Status200OK, new JsonObject { ["status"] = "ok", ["front_door"] = true });
+    }
 
     /// <summary>The front door's own role. It is the seat the front door's gate gave this request, not a store's: a store sees only the
     /// front door's shared-token session, so personal views are off here (<c>can_own</c>) and the stores answer their own refusals.</summary>

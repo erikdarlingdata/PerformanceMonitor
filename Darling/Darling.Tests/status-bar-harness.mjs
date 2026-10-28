@@ -32,6 +32,7 @@ const context = vm.createContext({
   localTime: String,
   updateRefreshHint: () => {},
   statusbar,
+  storeHeaders: (h) => h, /* util.js: adds X-Darling-Store behind a front door (#6840); a store is not behind one */
   getSession: () => (sc.session instanceof Error ? Promise.reject(sc.session) : Promise.resolve(sc.session)),
   readTool: async (tool) => {
     counts.storeReads++;

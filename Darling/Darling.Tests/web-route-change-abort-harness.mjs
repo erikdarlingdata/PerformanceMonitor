@@ -117,6 +117,12 @@ globalThis.fetch = (url, opts = {}) => {
   fetches++; if (url.includes("get_server_summary")) serverRenders++;
   const rec = { at: now, url, signal: opts.signal || null, abortedAtStart: !!(opts.signal && opts.signal.aborted), aborted: false };
   fetchLog.push(rec);
+  /* app.js asks /api/session before it starts (#6840: is this a front door?). A store answers it at once, and the page must not wait on the
+     scenario's clock to start, so it is answered now. It stays counted in fetchLog like every other read. */
+  if (url.split("?")[0] === "/api/session") {
+    const a = answerFor(url);
+    return Promise.resolve({ ok: true, status: a.status, json: async () => a.body, text: async () => JSON.stringify(a.body) });
+  }
   return new Promise((resolve, reject) => {
     const answer = () => {
       const a = answerFor(url);

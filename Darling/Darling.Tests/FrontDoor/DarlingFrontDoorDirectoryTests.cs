@@ -133,6 +133,35 @@ public class DarlingFrontDoorDirectoryTests
     }
 
     [Fact]
+    public async Task A_store_with_no_server_registered_yet_is_ok_with_zero_servers_and_not_unreachable()
+    {
+        await using var use1 = await FakeMcpPeer.StartAsync(new[] { "SQL01" });
+        await using var use2 = await FakeMcpPeer.StartAsync(Array.Empty<string>());
+        await using var rig = new FrontDoorRig(new[] { ("use1", use1), ("use2", use2) });
+
+        await rig.Directory.RefreshAsync(Ct);
+
+        var state = rig.State("use2");
+        Assert.Equal(FrontDoorStoreHealth.Ok, state.Health);
+        Assert.Empty(state.Servers);
+        Assert.NotNull(state.LastOkUtc);
+        Assert.Null(state.Error);
+    }
+
+    [Fact]
+    public async Task Two_store_names_that_differ_only_in_case_are_one_store_and_the_first_wins()
+    {
+        await using var use1 = await FakeMcpPeer.StartAsync(new[] { "SQL01" });
+        await using var other = await FakeMcpPeer.StartAsync(new[] { "SQL99" });
+        await using var rig = new FrontDoorRig(new[] { ("use1", use1), ("USE1", other) });
+        await rig.Directory.RefreshAsync(Ct);
+
+        var only = Assert.Single(rig.Directory.Stores);
+        Assert.Equal("use1", only.Store.Name);
+        Assert.Equal("SQL01", Assert.Single(only.Servers).ServerName);
+    }
+
+    [Fact]
     public async Task A_429_holds_the_store_for_its_retry_after_and_no_call_goes_to_it_meanwhile()
     {
         await using var use1 = await FakeMcpPeer.StartAsync(new[] { "SQL01" });

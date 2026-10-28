@@ -331,6 +331,20 @@ public sealed class FrontDoorConfigTests
         Assert.Equal(valid, Problems(store).Length == 0);
     }
 
+    [Theory]
+    [InlineData("0x")]
+    [InlineData("zz")]
+    public void AMalformedPin_LeavesTheStoreOut_InsteadOfFallingBackToSystemTrust(string prefix)
+    {
+        var bad = Store("bad");
+        bad.CertificateSha256 = prefix + new string('A', 62);
+        var good = Store("good");
+        var block = Block(bad, good);
+
+        Assert.Equal(new[] { "good" }, block.ToStores().Select(s => s.Name));
+        Assert.Null(bad.ToStore());
+    }
+
     [Fact]
     public void ACertificatePin_AcceptsColonsAndAnyCase_AndIsNormalized()
     {

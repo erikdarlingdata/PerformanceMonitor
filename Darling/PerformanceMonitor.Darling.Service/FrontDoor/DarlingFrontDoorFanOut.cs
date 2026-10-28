@@ -38,6 +38,19 @@ internal static class DarlingFrontDoorFanOut
         Func<string, Task<DarlingFrontDoorRouter.StoreOutcome>> askStore,
         CancellationToken ct)
     {
+        /* No store to ask is not "asked every store, nothing to report": answer what the one-store path answers when it has no store. */
+        if (stores.Count == 0)
+        {
+            return new CallToolResult
+            {
+                Content = new List<ContentBlock>
+                {
+                    new TextContentBlock { Text = McpHelpers.Status("unavailable", "No store is reachable right now, so the front door cannot answer.") },
+                },
+                IsError = true,
+            };
+        }
+
         var tasks = stores
             .Select(state => state.Health == FrontDoorStoreHealth.AuthFailed
                 ? Task.FromResult(new DarlingFrontDoorRouter.StoreOutcome(

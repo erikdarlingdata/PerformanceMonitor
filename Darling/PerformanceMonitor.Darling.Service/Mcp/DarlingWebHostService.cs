@@ -833,7 +833,7 @@ public sealed class DarlingWebHostService : BackgroundService
                     return false;
                 }
 
-                frontDoorProxy = DarlingFrontDoorWebProxy.Create(frontDoorDirectory, frontDoorSecrets, config.FrontDoor, _logger);
+                frontDoorProxy = DarlingFrontDoorWebProxy.Create(frontDoorDirectory, frontDoorSecrets, config.FrontDoor, _logger, _collectorState.Read);
 
                 /* Every user who signs in with no role mapping holds the edit seat, and through the front door a change they make runs on
                    whichever store it is sent to. */

@@ -102,8 +102,22 @@ internal sealed class DarlingFrontDoorWebSession : IDisposable
         }
     }
 
+    /* GetOrAdd runs its factory outside the dictionary's lock, so two first requests to one store could each build a PeerState (an
+       HttpClient and its handler) and drop the loser undisposed. Building under a lock builds exactly one. */
+    private readonly object _peersGate = new();
+
     private PeerState StateFor(FrontDoorStore store)
-        => _peers.GetOrAdd(store.Name, _ => new PeerState(store));
+    {
+        if (_peers.TryGetValue(store.Name, out var existing))
+        {
+            return existing;
+        }
+
+        lock (_peersGate)
+        {
+            return _peers.GetOrAdd(store.Name, _ => new PeerState(store));
+        }
+    }
 
     /// <summary>The client for one store. Every call to that store goes through it.</summary>
     internal HttpClient ClientFor(FrontDoorStore store) => StateFor(store).Client;

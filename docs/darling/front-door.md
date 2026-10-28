@@ -56,7 +56,7 @@ To make an encrypted value, use the same `--encrypt-password` verb that the `mcp
 
 ### Checks at start
 
-The service checks the block when it starts, together with the rest of `darling.json`. When the block is on and a rule below fails, the service reports each problem and does not start. A problem names the store by its position in the list (`frontDoor.stores[0]`) and never prints an address or a token.
+The service checks the block when it starts, together with the rest of `darling.json`. When the block is on and a rule below fails, the collector side of the service reports each problem and stands down, and `GET /api/ping` answers 503 `stopped` with the problems. The MCP host and the web host still start and serve, because they load the file themselves and do not run these checks, so read the log line, not whether something is listening. A problem names the store by its position in the list (`frontDoor.stores[0]`) and never prints an address or a token.
 
 - `refreshSeconds` must be from 30 to 3600.
 - `peerTimeoutSeconds` must be from 30 to 600.
@@ -95,7 +95,7 @@ The front door still needs its own `mcp` and `web` settings, because they decide
 
 ## How the front door knows each store's servers
 
-Every `refreshSeconds` the front door reads `list_servers` from each store in parallel. Each store gets 30 seconds. The front door keeps the server name, display name, engine and read-only flag.
+Every `refreshSeconds` the front door reads `list_servers` from each store in parallel. Each store gets 30 seconds. The front door keeps the server name and display name. A store with no server registered yet answers an `empty` status instead of a list. The front door reads that as a store that is up with zero servers.
 
 Each store has one of four health words:
 
@@ -103,10 +103,10 @@ Each store has one of four health words:
 |---|---|
 | `ok` | The last read worked. |
 | `stale` | The last read failed, and the front door keeps the last good list. |
-| `unreachable` | The store has never answered. |
+| `unreachable` | The store has never answered with a usable list. A store that answers `empty` is `ok` with 0 servers. |
 | `auth_failed` | The store answered 401, 403 or 429. |
 
-A store in `auth_failed` is held and gets no calls for at least 300 seconds, or for the store's `Retry-After` when that is longer. The hold is there because a wrong token, sent on every call, locks out the other clients of that store too. After the hold, the next refresh asks again.
+A store in `auth_failed` is held and gets no calls for at least 300 seconds, or for the store's `Retry-After` when that is longer. The hold is there because a wrong token, sent on every call, locks out the other clients of that store too. The hold is on the store, not on one role. A wrong `mcpToken` or a wrong `mcpAgentToken` holds the store for the calls of both roles. After the hold, the next refresh asks again.
 
 When a server name matches nothing, the front door reads the lists again once, at most once every 30 seconds, and looks again. That covers a server added a moment ago.
 
@@ -126,11 +126,11 @@ The front door decides where a call goes in this order.
 |---|---|---|
 | Store-required | Every write tool, every investigation tool and every server-admin tool. Also `run_custom_view_panel`, `test_custom_alert_rule`, `backtest_custom_alert_rule` and `wait_for_investigation_requests`. Also any call that carries an id of one store's own: `rule_id`, `view_id`, `route_id`, `fallback_route_id`, `tag_id`, `parent_id`, `note_id`, `request_id`, `claim_id`, `command_id`, `journal_id`, `sweep_id`, `called_id`, `query_id`, `route_ids` or `server_ids`. | The call needs `store`, or a `server_name` that is on exactly one store. If it has neither, the front door refuses it. A write never goes to more than one store. |
 | Any one store | `get_tool_guide`, `analyze_plan_xml`, `validate_custom_view`, `validate_custom_alert_rule`, `describe_custom_view_catalog` and `list_custom_alert_templates`. These compute from their arguments alone. | The call goes to the first store that is not held, healthiest first. If that store cannot be asked, the front door tries the next one. |
-| Fan-out | The 27 tools below, and any other read that takes `server_name` when it is called with no `server_name` or with `*`. | The call goes to every store that is not held, at the same time. |
+| Fan-out | The tools listed in `DarlingFrontDoorRouting.FanOutTools` (reads that take no server), and any other read that takes `server_name` when it is called with no `server_name` or with `*`. | The call goes to every store that is not held, at the same time. |
 
-The 27 fan-out tools that take no server are:
+The fan-out tools that take no server are the names in `DarlingFrontDoorRouting.FanOutTools` in the service source. That list is the one place the routing reads, and a read tool that is in no list is fanned out.
 
-`find_database`, `get_agent_changes`, `get_collection_state`, `get_collector_cost`, `get_command_result`, `get_compiles_after_evict`, `get_custom_alert_rule`, `get_custom_view`, `get_finops_inventory`, `get_fleet_overview`, `get_investigation_evidence`, `get_mute_rules`, `get_notification_routes`, `get_read_latency`, `get_server_actions`, `get_store_host`, `get_store_log`, `get_store_metrics`, `get_store_query_history`, `get_store_query_stats`, `get_sweep_reports`, `list_custom_alert_rules`, `list_custom_views`, `list_query_tag_rules`, `list_query_tags`, `list_servers` and `test_query_tag_rule`.
+
 
 A test in the build fails if any tool is in no class, so a new tool cannot go missing from this routing.
 
@@ -205,7 +205,7 @@ The front door answers four routes itself. They need a signed-in browser like ev
 
 | Route | Answer |
 |---|---|
-| `GET /api/ping` | `{"status":"ok","front_door":true}`. |
+| `GET /api/ping` | `{"status":"ok","front_door":true}`. It answers 503 `stopped` with the problems when the worker refused `darling.json`, and 503 `degraded` when every store has been tried and none can be used. |
 | `GET /api/session` | The front door's own role, with `front_door` `true` and `can_own` `false`. |
 | `GET /api/front-door` | Each store's `name`, `health`, `server_count`, `last_ok_utc` and, when the store said so, `admin_writes_off` and `managed_store`. |
 | `GET /api/front-door/locate?server=NAME` | 200 with the `store` and the matched `server_name`. 409 with `ambiguous` and the `stores` that match. 404 with `not_found`. |

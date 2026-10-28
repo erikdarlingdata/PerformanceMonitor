@@ -3242,8 +3242,12 @@ public sealed class FrontDoorConfig
 
     /// <summary>The valid store entries as routing records, in file order. An entry that fails validation is left out, so a
     /// caller that has not validated never sees a half-built store.</summary>
+    /* The same name twice (names compare ignoring case) is one store, the first entry: this host does not validate the file, Validate
+       refuses the duplicate, and a second entry would otherwise break the peer client's name table at start and make two rows share one
+       entry's health and server list. */
     internal IReadOnlyList<FrontDoorStore> ToStores()
-        => (Stores ?? new()).Select(s => s?.ToStore()).Where(s => s is not null).Select(s => s!).ToList();
+        => (Stores ?? new()).Select(s => s?.ToStore()).Where(s => s is not null).Select(s => s!)
+            .GroupBy(s => s.Name, StringComparer.OrdinalIgnoreCase).Select(g => g.First()).ToList();
 
     /// <summary>Notes for the log that are not refusals (D3): a plain-http address to a store that is not on this machine sends
     /// that store's token in clear text. Guidance only, like the MCP listener without TLS. Names the store, never an address.</summary>
@@ -3450,7 +3454,7 @@ public sealed class FrontDoorStoreConfig
         return hex.Length == 64 && hex.All(Uri.IsHexDigit) ? hex.ToUpperInvariant() : null;
     }
 
-    /// <summary>The routing record for this entry, or null when it is not usable (no valid name or MCP address).</summary>
+    /// <summary>The routing record for this entry, or null when it is not usable (no valid name or MCP address, or a pin that is not 64 hex characters).</summary>
     internal FrontDoorStore? ToStore()
     {
         var name = Name?.Trim() ?? "";
@@ -3459,8 +3463,16 @@ public sealed class FrontDoorStoreConfig
             return null;
         }
 
+        /* A pin that is set and is not a pin is not "no pin": dropping it would reach the store under the system's chain
+           trust, which is what the pin was written to exclude, and only the worker validates this file. */
+        var pin = NormalizePin(CertificateSha256);
+        if (!string.IsNullOrWhiteSpace(CertificateSha256) && pin is null)
+        {
+            return null;
+        }
+
         var web = TryParseUrl(WebUrl, out var webUri) ? webUri : null;
-        return new FrontDoorStore(name, mcp, web, NormalizePin(CertificateSha256));
+        return new FrontDoorStore(name, mcp, web, pin);
     }
 
     /// <summary>The MCP token for the role, preferring the encrypted form; null when none is set. Throws when an encrypted token
