@@ -248,7 +248,8 @@ FROM generate_series($4::timestamp, $5::timestamp, INTERVAL '5 minutes') AS t",
 
             Assert.Equal("precondition", web.GetProperty("status").GetString());
             Assert.Equal(ViewerAgentAlertsRead.Precondition, read.Status);
-            Assert.Contains("agent_alerts collector has never run", read.Message, StringComparison.Ordinal);
+            /* The Viewer words the answer for a reader: the collector's display name, where the tool names agent_alerts. */
+            Assert.Contains("collector has never run", read.Message, StringComparison.Ordinal);
             Assert.Contains(CollectorRuntimePrecondition.AgentAlertsPossibleCauses, read.Message, StringComparison.Ordinal);
             return 0;
         });
