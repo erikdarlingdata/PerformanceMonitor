@@ -117,7 +117,7 @@ public sealed class DatabaseProtectionCollectorTests
     }
 
     [Fact]
-    public async Task HyperscaleWithNoDmvRows_OrARefusedGrant_IsPlatformManagedWithNoAge_NotAnError()
+    public async Task ARefusedBackupRead_IsPlatformManagedWithNoAge_AndUnavailable_NotAnError()
     {
         var table = Shape();
         Add(table, "HyperscaleDb", "FULL", new DateTime(1900, 1, 1), null, null, readable: false);
@@ -129,6 +129,20 @@ public sealed class DatabaseProtectionCollectorTests
         Assert.Null(row.LastLogBackupTime);
         Assert.Equal(DatabaseProtectionCollector.BackupUnavailable, row.FullBackupState);
         Assert.Equal(DatabaseProtectionCollector.BackupUnavailable, row.LogBackupState);
+    }
+
+    [Fact]
+    public async Task HyperscaleWithABackupReadThatSucceedsWithNoRows_IsPlatformManagedWithNoAge_AndNoneInWindow()
+    {
+        var table = Shape();
+        Add(table, "HyperscaleDb", "FULL", new DateTime(1900, 1, 1), null, null, readable: true);
+
+        var row = Assert.Single(await ReadAsync(table, new CollectorTargetInfo { IsAzureSqlDb = true }));
+
+        Assert.Equal(DatabaseProtectionCollector.PlatformManaged, row.Platform);
+        Assert.Null(row.LastFullBackupTime);
+        Assert.Equal(DatabaseProtectionCollector.BackupNoneInWindow, row.FullBackupState);
+        Assert.Equal(DatabaseProtectionCollector.BackupNoneInWindow, row.LogBackupState);
     }
 
     [Fact]

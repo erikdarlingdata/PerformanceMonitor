@@ -26,16 +26,18 @@ namespace PerformanceMonitor.Collectors;
 /// (DATABASEPROPERTYEX returned 1900-01-01), <c>unknown</c> (NULL: the build cannot answer, or the database is not online).
 /// <c>full_backup_state</c> and <c>log_backup_state</c>: <c>recorded</c> (a time), <c>none_in_window</c> (nothing in the last
 /// <see cref="BackupWindowDays"/> days, which is NOT "never": an unpruned msdb is bounded by the window), <c>not_expected</c>
-/// (a log backup of a SIMPLE-recovery database), <c>unavailable</c> (Azure SQL Database where
-/// <c>sys.dm_database_backups</c> returned no rows, as Hyperscale does, or refused the read).</para>
+/// (a log backup of a SIMPLE-recovery database), <c>unavailable</c> (Azure SQL Database where the read of
+/// <c>sys.dm_database_backups</c> was refused, for example without VIEW DATABASE PERFORMANCE STATE). A read that succeeds and finds no
+/// rows, as Hyperscale does always and a General Purpose database does before its first backup, is <c>none_in_window</c>, which on the
+/// platform-managed label shows no age and is never overdue.</para>
 ///
 /// <para><b>Platform label.</b> <c>native</c> (SQL Server), <c>platform_managed</c> (Azure SQL Database and Managed Instance: the
 /// platform takes the backups and owns integrity), <c>native_only</c> (Amazon RDS: backupset holds native backups only, the
 /// automated snapshots are not per database).</para>
 ///
 /// <para><b>Azure SQL Database.</b> A target is one database, so the pass reads the current database only, with no msdb: CHECKDB
-/// from <c>DATABASEPROPERTYEX(DB_NAME(), ...)</c> and backups from <c>sys.dm_database_backups</c> (needs VIEW DATABASE STATE or
-/// ##MS_ServerStateReader##). A refused grant is caught inside the batch and reads as <c>unavailable</c>, never as an error that
+/// from <c>DATABASEPROPERTYEX(DB_NAME(), ...)</c> and backups from <c>sys.dm_database_backups</c> (needs VIEW DATABASE PERFORMANCE STATE,
+/// which VIEW DATABASE STATE grants). A refused grant is caught inside the batch and reads as <c>unavailable</c>, never as an error that
 /// repeats every cycle. <b>Times are stored in UTC</b>: msdb stamps the server's local clock. A backup converts with the offset it
 /// recorded itself (<c>backupset.time_zone</c>), so one finished before a clock change keeps the right age, and the CHECKDB and create
 /// times, which record none, convert with the offset in force now (the <c>ProcedureStatsCollector</c> pattern), so those can read an
@@ -177,9 +179,10 @@ BEGIN TRY
         N'SELECT /* PerformanceMonitorLite */
               @last_full = MAX(CASE WHEN backup_type = ''D'' THEN backup_finish_date END),
               @last_log = MAX(CASE WHEN backup_type = ''L'' THEN backup_finish_date END),
-              @readable = CASE WHEN COUNT_BIG(*) > 0 THEN 1 ELSE 0 END
+              @readable = 1
           FROM sys.dm_database_backups
-          WHERE backup_finish_date >= DATEADD(DAY, -{BackupWindowDays}, SYSUTCDATETIME());',
+          WHERE backup_finish_date >= DATEADD(DAY, -{BackupWindowDays}, SYSUTCDATETIME())
+          OPTION(RECOMPILE);',
         N'@last_full datetime2 OUTPUT, @last_log datetime2 OUTPUT, @readable bit OUTPUT',
         @last_full = @last_full OUTPUT,
         @last_log = @last_log OUTPUT,

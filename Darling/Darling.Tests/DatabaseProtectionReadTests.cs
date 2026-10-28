@@ -85,6 +85,28 @@ public sealed class DatabaseProtectionBandsTests
         { "unavailable stays unavailable on a managed platform", Healthy() with { Platform = "platform_managed", LastFullBackupTime = null, FullBackupState = "unavailable" }, "platform_managed", "unavailable", "platform_managed" },
     };
 
+    [Fact]
+    public void APlatformManagedDatabaseWithNoBackupInTheWindow_ReadsPlatformManagedWithNoAge_AndAnUnreadableSourceReadsUnavailable()
+    {
+        var none = Healthy() with
+        {
+            Platform = "platform_managed", LastFullBackupTime = null, FullBackupState = "none_in_window",
+            LastLogBackupTime = null, LogBackupState = "none_in_window",
+        };
+        var noneBand = DatabaseProtectionBands.Evaluate(none, Now, Limits);
+        foreach (var f in new[] { noneBand.FullBackup, noneBand.LogBackup })
+        {
+            Assert.Equal("platform_managed", f.State);
+            Assert.Null(f.Age);
+            Assert.False(f.Overdue);
+        }
+
+        var refused = none with { FullBackupState = "unavailable", LogBackupState = "unavailable" };
+        var refusedBand = DatabaseProtectionBands.Evaluate(refused, Now, Limits);
+        Assert.Equal("unavailable", refusedBand.FullBackup.State);
+        Assert.Equal("unavailable", refusedBand.LogBackup.State);
+    }
+
     [Theory]
     [MemberData(nameof(Cases))]
     public void EachFact_GetsItsWord(string name, DatabaseProtectionFact fact, string checkDb, string full, string log)

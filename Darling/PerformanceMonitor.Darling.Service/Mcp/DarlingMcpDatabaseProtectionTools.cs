@@ -55,7 +55,7 @@ public sealed class DarlingMcpDatabaseProtectionTools
         "Each fact's state: ok, overdue (older than the threshold), never (CHECKDB never passed) or none_in_window (no backup in the last 60 days), both of which count as overdue, " +
         "new_database (created less than the threshold ago, so not late yet), not_expected (a SIMPLE-recovery database expects no log backup), " +
         "platform_managed (Azure SQL Database and Managed Instance) or native_only (Amazon RDS): the age shows and is never overdue, " +
-        "unknown (SQL Server 2017 before CU9 cannot answer CHECKDB) or unavailable (the backup source gave nothing: no grant, or Hyperscale): both pass through and are never overdue, " +
+        "unknown (SQL Server 2017 before CU9 cannot answer CHECKDB) or unavailable (the backup read was refused, for example no VIEW DATABASE PERFORMANCE STATE on Azure SQL Database, which VIEW DATABASE STATE grants): both pass through and are never overdue, " +
         "excluded (the database is offline, restoring, a secondary or otherwise not online; excluded_reason says which). " +
         "summary.text, overdue_full_backup, overdue_log_backup and overdue_checkdb name the overdue databases. overdue_only lists just the databases overdue on something. " +
         "Reads the database_protection collector (every 60 minutes), never a monitored server. Ages are measured at captured_at, the newest capture in the window. " +

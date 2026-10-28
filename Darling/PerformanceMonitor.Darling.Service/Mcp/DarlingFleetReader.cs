@@ -1596,17 +1596,25 @@ GROUP BY server_id, collector_name";
     }
 
     /// <summary>The newest database protection capture per server inside <see cref="DatabaseProtectionBands.CaptureFreshness"/>, one statement for the
-    /// fleet (#6873), by the (server_id, collection_time) index. $1 is the window start.</summary>
+    /// fleet (#6873). Shaped like the other per-server reads in this file: <c>servers</c> drives a lateral that seeks
+    /// <c>idx_database_protection_time</c> (<c>server_id, collection_time</c>) once per server for the newest capture time, then the capture's
+    /// rows are read by the same index. The table is a plain table with <c>server_id</c> leading its index, so a predicate on <c>collection_time</c>
+    /// alone has no range seek on it and, on a runtime without index skip scan, walks every retained row on each fleet roll-up. Measured on
+    /// PostgreSQL 18 over 3.24M rows (50 servers, 30 databases, hourly for 90 days): 50 index-only seeks for the newest times plus 50 seeks for the
+    /// capture rows, about 1.0 to 1.4 ms and 1,516 buffer hits. The time-only shape was 1.9 to 2.7 ms there, and only that fast because PostgreSQL 18
+    /// skips ahead through the leading column. $1 is the window start.</summary>
     internal const string FleetDatabaseProtectionSql = @"
-WITH newest AS (
-    SELECT server_id, MAX(collection_time) AS collection_time
-    FROM collect.database_protection
-    WHERE collection_time >= $1
-    GROUP BY server_id)
 SELECT d.server_id, d.collection_time, d.database_name, d.state_desc, d.recovery_model_desc, d.create_date, d.replica_role, d.platform,
        d.last_good_checkdb_time, d.checkdb_state, d.last_full_backup_time, d.full_backup_state, d.last_log_backup_time, d.log_backup_state
-FROM newest AS n
-JOIN collect.database_protection AS d ON d.server_id = n.server_id AND d.collection_time = n.collection_time";
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT MAX(x.collection_time) AS collection_time
+    FROM collect.database_protection AS x
+    WHERE x.server_id = s.server_id
+    AND   x.collection_time >= $1
+) AS n
+JOIN collect.database_protection AS d ON d.server_id = s.server_id AND d.collection_time = n.collection_time";
 
     /// <summary>The overdue facts per server, for the servers that have any (#6873). The judgment is
     /// <see cref="DatabaseProtectionBands.OverdueFacts"/>, the one the alerts, the tool and the Viewer use; this only batches the read.
