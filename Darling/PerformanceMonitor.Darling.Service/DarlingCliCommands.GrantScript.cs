@@ -26,19 +26,21 @@ public static partial class DarlingCliCommands
     /// <summary>What <c>--grant-script</c> was asked for. <see cref="ServerName"/> picks a registered server; <see cref="Host"/> describes
     /// one not yet added. Exactly one of the two is set.</summary>
     internal sealed record GrantScriptArgs(
-        string? ServerName, string? Host, string? Auth, string? Username, string? ServiceAccount, bool FinOps, bool Azure, string? ConfigPath);
+        string? ServerName, string? Host, string? Auth, string? Username, string? ServiceAccount, bool FinOps, bool Azure, bool Rds, string? ConfigPath);
 
     /// <summary>The grammar <c>--grant-script</c> prints when its arguments are wrong. Pure ASCII.</summary>
     public static string GrantScriptUsageText() =>
         "Usage:" + Environment.NewLine +
-        "  --grant-script <server-name> [--finops] [--azure] [--service-account <account>] [--config <path>]" + Environment.NewLine +
+        "  --grant-script <server-name> [--finops] [--azure] [--rds] [--service-account <account>] [--config <path>]" + Environment.NewLine +
         "      Print the T-SQL that creates the monitoring login and grants what Darling needs, for a server this install monitors." + Environment.NewLine +
         "      The principal follows the server entry: its SQL login, or for Windows authentication the account the service runs as." + Environment.NewLine +
-        "  --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--service-account <account>]" + Environment.NewLine +
+        "  --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--rds] [--service-account <account>]" + Environment.NewLine +
         "      The same for a host not yet added. Connects to no monitored server." + Environment.NewLine +
         "  --finops adds the per-database grants the FinOps Index Analysis tab needs. --azure (implied by a *.database.windows.net host)" + Environment.NewLine +
-        "  prints the Azure SQL Database form: a contained user and database-scoped grants. --service-account names the account the service" + Environment.NewLine +
-        "  runs as when it is a domain account or a gMSA and this machine cannot tell. Run the output as a sysadmin; it is safe to run twice." + Environment.NewLine +
+        "  prints the Azure SQL Database form: a contained user and database-scoped grants." + Environment.NewLine +
+        "  --rds (implied by a *.rds.amazonaws.com host) prints the Amazon RDS for SQL Server form: no CONNECT ANY DATABASE, ALTER SETTINGS or" + Environment.NewLine +
+        "  refused msdb grants, and a CREATE USER in each current user database. Run it as the RDS master user. --service-account names the account the service" + Environment.NewLine +
+        "  runs as when it is a domain account or a gMSA and this machine cannot tell. Run any other output as a sysadmin; it is safe to run twice." + Environment.NewLine +
         "The script never holds a password: a SQL login gets a placeholder to replace.";
 
     /// <summary>The <c>--auth</c> word as the registry stores it: lower case, with "windows" (the word <c>--add-server</c> takes) read as "integrated".</summary>
@@ -55,7 +57,7 @@ public static partial class DarlingCliCommands
         parsed = null;
         errorMessage = null;
         string? name = null, host = null, auth = null, username = null, serviceAccount = null, configPath = null;
-        bool finOps = false, azure = false;
+        bool finOps = false, azure = false, rds = false;
         for (var i = 0; i < rest.Length; i++)
         {
             var arg = rest[i];
@@ -66,6 +68,9 @@ public static partial class DarlingCliCommands
                     continue;
                 case "--azure":
                     azure = true;
+                    continue;
+                case "--rds":
+                    rds = true;
                     continue;
                 case "--host" or "--auth" or "--username" or "--service-account" or "--config":
                     if (i + 1 >= rest.Length || rest[i + 1].StartsWith("--", StringComparison.Ordinal))
@@ -130,7 +135,7 @@ public static partial class DarlingCliCommands
             return false;
         }
 
-        parsed = new GrantScriptArgs(name, host, auth, username, serviceAccount, finOps, azure, configPath);
+        parsed = new GrantScriptArgs(name, host, auth, username, serviceAccount, finOps, azure, rds, configPath);
         return true;
     }
 
@@ -227,7 +232,8 @@ public static partial class DarlingCliCommands
             domainName ?? Environment.UserDomainName,
             ServiceNotOnThisMachine: serviceAccount is null);
         var azure = args.Azure || MonitoringGrantScript.IsAzureSqlDatabaseHost(host);
-        output.Write(MonitoringGrantScript.Build(MonitoringGrantScript.ChoosePrincipal(inputs), args.FinOps, azure, label));
+        var rds = args.Rds || MonitoringGrantScript.IsAwsRdsHost(host);
+        output.Write(MonitoringGrantScript.Build(MonitoringGrantScript.ChoosePrincipal(inputs), args.FinOps, azure, label, awsRds: rds));
         return 0;
     }
 }

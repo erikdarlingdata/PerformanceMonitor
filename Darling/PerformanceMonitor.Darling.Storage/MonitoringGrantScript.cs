@@ -44,9 +44,11 @@ public enum GrantScope
 
 /// <summary>
 /// One grant. <see cref="Required"/> is false for the grants docs/permissions.md marks "Optional" (ALTER TRACE, ALTER SETTINGS, the
-/// msdb job reads): the script includes them, the connection test does not warn about them.
+/// msdb job reads): the script includes them, the connection test does not warn about them. <see cref="RdsRefused"/> marks a grant
+/// Amazon RDS for SQL Server refuses to its master user (#6889): the RDS form of the script leaves it out and the connection test on an
+/// RDS target does not ask for it.
 /// </summary>
-public sealed record GrantEntry(GrantSet Set, GrantScope Scope, string Permission, string? OnObject, bool Required, string Why)
+public sealed record GrantEntry(GrantSet Set, GrantScope Scope, string Permission, string? OnObject, bool Required, string Why, bool RdsRefused = false)
 {
     /// <summary>The statement that grants this to <paramref name="principal"/> (a bare name, bracket-quoted here).</summary>
     public string Statement(string principal) => GrantPrefix + MonitoringGrantScript.QuoteName(principal) + ";";
@@ -111,7 +113,7 @@ public static class MonitoringGrantScript
         new(GrantSet.Base, GrantScope.Server, "VIEW SERVER STATE", null, true,
             "Server-scoped DMVs, the required core. Also implies VIEW DATABASE STATE in every database."),
         new(GrantSet.Base, GrantScope.Server, "CONNECT ANY DATABASE", null, true,
-            "Enter every current and future database, with no per-database users to maintain."),
+            "Enter every current and future database, with no per-database users to maintain.", RdsRefused: true),
         new(GrantSet.Base, GrantScope.Server, "VIEW ANY DEFINITION", null, true,
             "Catalog visibility. Catalog views hide rows instead of raising an error, so without this the index, object and availability group collectors see nothing."),
         new(GrantSet.Base, GrantScope.Server, "ALTER ANY EVENT SESSION", null, true,
@@ -119,15 +121,15 @@ public static class MonitoringGrantScript
         new(GrantSet.Base, GrantScope.Server, "ALTER TRACE", null, false,
             "Optional: the default-trace collector reads sys.traces. ALTER TRACE is not read-only; withhold it and the collector records a permissions skip."),
         new(GrantSet.Base, GrantScope.Server, "ALTER SETTINGS", null, false,
-            "Optional: lets the service set 'blocked process threshold (s)' to 5 when it is 0."),
+            "Optional: lets the service set 'blocked process threshold (s)' to 5 when it is 0.", RdsRefused: true),
         new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.sysjobs", false, "Optional: SQL Agent job monitoring and failed-job alerts. Direct table grants, not SQLAgentReaderRole."),
-        new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.sysjobsteps", false, "Optional: names the Agent job and step on a Long-Running Query alert."),
+        new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.sysjobsteps", false, "Optional: names the Agent job and step on a Long-Running Query alert.", RdsRefused: true),
         new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.sysjobactivity", false, "Optional: SQL Agent job monitoring."),
         new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.sysjobhistory", false, "Optional: SQL Agent job monitoring."),
-        new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.sysjobschedules", false, "Optional: SQL Agent job monitoring."),
-        new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.syscategories", false, "Optional: SQL Agent job monitoring."),
-        new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.syssessions", false, "Optional: SQL Agent job monitoring."),
-        new(GrantSet.Base, GrantScope.Msdb, "EXECUTE", "dbo.agent_datetime", false, "Optional: SQL Agent job monitoring."),
+        new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.sysjobschedules", false, "Optional: SQL Agent job monitoring.", RdsRefused: true),
+        new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.syscategories", false, "Optional: SQL Agent job monitoring.", RdsRefused: true),
+        new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.syssessions", false, "Optional: SQL Agent job monitoring.", RdsRefused: true),
+        new(GrantSet.Base, GrantScope.Msdb, "EXECUTE", "dbo.agent_datetime", false, "Optional: SQL Agent job monitoring.", RdsRefused: true),
         new(GrantSet.FinOps, GrantScope.EachDatabase, "VIEW DATABASE STATE", null, true, "FinOps Index Analysis runs sp_IndexCleanup in each database you inspect."),
         new(GrantSet.FinOps, GrantScope.EachDatabase, "VIEW DEFINITION", null, true, "FinOps Index Analysis."),
         new(GrantSet.FinOps, GrantScope.EachDatabase, "SELECT", "sys.sql_expression_dependencies", true,
@@ -142,6 +144,10 @@ public static class MonitoringGrantScript
     /// <summary>The server-scoped grants the connection test checks: the required base grants.</summary>
     public static IReadOnlyList<GrantEntry> RequiredServerGrants { get; } =
         All.Where(e => e.Set == GrantSet.Base && e.Scope == GrantScope.Server && e.Required).ToList();
+
+    /// <summary>The server-scoped grants the connection test checks on Amazon RDS: <see cref="RequiredServerGrants"/> without the ones RDS refuses (#6889).</summary>
+    public static IReadOnlyList<GrantEntry> RequiredRdsServerGrants { get; } =
+        RequiredServerGrants.Where(e => !e.RdsRefused).ToList();
 
     /// <summary>The database-scoped grants the connection test checks on an Azure SQL Database.</summary>
     public static IReadOnlyList<GrantEntry> RequiredAzureGrants { get; } =
@@ -191,6 +197,28 @@ public static class MonitoringGrantScript
     /// </summary>
     public static bool IsAzureSqlDatabaseHost(string? host)
     {
+        var text = BareHost(host);
+        const string suffix = ".database.windows.net";
+        return text.Length > suffix.Length
+            && text.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+            && text.IndexOf('.', StringComparison.Ordinal) == text.Length - suffix.Length;
+    }
+
+    /// <summary>
+    /// #6889: true when <paramref name="host"/> is an Amazon RDS endpoint (<c>name.id.region.rds.amazonaws.com</c>, the China suffix
+    /// too), the hosts whose script takes the RDS form. A custom DNS name in front of an RDS instance is not recognized: the CLI's
+    /// <c>--rds</c> covers it.
+    /// </summary>
+    public static bool IsAwsRdsHost(string? host)
+    {
+        var text = BareHost(host);
+        return text.EndsWith(".rds.amazonaws.com", StringComparison.OrdinalIgnoreCase)
+            || text.EndsWith(".rds.amazonaws.com.cn", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The host name alone: no <c>tcp:</c> prefix, no <c>,port</c>, no surrounding space.</summary>
+    private static string BareHost(string? host)
+    {
         var text = (host ?? "").Trim();
         if (text.StartsWith("tcp:", StringComparison.OrdinalIgnoreCase))
         {
@@ -203,11 +231,7 @@ public static class MonitoringGrantScript
             text = text[..cut];
         }
 
-        text = text.Trim();
-        const string suffix = ".database.windows.net";
-        return text.Length > suffix.Length
-            && text.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
-            && text.IndexOf('.', StringComparison.Ordinal) == text.Length - suffix.Length;
+        return text.Trim();
     }
 
     /// <summary>The account the Darling Windows service is configured to run as (<c>sc qc</c>'s SERVICE_START_NAME), read from the service's
@@ -322,8 +346,11 @@ public static class MonitoringGrantScript
     /// The script. An Azure SQL Database (<paramref name="azureSqlDatabase"/>) gets the contained user and the database grants; any other
     /// server gets the login, the base grants and the msdb grants, plus the FinOps per-database grants when <paramref name="finOps"/>.
     /// Running it twice is clean: the login and user are created only when missing, and a repeated GRANT is a no-op.
+    /// <paramref name="awsRds"/> (#6889) is the Amazon RDS for SQL Server form: RDS has no sysadmin and refuses CONNECT ANY DATABASE, ALTER
+    /// SETTINGS and five msdb grants to its master user, so those are left out and the login gets a user in each current user database
+    /// instead. It has no effect on an Azure SQL Database script.
     /// </summary>
-    public static string Build(GrantPrincipal principal, bool finOps, bool azureSqlDatabase, string? serverLabel = null)
+    public static string Build(GrantPrincipal principal, bool finOps, bool azureSqlDatabase, string? serverLabel = null, bool awsRds = false)
     {
         ArgumentNullException.ThrowIfNull(principal);
         var name = principal.Name;
@@ -340,7 +367,10 @@ public static class MonitoringGrantScript
             Line("   " + InComment(note));
         }
 
-        Line("   Review it, then run it as a sysadmin" + (azureSqlDatabase ? " connected to the database you monitor, not master" : "") + ". It is safe to run twice. */");
+        var runAs = awsRds && !azureSqlDatabase
+            ? "as the RDS master user (RDS has no sysadmin)"
+            : "as a sysadmin" + (azureSqlDatabase ? " connected to the database you monitor, not master" : "");
+        Line("   Review it, then run it " + runAs + ". It is safe to run twice. */");
         Line();
 
         if (azureSqlDatabase)
@@ -384,26 +414,45 @@ public static class MonitoringGrantScript
         Line();
         foreach (var entry in All.Where(e => e.Set == GrantSet.Base && e.Scope == GrantScope.Server))
         {
+            if (awsRds && entry.RdsRefused)
+            {
+                Line("/* Left out: RDS refuses the " + entry.Permission + " grant to its master user (Grantor does not have GRANT permission). "
+                    + (entry.Permission == "ALTER SETTINGS"
+                        ? "Without it the service does not set 'blocked process threshold (s)' on this server."
+                        : "Without it the login enters no database until it has a user there, which the per-database block below adds.")
+                    + " */");
+                Line();
+                continue;
+            }
+
             Line("/* " + entry.Why + " */");
             Line(entry.Statement(name));
             Line();
         }
 
-        Line("/* Optional: SQL Agent job monitoring and failed-job alerts. Skip this block if the server has no msdb Agent surface (AWS RDS has its own rules). */");
+        if (awsRds)
+        {
+            Line("/* Optional: SQL Agent job history. RDS refuses the grants on sysjobsteps, sysjobschedules, syscategories, syssessions and agent_datetime, so they are left out: a Long-Running Query alert cannot name the Agent job and step, and Running Jobs and Agent Status do not collect on RDS. msdb.dbo.backupset needs no grant, public already reads it. */");
+        }
+        else
+        {
+            Line("/* Optional: SQL Agent job monitoring and failed-job alerts. Skip this block if the server has no msdb Agent surface. */");
+        }
+
         Line("USE [msdb];");
         Line();
         AppendCreateUser(sb, name, q, "    CREATE USER " + q + " FOR LOGIN " + q + ";");
-        foreach (var entry in All.Where(e => e.Set == GrantSet.Base && e.Scope == GrantScope.Msdb))
+        foreach (var entry in All.Where(e => e.Set == GrantSet.Base && e.Scope == GrantScope.Msdb && !(awsRds && e.RdsRefused)))
         {
             Line(entry.Statement(name));
         }
 
         Line();
         Line("USE [master];");
-        if (finOps)
+        if (finOps || awsRds)
         {
             Line();
-            AppendFinOps(sb, name);
+            AppendEachDatabase(sb, name, finOps, awsRds);
         }
 
         return sb.ToString();
@@ -415,7 +464,11 @@ public static class MonitoringGrantScript
             .Append(Literal(name)).Append("\n)\nBEGIN\n").Append(createStatement).Append("\nEND;\n\n");
     }
 
-    private static void AppendFinOps(StringBuilder sb, string name)
+    /// <summary>
+    /// The per-database block. <paramref name="grants"/> adds the FinOps grants; <paramref name="awsRds"/> (#6889) is the RDS form, which
+    /// is there for the CREATE USER alone (RDS has no CONNECT ANY DATABASE, so no user means no database) and skips rdsadmin.
+    /// </summary>
+    private static void AppendEachDatabase(StringBuilder sb, string name, bool grants, bool awsRds)
     {
         /* The block docs/permissions.md gives for "all databases", built from the list: a cursor over the online read-write user
            databases that are not single-user and that the caller can open, each one in a TRY/CATCH that prints the error and goes on (not
@@ -430,14 +483,24 @@ public static class MonitoringGrantScript
         inner.Append("BEGIN\n");
         inner.Append("    SET @statement += N'CREATE USER ' + QUOTENAME(@login) + N' FOR LOGIN ' + QUOTENAME(@login) + N';';\n");
         inner.Append("END;\n\n");
-        foreach (var entry in All.Where(e => e.Set == GrantSet.FinOps))
+        foreach (var entry in All.Where(e => grants && e.Set == GrantSet.FinOps))
         {
             inner.Append("SET @statement += N'").Append(entry.GrantPrefix).Append("' + QUOTENAME(@login) + N';';\n");
         }
 
         inner.Append("\nEXECUTE sys.sp_executesql\n    @statement;");
 
-        sb.Append("/* FinOps Index Analysis: the per-database grants, in every online read-write user database. */\n");
+        if (awsRds)
+        {
+            sb.Append("/* RDS has no CONNECT ANY DATABASE, so the login needs its own user in each user database before it can read there. This adds it in every current online read-write user database (system databases and rdsadmin are skipped)"
+                + (grants ? ", with the FinOps Index Analysis grants" : "")
+                + ". A database created later needs the same CREATE USER ... FOR LOGIN ...: run this script again after you create one. */\n");
+        }
+        else
+        {
+            sb.Append("/* FinOps Index Analysis: the per-database grants, in every online read-write user database. */\n");
+        }
+
         sb.Append("DECLARE\n");
         sb.Append("    @login sysname = ").Append(Literal(name)).Append(",\n");
         sb.Append("    @database_name sysname,\n");
@@ -446,6 +509,11 @@ public static class MonitoringGrantScript
         sb.Append("DECLARE\n    database_cursor CURSOR LOCAL FAST_FORWARD FOR\n");
         sb.Append("    SELECT\n        d.name\n    FROM sys.databases AS d\n");
         sb.Append("    WHERE d.database_id > 4\n");
+        if (awsRds)
+        {
+            sb.Append("    AND   d.name <> N'rdsadmin'\n");
+        }
+
         sb.Append("    AND   d.state = 0\n");
         sb.Append("    AND   DATABASEPROPERTYEX(d.name, N'Updateability') = N'READ_WRITE'\n");
         sb.Append("    AND   d.user_access <> 1\n");
