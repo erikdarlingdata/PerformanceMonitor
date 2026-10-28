@@ -506,6 +506,164 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         }
     }
 
+    /// <summary>#6860: a server registered with a display name that differs from its connection key is named by the display name in
+    /// every part of the answer, as every other tool names it (#6179): the envelope's <c>server</c>, the rows' <c>server</c> and the
+    /// not_collected sentence. The key must not appear, whether the caller named the server by its key or by its display name.</summary>
+    [Fact]
+    public async Task ADisplayNamedServer_IsAnsweredByItsDisplayName_NotItsConnectionKey()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            const string displayA = "Payroll Agent Box";
+            const string displayC = "Reporting Azure Database";
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1 WHERE server_id = $2", displayA, ServerA);
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1, sql_engine_edition = 5 WHERE server_id = $2", displayC, ServerC);
+
+            foreach (var asked in new[] { NameA, displayA })
+            {
+                var body = await DarlingMcpJobTools.GetJobHistory(postgres, asked, as_of: AsOfText, cancellationToken: ct);
+                using var doc = JsonDocument.Parse(body);
+                Assert.Equal(displayA, doc.RootElement.GetProperty("server").GetString());
+                Assert.All(doc.RootElement.GetProperty("runs").EnumerateArray(), r => Assert.Equal(displayA, r.GetProperty("server").GetString()));
+                Assert.DoesNotContain(NameA, body, StringComparison.Ordinal);
+            }
+
+            foreach (var asked in new[] { NameC, displayC })
+            {
+                var body = await DarlingMcpJobTools.GetJobHistory(postgres, asked, as_of: AsOfText, cancellationToken: ct);
+                Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(body));
+                Assert.Contains(displayC, body, StringComparison.Ordinal);
+                Assert.DoesNotContain(NameC, body, StringComparison.Ordinal);
+            }
+
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    /// <summary>#6860: the fleet form names each row by the one answer-name rule (#6179), not by the reader's own SQL label. A display name
+    /// one server holds answers by that name, and two servers that share a display name answer by their keys, which pick exactly one server
+    /// when passed back as <c>server_name</c>.</summary>
+    [Fact]
+    public async Task TheFleetForm_NamesEachRowByTheAnswerNameRule()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            const string shared = "Payroll Agent Box";
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1 WHERE server_id = $2", shared, ServerA);
+
+            var held = await DarlingMcpJobTools.GetJobHistory(postgres, null, as_of: AsOfText, cancellationToken: ct);
+            using (var doc = JsonDocument.Parse(held))
+            {
+                var names = doc.RootElement.GetProperty("runs").EnumerateArray().Select(r => r.GetProperty("server").GetString()).Distinct().Order().ToArray();
+                Assert.Equal(new[] { NameB, shared }.Order().ToArray(), names);
+            }
+
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1 WHERE server_id = $2", shared, ServerB);
+            var clash = await DarlingMcpJobTools.GetJobHistory(postgres, null, as_of: AsOfText, cancellationToken: ct);
+            using (var doc = JsonDocument.Parse(clash))
+            {
+                var names = doc.RootElement.GetProperty("runs").EnumerateArray().Select(r => r.GetProperty("server").GetString()).Distinct().Order().ToArray();
+                Assert.Equal(new[] { NameA, NameB }.Order().ToArray(), names);
+            }
+
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    /// <summary>#6860: <c>agents_not_running[].server</c> follows the same naming rule as <c>runs[].server</c>. Two servers share a display
+    /// name and one Agent is stopped: the entry names that server by its key, as its runs do, and that name resolves back as <c>server_name</c>.</summary>
+    [Fact]
+    public async Task TheFleetForm_NamesAStoppedAgentByTheSameNameItsRunsUse_AndThatNameResolves()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            const string shared = "Payroll Agent Box";
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1 WHERE server_id IN ($2, $3)", shared, ServerA, ServerB);
+            await SeedAgentAsync(c, ct, ServerA, NameA, false, "Stopped", TimeSpan.FromMinutes(2));
+            await SeedAgentAsync(c, ct, ServerB, NameB, true, "Running", TimeSpan.FromMinutes(1));
+
+            var fleet = await DarlingMcpJobTools.GetJobHistory(postgres, null, as_of: AsOfText, cancellationToken: ct);
+            using var doc = JsonDocument.Parse(fleet);
+            var runNames = doc.RootElement.GetProperty("runs").EnumerateArray().Select(r => r.GetProperty("server").GetString()).Distinct().Order().ToArray();
+            Assert.Equal(new[] { NameA, NameB }.Order().ToArray(), runNames);
+            var stopped = doc.RootElement.GetProperty("agents_not_running").EnumerateArray().Single();
+            var agentName = stopped.GetProperty("server").GetString();
+            Assert.Equal(NameA, agentName);
+            Assert.Contains(agentName, runNames);
+
+            var back = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, agentName, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            Assert.Equal(NameA, back.GetProperty("server").GetString());
+            Assert.Equal(4, back.GetProperty("runs").GetArrayLength());
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    [Fact]
+    public async Task TheFleetForm_NamesADisabledServersRowsByItsKey_NeverByItsDisplayName()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            /* #6860: an enabled and a disabled server carry one display name. The reader's label would show both under it. */
+            const string shared = "Orders Primary";
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1 WHERE server_id IN ($2, $3)", shared, ServerA, ServerB);
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET is_enabled = false WHERE server_id = $1", ServerB);
+
+            var body = await DarlingMcpJobTools.GetJobHistory(postgres, null, as_of: AsOfText, cancellationToken: ct);
+            using var doc = JsonDocument.Parse(body);
+            var runs = doc.RootElement.GetProperty("runs").EnumerateArray().ToArray();
+            var byName = runs.GroupBy(r => r.GetProperty("server").GetString()!).ToDictionary(g => g.Key, g => g.Select(r => r.GetProperty("job_name").GetString()!).Order().ToArray());
+
+            Assert.Equal(new[] { NameB, shared }.Order().ToArray(), byName.Keys.Order().ToArray());
+            Assert.Equal(new[] { "Index Rebuild", "Nightly ETL", "Nightly ETL", "Nightly ETL" }, byName[shared]);
+            Assert.Equal(new[] { "Log Backup", "Nightly ETL" }, byName[NameB]);
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
     [Fact]
     public async Task Filters_AndFleetMode_AndLimit()
     {

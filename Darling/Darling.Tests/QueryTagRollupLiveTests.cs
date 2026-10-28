@@ -160,6 +160,37 @@ public sealed class QueryTagRollupLiveTests
         });
     }
 
+    /// <summary>#6860: a server whose display name differs from its connection key is named by the display name in the answer's
+    /// <c>server</c> field and in the not_collected sentence (#6179), not by the key, whether the caller asked by key or by display name.</summary>
+    [Fact]
+    public async Task ADisplayNamedServer_IsAnsweredByItsDisplayName_NotItsConnectionKey()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await ExecAsync(c.Store, "UPDATE servers SET display_name = 'Orders Primary' WHERE server_id = $1", c.Ct, ServerOne);
+            await ExecAsync(c.Store, "UPDATE servers SET display_name = 'Orders Reporting Postgres', engine_kind = 'postgres' WHERE server_id = $1", c.Ct, ServerTwo);
+
+            var a = await TagAsync(c, "A");
+            await MapAsync(c, ServerOne, "hash", "0xA1", a);
+            await PlanCacheAsync(c, ServerOne, "0xA1", 30, 4_000_000, 7);
+            await CoverQueryStoreAsync(c, ServerOne);
+            foreach (var asked in new[] { "srv-one", "Orders Primary" })
+            {
+                using var named = await ReadAsync(c, asked);
+                Assert.Equal("Orders Primary", named.RootElement.GetProperty("server").GetString());
+                Assert.DoesNotContain("srv-one", named.RootElement.GetRawText(), StringComparison.Ordinal);
+            }
+
+            foreach (var asked in new[] { "srv-two", "Orders Reporting Postgres" })
+            {
+                using var unmet = await ReadAsync(c, asked);
+                Assert.Equal("not_collected", unmet.RootElement.GetProperty("status").GetString());
+                Assert.Contains("Orders Reporting Postgres", unmet.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+                Assert.DoesNotContain("srv-two", unmet.RootElement.GetRawText(), StringComparison.Ordinal);
+            }
+        });
+    }
+
     [Fact]
     public async Task EachSourceHasItsOwnSection_AndTheSectionsAreNeverSummed()
     {
