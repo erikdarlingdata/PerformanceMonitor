@@ -1059,7 +1059,8 @@ public partial class RemoteCollectorService
                    transcription — it IS Darling's classifier, and 262 (the tempdb denial behind the
                    collector's old Azure SQL DB gate) reaches both SKUs at once. */
                 status = "PERMISSIONS";
-                LogRunWarning(telemetry, $"Collector '{collectorName}' permission denied for server '{server.DisplayName}': {ex.Message}");
+                /* #6859: errorMessage carries the error number and the Azure hint, as Darling's line does, because this Warning is now the only log line for a denied run. */
+                LogRunWarning(telemetry, $"Collector '{collectorName}' permission denied for server '{server.DisplayName}': {errorMessage}");
             }
             else
             {

@@ -80,7 +80,7 @@ public sealed class CollectorSqlErrorLogLevelLiteTests : IDisposable
 
             var service = new RemoteCollectorService(_duckDb, servers, schedules);
             service.ServerReaderOverrideForTests = _ =>
-                throw SqlExceptionFactory.Create(number, errorClass, $"The server refused the read with error {number}.");
+                throw SqlExceptionFactory.Create(number, errorClass, "The server refused the read.");
 
             await service.RunCollectorAsync(server, Collector, CancellationToken.None);
 
@@ -115,7 +115,7 @@ public sealed class CollectorSqlErrorLogLevelLiteTests : IDisposable
         Assert.Equal(1, Count(lines, "WARN"));
         Assert.Equal(0, Count(lines, "ERROR"));
         Assert.Contains(lines, line => line.Contains("permission denied", StringComparison.Ordinal)
-            && line.Contains($"error {number}", StringComparison.Ordinal));
+            && line.Contains($"#{number}", StringComparison.Ordinal));
     }
 
     [Fact]
