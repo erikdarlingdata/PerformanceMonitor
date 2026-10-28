@@ -36,8 +36,10 @@ namespace PerformanceMonitor.Collectors;
 /// <para><b>Azure SQL Database.</b> A target is one database, so the pass reads the current database only, with no msdb: CHECKDB
 /// from <c>DATABASEPROPERTYEX(DB_NAME(), ...)</c> and backups from <c>sys.dm_database_backups</c> (needs VIEW DATABASE STATE or
 /// ##MS_ServerStateReader##). A refused grant is caught inside the batch and reads as <c>unavailable</c>, never as an error that
-/// repeats every cycle. <b>Times are stored in UTC</b>: msdb stamps the server's local clock, converted here with the offset in force
-/// now (the <c>ProcedureStatsCollector</c> pattern), so a backup finished before a clock change reads at most one hour off.</para>
+/// repeats every cycle. <b>Times are stored in UTC</b>: msdb stamps the server's local clock. A backup converts with the offset it
+/// recorded itself (<c>backupset.time_zone</c>), so one finished before a clock change keeps the right age, and the CHECKDB and create
+/// times, which record none, convert with the offset in force now (the <c>ProcedureStatsCollector</c> pattern), so those can read an
+/// hour off in the hour after a change.</para>
 ///
 /// <para>tempdb is not listed (it cannot be backed up), nor are database snapshots. A Darling-only collector: Lite has no twin.</para>
 /// </summary>
@@ -98,10 +100,28 @@ WITH
     SELECT /* PerformanceMonitorLite */
         bs.database_name,
         last_full =
-            MAX(CASE WHEN bs.type = 'D' THEN bs.backup_finish_date END),
+            MAX(CASE WHEN bs.type = 'D' THEN u.finish_utc END),
         last_log =
-            MAX(CASE WHEN bs.type = 'L' THEN bs.backup_finish_date END)
+            MAX(CASE WHEN bs.type = 'L' THEN u.finish_utc END)
     FROM msdb.dbo.backupset AS bs
+    /* Each backup is converted with the offset it recorded itself (time_zone, 15-minute steps, 127 or NULL = unknown), not the offset
+       in force now, so a log backup taken just before a clock change does not read an hour off (#6873). The MAX is taken over the
+       converted value. */
+    CROSS APPLY
+    (
+        SELECT
+            finish_utc =
+                DATEADD
+                (
+                    MINUTE,
+                    CASE
+                        WHEN bs.time_zone BETWEEN -48 AND 48
+                        THEN -15 * CONVERT(integer, bs.time_zone)
+                        ELSE @offset_minutes
+                    END,
+                    bs.backup_finish_date
+                )
+    ) AS u
     WHERE bs.backup_finish_date >= DATEADD(DAY, -{BackupWindowDays}, GETDATE())
     AND   bs.is_copy_only = 0
     AND   bs.type IN ('D', 'L')
@@ -125,8 +145,8 @@ SELECT
             THEN DATEADD(MINUTE, @offset_minutes, CONVERT(datetime, DATABASEPROPERTYEX(d.name, N'LastGoodCheckDbTime')))
             ELSE CONVERT(datetime, DATABASEPROPERTYEX(d.name, N'LastGoodCheckDbTime'))
         END,
-    last_full = DATEADD(MINUTE, @offset_minutes, b.last_full),
-    last_log = DATEADD(MINUTE, @offset_minutes, b.last_log),
+    last_full = b.last_full,
+    last_log = b.last_log,
     backups_readable = CONVERT(bit, 1)
 FROM sys.databases AS d
 LEFT JOIN backups AS b

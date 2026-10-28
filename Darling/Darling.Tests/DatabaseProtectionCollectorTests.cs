@@ -328,14 +328,15 @@ public sealed class DatabaseProtectionLiveSqlTests
         await using var connection = new SqlConnection(cs);
         await connection.OpenAsync(ct);
 
-        /* The temp table carries the same four columns the batch reads, named for a database every instance has. */
+        /* The temp table carries the same five columns the batch reads, named for a database every instance has. A NULL time_zone
+           means the backup did not record one, so the offset in force now applies. */
         await using (var setup = new SqlCommand(@"
-CREATE TABLE #backupset (database_name nvarchar(128), type char(1), backup_finish_date datetime, is_copy_only bit);
+CREATE TABLE #backupset (database_name nvarchar(128), type char(1), backup_finish_date datetime, is_copy_only bit, time_zone smallint);
 INSERT #backupset VALUES
-    (N'master', 'D', DATEADD(DAY, -2, GETDATE()), 0),
-    (N'master', 'D', DATEADD(DAY, -1, GETDATE()), 1),   /* newer, but copy_only: must not win */
-    (N'master', 'L', DATEADD(DAY, -70, GETDATE()), 0),  /* older than the 60-day window: reads as none */
-    (N'model',  'D', DATEADD(DAY, -3, GETDATE()), 0);", connection))
+    (N'master', 'D', DATEADD(DAY, -2, GETDATE()), 0, NULL),
+    (N'master', 'D', DATEADD(DAY, -1, GETDATE()), 1, NULL),   /* newer, but copy_only: must not win */
+    (N'master', 'L', DATEADD(DAY, -70, GETDATE()), 0, NULL),  /* older than the 60-day window: reads as none */
+    (N'model',  'D', DATEADD(DAY, -3, GETDATE()), 0, NULL);", connection))
         {
             await setup.ExecuteNonQueryAsync(ct);
         }
@@ -350,8 +351,61 @@ INSERT #backupset VALUES
         /* the two-day-old non-copy_only backup, in UTC, not yesterday's copy_only one */
         Assert.InRange((DateTime.UtcNow - master.LastFullBackupTime!.Value).TotalHours, 47.0, 49.0);
         Assert.Null(master.LastLogBackupTime);
-        Assert.Equal(DatabaseProtectionCollector.BackupNoneInWindow, master.LogBackupState);
+        /* master is SIMPLE on a stock instance, where no log backup is expected, otherwise the 70-day-old one reads as none in the window */
+        Assert.Equal(
+            master.RecoveryModelDesc == "SIMPLE" ? DatabaseProtectionCollector.BackupNotExpected : DatabaseProtectionCollector.BackupNoneInWindow,
+            master.LogBackupState);
         Assert.DoesNotContain(rows, r => r.DatabaseName == "tempdb");
+    }
+
+    /// <summary>
+    /// A backup converts with the offset recorded on its own row (<c>time_zone</c>, 15-minute steps), not the offset in force now,
+    /// and the newest is chosen after the conversion. Two log backups on a database are given zones that put the raw-newest one
+    /// EARLIER in UTC than the other, so taking the MAX before converting reads the wrong one. A full backup with time_zone 127
+    /// (unknown) falls back to the current offset. Zone -20 is five hours behind UTC and +16 is four hours ahead, and the current
+    /// offset of the test server is read from the server so the assertion holds in any zone.
+    /// </summary>
+    [Fact]
+    public async Task AGroupedBackupConvertsWithItsOwnTimeZone_TheMaxIsTakenAfterTheConversion_AnUnknownZoneUsesTheCurrentOffset()
+    {
+        var cs = ConnectionString();
+        Assert.SkipWhen(cs is null, "Set DARLING_TEST_SQL to a SQL Server host to run the database protection live SQL test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var connection = new SqlConnection(cs);
+        await connection.OpenAsync(ct);
+
+        DateTime g;
+        int currentOffsetMinutes;
+        await using (var clock = new SqlCommand("SELECT DATEADD(DAY, -1, GETDATE()), DATEDIFF(MINUTE, GETDATE(), GETUTCDATE());", connection))
+        await using (var clockReader = await clock.ExecuteReaderAsync(ct))
+        {
+            Assert.True(await clockReader.ReadAsync(ct));
+            g = clockReader.GetDateTime(0);
+            currentOffsetMinutes = clockReader.GetInt32(1);
+        }
+
+        /* A literal, not a parameter: a parameterized command runs under sp_executesql, which drops the temp table when it returns. */
+        var literal = "'" + g.ToString("yyyy-MM-ddTHH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture) + "'";
+        await using (var setup = new SqlCommand($@"
+CREATE TABLE #backupset (database_name nvarchar(128), type char(1), backup_finish_date datetime, is_copy_only bit, time_zone smallint);
+INSERT #backupset VALUES
+    (N'msdb', 'L', {literal}, 0, -20),                         /* five hours behind UTC: UTC is local + 5 h */
+    (N'msdb', 'L', DATEADD(HOUR, 1, {literal}), 0, 16),        /* raw-newest, four hours ahead of UTC: UTC is local - 4 h, so older than the one above */
+    (N'msdb', 'D', {literal}, 0, 127);                         /* unknown zone: the current offset */", connection))
+        {
+            await setup.ExecuteNonQueryAsync(ct);
+        }
+
+        var text = DatabaseProtectionCollector.Instance.BuildQuery(Context()).Text.Replace("msdb.dbo.backupset", "#backupset", StringComparison.Ordinal);
+        await using var command = new SqlCommand(text, connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var rows = await DatabaseProtectionCollector.Instance.ReadAsync(reader, Context(), ct);
+
+        var msdb = rows.Single(r => r.DatabaseName == "msdb");
+        Assert.Equal(g.AddHours(5), msdb.LastLogBackupTime);
+        Assert.Equal(g.AddMinutes(currentOffsetMinutes), msdb.LastFullBackupTime);
+        Assert.Equal(DatabaseProtectionCollector.BackupRecorded, msdb.LogBackupState);
     }
 
     private static CollectorContext Context() => new()
