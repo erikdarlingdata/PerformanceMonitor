@@ -288,7 +288,7 @@ public sealed class AgentAlertsStoreLiveTests
 
             Assert.Equal(3L, await ScalarAsync(connection, "SELECT count(*) FROM collect.agent_alerts WHERE server_id = " + TestServerId, ct));
             Assert.Equal(1L, await ScalarAsync(connection, "SELECT count(*) FROM collect.agent_alerts WHERE server_id = " + TestServerId + " AND alert_id IS NULL", ct));
-            Assert.Equal("7|Severity 019|true|19|2026-10-28 11:45:30|4|2|8|Error 823|false|823|<null>|0|0",
+            Assert.Equal("7|Severity 019|t|19|2026-10-28 11:45:30|4|2|8|Error 823|f|823|<null>|0|0",
                 (string)(await ScalarAsync(connection,
                     "SELECT string_agg(concat_ws('|', alert_id, alert_name, enabled, COALESCE(NULLIF(severity, 0), message_id), COALESCE(to_char(last_occurrence, 'YYYY-MM-DD HH24:MI:SS'), '<null>'), occurrence_count, operator_count), '|' ORDER BY alert_id) "
                     + "FROM collect.agent_alerts WHERE server_id = " + TestServerId + " AND alert_id IS NOT NULL", ct))!);
