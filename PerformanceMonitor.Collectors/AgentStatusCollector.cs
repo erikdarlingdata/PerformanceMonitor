@@ -68,7 +68,7 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SELECT /* PerformanceMonitorLite */
     agent_running =
         CASE
-            WHEN CONVERT(int, SERVERPROPERTY(N'EngineEdition')) = 8
+            WHEN CONVERT(integer, SERVERPROPERTY(N'EngineEdition')) = 8
             THEN CONVERT(bit, 1)
             WHEN EXISTS
             (
@@ -82,7 +82,7 @@ SELECT /* PerformanceMonitorLite */
         END,
     agent_status_desc =
         CASE
-            WHEN CONVERT(int, SERVERPROPERTY(N'EngineEdition')) = 8
+            WHEN CONVERT(integer, SERVERPROPERTY(N'EngineEdition')) = 8
             THEN CONVERT(nvarchar(256), N'Running (managed by Azure SQL Managed Instance)')
             ELSE
             (
