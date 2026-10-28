@@ -345,9 +345,10 @@ BEGIN
             AND   xet.target_name = N''ring_buffer''
             OPTION(RECOMPILE);
 
+            /* #6868: a count of 0 shreds like NULL. A Managed Instance never moves it off 0, so 0 = 0 would skip forever. */
             SET @shred_needed =
                 CASE
-                    WHEN @execution_count IS NULL THEN 1
+                    WHEN @execution_count IS NULL OR @execution_count = 0 THEN 1
                     WHEN @last_execution_count IS NULL THEN 1
                     WHEN @execution_count <> @last_execution_count THEN 1
                     ELSE 0
@@ -420,9 +421,10 @@ BEGIN
             AND   xet.target_name = N''ring_buffer''
             OPTION(RECOMPILE);
 
+            /* #6868: a count of 0 shreds like NULL. A Managed Instance never moves it off 0, so 0 = 0 would skip forever. */
             SET @shred_needed =
                 CASE
-                    WHEN @execution_count IS NULL THEN 1
+                    WHEN @execution_count IS NULL OR @execution_count = 0 THEN 1
                     WHEN @last_execution_count IS NULL THEN 1
                     WHEN @execution_count <> @last_execution_count THEN 1
                     ELSE 0
