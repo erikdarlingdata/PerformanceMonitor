@@ -2086,6 +2086,24 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             context.PgFunctionSchemas = CollectorContext.ChoosePgFunctionSchemas(functions, statementsSchema);
         }
 
+        /* #6888: the read above succeeded and a declared extension the query reads is not created in this database, so
+           the answer is already known and the query is not sent. Sending it would fail with 42883 / 42P01, which the host
+           classifies as a missing extension, and PostgreSQL writes that failure into the MONITORED server's own log, where
+           a DBA reads it as an error from the monitor. Raised as the same 42P01 the query would have raised, so the
+           worker's classification (PostgresFaultOutcome) records the same EXTENSION_MISSING outcome with the same advice,
+           on the server-scoped path and, stamped with the database, on the per-database path. A failed read threw above
+           and still fails the run. A collector that runs without the extension on this target (ReadsPgExtension false)
+           keeps running. */
+        foreach (var dependency in definition.RequiredPgExtensions)
+        {
+            if (!schemas.ContainsKey(dependency.ExtensionName) && definition.ReadsPgExtension(dependency, context))
+            {
+                throw new PostgresException(
+                    $"extension \"{dependency.ExtensionName}\" is not created in this database",
+                    "ERROR", "ERROR", PostgresErrorCodes.UndefinedTable);
+            }
+        }
+
         return true;
     }
 

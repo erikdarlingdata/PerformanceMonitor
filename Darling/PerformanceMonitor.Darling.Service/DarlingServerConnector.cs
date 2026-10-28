@@ -390,7 +390,26 @@ SELECT
     /// <para>#6143: <c>{0}</c> is the schema, quoted, from <see cref="ResolveAuroraFunctionSchemaAsync"/>. For
     /// <c>aurora_version</c> that is always pg_catalog: the pg_stat_statements extension does not ship it, so a function
     /// of that name in any other schema is never called. Whether the target is Aurora is still decided by the call.</para>
-    public const string PostgresAuroraProbeQueryText = @"SELECT {0}.aurora_version()";
+    /// <para>#6888: the call runs inside a DO block that catches <c>undefined_function</c>, and hands the answer back
+    /// through a transaction-local setting read by the second statement. PostgreSQL writes a failed statement to the
+    /// server's own log, so the bare call put <c>function pg_catalog.aurora_version() does not exist</c> into every
+    /// stock target's log on every connect, where a DBA read it as an error from the monitor. An error that PL/pgSQL
+    /// catches is not written to the log. The setting is <c>off</c> unless the call returned a value, so the answer is
+    /// the same one the bare call gave. Read-only (set_config with is_local touches no catalog), and plpgsql is a
+    /// trusted language every role may run a DO block in.</para>
+    public const string PostgresAuroraProbeQueryText = @"DO $aurora_probe$
+BEGIN
+    PERFORM pg_catalog.set_config('performance_monitor.is_aurora', 'off', true);
+    BEGIN
+        IF {0}.aurora_version() IS NOT NULL THEN
+            PERFORM pg_catalog.set_config('performance_monitor.is_aurora', 'on', true);
+        END IF;
+    EXCEPTION WHEN undefined_function THEN
+        NULL;
+    END;
+END
+$aurora_probe$;
+SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
 
     /// <summary>
     /// Whether this target is Aurora, decided by CALLING <c>aurora_version()</c> (#2340). True when the call
@@ -415,8 +434,22 @@ SELECT
             var schema = await ResolveAuroraFunctionSchemaAsync(connection, "aurora_version", cancellationToken);
             using var command = new NpgsqlCommand(
                 PostgresAuroraProbeQueryText.Replace("{0}", schema, StringComparison.Ordinal), connection) { CommandTimeout = 15 };
-            var version = await command.ExecuteScalarAsync(cancellationToken);
-            return version is not null and not DBNull;
+            /* Both statements go in one batch, so they share one implicit transaction and the is_local setting the DO
+               block wrote is still there for the SELECT. The DO block returns no rows: the answer is the SELECT's. */
+            string? answer = null;
+            using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                do
+                {
+                    if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0))
+                    {
+                        answer = reader.GetString(0);
+                    }
+                }
+                while (await reader.NextResultAsync(cancellationToken));
+            }
+
+            return string.Equals(answer, "on", StringComparison.Ordinal);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
