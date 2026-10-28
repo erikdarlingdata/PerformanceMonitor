@@ -169,9 +169,10 @@ public sealed class DarlingMcpQueryTagRollupTools
                     reach["window_truncated"] = RawWindowFloor.IsTruncated(from, windowStart) || read.BacklogHoursWaiting > 0;
                     if (read.BacklogHoursWaiting > 0)
                     {
-                        /* #6865: the route never reads the hours that wait for the hourly builder from the wide table, so this is the newest span that needs none of them. */
+                        /* #6865: the route never reads the hours that wait for the hourly builder from the wide table, so this is the newest span that needs none of them. backlog_hours_waiting counts the backlog hours, hours_left_out the whole hours from the window's first hour to the start. */
                         reach["backlog_hours_waiting"] = read.BacklogHoursWaiting;
-                        reach["backlog_note"] = $"{read.BacklogHoursWaiting} hour(s) of this window are still being built into the hourly Query Store table, so the figures start at {reach["effective_start"]} instead of the start of the window. The full window answers once they are built.";
+                        reach["hours_left_out"] = read.BacklogHoursLeftOut;
+                        reach["backlog_note"] = QueryTagRollupHashRoute.BacklogNote($"{reach["effective_start"]}", read.BacklogHoursLeftOut, read.BacklogHoursWaiting);
                     }
 
                     if (read.UsedHashHourly)

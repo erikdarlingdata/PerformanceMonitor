@@ -78,10 +78,17 @@ public static class QueryTagRollupHashRoute
         Dictionary<int, DateTime> Starts,
         DateTime RequestedStart,
         List<(DateTime Day, int ServerId)> DayPairs,
-        int BacklogHoursWaiting = 0)
+        int BacklogHoursWaiting = 0,
+        int BacklogHoursLeftOut = 0)
     {
         /// <summary>Whether any whole day is read from the day table (the section's source and tier then say so).</summary>
         public bool UsesDays => DayPairs.Count > 0;
+
+        /// <summary>
+        /// Whether the plan reads any hour or day from the hash tables. False when the route answers only because backlog hours waiting for the builder
+        /// were left out (#6865): the wide table's tail served it alone, so the section must not name the hash tables as a source.
+        /// </summary>
+        public bool ReadsHashTables => TablePairs.Count > 0 || DayPairs.Count > 0;
 
         /// <summary>The section's start-edge note: null when no server's start moved.</summary>
         public string? EdgesNote => HourlyWindowEdges.StartNote(RequestedStart, CeilHour(RequestedStart));
@@ -175,9 +182,11 @@ public static class QueryTagRollupHashRoute
     /// are read exactly as without a backlog (table hours, day rows, the tail, and real late-write stale pairs from the wide table).
     /// Pure. <paramref name="backlogHours"/> are the backlog hours of the ledger. Returns each server's start moved to the end of the newest backlog hour
     /// when that is later than its own start (the starts are the snapped ones), and how many distinct backlog hours lie in the span the read would
-    /// otherwise have covered; an empty dictionary and 0 when no backlog hour is in it.
+    /// otherwise have covered (<c>HoursWaiting</c>), and how many whole hours the read leaves out, from the first whole hour of the window to the cut
+    /// (<c>HoursLeftOut</c>: the backlog hours plus every other hour before the newest one, which is the size of the gap the notes state);
+    /// an empty dictionary and 0, 0 when no backlog hour is in the span.
     /// </summary>
-    public static (Dictionary<int, DateTime> Starts, int HoursWaiting) SpanPastBacklog(
+    public static (Dictionary<int, DateTime> Starts, int HoursWaiting, int HoursLeftOut) SpanPastBacklog(
         IReadOnlyDictionary<int, DateTime> readStarts, DateTime windowEnd, ISet<DateTime> backlogHours)
     {
         ArgumentNullException.ThrowIfNull(readStarts);
@@ -185,7 +194,7 @@ public static class QueryTagRollupHashRoute
         var moved = new Dictionary<int, DateTime>();
         if (readStarts.Count == 0)
         {
-            return (moved, 0);
+            return (moved, 0, 0);
         }
 
         var wholeEnd = FloorHour(windowEnd);
@@ -193,7 +202,7 @@ public static class QueryTagRollupHashRoute
         var inSpan = backlogHours.Where(h => h >= first && h < wholeEnd).ToList();
         if (inSpan.Count == 0)
         {
-            return (moved, 0);
+            return (moved, 0, 0);
         }
 
         var cut = inSpan.Max().Add(Hour);
@@ -202,8 +211,18 @@ public static class QueryTagRollupHashRoute
             moved[serverId] = CeilHour(readStart) < cut ? cut : readStart;
         }
 
-        return (moved, inSpan.Count);
+        return (moved, inSpan.Count, (int)((cut - first).TotalHours));
     }
+
+    /// <summary>
+    /// #6865: the one sentence the MCP section, the Viewer and (as a copy in query-tag-usage.js) the web page give when the read leaves out the first
+    /// hours of the window. <paramref name="hoursLeftOut"/> is the size of the gap, <paramref name="hoursWaiting"/> the backlog hours inside it that
+    /// are the reason. The two are different numbers, and the text never gives the second as the first.
+    /// </summary>
+    public static string BacklogNote(string startText, int hoursLeftOut, int hoursWaiting) =>
+        $"The figures start at {startText}, which leaves out the first {hoursLeftOut} {(hoursLeftOut == 1 ? "hour" : "hours")} of the window, because "
+        + $"{hoursWaiting} {(hoursWaiting == 1 ? "hour" : "hours")} in that part {(hoursWaiting == 1 ? "is" : "are")} still being built into the hourly Query Store table. "
+        + "The full window answers once they are built.";
 
     /// <summary>
     /// Decides whether the fleet read is routed and, if so, how: null means today's statement (one allowed server, a store below
@@ -268,8 +287,8 @@ public static class QueryTagRollupHashRoute
         /* #6865: a built hour whose pairs are stale only for the hash table (and no pair of it is a late write) is backlog: the read starts after the
            newest one instead of reading it from the wide table. */
         var backlog = stale.Select(p => p.Hour).Where(h => built.Contains(h) && !lateWriteHours.Contains(h)).ToHashSet();
-        var (moved, waiting) = SpanPastBacklog(allowed, windowEnd, backlog);
-        var plan = Split(waiting == 0 ? allowed : moved, windowEnd, built, stale, validDays) with { BacklogHoursWaiting = waiting };
+        var (moved, waiting, leftOut) = SpanPastBacklog(allowed, windowEnd, backlog);
+        var plan = Split(waiting == 0 ? allowed : moved, windowEnd, built, stale, validDays) with { BacklogHoursWaiting = waiting, BacklogHoursLeftOut = leftOut };
         /* With hours left out the route answers even with no table hour in the span: today's statement would read the whole window wide. */
         return waiting == 0 && plan.TablePairs.Count == 0 && plan.DayPairs.Count == 0 ? null : plan;
     }

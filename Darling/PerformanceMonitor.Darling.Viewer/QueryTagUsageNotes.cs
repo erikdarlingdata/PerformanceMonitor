@@ -67,9 +67,8 @@ public static class QueryTagUsageNotes
     }
 
     /// <summary>#6865: the fleet read leaves out the hours that wait for the hourly builder, so the section is the newest span that needs none of them.</summary>
-    public static string QueryStoreBacklog(DateTime servedStart, int hoursWaiting, Func<DateTime, string> at) =>
-        $"{hoursWaiting} {(hoursWaiting == 1 ? "hour" : "hours")} of this window {(hoursWaiting == 1 ? "is" : "are")} still being built into the hourly Query Store table, so the figures start at "
-        + at(servedStart) + " instead of the start of the window. The full window answers once they are built.";
+    public static string QueryStoreBacklog(DateTime servedStart, int hoursLeftOut, int hoursWaiting, Func<DateTime, string> at) =>
+        QueryTagRollupHashRoute.BacklogNote(at(servedStart), hoursLeftOut, hoursWaiting);
 
     /// <summary>A raw read that starts after the window does: what the raw collections still hold.</summary>
     public static string RawFloor(string sectionName, DateTime effectiveStart, Func<DateTime, string> at) =>

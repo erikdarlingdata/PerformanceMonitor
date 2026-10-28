@@ -638,8 +638,9 @@ AND first_execution_time <= LEAST(TIMESTAMP '{At(group.Key.To)}', TIMESTAMP '{At
 
             var cut = await FleetFromAsync(a, starts, ct);
             Assert.True(cut.UsedHashHourly);
-            /* Hours 23 back to 13 back wait: 11 of them. */
+            /* Hours 23 back to 13 back wait: 11 of them, and the read leaves out the same 11 whole hours (from the first whole hour of the window to the cut). */
             Assert.Equal(11, cut.BacklogHoursWaiting);
+            Assert.Equal(11, cut.BacklogHoursLeftOut);
             Assert.Equal(3, cut.RoutedStarts!.Count);
             Assert.All(cut.RoutedStarts!.Values, start => Assert.Equal(backlogBelow, start));
             Assert.NotEmpty(cut.Facts);
@@ -652,6 +653,68 @@ AND first_execution_time <= LEAST(TIMESTAMP '{At(group.Key.To)}', TIMESTAMP '{At
             Assert.Equal(11, late.BacklogHoursWaiting);
             Assert.All(late.RoutedStarts!.Values, start => Assert.Equal(backlogBelow, start));
             Assert.Equal(Canon(await TodaysAsync(a, span, a.End, ct)), Canon(late.Facts));
+
+            /* An hour inside the gap whose hash rows are valid again is not backlog: the backlog count drops to 10, but the read still starts at the cut,
+               so it still leaves out 11 hours. The two numbers are not the same number. */
+            await ExecAsync(a.Connection, $"UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = late_seq WHERE hour = TIMESTAMP '{At(a.HourNow.AddHours(-18))}'", ct);
+            var gap = await FleetFromAsync(a, starts, ct);
+            Assert.Equal(10, gap.BacklogHoursWaiting);
+            Assert.Equal(11, gap.BacklogHoursLeftOut);
+            Assert.All(gap.RoutedStarts!.Values, start => Assert.Equal(backlogBelow, start));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(a, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// #6865: when backlog covers every hash hour of the window, nothing after the cut is a valid table hour and the wide table's tail serves the whole
+    /// answer. The route still answers (today's statement would read the whole window wide), but the section must not name the hash tables as a source:
+    /// <c>UsedHashHourly</c>, the section's <c>tier</c> and its <c>source</c> say only what served it, and the figures are the wide statement over the tail.
+    /// </summary>
+    [Fact]
+    public async Task AReadWhoseEveryHashHourIsBacklog_IsServedByTheTailAlone_AndNamesNoHashTable()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var a = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(a.Connection, "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);
+            await ExecAsync(a.Connection, "DELETE FROM collect.query_store_hash_hourly", ct);
+            var starts = Servers.ToDictionary(s => s, _ => a.Start);
+
+            var read = await FleetFromAsync(a, starts, ct);
+            Assert.False(read.UsedHashHourly);
+            Assert.False(read.UsedHashDaily);
+            var first = QueryTagRollupHashRoute.CeilHour(a.Start);
+            /* The backlog hours are the built hours of the window whose stale pairs are stale only for the hash table (built_seq equals late_seq): the seed
+               leaves the newest hours late-written, and those are read wide as before. The cut is the end of the newest backlog hour. */
+            var backlogWhere = $"FROM collect.query_store_compose_stamp_built WHERE hour >= TIMESTAMP '{At(first)}' AND hour < TIMESTAMP '{At(a.HourNow)}' AND built_seq IS NOT DISTINCT FROM late_seq";
+            var backlogHours = await ComposeStampLiveSupport.CountAsync(a.Connection, $"SELECT count(DISTINCT hour) {backlogWhere}", ct);
+            await using var newest = new NpgsqlCommand($"SELECT max(hour) {backlogWhere}", a.Connection);
+            var cut = DateTime.SpecifyKind((DateTime)(await newest.ExecuteScalarAsync(ct))!, DateTimeKind.Unspecified).AddHours(1);
+            Assert.True(backlogHours > 0);
+            Assert.Equal(backlogHours, read.BacklogHoursWaiting);
+            Assert.Equal((int)(cut - first).TotalHours, read.BacklogHoursLeftOut);
+            Assert.All(read.RoutedStarts!.Values, start => Assert.Equal(cut, start));
+            var tail = Servers.ToDictionary(s => s, _ => cut);
+            var expected = await TodaysAsync(a, tail, a.End, ct);
+            Assert.NotEmpty(expected);
+            Assert.Equal(Canon(expected), Canon(read.Facts));
+
+            /* The section the MCP tool writes names the wide table only, and has no tier. */
+            using var doc = JsonDocument.Parse(await DarlingMcpQueryTagRollupTools.GetResourceUseByTagCore(
+                a.Source, null, 24, null, 25, a.End.ToString("o", CultureInfo.InvariantCulture), null, ct));
+            var section = doc.RootElement.GetProperty("sections").EnumerateArray().Single(s => s.GetProperty("section").GetString() == "query_store");
+            Assert.Equal("collect.query_store_interval_wide", section.GetProperty("source").GetString());
+            Assert.False(section.TryGetProperty("tier", out _));
+            Assert.DoesNotContain("query_store_hash", section.GetRawText(), StringComparison.Ordinal);
+            Assert.True(section.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(backlogHours, section.GetProperty("backlog_hours_waiting").GetInt32());
             bodySucceeded = true;
         }
         finally

@@ -11,6 +11,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -259,6 +260,102 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             Assert.Equal(26, tick.BuiltBacklog);
             Assert.Equal(28, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
             Assert.Equal(0, await HashStalePairsAsync(connection, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await source.DisposeAsync();
+            await connection.DisposeAsync();
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+            await scratch.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// A tick whose clock reads <paramref name="perBuild"/> for every hour already built into the hash table, so the elapsed time the tick sees is what
+    /// its builds cost: the budget and the tick limit are reached by building, not by a call counter.
+    /// </summary>
+    private static async Task<QueryStoreComposeStamp.TickResult> TickWithBuildCostAsync(NpgsqlDataSource source, DateTime hourNow, TimeSpan perBuild, CancellationToken ct)
+    {
+        using var clockConnection = source.OpenConnection();
+        TimeSpan Elapsed()
+        {
+            using var command = new NpgsqlCommand("SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", clockConnection);
+            return perBuild * Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+
+        var now = ComposeStampLiveSupport.ClockWithin(hourNow);
+        return await QueryStoreComposeStamp.RunTickAsync(
+            source, now, ComposeStampLiveSupport.RetentionDays, NullLogger.Instance, Elapsed, ct, new QueryStoreComposeStamp.TickOptions(StoreNow: now));
+    }
+
+    /// <summary>
+    /// #6865: the extra backlog builds stop at <see cref="QueryStoreComposeStamp.ExtraBacklogBudget"/> of their own time, not at the 24 hours the plan
+    /// offers, and the tick stays inside <see cref="QueryStoreComposeStamp.MaxTickDuration"/>. Each build costs 40 s on the clock: the six normal builds
+    /// take 240 s, the extras are measured from there, and the fifth extra is the first to find the 180 s used (the plan offers 22). Every normal hour
+    /// started, so nothing is deferred: the extras the budget did not reach are the next tick's backlog, not deferred hours.
+    /// </summary>
+    [Fact]
+    public async Task TheExtraBacklogBuilds_StopAtTheirBudget_InsideTheTickLimit_AndLeaveNothingDeferred()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(connection, "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);
+            await ExecAsync(connection, "DELETE FROM collect.query_store_hash_hourly", ct);
+            var plan = await PlanAsync(connection, hourNow, ct);
+            Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick, plan.Builds.Count);
+            Assert.Equal(22, plan.ExtraBacklog!.Count);
+
+            var perBuild = TimeSpan.FromSeconds(40);
+            var tick = await TickWithBuildCostAsync(source, hourNow, perBuild, ct);
+            var extras = (int)Math.Ceiling(QueryStoreComposeStamp.ExtraBacklogBudget / perBuild);
+            Assert.Equal(5, extras);
+            Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick + extras, tick.Built);
+            Assert.Equal(tick.Built, tick.BuiltBacklog);
+            Assert.Equal(0, tick.Failed);
+            Assert.Equal(0, tick.Deferred);
+            Assert.Equal(tick.Built, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
+            Assert.True(perBuild * tick.Built < QueryStoreComposeStamp.MaxTickDuration);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await source.DisposeAsync();
+            await connection.DisposeAsync();
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+            await scratch.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// #6865: when the tick limit is reached inside the normal builds, no extra build starts, and <c>Deferred</c> counts the normal hours not started
+    /// (2 of the 6), not the 22 extras that were never reached. Each build costs 150 s, so the fifth normal build finds 600 s used.
+    /// </summary>
+    [Fact]
+    public async Task WhenTheTickLimitEndsTheNormalBuilds_NoExtraStarts_AndDeferredCountsOnlyThePlannedHoursNotStarted()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(connection, "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);
+            await ExecAsync(connection, "DELETE FROM collect.query_store_hash_hourly", ct);
+            var plan = await PlanAsync(connection, hourNow, ct);
+            Assert.Equal(22, plan.ExtraBacklog!.Count);
+
+            var perBuild = TimeSpan.FromSeconds(150);
+            var tick = await TickWithBuildCostAsync(source, hourNow, perBuild, ct);
+            var started = (int)Math.Ceiling(QueryStoreComposeStamp.MaxTickDuration / perBuild);
+            Assert.Equal(4, started);
+            Assert.Equal(started, tick.Built);
+            Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick - started, tick.Deferred);
+            Assert.Equal(started, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
             bodySucceeded = true;
         }
         finally

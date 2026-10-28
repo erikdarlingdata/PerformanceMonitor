@@ -1299,14 +1299,14 @@ WHERE hour < $1;";
         var extra = planned.ExtraBacklog ?? Array.Empty<Build>();
         TimeSpan? extraStart = null;
         var startedExtra = 0;
-        foreach (var item in plan.Concat(extra))
+        foreach (var (item, isExtra) in plan.Select(build => (build, false)).Concat(extra.Select(build => (build, true))))
         {
             if (elapsed() >= MaxTickDuration)
             {
                 break;
             }
 
-            if (extra.Contains(item))
+            if (isExtra)
             {
                 extraStart ??= elapsed();
                 if (elapsed() - extraStart.Value >= ExtraBacklogBudget)

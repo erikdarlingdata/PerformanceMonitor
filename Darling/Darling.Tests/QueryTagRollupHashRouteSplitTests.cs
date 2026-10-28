@@ -292,13 +292,14 @@ public sealed class QueryTagRollupHashRouteSplitTests
 
     private static ISet<DateTime> Backlog(params int[] hours) => hours.Select(h => T(h)).ToHashSet();
 
-    /// <summary>#6865: the read starts at the end of the newest backlog hour and counts the backlog hours it leaves out.</summary>
+    /// <summary>#6865: the read starts at the end of the newest backlog hour. The backlog hours (4) and the whole hours the read leaves out (8, from the first whole hour to the cut) are two numbers.</summary>
     [Fact]
-    public void SpanPastBacklog_StartsAfterTheNewestBacklogHour_AndCountsTheBacklogHoursInTheWindow()
+    public void SpanPastBacklog_StartsAfterTheNewestBacklogHour_AndCountsBothTheBacklogHoursAndTheHoursLeftOut()
     {
-        var (starts, waiting) = QueryTagRollupHashRoute.SpanPastBacklog(new Dictionary<int, DateTime> { [1] = T(1, 17) }, T(12, 20), Backlog(2, 3, 5, 9));
+        var (starts, waiting, leftOut) = QueryTagRollupHashRoute.SpanPastBacklog(new Dictionary<int, DateTime> { [1] = T(1, 17) }, T(12, 20), Backlog(2, 3, 5, 9));
         Assert.Equal(T(10), starts[1]);
         Assert.Equal(4, waiting);
+        Assert.Equal(8, leftOut);
 
         /* The span that results: table hours after the cut, the open tail wide, nothing older read. */
         var plan = Split(starts[1], T(12, 20), Enumerable.Range(0, 12));
@@ -310,22 +311,25 @@ public sealed class QueryTagRollupHashRouteSplitTests
     public void SpanPastBacklog_IgnoresBacklogHoursOutsideTheWindow_AndWithNoneInItLeavesTheStartsAlone()
     {
         var starts = new Dictionary<int, DateTime> { [1] = T(4), [2] = T(6, 30) };
-        var (moved, waiting) = QueryTagRollupHashRoute.SpanPastBacklog(starts, T(12, 20), Backlog(1, 2, 12, 13));
+        var (moved, waiting, leftOut) = QueryTagRollupHashRoute.SpanPastBacklog(starts, T(12, 20), Backlog(1, 2, 12, 13));
         Assert.Empty(moved);
         Assert.Equal(0, waiting);
-        var (none, noneWaiting) = QueryTagRollupHashRoute.SpanPastBacklog(starts, T(12, 20), Backlog());
+        Assert.Equal(0, leftOut);
+        var (none, noneWaiting, noneLeftOut) = QueryTagRollupHashRoute.SpanPastBacklog(starts, T(12, 20), Backlog());
         Assert.Empty(none);
         Assert.Equal(0, noneWaiting);
+        Assert.Equal(0, noneLeftOut);
     }
 
     [Fact]
     public void SpanPastBacklog_MovesEveryServerToTheCut_ButKeepsALaterStart()
     {
         var starts = new Dictionary<int, DateTime> { [1] = T(2), [2] = T(9, 30), [3] = T(7) };
-        var (moved, waiting) = QueryTagRollupHashRoute.SpanPastBacklog(starts, T(12, 20), Backlog(3, 7));
+        var (moved, waiting, leftOut) = QueryTagRollupHashRoute.SpanPastBacklog(starts, T(12, 20), Backlog(3, 7));
         Assert.Equal(T(8), moved[1]);
         Assert.Equal(T(9, 30), moved[2]);
         Assert.Equal(T(8), moved[3]);
         Assert.Equal(2, waiting);
+        Assert.Equal(6, leftOut);
     }
 }

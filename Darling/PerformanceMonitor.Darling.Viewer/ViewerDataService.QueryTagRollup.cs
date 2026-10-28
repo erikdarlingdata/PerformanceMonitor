@@ -116,7 +116,7 @@ public sealed partial class ViewerDataService
             {
                 /* #6865: the fleet read leaves out the hours that wait for the hourly builder; this is the newest span that needs none. */
                 var served = qs.RoutedStarts is { Count: > 0 } span ? span.Values.Max() : startUtc;
-                notes[QueryTagRollupSection.QueryStore.Name] = QueryTagUsageNotes.QueryStoreBacklog(served, qs.BacklogHoursWaiting, at);
+                notes[QueryTagRollupSection.QueryStore.Name] = QueryTagUsageNotes.QueryStoreBacklog(served, qs.BacklogHoursLeftOut, qs.BacklogHoursWaiting, at);
             }
 
             if (qs.Allowed.Count == 0)
