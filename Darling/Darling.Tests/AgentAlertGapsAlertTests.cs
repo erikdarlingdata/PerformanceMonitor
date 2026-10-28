@@ -291,9 +291,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
 
             /* The Viewer's Overview card reads the same gaps through the same reader. */
             await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(postgres.ConnectionString);
-            var viewerGap = Assert.Single(await viewer.GetAgentAlertGapsAsync(ServerId, DateTime.UtcNow, ct));
-            Assert.Equal(gap.Code, viewerGap.Code);
-            Assert.Equal(gap.Message, viewerGap.Message);
+            var viewerGaps = await viewer.GetAgentAlertGapsAsync(ServerId, DateTime.UtcNow, ct);
+            Assert.Equal(gaps[ServerId].Select(g => g.Code + "|" + g.Message), viewerGaps.Select(g => g.Code + "|" + g.Message));
+            Assert.Contains(viewerGaps, g => g.Code == "no_alerts_defined");
 
             /* A newer complete capture leaves the server out. */
             await InsertCaptureAsync(postgres, ct, DateTime.UtcNow.AddMinutes(-1), CompleteSetup());
