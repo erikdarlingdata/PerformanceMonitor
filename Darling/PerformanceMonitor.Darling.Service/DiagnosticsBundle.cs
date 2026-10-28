@@ -102,6 +102,8 @@ internal static class DiagnosticsBundle
         "DarlingConfig.ForcePlanBot",
         "DarlingConfig.Peers",
         "DarlingConfig.Heartbeat",
+        /* #6840: the front door's block holds every store's address and access token. */
+        "DarlingConfig.FrontDoor",
         "PostgresConfig.WebConnectionString",
         "PostgresConfig.McpConnectionString",
         "PostgresConfig.Port",

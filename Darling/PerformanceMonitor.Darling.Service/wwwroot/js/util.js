@@ -935,6 +935,77 @@ export function hasInFlightReads() {
   return pageReads.n > 0;
 }
 
+/* ─────────────────────────── front door (#6840) ───────────────────────────
+   A front door fronts several Darling stores. The page then works inside ONE store at a time: every /api/* request
+   carries X-Darling-Store naming it, and every link to a store-local id carries #/s/{store}/ so a bookmark or a pasted link
+   opens in the same store. With no front door (frontDoor() false) none of this runs: no header, no prefix, and every request
+   and link is exactly what it was before. */
+const STORE_HEADER = "X-Darling-Store";
+const STORE_HASH_PREFIX = "#/s/";
+let frontDoorOn = false;
+let pickedStore = null;
+
+/** True when /api/session said front_door: true (app.js sets it once, at start). */
+export function frontDoor() {
+  return frontDoorOn;
+}
+
+export function setFrontDoor(on) {
+  frontDoorOn = on === true;
+}
+
+/** The store the page is working in, or null when none is picked (or there is no front door). */
+export function currentStore() {
+  return frontDoorOn ? pickedStore : null;
+}
+
+export function setStore(name) {
+  pickedStore = typeof name === "string" && name !== "" ? name : null;
+}
+
+/** `hash` ("#/server/x") with #/s/{store}/ in front of its route. With no store, or no front door and no explicit store, it
+    comes back unchanged. `store` defaults to the current one. */
+export function storeHash(hash, store) {
+  const s = store != null && store !== "" ? store : currentStore();
+  const h = String(hash == null ? "" : hash);
+  if (!s || !h.startsWith("#/")) return h;
+  return STORE_HASH_PREFIX + encodeURIComponent(s) + "/" + h.slice(2);
+}
+
+/** Splits a location hash into the store it names and the route after it: "#/s/use1/server/x" gives { store: "use1",
+    hash: "#/server/x" }. A hash with no #/s/ prefix gives store null and the hash as it came. */
+export function splitStoreHash(hash) {
+  const h = String(hash == null ? "" : hash);
+  if (!h.startsWith(STORE_HASH_PREFIX)) return { store: null, hash: h };
+  const rest = h.slice(STORE_HASH_PREFIX.length);
+  const slash = rest.indexOf("/");
+  const name = slash < 0 ? rest : rest.slice(0, slash);
+  let store = null;
+  try {
+    store = decodeURIComponent(name);
+  } catch {
+    store = null;
+  }
+  if (store === null || store === "") return { store: null, hash: h };
+  const route = slash < 0 ? "" : rest.slice(slash + 1);
+  return { store, hash: route === "" ? "#/fleet" : "#/" + route };
+}
+
+/** The route part of location.hash: the same text with any #/s/{store}/ prefix taken off, for code that reads the hash. */
+export function routeHash() {
+  const raw = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  return splitStoreHash(raw).hash;
+}
+
+/** Headers for a request to /api/*: `headers` plus X-Darling-Store when the front door is on and a store is picked (or
+    `store` is given). Without a front door it returns `headers` itself, so a request is byte-for-byte what it was. */
+export function storeHeaders(headers, store) {
+  if (!frontDoorOn) return headers;
+  const s = store != null && store !== "" ? store : pickedStore;
+  if (!s) return headers;
+  return { ...headers, [STORE_HEADER]: s };
+}
+
 /**
  * GET a same-origin API path and classify the response into one of four kinds, mirroring the service's
  * response shapes (DarlingWebEndpoints):
@@ -952,7 +1023,7 @@ export async function apiGet(path, signal) {
   try {
     let resp;
     try {
-      resp = await fetch(path, { headers: { Accept: "application/json" }, signal });
+      resp = await fetch(path, { headers: storeHeaders({ Accept: "application/json" }), signal });
     } catch (e) {
       if (e && e.name === "AbortError") return { kind: "aborted" };
       return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
@@ -984,15 +1055,17 @@ export async function apiGetJoined(path, signal) {
   scope.n++;
   let entry = null;
   let onAbort = null;
+  /* The same path in two stores is two reads (#6840): the key carries the store the request will name. */
+  const key = frontDoorOn && pickedStore ? pickedStore + "\n" + path : path;
   try {
-    entry = joinedReads.get(path);
+    entry = joinedReads.get(key);
     if (!entry) {
       const controller = new AbortController();
       const joined = { controller, waiters: 0, body: null };
       joined.body = fetchBody(path, controller.signal).finally(() => {
-        if (joinedReads.get(path) === joined) joinedReads.delete(path);
+        if (joinedReads.get(key) === joined) joinedReads.delete(key);
       });
-      joinedReads.set(path, joined);
+      joinedReads.set(key, joined);
       entry = joined;
     }
 
@@ -1010,9 +1083,9 @@ export async function apiGetJoined(path, signal) {
     if (signal && onAbort) signal.removeEventListener("abort", onAbort);
     if (entry) {
       entry.waiters--;
-      if (entry.waiters === 0 && joinedReads.get(path) === entry) {
+      if (entry.waiters === 0 && joinedReads.get(key) === entry) {
         /* Nobody is waiting: stop the fetch, and let the next caller start a fresh one. */
-        joinedReads.delete(path);
+        joinedReads.delete(key);
         entry.controller.abort();
       }
     }
@@ -1020,8 +1093,9 @@ export async function apiGetJoined(path, signal) {
   }
 }
 
-/* The /api/fleet request every caller in flight at the same moment shares — see apiGetFleet. */
-let fleetRequest = null;
+/* The /api/fleet requests in flight, one per store (one key without a front door), each shared by every caller that asks
+   while it is in flight — see apiGetFleet. */
+const fleetRequests = new Map();
 
 /**
  * GET /api/fleet, classified exactly like apiGet, with ONE request shared by every caller that asks while it is
@@ -1034,17 +1108,22 @@ let fleetRequest = null;
  * before, so no page renders an older roll-up than it would have — only the duplicate is gone. And each caller
  * classifies (so parses) the shared body for itself, so every page still owns the cards it was handed.
  */
-export async function apiGetFleet() {
+export async function apiGetFleet(store) {
   const scope = pageReads;
   scope.n++;
   try {
-    if (!fleetRequest) {
-      fleetRequest = fetchBody("/api/fleet").finally(() => {
-        fleetRequest = null;
+    /* #6840: `store` reads another store's roll-up (the front door's fleet page and sidebar read every store); with none it
+       is the current store's, and without a front door the one key and the one request it always was. */
+    const key = frontDoorOn ? (store != null && store !== "" ? store : pickedStore || "") : "";
+    let request = fleetRequests.get(key);
+    if (!request) {
+      request = fetchBody("/api/fleet", undefined, frontDoorOn ? key : undefined).finally(() => {
+        if (fleetRequests.get(key) === request) fleetRequests.delete(key);
       });
+      fleetRequests.set(key, request);
     }
 
-    const shared = await fleetRequest;
+    const shared = await request;
     if (shared.transportError) return { kind: "error", message: shared.transportError };
     return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
   } finally {
@@ -1054,9 +1133,9 @@ export async function apiGetFleet() {
 
 /** Fetch a path and read its whole body once, for a response several callers classify. A failure comes back as a
     value rather than a rejection, so one lost request cannot surface as an unhandled rejection per caller. */
-async function fetchBody(path, signal) {
+async function fetchBody(path, signal, store) {
   try {
-    const resp = await fetch(path, { headers: { Accept: "application/json" }, signal });
+    const resp = await fetch(path, { headers: storeHeaders({ Accept: "application/json" }, store), signal });
     return { ok: resp.ok, status: resp.status, raw: await resp.text(), retryAfter: retryAfterOf(resp) };
   } catch (e) {
     if (e && e.name === "AbortError") return { aborted: true };
@@ -1079,7 +1158,7 @@ export async function apiSend(method, path, body) {
   try {
     resp = await fetch(path, {
       method,
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      headers: storeHeaders({ Accept: "application/json", "Content-Type": "application/json" }),
       body: hasBody ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
@@ -1114,7 +1193,7 @@ export async function apiWrite(method, path, body) {
   try {
     resp = await fetch(path, {
       method,
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      headers: storeHeaders({ Accept: "application/json", "Content-Type": "application/json" }),
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (e) {
@@ -1414,7 +1493,7 @@ const INSTANT_FIELDS = ["sample_time", "time", "collection_time", "event_time", 
 
 /* The range belongs to the server page: a read from any other page is never anchored by it. */
 function liveRange() {
-  const hash = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  const hash = routeHash();
   return activeRange && (hash === "" || hash.startsWith("#/server/")) ? activeRange : null;
 }
 
@@ -1501,7 +1580,7 @@ export function getActiveDatabaseFilter() {
 
 /* The filter belongs to the server page: a read or a panel on any other page is never touched by it. */
 function liveDatabaseFilter() {
-  const hash = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  const hash = routeHash();
   return activeDatabaseFilter && hash.startsWith("#/server/") ? activeDatabaseFilter : null;
 }
 

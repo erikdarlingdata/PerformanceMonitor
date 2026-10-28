@@ -109,3 +109,5 @@ Set `DARLING_MCP_TOKEN` in the environment that starts Claude Code, or keep the 
 If `mcp.network.tls` is set and `mcp.network.listen` is `0.0.0.0` or `::`, the one MCP listener serves HTTPS to everyone, loopback included. Local clients then need `https://`, and the certificate must name the host they use. With a specific listen IP the loopback listeners stay plain HTTP, and the command above still works.
 
 If the port is already in use at startup, the MCP server logs an error and does not start; collection is unaffected.
+
+**The `store` argument (front door only).** On a service that runs as a front door, every tool also takes an optional `store` argument that names one of the front door's stores. A store itself has no `store` argument. The front door sends a call to a store by `store`, then by `server_name`, then by the kind of tool, and it answers a read that names no server from every store. See [How MCP calls route](front-door.md#how-mcp-calls-route).

@@ -25,5 +25,6 @@ Read these pages in this order. After the install, each page is complete on its 
 19. [Opt-in Network Endpoints (LAN)](network-endpoints.md): reach the store, MCP and the web dashboard from another machine.
 20. [Troubleshooting](../troubleshooting.md#darling): a table of what you see, the likely cause and the fix, for Darling and Lite.
 21. [Darling troubleshooting](troubleshooting.md): every service log line and what it means.
+22. [The front door](front-door.md): one MCP address and one web address in front of several stores.
 
 The [Darling operator guide](../../Darling/README.md) is now a short index. Its old headings link to these pages.

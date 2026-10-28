@@ -21,7 +21,7 @@
  * fleet-wide: the picker stays visible on that tab and its build ignores the choice.
  */
 
-import { el, mount, readTool, onPageLeave, loadingStrip, errorStrip, emptyStrip } from "../util.js";
+import { storeHash, el, mount, readTool, onPageLeave, loadingStrip, errorStrip, emptyStrip } from "../util.js";
 import { setPanelSignal } from "../panels.js";
 import { orderServers } from "../server-order.js";
 import { isPostgresRow } from "./finops/gate.js";
@@ -89,7 +89,7 @@ function findTab(id) {
 }
 
 function hashFor(server, tabId) {
-  return "#/finops/" + encodeURIComponent(server) + "/" + tabId;
+  return storeHash("#/finops/" + encodeURIComponent(server) + "/" + tabId);
 }
 
 /** The server rows list_servers returned, whichever envelope shape carried them. */

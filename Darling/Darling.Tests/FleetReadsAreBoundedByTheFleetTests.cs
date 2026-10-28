@@ -173,10 +173,11 @@ public sealed class FleetReadsAreBoundedByTheFleetTests
     {
         var util = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js");
 
-        Assert.Contains("export async function apiGetFleet() {", util, StringComparison.Ordinal);
-        Assert.Contains("if (!fleetRequest) {", util, StringComparison.Ordinal);
-        Assert.Contains("fleetRequest = fetchBody(\"/api/fleet\").finally(() => {", util, StringComparison.Ordinal);
-        Assert.Contains("fleetRequest = null;", util, StringComparison.Ordinal);
+        Assert.Contains("export async function apiGetFleet(store) {", util, StringComparison.Ordinal);
+        // #6840: one in-flight request per store (one key without a front door), still joined and still cleared when it settles
+        Assert.Contains("if (!request) {", util, StringComparison.Ordinal);
+        Assert.Contains("request = fetchBody(\"/api/fleet\", undefined, frontDoorOn ? key : undefined).finally(() => {", util, StringComparison.Ordinal);
+        Assert.Contains("if (fleetRequests.get(key) === request) fleetRequests.delete(key);", util, StringComparison.Ordinal);
         Assert.Contains("return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });", util, StringComparison.Ordinal);
     }
 

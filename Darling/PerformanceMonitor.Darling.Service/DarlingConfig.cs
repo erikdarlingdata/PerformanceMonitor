@@ -16,6 +16,7 @@ using System.Text.Json;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 using PerformanceMonitor.Darling.Storage;
 using System.Text.Json.Serialization;
 using PerformanceMonitor.Notifications;
@@ -398,6 +399,26 @@ public sealed class DarlingConfig
 
     private ReadsConfig _reads = new();
 
+    /// <summary>
+    /// The front door (#6840): one web address and one MCP endpoint that routes to several Darling stores, each of which keeps
+    /// its own monitoring database. File-only, like <see cref="Peers"/>, and absent or <c>"enabled": false</c> is today's
+    /// behavior. In front-door mode this process holds no store of its own and runs no collector. See <see cref="FrontDoorConfig"/>.
+    /// </summary>
+    [JsonPropertyName("frontDoor")]
+    public FrontDoorConfig FrontDoor
+    {
+        get => _frontDoor;
+
+        /* "frontDoor": null means off, the same as an absent block (the #5460 heartbeat rule). */
+        set => _frontDoor = value ?? new();
+    }
+
+    private FrontDoorConfig _frontDoor = new();
+
+    /// <summary>True when this process is a front door (#6840): <c>frontDoor.enabled</c>.</summary>
+    [JsonIgnore]
+    public bool IsFrontDoor => FrontDoor.Enabled;
+
     public static string ResolveConfigPath(string? explicitPath = null) =>
         ResolveConfigPath(explicitPath, Environment.GetEnvironmentVariable);
 
@@ -511,7 +532,12 @@ public sealed class DarlingConfig
     {
         var problems = new List<string>();
 
-        if (Postgres is null)
+        if (IsFrontDoor)
+        {
+            /* #6840: a front door has no store of its own, so no postgres section is required of it (and none is read).
+               The frontDoor block itself is checked below, with the peers block. */
+        }
+        else if (Postgres is null)
         {
             problems.Add("postgres section is required.");
         }
@@ -568,6 +594,7 @@ public sealed class DarlingConfig
         }
 
         problems.AddRange(PeersConfig.Validate(Peers));
+        problems.AddRange(FrontDoorConfig.Validate(FrontDoor));
         /* #5450: the heartbeat block, for the same reason (a broken one is reported even with no servers yet). */
         problems.AddRange(HeartbeatConfig.Validate(Heartbeat));
 
@@ -3095,6 +3122,11 @@ public sealed class PeersConfig
         return problems;
     }
 
+    /// <summary>The credential-shaped substring <paramref name="text"/> carries, or null. The front door's store names use the
+    /// same list, because a store name goes into a header and a page address.</summary>
+    internal static string? FindCredentialShapedToken(string text)
+        => CredentialShapedTokens.FirstOrDefault(t => text.Contains(t, StringComparison.OrdinalIgnoreCase));
+
     private static IEnumerable<string> PeerStrings(PeerStoreConfig peer)
     {
         yield return peer.Name ?? "";
@@ -3151,4 +3183,324 @@ public sealed class ReadsConfig
     /// <summary>How many long reads run at once (default 2). 0 turns the limit off.</summary>
     [JsonPropertyName("maxHeavyReads")]
     public int MaxHeavyReads { get; set; } = ReadAdmission.DefaultMaxHeavyReads;
+}
+
+/// <summary>
+/// The <c>frontDoor</c> block of darling.json (#6840): this process is a front door that holds no monitoring database of its
+/// own and forwards the MCP and web surfaces to the Darling stores listed in <see cref="Stores"/>.
+///
+/// <para><b>File-only, and its own block.</b> It is not part of <see cref="PeersConfig"/>: that text goes verbatim to every MCP
+/// client and its validator refuses secrets, while this block holds every peer's access token. No read surface returns it.
+/// Each token is an <c>*EncryptedToken</c> (DPAPI), a plain <c>*Token</c>, or an <c>env:</c>/<c>file:</c> reference, resolved the
+/// way <see cref="McpTokenEntry.ResolveToken"/> resolves its own. An edit takes effect on the next service restart.</para>
+/// </summary>
+public sealed class FrontDoorConfig
+{
+    /// <summary>Seconds between directory refreshes when <c>refreshSeconds</c> is omitted.</summary>
+    public const int DefaultRefreshSeconds = 300;
+
+    /// <summary>The shortest refresh a config may ask for.</summary>
+    public const int MinRefreshSeconds = 30;
+
+    /// <summary>The longest refresh a config may ask for.</summary>
+    public const int MaxRefreshSeconds = 3600;
+
+    /// <summary>Seconds a fan-out waits for one store when <c>peerTimeoutSeconds</c> is omitted.</summary>
+    public const int DefaultPeerTimeoutSeconds = 150;
+
+    /// <summary>The shortest peer timeout a config may ask for.</summary>
+    public const int MinPeerTimeoutSeconds = 30;
+
+    /// <summary>The longest peer timeout a config may ask for.</summary>
+    public const int MaxPeerTimeoutSeconds = 600;
+
+    /// <summary>Off unless set: an absent block, or <c>"enabled": false</c>, is today's single-store behavior.</summary>
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
+
+    /// <summary>Seconds between reads of each store's server list.</summary>
+    [JsonPropertyName("refreshSeconds")]
+    public int RefreshSeconds { get; set; } = DefaultRefreshSeconds;
+
+    /// <summary>Seconds one forwarded call to a store may take before the front door gives up on it.</summary>
+    [JsonPropertyName("peerTimeoutSeconds")]
+    public int PeerTimeoutSeconds { get; set; } = DefaultPeerTimeoutSeconds;
+
+    /// <summary>The directory refresh interval a caller uses: <see cref="RefreshSeconds"/> held between the limits. <c>Validate</c> does
+    /// not run in the processes that host the front door's directory and MCP router, so a 0 here would refresh without a pause and a
+    /// negative value would stop the host (#6840).</summary>
+    internal TimeSpan EffectiveRefreshInterval() =>
+        TimeSpan.FromSeconds(Math.Clamp(RefreshSeconds, MinRefreshSeconds, MaxRefreshSeconds));
+
+    /// <summary>The per-call deadline a caller uses: <see cref="PeerTimeoutSeconds"/> held between the limits, for the same reason.</summary>
+    internal TimeSpan EffectivePeerTimeout() =>
+        TimeSpan.FromSeconds(Math.Clamp(PeerTimeoutSeconds, MinPeerTimeoutSeconds, MaxPeerTimeoutSeconds));
+
+    /// <summary>The Darling stores this front door routes to.</summary>
+    [JsonPropertyName("stores")]
+    public List<FrontDoorStoreConfig> Stores { get; set; } = new();
+
+    /// <summary>The valid store entries as routing records, in file order. An entry that fails validation is left out, so a
+    /// caller that has not validated never sees a half-built store.</summary>
+    /* The same name twice (names compare ignoring case) is one store, the first entry: this host does not validate the file, Validate
+       refuses the duplicate, and a second entry would otherwise break the peer client's name table at start and make two rows share one
+       entry's health and server list. */
+    internal IReadOnlyList<FrontDoorStore> ToStores()
+        => (Stores ?? new()).Select(s => s?.ToStore()).Where(s => s is not null).Select(s => s!)
+            .GroupBy(s => s.Name, StringComparer.OrdinalIgnoreCase).Select(g => g.First()).ToList();
+
+    /// <summary>Notes for the log that are not refusals (D3): a plain-http address to a store that is not on this machine sends
+    /// that store's token in clear text. Guidance only, like the MCP listener without TLS. Names the store, never an address.</summary>
+    public IReadOnlyList<string> Warnings()
+    {
+        var warnings = new List<string>();
+        foreach (var store in Stores ?? new())
+        {
+            if (store is null || string.IsNullOrWhiteSpace(store.Name))
+            {
+                continue;
+            }
+
+            foreach (var (setting, url) in new[] { ("mcpUrl", store.McpUrl), ("webUrl", store.WebUrl) })
+            {
+                if (FrontDoorStoreConfig.TryParseUrl(url, out var uri) && uri.Scheme == Uri.UriSchemeHttp && !uri.IsLoopback)
+                {
+                    warnings.Add($"frontDoor.stores['{store.Name.Trim()}'].{setting} is plain http to a host that is not this machine, " +
+                        "so the store's access token crosses the network in clear text. Use https if the store serves it.");
+                }
+            }
+        }
+
+        return warnings;
+    }
+
+    /// <summary>
+    /// Validates a front-door block; returns human-readable problems (empty = valid). Nothing is checked when the block is off.
+    /// A problem never carries a URL's text or a token.
+    /// </summary>
+    public static IReadOnlyList<string> Validate(FrontDoorConfig? frontDoor)
+    {
+        var problems = new List<string>();
+        if (frontDoor is null || !frontDoor.Enabled)
+        {
+            return problems;
+        }
+
+        if (frontDoor.RefreshSeconds is < MinRefreshSeconds or > MaxRefreshSeconds)
+        {
+            problems.Add($"frontDoor.refreshSeconds must be between {MinRefreshSeconds} and {MaxRefreshSeconds} (got {frontDoor.RefreshSeconds}).");
+        }
+
+        if (frontDoor.PeerTimeoutSeconds is < MinPeerTimeoutSeconds or > MaxPeerTimeoutSeconds)
+        {
+            problems.Add($"frontDoor.peerTimeoutSeconds must be between {MinPeerTimeoutSeconds} and {MaxPeerTimeoutSeconds} (got {frontDoor.PeerTimeoutSeconds}).");
+        }
+
+        if (frontDoor.Stores is not { Count: > 0 })
+        {
+            problems.Add("frontDoor.stores needs at least one store when frontDoor.enabled is true.");
+            return problems;
+        }
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < frontDoor.Stores.Count; i++)
+        {
+            var store = frontDoor.Stores[i];
+            if (store is null)
+            {
+                problems.Add($"frontDoor.stores[{i}] is empty.");
+                continue;
+            }
+
+            /* The index names the entry, never the name: a name that fails the credential check can BE the offending text. */
+            var label = $"frontDoor.stores[{i}]";
+            var name = store.Name?.Trim() ?? "";
+            if (!FrontDoorStoreConfig.NamePattern.IsMatch(name))
+            {
+                problems.Add($"{label}: name is required, 1 to 64 characters of A-Z, a-z, 0-9, '.', '_' and '-'. It goes into a request header and a page address.");
+            }
+            else if (PeersConfig.FindCredentialShapedToken(name) is not null)
+            {
+                problems.Add($"{label}: name looks like it carries a credential. A store name is shown on every page and sent in a header, so name the store, not how to reach it.");
+            }
+            else if (!seen.Add(name))
+            {
+                problems.Add($"{label}: name is used by another store (names are compared ignoring case).");
+            }
+
+            if (string.IsNullOrWhiteSpace(store.McpUrl))
+            {
+                problems.Add($"{label}: mcpUrl is required.");
+            }
+            else if (FrontDoorStoreConfig.UrlProblem(store.McpUrl) is { } mcpProblem)
+            {
+                problems.Add($"{label}: mcpUrl {mcpProblem}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(store.WebUrl) && FrontDoorStoreConfig.UrlProblem(store.WebUrl) is { } webProblem)
+            {
+                problems.Add($"{label}: webUrl {webProblem}");
+            }
+
+            if (string.IsNullOrWhiteSpace(store.McpEncryptedToken) && string.IsNullOrWhiteSpace(store.McpToken))
+            {
+                problems.Add($"{label}: an MCP token is required (mcpEncryptedToken, or mcpToken as text or an env:/file: reference).");
+            }
+
+            /* A store with a web address and no web token would answer 502 on every web request at run time. */
+            if (!string.IsNullOrWhiteSpace(store.WebUrl)
+                && string.IsNullOrWhiteSpace(store.WebEncryptedToken) && string.IsNullOrWhiteSpace(store.WebToken))
+            {
+                problems.Add($"{label}: a web token is required when webUrl is set (webEncryptedToken, or webToken as text or an env:/file: reference).");
+            }
+
+            if (!string.IsNullOrWhiteSpace(store.CertificateSha256) && FrontDoorStoreConfig.NormalizePin(store.CertificateSha256) is null)
+            {
+                problems.Add($"{label}: certificateSha256 must be the certificate's SHA-256 thumbprint, 64 hex characters (colons and spaces allowed).");
+            }
+        }
+
+        return problems;
+    }
+}
+
+/// <summary>One store a front door routes to: a name, the address of its MCP endpoint and (optionally) its web dashboard, the
+/// access tokens, and an optional certificate pin. See <see cref="FrontDoorConfig"/>.</summary>
+public sealed class FrontDoorStoreConfig
+{
+    internal static readonly System.Text.RegularExpressions.Regex NamePattern =
+        new("^[A-Za-z0-9._-]{1,64}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>The store's name: 1 to 64 of <c>A-Za-z0-9._-</c>. It is the <c>X-Darling-Store</c> header value and the page address's store.</summary>
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    /// <summary>The store's MCP endpoint, an absolute http or https URL with no query. Required.</summary>
+    [JsonPropertyName("mcpUrl")]
+    public string? McpUrl { get; set; }
+
+    /// <summary>The store's operator-role MCP token, DPAPI-encrypted. Preferred over <see cref="McpToken"/>.</summary>
+    [JsonPropertyName("mcpEncryptedToken")]
+    public string? McpEncryptedToken { get; set; }
+
+    /// <summary>The store's operator-role MCP token as text, or an <c>env:</c>/<c>file:</c> reference.</summary>
+    [JsonPropertyName("mcpToken")]
+    public string? McpToken { get; set; }
+
+    /// <summary>The store's agent-role MCP token, DPAPI-encrypted. Preferred over <see cref="McpAgentToken"/>.</summary>
+    [JsonPropertyName("mcpEncryptedAgentToken")]
+    public string? McpEncryptedAgentToken { get; set; }
+
+    /// <summary>The store's agent-role MCP token as text, or an <c>env:</c>/<c>file:</c> reference.</summary>
+    [JsonPropertyName("mcpAgentToken")]
+    public string? McpAgentToken { get; set; }
+
+    /// <summary>The store's web dashboard, an absolute http or https URL with no query. Optional: a store without it has no web pages through the front door.</summary>
+    [JsonPropertyName("webUrl")]
+    public string? WebUrl { get; set; }
+
+    /// <summary>The token the front door signs in to the store's web dashboard with, DPAPI-encrypted. Preferred over <see cref="WebToken"/>.</summary>
+    [JsonPropertyName("webEncryptedToken")]
+    public string? WebEncryptedToken { get; set; }
+
+    /// <summary>The web sign-in token as text, or an <c>env:</c>/<c>file:</c> reference.</summary>
+    [JsonPropertyName("webToken")]
+    public string? WebToken { get; set; }
+
+    /// <summary>The SHA-256 of the store's certificate (64 hex characters). When set, only that certificate is accepted and the
+    /// chain is not consulted, which is how a store with a self-signed certificate is reached. Absent: the system's trust decides.</summary>
+    [JsonPropertyName("certificateSha256")]
+    public string? CertificateSha256 { get; set; }
+
+    internal static bool TryParseUrl(string? text, out Uri uri)
+    {
+        if (!string.IsNullOrWhiteSpace(text)
+            && Uri.TryCreate(text.Trim(), UriKind.Absolute, out var parsed)
+            && (parsed.Scheme == Uri.UriSchemeHttp || parsed.Scheme == Uri.UriSchemeHttps))
+        {
+            uri = parsed;
+            return true;
+        }
+
+        uri = null!;
+        return false;
+    }
+
+    /// <summary>What is wrong with a store address, as the tail of a sentence, or null when it is usable. Never echoes the address.</summary>
+    internal static string? UrlProblem(string text)
+    {
+        if (!TryParseUrl(text, out var uri))
+        {
+            return "must be an absolute http or https URL.";
+        }
+
+        if (uri.Query.Length > 0)
+        {
+            return "must not have a query string.";
+        }
+
+        if (uri.UserInfo.Length > 0)
+        {
+            return "must not carry a user name or password.";
+        }
+
+        return null;
+    }
+
+    /// <summary>A pin as 64 upper-case hex characters (colons and spaces dropped), or null when it is not one.</summary>
+    internal static string? NormalizePin(string? pin)
+    {
+        var hex = new string((pin ?? "").Where(c => c != ':' && !char.IsWhiteSpace(c)).ToArray());
+        return hex.Length == 64 && hex.All(Uri.IsHexDigit) ? hex.ToUpperInvariant() : null;
+    }
+
+    /// <summary>The routing record for this entry, or null when it is not usable (no valid name or MCP address, or a pin that is not 64 hex characters).</summary>
+    internal FrontDoorStore? ToStore()
+    {
+        var name = Name?.Trim() ?? "";
+        if (!NamePattern.IsMatch(name) || !TryParseUrl(McpUrl, out var mcp))
+        {
+            return null;
+        }
+
+        /* A pin that is set and is not a pin is not "no pin": dropping it would reach the store under the system's chain
+           trust, which is what the pin was written to exclude, and only the worker validates this file. */
+        var pin = NormalizePin(CertificateSha256);
+        if (!string.IsNullOrWhiteSpace(CertificateSha256) && pin is null)
+        {
+            return null;
+        }
+
+        var web = TryParseUrl(WebUrl, out var webUri) ? webUri : null;
+        return new FrontDoorStore(name, mcp, web, pin);
+    }
+
+    /// <summary>The MCP token for the role, preferring the encrypted form; null when none is set. Throws when an encrypted token
+    /// cannot be read or a reference cannot be resolved.</summary>
+    internal string? ResolveMcpToken(bool agentRole)
+        => agentRole
+            ? ResolveSecret(McpEncryptedAgentToken, McpAgentToken, "mcpEncryptedAgentToken", "mcpAgentToken")
+            : ResolveSecret(McpEncryptedToken, McpToken, "mcpEncryptedToken", "mcpToken");
+
+    /// <summary>The web sign-in token, preferring the encrypted form; null when none is set.</summary>
+    internal string? ResolveWebToken()
+        => ResolveSecret(WebEncryptedToken, WebToken, "webEncryptedToken", "webToken");
+
+    /* The same resolution as McpTokenEntry.ResolveToken, with this entry's own setting in each error. */
+    private string? ResolveSecret(string? encrypted, string? plain, string encryptedKey, string plainKey)
+    {
+        var setting = $"frontDoor.stores[{Name}]";
+        if (!string.IsNullOrWhiteSpace(encrypted))
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                throw new PlatformNotSupportedException(
+                    $"{setting}.{encryptedKey} requires Windows (DPAPI); use the plaintext \"{plainKey}\" on other platforms.");
+            }
+
+            return DarlingSecrets.Unprotect(encrypted);
+        }
+
+        return string.IsNullOrWhiteSpace(plain) ? null : DarlingSecretSource.Resolve(plain, $"{setting}.{plainKey}");
+    }
 }

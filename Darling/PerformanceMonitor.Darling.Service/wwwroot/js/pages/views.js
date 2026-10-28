@@ -25,7 +25,7 @@
  * descriptions) reaches the DOM through el()/textContent (R4 — never innerHTML).
  */
 
-import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, localizeAlertDetail, fmtNum } from "../util.js";
+import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, localizeAlertDetail, fmtNum, storeHash } from "../util.js";
 import { rollingHoursPicker } from "../page-range.js";
 import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
 import { orderServers } from "../server-order.js";
@@ -162,8 +162,8 @@ function firstRunHero(canEdit, servers) {
         "investigation. Both save for every seat and re-scope live by server and time range. No SQL to write.",
     }),
     el("div", { class: "hero-ctas" }, [
-      el("a", { class: "btn primary hero-cta", href: "#/view/new", text: "New view" }),
-      el("a", { class: "btn hero-cta", href: "#/notebook/new", text: "New notebook" }),
+      el("a", { class: "btn primary hero-cta", href: storeHash("#/view/new"), text: "New view" }),
+      el("a", { class: "btn hero-cta", href: storeHash("#/notebook/new"), text: "New notebook" }),
       templateMenu(servers),
     ]),
     starterRow(servers),
@@ -213,8 +213,8 @@ function listHead(canEdit, servers) {
     el("h2", { text: "Custom Views" }),
     el("div", { class: "spacer" }),
     canEdit ? templateMenu(servers) : null,
-    canEdit ? el("a", { class: "btn", href: "#/notebook/new", text: "New notebook" }) : null,
-    canEdit ? el("a", { class: "btn primary", href: "#/view/new", text: "New view" }) : null,
+    canEdit ? el("a", { class: "btn", href: storeHash("#/notebook/new"), text: "New notebook" }) : null,
+    canEdit ? el("a", { class: "btn primary", href: storeHash("#/view/new"), text: "New view" }) : null,
   ]);
 }
 
@@ -252,7 +252,7 @@ function templateMenu(servers) {
   list.push(el("div", { class: "template-group-label", text: "Notebooks" }));
   for (const t of NOTEBOOK_TEMPLATES) {
     list.push(
-      el("a", { class: "template-item", href: "#/notebook/new/" + encodeURIComponent(t.key), title: t.description }, [
+      el("a", { class: "template-item", href: storeHash("#/notebook/new/") + encodeURIComponent(t.key), title: t.description }, [
         el("span", { class: "template-label", text: t.label }),
         el("span", { class: "template-desc", text: t.description }),
       ])
@@ -289,7 +289,7 @@ async function createFromTemplate(template, server, status) {
   mount(status, loadingStrip("Creating “" + template.label + "”…"));
   const res = await api.createView(template.make(server));
   if (res.kind === "data" && res.data && res.data.id != null) {
-    location.hash = "#/view/" + encodeURIComponent(res.data.id);
+    location.hash = storeHash("#/view/") + encodeURIComponent(res.data.id);
     return;
   }
   const message =
@@ -321,7 +321,7 @@ function viewCard(v) {
   const chips = el("div", { class: "vc-chips" });
   /* The list summary carries a concrete `kind` (backend #56), so the link + "Notebook" badge are set SYNCHRONOUSLY
      here — no wait on the per-card definition fetch (which only fills in the count chips). */
-  const href = (isNotebook ? "#/notebook/" : "#/view/") + encodeURIComponent(v.id);
+  const href = storeHash((isNotebook ? "#/notebook/" : "#/view/") + encodeURIComponent(v.id));
   const card = el("a", { class: "view-card card", href }, [
     el("div", { class: "vc-name" }, [
       el("span", { class: "vc-name-text", text: v.name }),
@@ -421,7 +421,7 @@ function importPanel() {
     const result = await api.createView({ name, description: parsed.description || null, definition: def });
     importBtn.disabled = false;
     if (result.kind === "data" && result.data) {
-      const route = isNotebookDefinition(def) ? "#/notebook/" : "#/view/";
+      const route = storeHash(isNotebookDefinition(def) ? "#/notebook/" : "#/view/");
       location.hash = route + encodeURIComponent(result.data.id);
       return;
     }
@@ -589,7 +589,7 @@ export async function renderView(main, id) {
     el("div", { class: "spacer" }),
     viewRefreshControl(view, def, false, canEdit),
     exportButton(view),
-    canEdit ? el("a", { class: "btn small", href: "#/view/" + encodeURIComponent(id) + "/edit", text: "Edit" }) : null,
+    canEdit ? el("a", { class: "btn small", href: storeHash("#/view/") + encodeURIComponent(id) + "/edit", text: "Edit" }) : null,
     canEdit ? deleteButton(id, status) : session.can_edit ? lockedDeleteButton(access) : null,
   ]);
 
@@ -709,7 +709,7 @@ export async function renderNotebookDoc(main, opts) {
         el("div", { class: "spacer" }),
         viewRefreshControl(opts.view, def, true, canEdit),
         exportButton(opts.view),
-        canEdit ? el("a", { class: "btn small", href: "#/notebook/" + encodeURIComponent(opts.view.id) + "/edit", text: "Edit" }) : null,
+        canEdit ? el("a", { class: "btn small", href: storeHash("#/notebook/") + encodeURIComponent(opts.view.id) + "/edit", text: "Edit" }) : null,
         canEdit ? deleteButton(opts.view.id, status) : opts.session.can_edit ? lockedDeleteButton(access) : null,
       ]);
 
@@ -934,7 +934,7 @@ function saveAsNotebookButton(definition, provenance, status) {
     const name = "Alert notebook " + new Date().toISOString();
     const res = await api.createView({ name, description: provenance || null, definition });
     if (res.kind === "data" && res.data && res.data.id != null) {
-      location.hash = "#/notebook/" + encodeURIComponent(res.data.id);
+      location.hash = storeHash("#/notebook/") + encodeURIComponent(res.data.id);
       return;
     }
     btn.disabled = false;
@@ -973,7 +973,7 @@ function renderCell(cell, readSet, sourceSet, scope, onSettled) {
 }
 
 function backToViews() {
-  return el("a", { href: "#/views", text: "← Views" });
+  return el("a", { href: storeHash("#/views"), text: "← Views" });
 }
 
 /* Fleet server options for the scope picker (value = stored server_name, label = display name). */
@@ -1183,7 +1183,7 @@ function deleteButton(id, status) {
     mount(status, el("div", { class: "strip loading", text: "Deleting…" }));
     const res = await api.deleteView(id);
     if (res.kind === "data") {
-      location.hash = "#/views";
+      location.hash = storeHash("#/views");
       return;
     }
     btn.disabled = false;

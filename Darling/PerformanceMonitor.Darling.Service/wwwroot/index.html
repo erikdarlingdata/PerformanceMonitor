@@ -34,6 +34,9 @@
                js/app.js sets the label/aria-label/title and the pressed state; see initAutoRefreshToggle(). -->
           <button id="sidebar-collapse" class="sidebar-collapse" type="button" aria-expanded="true" title="Hide the sidebar"></button>
           <button id="auto-refresh-toggle" class="auto-refresh-toggle" type="button" aria-pressed="false"></button>
+          <!-- Front door only (#6840): js/store-picker.js fills and shows this when /api/session says front_door. The top bar below is
+               hidden at desktop widths, so the picker lives here, where the menu is on every width. -->
+          <div id="store-picker" class="store-picker" hidden></div>
         </div>
         <nav class="nav">
           <a data-route="fleet" href="#/fleet">Fleet Overview</a>

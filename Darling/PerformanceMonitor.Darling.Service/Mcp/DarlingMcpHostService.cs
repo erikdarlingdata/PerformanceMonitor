@@ -27,6 +27,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Storage;
@@ -147,6 +148,10 @@ public sealed class DarlingMcpHostService : BackgroundService
     /* #5506 part 3: the process's one read admission, shared with the web host; null in a test-constructed host. */
     private readonly ReadAdmission? _readAdmission;
 
+    /* #6840: the process's services, read only when darling.json's frontDoor.enabled is set, for the front door's directory and MCP peer
+       client. Those are internal types, so they cannot be constructor parameters of this public class. Null in a test-constructed host. */
+    private readonly IServiceProvider? _processServices;
+
     /* #5288: where this host publishes the served certificate's expiry facts for the worker's alert sweep. It is
        the SAME McpTlsCertificateState singleton DI hands the worker (Program.cs registers it once), so a Publish
        or Clear here is what the "MCP TLS Certificate Expiring" self-alert reads. Optional so a test-constructed
@@ -162,8 +167,9 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// releases it; released by <see cref="ReleaseServerCertificate"/>.</summary>
     private DarlingWebTls.LoadedCertificate? _serverCertificate;
 
-    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, McpTlsCertificateState? mcpTlsCertState = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null)
+    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, McpTlsCertificateState? mcpTlsCertState = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null, IServiceProvider? processServices = null)
     {
+        _processServices = processServices;
         _ownerSource = ownerSource ?? new StoreOwnerSource();
         _pseudonymKeys = pseudonymKeys;
         _slowReads = slowReads;
@@ -703,76 +709,102 @@ public sealed class DarlingMcpHostService : BackgroundService
                     effectivePort, networkMode, networkMode ? allowedCidr.ToString() : null, stoppingToken);
             }
 
-            /* Managed mode: the WORKER owns the bundled server's lifecycle; the MCP host only derives the
-               least-privilege mcp-role connection string from the stored DPAPI credential (D3-role). */
-            string? storeConnectionString;
-            if (config.Postgres.Managed)
+            /* #6840: a front door holds no store. It skips the store wait and the store's login, and gives the tool services a data source
+               that is never opened, so the tool list is this build's own (the schemas leave out service parameters, as on a store). Every
+               tool is then replaced by one that sends the call to a store's MCP endpoint (ConfigureMcpServices, frontDoor). The router needs
+               the directory and the peer client, which the process registers when frontDoor.enabled is set: without them there is
+               nothing to route to, and the start stops here with the reason. */
+            DarlingFrontDoorRouter? frontDoor = null;
+            NpgsqlDataSource postgres;
+            if (config.IsFrontDoor)
             {
-                if (!OperatingSystem.IsWindows())
+                var frontDoorDirectory = _processServices?.GetService<IFrontDoorDirectory>();
+                var frontDoorPeers = _processServices?.GetService<IFrontDoorMcpPeers>();
+                if (frontDoorDirectory is null || frontDoorPeers is null)
                 {
-                    _logger.LogError("MCP server not started: postgres.managed = true requires Windows");
+                    _logger.LogCritical("MCP server not started: frontDoor.enabled is set but this process has no front door directory or peer client registered");
                     await DisposeFailedStartAsync();
                     return false;
                 }
 
-                storeConnectionString = await WaitForManagedConnectionStringAsync(config.Postgres, stoppingToken);
-                if (storeConnectionString is null)
-                {
-                    await DisposeFailedStartAsync();
-                    return false;
-                }
+                frontDoor = new DarlingFrontDoorRouter(
+                    frontDoorDirectory, frontDoorPeers, config.FrontDoor.EffectivePeerTimeout(), _logger);
+                postgres = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc("Host=front-door.invalid"));
+                _appDataSource = postgres;
             }
             else
             {
-                /* #3914: not the owner by default any more — postgres.mcpConnectionString, the mcp role the
-                   service provisioned on the compose store, or the owner with a warning, in that order. */
-                storeConnectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
-                    DarlingStoreLogins.Surface.Mcp, config.Postgres, _logger, stoppingToken);
-                if (storeConnectionString is null)
+                /* Managed mode: the WORKER owns the bundled server's lifecycle; the MCP host only derives the
+                   least-privilege mcp-role connection string from the stored DPAPI credential (D3-role). */
+                string? storeConnectionString;
+                if (config.Postgres.Managed)
                 {
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        _logger.LogError("MCP server not started: postgres.managed = true requires Windows");
+                        await DisposeFailedStartAsync();
+                        return false;
+                    }
+
+                    storeConnectionString = await WaitForManagedConnectionStringAsync(config.Postgres, stoppingToken);
+                    if (storeConnectionString is null)
+                    {
+                        await DisposeFailedStartAsync();
+                        return false;
+                    }
+                }
+                else
+                {
+                    /* #3914: not the owner by default any more — postgres.mcpConnectionString, the mcp role the
+                       service provisioned on the compose store, or the owner with a warning, in that order. */
+                    storeConnectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
+                        DarlingStoreLogins.Surface.Mcp, config.Postgres, _logger, stoppingToken);
+                    if (storeConnectionString is null)
+                    {
+                        await DisposeFailedStartAsync();
+                        return false;
+                    }
+                }
+
+                /* A string Npgsql cannot use throws from the Create below into the catch at the end of this method,
+                   which logs the exception's message, and Npgsql's text for that can quote part of the string (a password
+                   with an unquoted ';' makes the text after it the "keyword", and a password tail that becomes a Host
+                   value with a ':' in it makes the text after the ':' a bad port). So prove it first, with Npgsql's own
+                   construction step (the guard builds and disposes a data source, and opens nothing), and log the
+                   formatter's text instead. The keywords added below (application name, session time zone) take part in
+                   none of Npgsql's construction checks, so a string that passes here does not throw from the Create below
+                   for a parse or a validation reason. */
+                if (DarlingStoreConnection.TryDescribeParseFailure(storeConnectionString) is { } unusableStoreString)
+                {
+                    _logger.LogError(
+                        "MCP server not started this attempt: its store connection string (postgres.mcpConnectionString, or postgres.connectionString when that is not set) is unusable: {Detail}",
+                        unusableStoreString);
                     await DisposeFailedStartAsync();
                     return false;
                 }
-            }
 
-            /* A string Npgsql cannot use throws from the Create below into the catch at the end of this method,
-               which logs the exception's message, and Npgsql's text for that can quote part of the string (a password
-               with an unquoted ';' makes the text after it the "keyword", and a password tail that becomes a Host
-               value with a ':' in it makes the text after the ':' a bad port). So prove it first, with Npgsql's own
-               construction step (the guard builds and disposes a data source, and opens nothing), and log the
-               formatter's text instead. The keywords added below (application name, session time zone) take part in
-               none of Npgsql's construction checks, so a string that passes here does not throw from the Create below
-               for a parse or a validation reason. */
-            if (DarlingStoreConnection.TryDescribeParseFailure(storeConnectionString) is { } unusableStoreString)
-            {
-                _logger.LogError(
-                    "MCP server not started this attempt: its store connection string (postgres.mcpConnectionString, or postgres.connectionString when that is not set) is unusable: {Detail}",
-                    unusableStoreString);
-                await DisposeFailedStartAsync();
-                return false;
-            }
+                /* Lifetime tied to the running app (#1560): disposed by StopServerAsync, not this method's
+                   scope — the supervisor may keep the app running across many poll ticks. #4479: the mcp-role
+                   connection string built by DarlingManagedPostgres already carries McpApplicationName, but a
+                   CONFIGURED (postgres.mcpConnectionString) or owner-fallback login never runs through that
+                   builder — set-if-absent here so every path this string can take still names the surface. */
+                /* #6281: no marker rides on this connection. The store's tag guard reads a per-transaction setting that each MCP tag write
+                   sets itself (DarlingStoreConnection.MarkMcpSurfaceAsync), because PgBouncer and RDS Proxy refuse a startup "options" parameter
+                   and a pooler set to ignore it would drop the marker without a word. */
+                /* #6630: a store the operator brings gets the worker's collect/config search path the same way (set-if-absent), because the
+                   bare names the reads use (servers, config_service, ...) only resolve through it, and the database default is best effort. */
+                postgres = DarlingWorker.CreateHostStoreDataSource(storeConnectionString, DarlingManagedPostgres.McpApplicationName);
+                _appDataSource = postgres;
 
-            /* Lifetime tied to the running app (#1560): disposed by StopServerAsync, not this method's
-               scope — the supervisor may keep the app running across many poll ticks. #4479: the mcp-role
-               connection string built by DarlingManagedPostgres already carries McpApplicationName, but a
-               CONFIGURED (postgres.mcpConnectionString) or owner-fallback login never runs through that
-               builder — set-if-absent here so every path this string can take still names the surface. */
-            /* #6281: no marker rides on this connection. The store's tag guard reads a per-transaction setting that each MCP tag write
-               sets itself (DarlingStoreConnection.MarkMcpSurfaceAsync), because PgBouncer and RDS Proxy refuse a startup "options" parameter
-               and a pooler set to ignore it would drop the marker without a word. */
-            /* #6630: a store the operator brings gets the worker's collect/config search path the same way (set-if-absent), because the
-               bare names the reads use (servers, config_service, ...) only resolve through it, and the database default is best effort. */
-            var postgres = DarlingWorker.CreateHostStoreDataSource(storeConnectionString, DarlingManagedPostgres.McpApplicationName);
-            _appDataSource = postgres;
-
-            /* #6263: investigations served, but no route opens a request. A hint, never a refusal: the operator may add the
-               route next. One read per start; an unreadable store says nothing here. */
-            if (writes.Investigations)
-            {
-                var agentRoutes = await DarlingAgentDispatchChecks.TryCountAgentRoutesAsync(postgres, stoppingToken);
-                if (agentRoutes == 0)
+                /* #6263: investigations served, but no route opens a request. A hint, never a refusal: the operator may add the
+                   route next. One read per start; an unreadable store says nothing here. */
+                if (writes.Investigations)
                 {
-                    _logger.LogWarning("{Hint}", DarlingAgentDispatchChecks.NoAgentRouteMessage);
+                    var agentRoutes = await DarlingAgentDispatchChecks.TryCountAgentRoutesAsync(postgres, stoppingToken);
+                    if (agentRoutes == 0)
+                    {
+                        _logger.LogWarning("{Hint}", DarlingAgentDispatchChecks.NoAgentRouteMessage);
+                    }
                 }
             }
 
@@ -893,7 +925,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                 /* #5914: a brief's request_url, the alert's triage page, only while the dashboard serves it: the one definition
                    of TriageBaseUrl, not a copy of it. */
                 DarlingAlertSettings.TriageBaseUrlOf(config),
-                tokenSet);
+                tokenSet,
+                frontDoor);
 
             _app = builder.Build();
 
@@ -1256,7 +1289,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// Every line below is identical to before the extraction; only the receiver (<c>builder.Services</c>
     /// there vs. the parameter here) changes.
     /// </summary>
-    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null, ReadAdmission? readAdmission = null, string? publicBaseUrl = null, DarlingMcpTokenSet? tokens = null)
+    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null, ReadAdmission? readAdmission = null, string? publicBaseUrl = null, DarlingMcpTokenSet? tokens = null, DarlingFrontDoorRouter? frontDoor = null)
     {
         /* #6542: with named tokens served, the policy a tool sees is the one its request's token is served (the bearer gate stored
            the caller on the request), not the start-wide union. Without them it is the start's policy, a singleton, as before. */
@@ -1354,6 +1387,22 @@ public sealed class DarlingMcpHostService : BackgroundService
         {
             var catalog = DarlingMcpWritePolicy.ToolNames(options.ToolCollection);
             DarlingMcpWritePolicy.Apply(options.ToolCollection, writes);
+
+            /* #6840: a front door replaces every tool the policy left with one that sends the call to a store, after the policy, so the write
+               switch, the named tokens and /core (which all filter by tool name) work on it unchanged. The caller is an agent when the request's
+               token is served the investigations role (the named agent token, or the legacy token under the investigations arm), so the store
+               sees the agent token and its own Level 2 gate applies. */
+            if (frontDoor is not null && options.ToolCollection is { } collection)
+            {
+                var served = collection.ToList();
+                collection.Clear();
+                foreach (var tool in served)
+                {
+                    collection.Add(new DarlingFrontDoorTool(
+                        tool, frontDoor, sp => (perRequest && sp is not null ? PolicyOf(sp) : writes).Investigations));
+                }
+            }
+
             options.ServerInstructions = DarlingMcpInstructions.Build(
                 declaredPeers, catalog, DarlingMcpWritePolicy.ToolNames(options.ToolCollection));
 
@@ -1861,12 +1910,21 @@ public sealed class DarlingMcpHostService : BackgroundService
                The mcp.dataDetail filter (#5632, McpDataDetailFilter) sits just outside the statement filter, so it
                reads the statement filter's output as plain JSON before GCF re-encodes it, and masks every tool answer
                at the level the host registered (a McpDataDetailSetting singleton; none, or full, passes through). */
-            .WithRequestFilters(filters => filters
-                .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
-                .AddCallToolFilter(toolLatency.AsFilter())
-                .AddCallToolFilter(GcfCallToolFilter.Instance)
-                .AddCallToolFilter(McpDataDetailFilter.Instance)
-                .AddCallToolFilter(SensitiveStatementOutputFilter.Instance));
+            .WithRequestFilters(filters =>
+            {
+                /* #6840: a front door drops the unknown-argument guard (it would refuse the store argument, and the store runs its own guard on
+                   what it is sent), the latency record (no store here to record it in), and the GCF re-encode. It keeps the two masking
+                   filters, which pass full through and let the front door mask more strictly than a store. */
+                if (frontDoor is null)
+                {
+                    filters.AddCallToolFilter(McpUnknownArgumentGuard.Instance);
+                    filters.AddCallToolFilter(toolLatency.AsFilter());
+                    filters.AddCallToolFilter(GcfCallToolFilter.Instance);
+                }
+
+                filters.AddCallToolFilter(McpDataDetailFilter.Instance);
+                filters.AddCallToolFilter(SensitiveStatementOutputFilter.Instance);
+            });
     }
 
     /// <summary>

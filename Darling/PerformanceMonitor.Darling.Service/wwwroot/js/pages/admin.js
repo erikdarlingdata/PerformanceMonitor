@@ -27,7 +27,7 @@
    it reaches a row. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, listOnlyNote, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText } from "../util.js";
+import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, listOnlyNote, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText, storeHash } from "../util.js";
 import { getSession } from "../views-api.js";
 import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
@@ -709,7 +709,7 @@ function tabBar(active) {
   return el("nav", { class: "subtabs", "aria-label": "Admin sections" },
     TABS.map((t) => el("a", {
       class: "subtab" + (t.id === active.id ? " active" : ""),
-      href: "#/admin/" + t.id,
+      href: storeHash("#/admin/") + t.id,
       "aria-current": t.id === active.id ? "page" : null,
       text: t.label,
     })));
@@ -2025,7 +2025,7 @@ function showsServers(hash) {
    another one is seen by nothing else, because no render of this page follows it. A hash that no longer shows the Servers
    tab discards the open form, password first, and drops a by-id read still in flight. Discarding twice is harmless. */
 function onHashChange() {
-  if (!showsServers(String(window.location.hash || ""))) closeEdit();
+  if (!showsServers(routeHash())) closeEdit();
 }
 
 export function renderAdmin(main, tabId) {

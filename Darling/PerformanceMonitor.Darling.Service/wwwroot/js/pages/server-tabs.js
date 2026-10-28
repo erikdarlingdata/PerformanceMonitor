@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, chartNoteText, getPath, fmtMs, fmtInt, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
+import { routeHash, el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, chartNoteText, getPath, fmtMs, fmtInt, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
 import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP, SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "./active-snapshots.js";
@@ -1284,7 +1284,7 @@ function overviewStripsPanel(server, ctx) {
  */
 export function fileIoGrain(server) {
   const filter = getActiveDatabaseFilter();
-  const hash = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  const hash = routeHash();
   const one = filter && filter.server === server && hash.startsWith("#/server/") && filter.databases.length === 1;
   return one ? "per file" : "per database and file type";
 }
@@ -4379,7 +4379,7 @@ function deadlockProcessKey(server, row) {
    page is a server page (dbScopeChip's own rule, so the chip and the rows always agree). */
 function deadlockRowFilter(server) {
   const filter = getActiveDatabaseFilter();
-  const hash = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  const hash = routeHash();
   return filter && filter.server === server && hash.startsWith("#/server/") ? filter : null;
 }
 
