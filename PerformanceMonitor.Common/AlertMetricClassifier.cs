@@ -335,6 +335,10 @@ namespace PerformanceMonitor.Common
                        Both stored the 0 sentinel from the day they shipped and rendered it as "0.00". */
                     or "Capture Down"
                     or "Agent Not Running"
+                    /* #6873: state-only, like the two above. The current value is "3 overdue" against "older than 7 days"; the 0 sentinel is not a measurement. */
+                    or "Backup Overdue"
+                    or "Log Backup Overdue"
+                    or "CHECKDB Overdue"
 
                     /* #1881, the metrics that stored a NONZERO number that was not a measurement:
 

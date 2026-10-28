@@ -876,7 +876,16 @@ export function metricBands(c) {
     chip("Blocking", fmtInt(c.blocking_count), c.blocking_severity, blockingDetail),
     chip("Deadlocks", fmtInt(c.deadlock_count), c.deadlock_severity, deadlockDetail),
     chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail),
+    /* #6873: a chip only when a full backup, a log backup or a CHECKDB is overdue. It is not a band: nothing above reads it, and a
+       server with nothing overdue (or a platform-managed one) shows no extra chip. The words come from the server. */
+    ...databaseProtectionChip(c),
   ]);
+}
+
+function databaseProtectionChip(c) {
+  const overdue = c.database_protection_overdue;
+  if (!Array.isArray(overdue) || overdue.length === 0) return [];
+  return [chip("Protection", fmtInt(overdue.length) + " overdue", "Warning", overdue.map((o) => o.text).join(", "))];
 }
 
 /* A short non-color severity cue so severity isn't conveyed by border color alone (M2). */

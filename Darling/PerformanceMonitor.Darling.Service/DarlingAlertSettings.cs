@@ -190,6 +190,10 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
         AttentionBaselineMath.ClampMultiples(_config.Alerts.ClientTimeoutsWarningMultiple, _config.Alerts.ClientTimeoutsCriticalMultiple).Warning;
     public int ClientTimeoutsCriticalMultiple =>
         AttentionBaselineMath.ClampMultiples(_config.Alerts.ClientTimeoutsWarningMultiple, _config.Alerts.ClientTimeoutsCriticalMultiple).Critical;
+    /// <summary>#6873: the three database protection alerts' switches. Off by default; not on <see cref="IAlertEngineSettings"/> because Lite has no such alerts.</summary>
+    public bool BackupOverdueEnabled => _config.Alerts.BackupOverdueEnabled;
+    public bool LogBackupOverdueEnabled => _config.Alerts.LogBackupOverdueEnabled;
+    public bool CheckDbOverdueEnabled => _config.Alerts.CheckDbOverdueEnabled;
     public int LongRunningQueryThresholdMinutes => _config.Alerts.LongRunningQueryThresholdMinutes;
     public int TempDbSpaceThresholdPercent => _config.Alerts.TempDbSpaceThresholdPercent;
     public int LowDiskThresholdPercent => Math.Clamp(_config.Alerts.LowDiskThresholdPercent, 0, 100);

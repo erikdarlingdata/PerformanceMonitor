@@ -201,7 +201,8 @@ public sealed class DatabaseProtectionCollectorTests
 
         static string Norm(string s) => string.Join(' ', s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
-        Assert.Equal(Norm(generated).TrimEnd(';'), Norm(rung).TrimEnd(';'));
+        /* The rung also adds the three alert switches to config_alert_settings, so the table and its index are the rung's start, not all of it. */
+        Assert.StartsWith(Norm(generated).TrimEnd(';'), Norm(rung), StringComparison.Ordinal);
     }
 }
 

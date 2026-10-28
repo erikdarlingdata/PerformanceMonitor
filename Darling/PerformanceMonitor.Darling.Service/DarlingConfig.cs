@@ -897,6 +897,19 @@ public sealed class AlertsConfig
     [JsonPropertyName("clientTimeoutsCriticalMultiple")]
     public int ClientTimeoutsCriticalMultiple { get; set; } = AttentionBaselineMath.DefaultCriticalMultiple;
 
+    /// <summary>The "Backup Overdue", "Log Backup Overdue" and "CHECKDB Overdue" alerts (#6873): each fires when a database's last full backup (7 days),
+    /// last log backup (60 minutes) or last good CHECKDB (14 days) is older than its threshold, judged by <c>DatabaseProtectionBands</c>. All three ship
+    /// OFF, like the other alerts that start firing on upgrade. Store columns <c>backup_overdue_enabled</c>, <c>log_backup_overdue_enabled</c> and
+    /// <c>checkdb_overdue_enabled</c> (V222).</summary>
+    [JsonPropertyName("backupOverdueEnabled")]
+    public bool BackupOverdueEnabled { get; set; }
+
+    [JsonPropertyName("logBackupOverdueEnabled")]
+    public bool LogBackupOverdueEnabled { get; set; }
+
+    [JsonPropertyName("checkDbOverdueEnabled")]
+    public bool CheckDbOverdueEnabled { get; set; }
+
     [JsonPropertyName("longRunningQueryEnabled")]
     public bool LongRunningQueryEnabled { get; set; } = true;
 

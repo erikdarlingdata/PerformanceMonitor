@@ -538,6 +538,8 @@ LIMIT 1";
         var (healthyCollectors, warningCollectors, failingCollectors, notCollectedCollectors, totalCollectors, deadlockBand, pgDeadlockBand) = await GetCollectorHealthCountsAsync(serverId, cancellationToken);
 
 
+        var protectionChip = await GetDatabaseProtectionChipAsync(serverId, nowUtc, cancellationToken);
+
         return new ServerSummaryItem
         {
             DisplayName = displayName,
@@ -578,6 +580,8 @@ LIMIT 1";
             DeadlockCollectorBand = deadlockBand,
             PgDeadlockCollectorBand = pgDeadlockBand,
             LastCollectionTime = lastCollection,
+            DatabaseProtectionChipValue = protectionChip.Value,
+            DatabaseProtectionChipDetail = protectionChip.Detail,
         };
     }
 
@@ -921,6 +925,18 @@ public sealed class ServerSummaryItem
     /// denominator <see cref="CollectorSeverity"/> grades the failing count against. Not healthy + failing:
     /// STALE, WARNING, STOPPED and the permission bands are banded collectors that are neither.</summary>
     public int CollectorCount { get; set; }
+
+    /// <summary>#6873: "3 overdue" when a full backup, a log backup or a CHECKDB is overdue on this server, else null. Not a band: nothing reads it for the card's band.</summary>
+    public string? DatabaseProtectionChipValue { get; set; }
+
+    /// <summary>#6873: the overdue facts in words, for the chip's detail. Null with <see cref="DatabaseProtectionChipValue"/>.</summary>
+    public string? DatabaseProtectionChipDetail { get; set; }
+
+    /// <summary>The chip shows only when something is overdue, and not on an offline card (its figures are old).</summary>
+    public bool HasDatabaseProtectionOverdue => DatabaseProtectionChipValue is not null && !IsOffline;
+
+    /// <summary>The chip's colour: always the Warning tone, like the web chip.</summary>
+    public SolidColorBrush DatabaseProtectionBrush => s_warningBrush;
 
     public DateTime? LastCollectionTime { get; set; }
 

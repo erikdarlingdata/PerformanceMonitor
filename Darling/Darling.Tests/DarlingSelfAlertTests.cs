@@ -307,6 +307,11 @@ public sealed class DarlingSelfAlertTests
         /// Purge Over Horizon read-failure count.</summary>
         public AlertReadFailureCounter? ReadFailures { get; set; }
 
+        /// <summary>#6873: the three database protection switches, read live. Default off, the shipped default.</summary>
+        public bool BackupOverdueEnabled { get; set; }
+        public bool LogBackupOverdueEnabled { get; set; }
+        public bool CheckDbOverdueEnabled { get; set; }
+
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /// <summary>#1681: captures what the evaluator writes to the service log, so the firing/recovery pair
@@ -328,7 +333,10 @@ public sealed class DarlingSelfAlertTests
             retentionHoldWarnRatio: WireRetentionHoldKnobs ? () => RetentionHoldWarnRatio : null,
             retentionHoldCriticalRatio: WireRetentionHoldKnobs ? () => RetentionHoldCriticalRatio : null,
             readFailures: ReadFailures,
-            storeName: StoreName);
+            storeName: StoreName,
+            backupOverdueEnabled: () => BackupOverdueEnabled,
+            logBackupOverdueEnabled: () => LogBackupOverdueEnabled,
+            checkDbOverdueEnabled: () => CheckDbOverdueEnabled);
     }
 
     /* ---------------- #991 Availability Group fixtures ---------------- */

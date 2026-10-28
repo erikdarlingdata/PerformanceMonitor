@@ -931,6 +931,9 @@ public partial class SettingsWindow : Window
         AlertFailedJobCheckBox.IsChecked = r.FailedJobEnabled;
         AlertFailedJobLookbackBox.Text = r.FailedJobLookbackMinutes.ToString(CultureInfo.InvariantCulture);
         AlertDatabaseStateCheckBox.IsChecked = r.DatabaseStateEnabled;
+        AlertBackupOverdueCheckBox.IsChecked = r.BackupOverdueEnabled;
+        AlertLogBackupOverdueCheckBox.IsChecked = r.LogBackupOverdueEnabled;
+        AlertCheckDbOverdueCheckBox.IsChecked = r.CheckDbOverdueEnabled;
         AlertCooldownBox.Text = r.CooldownMinutes.ToString(CultureInfo.InvariantCulture);
         AnalysisEnabledCheckBox.IsChecked = r.AnalysisEnabled;
         AnalysisIntervalBox.Text = r.AnalysisIntervalMinutes.ToString(CultureInfo.InvariantCulture);
@@ -1000,6 +1003,9 @@ public partial class SettingsWindow : Window
             LongRunningJobEnabled = AlertLongRunningJobCheckBox.IsChecked == true,
             FailedJobEnabled = AlertFailedJobCheckBox.IsChecked == true,
             DatabaseStateEnabled = AlertDatabaseStateCheckBox.IsChecked == true,
+            BackupOverdueEnabled = AlertBackupOverdueCheckBox.IsChecked == true,
+            LogBackupOverdueEnabled = AlertLogBackupOverdueCheckBox.IsChecked == true,
+            CheckDbOverdueEnabled = AlertCheckDbOverdueCheckBox.IsChecked == true,
             AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true,
             AnalysisNotificationsEnabled = AnalysisNotificationsCheckBox.IsChecked == true,
             /* #3712 (V137): the combo's Tag IS the stored value -- 'digest' / 'page', or empty for NULL ("the file

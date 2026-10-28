@@ -1330,7 +1330,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         ClientTimeoutsEnabled: true, ClientTimeoutsWarningPerMinute: 4, ClientTimeoutsCriticalPerMinute: 25,
         ExcludedVolumes: new[] { "S:\\", "/mnt/scratch" },
         /* #5736 (V211): not the shipped 3 / 10, for the same reason as the floors above. */
-        ClientTimeoutsWarningMultiple: 2, ClientTimeoutsCriticalMultiple: 7);
+        ClientTimeoutsWarningMultiple: 2, ClientTimeoutsCriticalMultiple: 7,
+        BackupOverdueEnabled: true, LogBackupOverdueEnabled: true, CheckDbOverdueEnabled: true);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

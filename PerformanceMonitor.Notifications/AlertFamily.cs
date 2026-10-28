@@ -108,6 +108,9 @@ public static class AlertFamily
         ["Version Store (PVS)"] = Performance,
         ["Database File Growth"] = Performance,
         ["Database State"] = Performance,
+        ["Backup Overdue"] = Performance,
+        ["Log Backup Overdue"] = Performance,
+        ["CHECKDB Overdue"] = Performance,
         ["Forced Plan Failing"] = Performance,
 
         /* ---- performance: the PostgreSQL-only alerts ---- */

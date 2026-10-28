@@ -2458,6 +2458,9 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
     /// 90-day time-sliced DELETE. Columns and the (server_id, collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a
     /// fresh store (V1's catalog walk) and an upgraded one agree. New table, no data moves, no grant (the <c>collect</c> schema carries
     /// blanket SELECT). Every statement is idempotent.
+    /// The same rung adds three <c>config.config_alert_settings</c> columns (<c>boolean NOT NULL DEFAULT FALSE</c>, catalog-only):
+    /// <c>backup_overdue_enabled</c>, <c>log_backup_overdue_enabled</c> and <c>checkdb_overdue_enabled</c>. The three overdue alerts ship OFF.
+    /// An older build never reads the columns.
     /// </summary>
     private const string V222Sql = @"
 CREATE TABLE IF NOT EXISTS collect.database_protection (
@@ -2479,7 +2482,12 @@ CREATE TABLE IF NOT EXISTS collect.database_protection (
     log_backup_state text
 );
 
-CREATE INDEX IF NOT EXISTS idx_database_protection_time ON collect.database_protection(server_id, collection_time);";
+CREATE INDEX IF NOT EXISTS idx_database_protection_time ON collect.database_protection(server_id, collection_time);
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS backup_overdue_enabled boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS log_backup_overdue_enabled boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS checkdb_overdue_enabled boolean NOT NULL DEFAULT FALSE;";
 
     /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>

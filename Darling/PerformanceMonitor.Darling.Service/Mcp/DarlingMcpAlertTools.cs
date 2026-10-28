@@ -586,6 +586,10 @@ public sealed partial class DarlingMcpAlertTools
         long_running_job = new { enabled = s.LongRunningJobEnabled, multiplier = s.LongRunningJobMultiplier },
         failed_job = new { enabled = s.FailedJobEnabled, lookback_minutes = s.FailedJobLookbackMinutes },
         database_state = new { enabled = s.DatabaseStateEnabled },
+        /* #6873: the database protection alerts (a full backup, a log backup or a CHECKDB older than its threshold). Off by default. */
+        backup_overdue = new { enabled = s.BackupOverdueEnabled },
+        log_backup_overdue = new { enabled = s.LogBackupOverdueEnabled },
+        checkdb_overdue = new { enabled = s.CheckDbOverdueEnabled },
         /* #2417: the AG family, read out of the store since V35/V37 and emitted to nobody until now -- so
            an agent asked why nothing alerted when a replica fell behind could not see the lag threshold,
            could not see whether AG notification was on at all, and had no way to tell "configured not to
@@ -2827,6 +2831,39 @@ public sealed partial class DarlingMcpAlertTools
             {
                 case "alerts_enabled": AddBool("enabled", prop.Value, "alerts_enabled"); break;
                 case "notify_connection_changes": AddBool("notify_connection_changes", prop.Value, "notify_connection_changes"); break;
+                case "backup_overdue":
+                    Group(prop.Value, "backup_overdue", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("backup_overdue_enabled", n, "backup_overdue.enabled"); break;
+                            default: error = $"Unknown field 'backup_overdue.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "log_backup_overdue":
+                    Group(prop.Value, "log_backup_overdue", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("log_backup_overdue_enabled", n, "log_backup_overdue.enabled"); break;
+                            default: error = $"Unknown field 'log_backup_overdue.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "checkdb_overdue":
+                    Group(prop.Value, "checkdb_overdue", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("checkdb_overdue_enabled", n, "checkdb_overdue.enabled"); break;
+                            default: error = $"Unknown field 'checkdb_overdue.{k}'."; break;
+                        }
+                    });
+                    break;
+
                 /* #2417: bounds mirror DarlingAlertSettings' clamps EXACTLY -- Clamp(0, 1440) on the
                    refire, nothing to clamp on the at-startup opt-in. Zero is IN range because 0 is the
                    shipped configuration (one alert per outage, no re-fire), not an invalid one. */

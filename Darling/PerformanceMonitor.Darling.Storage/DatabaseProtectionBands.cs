@@ -49,6 +49,22 @@ public sealed record DatabaseProtectionSummary(
     IReadOnlyList<string> OverdueLogBackup,
     string Text);
 
+/// <summary>One overdue fact of one database (#6873): <see cref="Kind"/> is one of <see cref="DatabaseProtectionBands"/>'s kind words, <see cref="State"/> the banded
+/// state word (<c>overdue</c>, <c>never</c> or <c>none_in_window</c>) and <see cref="Age"/> the age at the capture, null when there is no time to measure.</summary>
+public sealed record DatabaseProtectionOverdue(string Kind, string Database, string State, TimeSpan? Age)
+{
+    /// <summary>The words the alert detail and the fleet chip use for this fact, for example <c>Sales (9 days old)</c> or <c>Sales (never checked)</c>.</summary>
+    public string Text => DatabaseProtectionBands.DescribeOverdue(this);
+
+    /// <summary>The fact in words for a chip: <c>Full backup</c>, <c>Log backup</c> or <c>CHECKDB</c>.</summary>
+    public string Label => Kind switch
+    {
+        DatabaseProtectionBands.KindFullBackup => "Full backup",
+        DatabaseProtectionBands.KindLogBackup => "Log backup",
+        _ => "CHECKDB",
+    };
+}
+
 /// <summary>
 /// #6873: the pure banding over one capture's stored facts. No I/O, so the MCP tool and the Viewer call it with the same facts and say the
 /// same words. Order of the rules, first match wins: a database that is not online (or is a secondary) is excluded and judged on nothing;
@@ -141,6 +157,62 @@ public static class DatabaseProtectionBands
         if (age.TotalDays >= 1) return Unit(age.Days, "day") + (age.Hours > 0 ? " " + Unit(age.Hours, "hour") : "");
         if (age.TotalHours >= 1) return Unit(age.Hours, "hour") + (age.Minutes > 0 ? " " + Unit(age.Minutes, "minute") : "");
         return Unit((long)age.TotalMinutes, "minute");
+    }
+
+    public const string KindFullBackup = "full_backup";
+    public const string KindLogBackup = "log_backup";
+    public const string KindCheckDb = "checkdb";
+
+    /// <summary>How old the newest capture may be and still be judged (#6873): three passes of the 60-minute collector. An older one is the
+    /// collection-stopped alert's to report, so it neither fires nor clears an overdue alert and shows no chip.</summary>
+    public static readonly TimeSpan CaptureFreshness = TimeSpan.FromHours(3);
+
+    /// <summary>Every overdue fact of the capture, one entry per database and fact, in the order of the databases then full backup, log backup, CHECKDB.
+    /// The only place that turns bands into "overdue", so the alerts, the fleet chip and the Viewer agree with the tool.</summary>
+    public static IReadOnlyList<DatabaseProtectionOverdue> OverdueFacts(
+        IReadOnlyList<DatabaseProtectionFact> facts, DateTime capturedAt, DatabaseProtectionThresholds? thresholds = null)
+    {
+        ArgumentNullException.ThrowIfNull(facts);
+        var t = thresholds ?? DatabaseProtectionThresholds.Default;
+        var list = new List<DatabaseProtectionOverdue>();
+        foreach (var fact in facts)
+        {
+            var band = Evaluate(fact, capturedAt, t);
+            if (band.FullBackup.Overdue) list.Add(new(KindFullBackup, fact.DatabaseName, band.FullBackup.State, band.FullBackup.Age));
+            if (band.LogBackup.Overdue) list.Add(new(KindLogBackup, fact.DatabaseName, band.LogBackup.State, band.LogBackup.Age));
+            if (band.CheckDb.Overdue) list.Add(new(KindCheckDb, fact.DatabaseName, band.CheckDb.State, band.CheckDb.Age));
+        }
+
+        return list;
+    }
+
+    /// <summary>The chip's value: how many facts are overdue. Null when none, so a chip shows only when something is late.</summary>
+    public static string? ChipValue(IReadOnlyList<DatabaseProtectionOverdue>? overdue) =>
+        overdue is { Count: > 0 } ? string.Create(CultureInfo.InvariantCulture, $"{overdue.Count} overdue") : null;
+
+    /// <summary>The chip's detail: each overdue fact with its label, for example <c>Full backup: Sales (9 days old), CHECKDB: Sales (never checked)</c>.</summary>
+    public static string ChipDetail(IReadOnlyList<DatabaseProtectionOverdue> overdue)
+    {
+        ArgumentNullException.ThrowIfNull(overdue);
+        return string.Join(", ", overdue.Select(o => o.Label + ": " + o.Text));
+    }
+
+    /// <summary>The words for one overdue fact: the database and how late it is.</summary>
+    public static string DescribeOverdue(DatabaseProtectionOverdue item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        string what;
+        if (item.Age is { } age)
+            what = age.TotalHours < 2
+                ? string.Create(CultureInfo.InvariantCulture, $"{Math.Floor(age.TotalMinutes)} minutes old")
+                : age.TotalHours < 48
+                    ? string.Create(CultureInfo.InvariantCulture, $"{Math.Floor(age.TotalHours)} hours old")
+                    : string.Create(CultureInfo.InvariantCulture, $"{Math.Floor(age.TotalDays)} days old");
+        else if (item.State == Never)
+            what = "never checked";
+        else
+            what = item.Kind == KindCheckDb ? "no CHECKDB on record" : "no backup on record";
+        return item.Database + " (" + what + ")";
     }
 
     /// <summary>The server answer: how many databases were judged and which are overdue on what.</summary>
