@@ -100,7 +100,7 @@ public partial class LocalDataService
             catch (DuckDBException ex) when (ex.Message.Contains("does not exist", StringComparison.OrdinalIgnoreCase))
             {
                 /* #6831: the windows show this text, so it says what is missing in words, as the Darling Viewer does, not the view's name. */
-                unavailable[section.Name] = $"This store has no {QueryTagRollup.SourceWords(section)} data yet.";
+                unavailable[section.Name] = QueryTagSourceWords.Missing(section.Name);
                 return [];
             }
         }

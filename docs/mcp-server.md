@@ -98,7 +98,7 @@ Open a new Claude Code session and ask questions like:
 
 Of Darling's tools, `mcp.allowWrites` with a token serves the write tools. `mcp.allowServerAdmin` adds the server administration tools (`add_servers`, `edit_server`, `remove_server` and `set_server_action`). `mcp.allowInvestigations` with a token adds the investigation tools, and only while `mcp.allowWrites` is off. A service started before an upgrade reports the older, smaller tool list until you restart it.
 
-The table below names the main tools, not all of them. The `tools/list` call on a running server gives the full list.
+The table below names the main tools, not all of them. The `tools/list` call on a running server gives the full list. For Darling, [MCP tools and their store tables](darling/mcp-tool-tables.md) lists every tool and the store tables that it reads.
 
 By default Lite serves only read tools. Its twelve write tools are served when `mcp_allow_writes` is `true` in `settings.json`. They are `mute_analysis_finding`, `unmute_analysis_finding`, `set_notification_route_enabled`, `delete_notification_route`, and the eight query tag tools (`create_query_tag`, `update_query_tag`, `delete_query_tag`, `assign_query_tag`, `unassign_query_tag`, `create_query_tag_rule`, `update_query_tag_rule` and `delete_query_tag_rule`). Restart Lite after you change it. While the setting is off, a call to a write tool fails as an unknown tool. Mutes that already exist stay in force. The write tools also need the MCP token: with `mcp_allow_tokenless_loopback` on, they stay off whatever this setting says, and Lite logs one Critical line. Any client that has the token can use them when the setting is on.
 

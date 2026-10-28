@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
@@ -24,6 +25,17 @@ namespace PerformanceMonitorLite.Tests;
 /// </summary>
 public sealed class LiteQueryTagMissingSourceTests : IDisposable
 {
+    /// <summary>The sentence each section must say when its source is missing: the same words in Lite and the Viewer (#6850).</summary>
+    private static readonly IReadOnlyDictionary<string, string> Expected = new Dictionary<string, string>
+    {
+        ["plan_cache"] = "This store has no query stats data yet.",
+        ["query_store"] = "This store has no Query Store data yet.",
+        ["procedures"] = "This store has no procedure stats data yet.",
+        ["blocking_reports"] = "This store has no blocked process report data yet.",
+        ["blocking_snapshots"] = "This store has no blocking snapshot data yet.",
+        ["deadlocks"] = "This store has no deadlock data yet.",
+    };
+
     private readonly string _tempDir;
 
     public LiteQueryTagMissingSourceTests()
@@ -67,5 +79,38 @@ public sealed class LiteQueryTagMissingSourceTests : IDisposable
 
         var view = QueryTagUsageView.Build(data, [(1, "s")], allServers: false, tagFilter: null);
         Assert.Contains("plan_cache is unavailable: This store has no query stats data yet.", view.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>#6850: every section, with its source dropped, says the same sentence the Darling Viewer says for it (the words, never the view or table name).</summary>
+    [Fact]
+    public async Task EverySection_WithItsSourceMissing_SaysTheSameWordsAsTheViewer()
+    {
+        using var initializer = new DuckDbInitializer(Path.Combine(_tempDir, "every.duckdb"));
+        await initializer.InitializeFromTemplateAsync();
+        var now = DateTime.UtcNow;
+        using (var connection = initializer.CreateConnection())
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            foreach (var drop in new[]
+            {
+                "DROP VIEW IF EXISTS v_query_stats", "DROP VIEW IF EXISTS v_query_store_stats", "DROP VIEW IF EXISTS v_procedure_stats",
+                "DROP VIEW IF EXISTS v_dmv_blocking_snapshots", "DROP TABLE IF EXISTS blocked_process_reports", "DROP TABLE IF EXISTS deadlocks",
+            })
+            {
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = drop;
+                await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            }
+        }
+
+        var data = await new LocalDataService(initializer).GetQueryTagRollupDataAsync([1], now.AddHours(-2), now);
+
+        foreach (var (section, sentence) in Expected)
+        {
+            Assert.True(data.Unavailable.TryGetValue(section, out var reason), $"section {section} was served with its source dropped");
+            Assert.Equal(sentence, reason);
+        }
+
+        Assert.Equal(Expected.Count, data.Unavailable.Count);
     }
 }

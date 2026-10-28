@@ -134,11 +134,16 @@ public static class QueryTagRollupSql
     /// sees the real range and scans <c>collection_time</c> alone. A constant floor shared by all ranges was tried first and did not stop
     /// it (PR notes).</para>
     ///
-    /// <para>The wide arms bound <c>first_execution_time</c> above by the window end plus <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>,
-    /// as <see cref="QueryStoreSql"/> does. The table arm and the day arm have no such bound, because the hour and day rows do not carry the
-    /// column. So the routed answer equals <see cref="QueryStoreSql"/> except for a row whose first execution is more than 12 hours after the
-    /// window end (a monitored server whose clock runs more than 12 hours fast): the statement drops it from a window it would count in a
-    /// wider one, and the tables keep it every time.</para>
+    /// <para>The wide arms bound <c>first_execution_time</c> above by the earlier of the range's own end and the window end, plus
+    /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/> (#6847). <see cref="QueryStoreSql"/> bounds by the window end. The slack's
+    /// reasons (#5523) are about a row's <c>collection_time</c>, not the window: a row collected before the range's end holds a first
+    /// execution at most the monitored clock's lead plus a collection cycle after that, which the 12 hours cover. A bound at the window end
+    /// let a range early in the window run its <c>(server_id, first_execution_time)</c> index range up to 12 hours past the WINDOW's end,
+    /// which PostgreSQL could then AND into the scan of <c>collection_time</c> and read the window's index entries to serve one range.
+    /// The table arm and the day arm have no such bound, because the hour and day rows do not carry the column. So the routed answer
+    /// equals <see cref="QueryStoreSql"/> except for a row whose first execution is more than 12 hours after its range's end (a monitored
+    /// server whose clock runs more than 12 hours fast, which the slack already leaves out): the statement drops it from a window it would
+    /// count in a wider one, and the tables keep it every time.</para>
     /// </summary>
     public static string QueryStoreRoutedSqlFor(int wideRanges, bool days = false)
     {
@@ -187,7 +192,7 @@ public static class QueryTagRollupSql
                     AND   q.collection_time < {{to}}::timestamp
                     AND   q.collection_time <= $3
                     AND   q.first_execution_time >= {{from}}::timestamp - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-                    AND   q.first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+                    AND   q.first_execution_time <= LEAST({{to}}::timestamp, $3) + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
                     GROUP BY q.server_id, q.query_hash
 
                 """);

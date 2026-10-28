@@ -18,6 +18,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Common.QueryTags;
 using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
@@ -123,7 +124,7 @@ public sealed class DarlingMcpQueryTagRollupTools
                 }
                 catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
                 {
-                    var reason = $"{source} does not exist in this store yet.";
+                    var reason = QueryTagSourceWords.Missing(section.Name);
                     notServed.Add((section.Name, reason));
                     sections.Add(Merge(Wrap(section, source, fleet, scope, names, tags, tagFilter, limit, [], "unavailable", reason, null), disclosure));
                     return;
@@ -185,7 +186,7 @@ public sealed class DarlingMcpQueryTagRollupTools
                 if (unavailable || allowed.Count == 0)
                 {
                     var reason = unavailable
-                        ? "collect.query_store_interval_wide does not exist in this store yet."
+                        ? QueryTagSourceWords.Missing(QueryTagRollupSection.QueryStore.Name)
                         : fleet
                             ? refusalNote!
                             : "Query Store is read from the composed interval table only, and it is not readable here: " + refused.Values.First() + ".";
@@ -225,7 +226,7 @@ public sealed class DarlingMcpQueryTagRollupTools
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
             {
-                const string reason = "collect.deadlocks does not exist in this store yet.";
+                var reason = QueryTagSourceWords.Missing(QueryTagRollupSection.Deadlocks.Name);
                 notServed.Add((QueryTagRollupSection.Deadlocks.Name, reason));
                 sections.Add(Wrap(QueryTagRollupSection.Deadlocks, "collect.deadlocks", fleet, scope, names, tags, tagFilter, limit, [], "unavailable", reason, null));
             }
