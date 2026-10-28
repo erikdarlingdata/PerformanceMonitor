@@ -84,6 +84,7 @@ internal static class DarlingMcpAgentActions
         nameof(DarlingSelfAlertEvaluator.AgSyncFellBehindMetric),
         nameof(DarlingSelfAlertEvaluator.AgDatabaseSuspendedMetric),
         nameof(DarlingSelfAlertEvaluator.AgentDownMetric),
+        nameof(DarlingSelfAlertEvaluator.AgentAlertSetupMetric),
         nameof(DarlingSelfAlertEvaluator.CollectorCostDigestMetric),
         nameof(DarlingSelfAlertEvaluator.FleetSweepRollupMetric),
         nameof(DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric),

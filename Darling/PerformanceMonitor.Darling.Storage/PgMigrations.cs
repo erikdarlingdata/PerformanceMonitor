@@ -2379,6 +2379,8 @@ CREATE INDEX IF NOT EXISTS idx_query_store_hints_markers
     /// (server_id, collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a fresh store (V1's catalog walk) and an upgraded
     /// one agree. New table, no data moves, no grant (the <c>collect</c> schema carries blanket SELECT). Every statement is idempotent. An
     /// older build never reads the table and is unaffected.
+    /// The same rung adds <c>config.config_alert_settings.agent_alert_gaps_enabled</c> (<c>boolean NOT NULL DEFAULT FALSE</c>, catalog-only): the "Agent Alert Gaps"
+    /// alert ships OFF. An older build never reads the column.
     /// </summary>
     private const string V222Sql = @"
 CREATE TABLE IF NOT EXISTS collect.agent_alerts (
@@ -2405,7 +2407,10 @@ CREATE TABLE IF NOT EXISTS collect.agent_alerts (
     response_job_id text
 );
 
-CREATE INDEX IF NOT EXISTS idx_agent_alerts_time ON collect.agent_alerts(server_id, collection_time);";
+CREATE INDEX IF NOT EXISTS idx_agent_alerts_time ON collect.agent_alerts(server_id, collection_time);
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS agent_alert_gaps_enabled boolean NOT NULL DEFAULT FALSE;";
 
     /// <summary>
     /// V218 (#6569): <c>ck_config_server_actions_action</c> also allows <c>recompile_module</c> (the switch of the Level 3 action that

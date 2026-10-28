@@ -554,7 +554,8 @@ ALTER TABLE collect.query_store_compose_stamp_built DROP COLUMN IF EXISTS hash_b
         // V222 (#6874): the Agent alerts table. The table is the probe's newest sentinel. The rewind drops it (its index goes with it), so a
         // re-run of V222 builds it again. Safe on a store that never had it.
         new(222, "hasAgentAlerts",
-            "DROP TABLE IF EXISTS collect.agent_alerts;"),
+            @"DROP TABLE IF EXISTS collect.agent_alerts;
+ALTER TABLE config.config_alert_settings DROP COLUMN IF EXISTS agent_alert_gaps_enabled;"),
     ];
 
     /// <summary>

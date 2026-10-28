@@ -922,6 +922,7 @@ GROUP BY server_id, collector_name";
             (scanNow, scanToken) => ReadFailingCollectorCountsAsync(postgres, scanNow, scanToken),
             cancellationToken);
         var tags = await ReadTagsAsync(postgres, cancellationToken);
+        var agentAlertGaps = await ReadAgentAlertGapsAsync(postgres, now, cancellationToken);
         var tagForest = await ReadTagForestAsync(postgres, cancellationToken);
         /* #3368: the deadlock band's tiers, read ONCE per roll-up rather than per card. A store reload can
            hot-swap the settings row mid-read, and re-reading per server would let one roll-up band some
@@ -957,10 +958,11 @@ GROUP BY server_id, collector_name";
             lastCollection.TryGetValue(server.ServerId, out var collected);
             failingCollectors.TryGetValue(server.ServerId, out var collectors);
             tags.TryGetValue(server.ServerId, out var serverTags);
+            agentAlertGaps.TryGetValue(server.ServerId, out var serverAgentAlertGaps);
 
             cards.Add(BuildCard(
                 server, c, pg, m, mp, t, b, deadlock, pgDeadlock, collected.LastCollection, collectors, serverTags, now,
-                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection));
+                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection, serverAgentAlertGaps));
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest, collectionHealthAgeSeconds,
@@ -1007,7 +1009,8 @@ GROUP BY server_id, collector_name";
         TimeSpan deadlockWindow,
         DeadlockRateThresholds deadlockTiers,
         DateTime? registeredAt = null,
-        DateTime? olderCollection = null)
+        DateTime? olderCollection = null,
+        IReadOnlyList<FleetAgentAlertGap>? agentAlertGaps = null)
     {
 
         /* Lite's XE-preferred / DMV-fallback, per server: XE when it has any row this window, else the DMV
@@ -1204,6 +1207,8 @@ GROUP BY server_id, collector_name";
             ThreadsWaitingForCpu = threads.RunnableTasks,
             RequestsWaitingForThreads = threads.WorkQueue,
             ThreadsSeverity = ServerHealthClassifier.ThreadsSeverity(threads.TotalThreads, availableThreads, threads.RunnableTasks, threads.WorkQueue),
+            /* #6874: set only when the Agent alert setup has a gap. The Band below is not read from it. */
+            AgentAlertGaps = agentAlertGaps is { Count: > 0 } ? agentAlertGaps : null,
             HealthyCollectorCount = collectors.Healthy,
             WarningCollectorCount = collectors.Warning,
             NotCollectedCollectorCount = collectors.NotCollected,
@@ -1589,6 +1594,66 @@ GROUP BY server_id, collector_name";
 
         return forest;
     }
+
+    /// <summary>The newest Agent alert capture per server in the last two hours (the collector runs every 15 minutes), one statement for the
+    /// fleet (#6874): the latest capture's rows, by the (server_id, collection_time) index. A server whose newest capture is the all-NULL marker
+    /// row has no alert_id, which is "collected, none defined". $1 is the window start.</summary>
+    internal const string FleetAgentAlertsSql = @"
+WITH newest AS (
+    SELECT server_id, MAX(collection_time) AS collection_time
+    FROM collect.agent_alerts
+    WHERE collection_time >= $1
+    GROUP BY server_id)
+SELECT a.server_id, a.alert_id, a.alert_name, a.enabled, a.message_id, a.severity, a.has_notification, a.operator_count
+FROM newest AS n
+JOIN collect.agent_alerts AS a ON a.server_id = n.server_id AND a.collection_time = n.collection_time";
+
+    /// <summary>The Agent alert setup's gaps per server, for the servers that have any (#6874). The status itself is
+    /// <see cref="AgentAlertStatus.Evaluate"/>; this only batches the read.</summary>
+    internal static async Task<Dictionary<int, IReadOnlyList<FleetAgentAlertGap>>> ReadAgentAlertGapsAsync(
+        NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var facts = new Dictionary<int, List<AgentAlertFact>>();
+        await using var command = postgres.CreateCommand(FleetAgentAlertsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - AgentAlertCaptureFreshness, DateTimeKind.Unspecified));
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var serverId = reader.GetInt32(0);
+                if (!facts.TryGetValue(serverId, out var list))
+                {
+                    facts[serverId] = list = new List<AgentAlertFact>();
+                }
+
+                if (reader.IsDBNull(1))
+                {
+                    continue; // the marker row: a capture with no alert
+                }
+
+                int? OptInt(int i) => reader.IsDBNull(i) ? null : reader.GetInt32(i);
+                list.Add(new AgentAlertFact(
+                    reader.GetInt32(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetBoolean(3),
+                    null, OptInt(4), OptInt(5), null, null, null, null, null, null, null, null, OptInt(6), OptInt(7), null, null));
+            }
+        }
+
+        var map = new Dictionary<int, IReadOnlyList<FleetAgentAlertGap>>();
+        foreach (var (serverId, list) in facts)
+        {
+            var status = AgentAlertStatus.Evaluate(list);
+            if (status.Gaps.Count > 0)
+            {
+                map[serverId] = status.Gaps.Select(g => new FleetAgentAlertGap(g.Code, g.Message)).ToList();
+            }
+        }
+
+        return map;
+    }
+
+    /// <summary>How old the newest Agent alert capture may be and still count (#6874): eight passes of the 15-minute collector.</summary>
+    internal static readonly TimeSpan AgentAlertCaptureFreshness = TimeSpan.FromHours(2);
 
     private static async Task<Dictionary<int, CpuRow>> ReadCpuAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
@@ -2446,6 +2511,11 @@ GROUP BY server_id, collector_name";
 /// <see cref="ServerHealthClassifier"/>, every instant a naive-UTC value the browser localizes. Serialized with
 /// snake_case field names for both <c>/api/fleet</c> and the <c>get_fleet_overview</c> MCP tool.
 /// </summary>
+/// <summary>One gap in a server's SQL Server Agent alert setup, as the fleet card carries it (#6874): the stable <see cref="Code"/> and the sentence.</summary>
+public sealed record FleetAgentAlertGap(
+    [property: JsonPropertyName("code")] string Code,
+    [property: JsonPropertyName("message")] string Message);
+
 public sealed class FleetServerCard
 {
     [JsonPropertyName("server_id")] public int ServerId { get; init; }
@@ -2748,6 +2818,13 @@ public sealed class FleetServerCard
     /// neither. Zero with nothing failing bands <c>collector_severity</c> Unknown, not Healthy (#3539
     /// A6): no collector has been banded for this server, so there is no collection to call clean.</summary>
     [JsonPropertyName("collector_count")] public int CollectorCount { get; init; }
+
+    /// <summary>The gaps in this server's SQL Server Agent alert setup (#6874), from the newest <c>agent_alerts</c> capture in the last
+    /// two hours through <see cref="AgentAlertStatus.Evaluate"/> (the words come from there, so the page, the Viewer and the tool agree).
+    /// Null when the setup has no gap, when no capture is that fresh, and on every server that never captures (Azure SQL Database, Azure SQL
+    /// Managed Instance, Amazon RDS, PostgreSQL). A chip on the card and nothing more: no band reads it. A firing that told no operator is not
+    /// here, because it needs two captures; <c>get_agent_alerts</c> reports that one.</summary>
+    [JsonPropertyName("agent_alert_gaps")] public IReadOnlyList<FleetAgentAlertGap>? AgentAlertGaps { get; init; }
     [JsonPropertyName("collector_severity")] public HealthSeverity CollectorSeverity { get; init; }
 
     /// <summary>The worst per-metric band, or Unknown when NOT ONE metric on the card was measured (#3539

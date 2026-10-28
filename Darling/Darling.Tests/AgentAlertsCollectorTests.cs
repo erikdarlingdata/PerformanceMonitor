@@ -208,7 +208,8 @@ public sealed class AgentAlertsCollectorTests
 
         static string Norm(string s) => string.Join(' ', s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
-        Assert.Equal(Norm(generated).TrimEnd(';'), Norm(rung).TrimEnd(';'));
+        /* The rung also adds the alert's settings column, so the table and its index are the rung's start, not all of it. */
+        Assert.StartsWith(Norm(generated), Norm(rung), StringComparison.Ordinal);
     }
 
     private sealed class RecordingWriter : ICollectorRowWriter

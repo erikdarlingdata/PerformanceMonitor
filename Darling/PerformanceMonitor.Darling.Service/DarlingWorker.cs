@@ -3633,6 +3633,8 @@ LIMIT 1";
                through the same by-reference alertSettings seam, so a store edit takes effect on the next sweep
                without a restart (and the clamps live on the settings properties, not here). */
             notifyAgHealth: () => alertSettings.NotifyAgHealth,
+            /* #6874: the Agent Alert Gaps switch, read live. Off until an operator turns it on. */
+            agentAlertSetupEnabled: () => alertSettings.AgentAlertGapsEnabled,
             agLagAlertSeconds: () => alertSettings.AgLagAlertSeconds,
             agRedoQueueAlertKb: () => alertSettings.AgRedoQueueAlertKb,
             agDisconnectRefireMinutes: () => alertSettings.AgDisconnectRefireMinutes,
