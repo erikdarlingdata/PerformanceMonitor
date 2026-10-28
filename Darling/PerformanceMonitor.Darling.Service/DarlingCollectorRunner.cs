@@ -1446,7 +1446,7 @@ public sealed class DarlingCollectorRunner
 
         /* #4046 part 1b: read on the target's own connection each cycle, since a sighup setting takes
            effect with no reconnect and #3604-style connect-time caching would miss that. */
-        var logTimezoneIsUtc = await TryReadLogTimezoneIsUtcAsync(server, cancellationToken);
+        var (logTimezoneIsUtc, zoneCheck) = await TryReadLogTimezoneAsync(server, cancellationToken);
 
         /* #4053 part c2: the same target-configuration read IngestRdsLogEventsAsync makes, for the same
            reason — this ingestor reaches the log through the AWS API, not SQL, so it carries no target
@@ -1456,7 +1456,8 @@ public sealed class DarlingCollectorRunner
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await rdsDeadlocks.IngestAsync(
-            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken,
+            zoneCheck);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
@@ -1474,18 +1475,26 @@ public sealed class DarlingCollectorRunner
     /// connection of their own. False (today's refusal on a foreign-zone line) when the setting cannot be
     /// read, matching the self-hosted route's NULL-column fallback in <see cref="PgServerLogTail.LogTimezoneIsUtc"/>.
     /// </summary>
-    private async Task<bool> TryReadLogTimezoneIsUtcAsync(ServerRuntime server, CancellationToken cancellationToken)
+    private async Task<(bool IsUtc, PgLogZoneCheck? ZoneCheck)> TryReadLogTimezoneAsync(
+        ServerRuntime server, CancellationToken cancellationToken)
     {
         try
         {
             var provider = TargetProviders.For(server.Target);
             await using var connection = provider.CreateConnection(server.ConnectionString);
             await connection.OpenAsync(cancellationToken);
-            var isUtc = await ReadLogTimezoneIsUtcAsync(connection, cancellationToken);
+            var setting = await ReadLogTimezoneSettingAsync(connection, cancellationToken);
+            var isUtc = PgDeadlockLogParser.IsUtcLogTimezoneSetting(setting);
 
             /* A read that works again resets the throttle below, so the next failure warns at once. */
             _logTimezoneReadWarnedUtc.TryRemove(server.ServerId, out _);
-            return isUtc;
+
+            /* #6866: a setting that is not UTC may be a named local zone. The managed route has no connection of its
+               own to ask on while it parses (the log text came from the AWS API), so the check opens one when it
+               has stamps to prove, the same way the read above does. */
+            return (isUtc, isUtc || string.IsNullOrWhiteSpace(setting)
+                ? null
+                : new PgLogZoneCheck(setting!, CreatePgLogZoneResolver(server)));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1495,7 +1504,7 @@ public sealed class DarlingCollectorRunner
             _logger?.Log(LogTimezoneReadFailureLevel(_logTimezoneReadWarnedUtc, server.ServerId, DateTime.UtcNow), ex,
                 "Could not read log_timezone for '{Server}' (#4046 part 1b) — a foreign-zone "
                 + "line this cycle is refused as before.", server.Config.DisplayName);
-            return false;
+            return (false, null);
         }
     }
 
@@ -1535,16 +1544,34 @@ public sealed class DarlingCollectorRunner
     /// Whether the target's <c>log_timezone</c> renders UTC, read on <paramref name="connection"/>, which must
     /// already be open. Its own method so a live test can run the exact statement the managed route sends.
     /// </summary>
-    internal static async Task<bool> ReadLogTimezoneIsUtcAsync(DbConnection connection, CancellationToken cancellationToken)
+    internal static async Task<bool> ReadLogTimezoneIsUtcAsync(DbConnection connection, CancellationToken cancellationToken) =>
+        PgDeadlockLogParser.IsUtcLogTimezoneSetting(await ReadLogTimezoneSettingAsync(connection, cancellationToken));
+
+    /// <summary>The target's <c>log_timezone</c> as written, read on <paramref name="connection"/> (open), or null.</summary>
+    internal static async Task<string?> ReadLogTimezoneSettingAsync(DbConnection connection, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
         using var command = connection.CreateCommand();
         command.CommandTimeout = 10;
         command.CommandText = LogTimezoneReadSql;
-        var value = await command.ExecuteScalarAsync(cancellationToken);
-        return value is string setting && PgDeadlockLogParser.IsUtcLogTimezoneSetting(setting);
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
     }
+
+    /// <summary>
+    /// How a log reader proves the time of lines stamped in a named local zone (#6866): a connection of its own to the
+    /// target, because the log read holds the main one open while it parses, running <see cref="PgLogNamedZone"/>'s one
+    /// batched statement with the command timeout the log tail read uses (<see cref="CommandTimeoutSeconds"/>). The
+    /// pool makes the extra connection cheap, and the read only happens when a named zone has stamps to prove.
+    /// </summary>
+    internal static PgLogZoneResolver CreatePgLogZoneResolver(ServerRuntime server) =>
+        async (setting, pairs, cancellationToken) =>
+        {
+            var provider = TargetProviders.For(server.Target);
+            await using var connection = provider.CreateConnection(server.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            return await PgLogNamedZone.ResolveAsync(connection, setting, pairs, CommandTimeoutSeconds, cancellationToken);
+        };
 
     /// <summary>#4046 part 1b: the managed route's foreign-zone count, on a throwaway context so the RDS ingest
     /// path can report it the same way <see cref="PgServerLogTail.MeasureForeignZoneLines"/> does for the
@@ -1637,7 +1664,7 @@ public sealed class DarlingCollectorRunner
 
         /* #4046 part 1b: see IngestRdsDeadlocksAsync's TryReadLogTimezoneIsUtcAsync call for why this reads
            the target fresh each cycle rather than caching it at connect. */
-        var logTimezoneIsUtc = await TryReadLogTimezoneIsUtcAsync(server, cancellationToken);
+        var (logTimezoneIsUtc, zoneCheck) = await TryReadLogTimezoneAsync(server, cancellationToken);
 
         /* #4053 part c1: the same target-configuration read the self-hosted pg_read_file route makes through
            ResolvePgReadBinaryFileGrantAsync, on the managed route's own throwaway connection for the same reason
@@ -1650,7 +1677,8 @@ public sealed class DarlingCollectorRunner
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await rdsLogEvents.IngestAsync(
-            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken,
+            zoneCheck);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
@@ -1904,6 +1932,10 @@ public sealed class DarlingCollectorRunner
     {
         if (server.Target.Engine == CollectorTargetEngine.PostgreSql && ReadsPgServerLogTail(collectorName))
         {
+            /* #6866: a named local log_timezone is proved against the target by a connection of its own, since the
+               tail read below holds this one open while the collector parses. */
+            context.PgLogZoneResolver = CreatePgLogZoneResolver(server);
+
             var targetKey = ReadBinaryFileCacheKey(server);
             context.PgReadBinaryFileGranted = await PgReadBinaryFileCapability.IsGrantedAsync(
                 targetConnection, targetKey, cancellationToken);

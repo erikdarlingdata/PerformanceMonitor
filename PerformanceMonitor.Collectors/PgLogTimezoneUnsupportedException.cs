@@ -65,11 +65,15 @@ public sealed class PgLogTimezoneUnsupportedException : Exception
             + "and this is NOT an empty log. "
             + $"The log is timestamped '{zone}', which is not a zero-offset zone. So {SettingName} is not "
             + "UTC, and every timestamp in the log is local time. "
-            + "The collector refuses these lines instead of converting them. The zone in a log prefix is an "
-            + "abbreviation, and one abbreviation can name several zones. For example, CST names three. "
-            + "A conversion is a guess, and a guess stores rows that look correct but have the wrong time. "
-            + $"Set {SettingName} = 'UTC' on the target. On managed PostgreSQL, change it in the parameter "
-            + "group. The change takes effect on a reload, so no restart is necessary. The next collection "
-            + "cycle then stores normally.";
+            + "The collector converts local time only when the target proves it. That needs "
+            + $"{SettingName} to be a named zone from the time zone database, such as 'Europe/Berlin', "
+            + "and a connection to ask on. A fixed offset such as '-03' is not a named zone, "
+            + "and no check was possible here. "
+            + "The zone in a log prefix is an abbreviation, and one abbreviation can name several zones. "
+            + "For example, CST names three. A conversion without proof is a guess, and a guess stores rows "
+            + "that look correct but have the wrong time. "
+            + $"Set {SettingName} to a named zone, or to 'UTC', on the target. On managed PostgreSQL, change it "
+            + "in the parameter group. The change takes effect on a reload, so no restart is necessary. "
+            + "The next collection cycle then stores normally.";
     }
 }

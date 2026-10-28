@@ -94,7 +94,8 @@ public sealed class RdsLogEventIngestor
         bool pgLogUsesCsvlog = false,
         string? loginConnectionString = null,
         AwsRoleKey? role = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        PgLogZoneCheck? zoneCheck = null)
     {
         /* #4708: what the last process saved for this server is loaded once, before its first read, so a
            restart resumes from the saved file and marker instead of the newest file's last lines. */
@@ -106,7 +107,7 @@ public sealed class RdsLogEventIngestor
         /* #4708: a rotated file is finished and the newest file opened in the SAME cycle (bounded), rather than
            the old file on one cycle and the new one on the next. */
         return await RdsLogSource.RunPassesAsync(
-            () => IngestPassAsync(serverId, storageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, loginConnectionString, role, cancellationToken));
+            () => IngestPassAsync(serverId, storageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, loginConnectionString, role, zoneCheck, cancellationToken));
     }
 
     /// <summary>
@@ -122,6 +123,7 @@ public sealed class RdsLogEventIngestor
         bool pgLogUsesCsvlog,
         string? loginConnectionString,
         AwsRoleKey? role,
+        PgLogZoneCheck? zoneCheck,
         CancellationToken cancellationToken)
     {
         RdsLogSource.LogChunk? chunk;
@@ -182,7 +184,7 @@ public sealed class RdsLogEventIngestor
 
         var (written, foreignZoneLines, csvRecordsDiscarded, nextCarry) = await StoreAsync(
             serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, pgLogUsesCsvlog,
-            carry, chunk.Value.MoreAvailable, cancellationToken);
+            carry, chunk.Value.MoreAvailable, zoneCheck, cancellationToken);
 
         /* THE MARKER MOVES HERE AND NOWHERE ELSE (#3008), and the csvlog carry moves alongside it for the
            same reason: DownloadDBLogFilePortion is consume-once, so a store failure must leave both the
@@ -220,6 +222,7 @@ public sealed class RdsLogEventIngestor
         bool pgLogUsesCsvlog,
         RdsCsvlogCarry.CsvCarry carry,
         bool additionalDataPending,
+        PgLogZoneCheck? zoneCheck,
         CancellationToken cancellationToken)
     {
         List<PgLogEvent> events;
@@ -243,7 +246,10 @@ public sealed class RdsLogEventIngestor
                assembler-backed overload — restated here because the csv parser accepts every zone and leaves
                the decision to this filter (its own #4053 fix), the same trade PgLogEventsCollector.ReadAsync's
                csvlog arm makes on the self-hosted route. */
-            var kept = PgLogEventsCollector.FilterForeignZoneEntries(entries, logTimezoneIsUtc, out foreignZoneLines);
+            /* #6866: a named local log_timezone is proved against the target first, one statement for the portion. */
+            var (kept, keptForeignZoneLines) = await PgLogNamedZone.FilterEntriesAsync(
+                entries, logTimezoneIsUtc, zoneCheck?.Setting, zoneCheck?.Resolver, cancellationToken);
+            foreignZoneLines = keptForeignZoneLines;
             events = _classifier.Classify(kept);
         }
         else
@@ -261,7 +267,9 @@ public sealed class RdsLogEventIngestor
                DefaultLogLinePrefix, unwritable by any parameter group setting, so passing it (rather than
                falling back to no separator check) keeps a K1-shaped statement line
                (`statement: SELECT 'ERROR:  x'`) that the no-separator fallback would otherwise refuse. */
-            events = _classifier.Classify(text, logTimezoneIsUtc, DefaultLogLinePrefix, out foreignZoneLines);
+            var zones = await PgLogNamedZone.ResolveBodyAsync(
+                text, logTimezoneIsUtc, zoneCheck?.Setting, zoneCheck?.Resolver, cancellationToken);
+            events = _classifier.Classify(text, logTimezoneIsUtc, DefaultLogLinePrefix, zones, out foreignZoneLines);
         }
 
         if (events.Count == 0)

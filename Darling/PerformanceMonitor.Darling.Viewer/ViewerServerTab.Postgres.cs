@@ -671,7 +671,7 @@ public partial class ViewerServerTab
             + "and lock-wait families, and it is also what a target with the relevant settings off looks "
             + "like: connection lines need log_connections / log_disconnections, lock waits need "
             + "log_lock_waits, spills need log_temp_files, autovacuum runs need log_autovacuum_min_duration. "
-            + "It is also what an unreadable log, a non-UTC log_timezone or a non-English lc_messages looks "
+            + "It is also what an unreadable log, a log_timezone that is neither UTC nor a named zone or a non-English lc_messages looks "
             + "like — the Vacuum tab's plan-capture readiness panel reads the same file and reports those.")
             + (page.Rows.Count == 0
                 ? string.Empty
