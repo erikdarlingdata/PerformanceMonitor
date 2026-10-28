@@ -556,4 +556,40 @@ SELECT
             return (false, false);
         return (reader.GetBoolean(0), reader.GetBoolean(1));
     }
+
+    /// <summary>#6877: where the server's stored Query Store rows start, for a window that ends before them (the window-floor probe
+    /// answers null when a window holds no row). Null when the server has none.</summary>
+    public async Task<DateTime?> GetOldestQueryStoreRowAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT min(collection_time) FROM v_query_store_stats WHERE server_id = $1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is DateTime first ? first : null;
+    }
+
+    /// <summary>
+    /// #6877: whether the collection log holds a productive run (SUCCESS, rows collected) of one collector at or before
+    /// <paramref name="cutoffUtc"/>: the collector was storing rows then, so a window whose rows are gone lost them to retention rather
+    /// than never having had any. Twin of Darling's <c>RetentionCause</c> check, without its servers-table fallback (Lite has one
+    /// horizon for the log and the data, so a window the data has lost is a window the log has lost).
+    /// </summary>
+    public async Task<bool> CollectorStoredRowsAtOrBeforeAsync(int serverId, string collectorName, DateTime cutoffUtc)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT 1
+FROM v_collection_log
+WHERE server_id = $1
+AND   collector_name = $2
+AND   status = 'SUCCESS'
+AND   rows_collected > 0
+AND   collection_time <= $3
+LIMIT 1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = collectorName });
+        command.Parameters.Add(new DuckDBParameter { Value = cutoffUtc });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
 }

@@ -54,12 +54,12 @@ public static class QueryTagUsageView
             anyUnfiltered |= facts.Count > 0;
             anyData |= facts.Any(f => QueryTagRollup.IsUnderTag(f.TagId, data.Tags, tagFilter));
             data.Unavailable.TryGetValue(section.Name, out var why);
-            if (why is not null) notServed.Add($"{section.Name} is unavailable: {why}");
+            if (why is not null) notServed.Add($"{PerformanceMonitor.Common.QueryTagUsageLabels.SectionTitle(section.Name)} is unavailable: {why}");
             Add(tables, QueryTagRollup.Section(section, facts, scope, allServers, data.Tags, tagFilter, limit, why), section);
         }
 
         data.Unavailable.TryGetValue(QueryTagRollupSection.Deadlocks.Name, out var deadlockWhy);
-        if (deadlockWhy is not null) notServed.Add($"{QueryTagRollupSection.Deadlocks.Name} is unavailable: {deadlockWhy}");
+        if (deadlockWhy is not null) notServed.Add($"{PerformanceMonitor.Common.QueryTagUsageLabels.SectionTitle(QueryTagRollupSection.Deadlocks.Name)} is unavailable: {deadlockWhy}");
         Add(tables, QueryTagRollup.DeadlockSection(data.Deadlocks, scope, allServers, data.Tags, tagFilter, limit, data.ScanTruncated, deadlockWhy), QueryTagRollupSection.Deadlocks);
 
         string? message = null;
@@ -86,13 +86,13 @@ public static class QueryTagUsageView
         {
             foreach (var server in list.OfType<Dictionary<string, object?>>())
             {
-                tables.Add(One(server, section, $"{section.Name} - {server["server"]}"));
+                tables.Add(One(server, section, $"{PerformanceMonitor.Common.QueryTagUsageLabels.SectionTitle(section.Name)} - {server["server"]}"));
             }
 
             if (block.TryGetValue("fleet_total", out var fleet) && fleet is Dictionary<string, object> figures)
             {
                 var columns = Columns(section);
-                tables.Add(new QueryTagUsageTable(section.Name, $"{section.Name} - all servers",
+                tables.Add(new QueryTagUsageTable(section.Name, $"{PerformanceMonitor.Common.QueryTagUsageLabels.SectionTitle(section.Name)} - all servers",
                     block["status"]?.ToString() ?? "ok", block.GetValueOrDefault("message") as string, Note(block), columns,
                     [new QueryTagUsageRow("total", "Total (all servers)", Cells(figures, section))]));
             }
@@ -100,7 +100,7 @@ public static class QueryTagUsageView
             return;
         }
 
-        tables.Add(One(block, section, section.Name));
+        tables.Add(One(block, section, PerformanceMonitor.Common.QueryTagUsageLabels.SectionTitle(section.Name)));
     }
 
     private static QueryTagUsageTable One(Dictionary<string, object?> block, QueryTagRollupSection section, string title)
@@ -129,7 +129,7 @@ public static class QueryTagUsageView
 
     private static string? Note(Dictionary<string, object?> block) => block.GetValueOrDefault("note") as string;
 
-    private static List<string> Columns(QueryTagRollupSection section) => ["Tag", .. section.Measures.Select(m => m.Name)];
+    private static List<string> Columns(QueryTagRollupSection section) => ["Tag", .. section.Measures.Select(m => PerformanceMonitor.Common.QueryTagUsageLabels.MeasureLabel(m.Name))];
 
     private static List<string> Cells(Dictionary<string, object> figures, QueryTagRollupSection section) =>
         section.Measures.Select(m => Convert.ToDouble(figures[m.Name], CultureInfo.InvariantCulture).ToString("#,0.###", CultureInfo.InvariantCulture)).ToList();

@@ -114,6 +114,16 @@ public sealed class PgLogEventClassifier
     public List<PgLogEvent> Classify(string? logBody, bool logTimezoneIsUtc, string? logLinePrefix, out int foreignZoneLines)
         => Classify(PgLogEntryAssembler.Assemble(logBody, logTimezoneIsUtc, logLinePrefix, out foreignZoneLines));
 
+    /// <summary>
+    /// <see cref="Classify(string?, bool, string?, out int)"/> for a target whose <c>log_timezone</c> is a named local
+    /// zone that the server has proved the lines of (#6866): see
+    /// <see cref="PgLogEntryAssembler.Assemble(string?, bool, string?, PgLogZoneMap?, out int)"/>. Null
+    /// <paramref name="zones"/> is the overload above, refusal included.
+    /// </summary>
+    public List<PgLogEvent> Classify(
+        string? logBody, bool logTimezoneIsUtc, string? logLinePrefix, PgLogZoneMap? zones, out int foreignZoneLines)
+        => Classify(PgLogEntryAssembler.Assemble(logBody, logTimezoneIsUtc, logLinePrefix, zones, out foreignZoneLines));
+
     /// <summary>The walk itself, over entries already assembled — for a transport that assembled them for another consumer too.</summary>
     public List<PgLogEvent> Classify(IReadOnlyList<PgLogEntry> entries)
     {

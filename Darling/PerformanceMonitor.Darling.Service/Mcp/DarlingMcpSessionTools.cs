@@ -221,7 +221,7 @@ public sealed class DarlingMcpSessionTools
             if (snapshotAt != null && rows.Count == 0)
                 return McpHelpers.Status(
                     "empty",
-                    $"No active query rows on {resolved.ServerName} at collection_time {snapshotAt.Value:o}"
+                    $"No active query rows on {resolved.DisplayName} at collection_time {snapshotAt.Value:o}"
                     + (!databases.IsAll || blocking_only || waitFilter != null ? " matched " + DescribeActiveQueryFilters(databases, blocking_only, waitFilter) : "")
                     + ". Read the snapshot times with snapshots_only.");
 
@@ -383,9 +383,9 @@ public sealed class DarlingMcpSessionTools
             if (!databases.IsAll || blockingOnly || waitFilter != null)
                 return McpHelpers.Status(
                     "empty",
-                    $"No active query snapshots on {resolved.ServerName} in the last {hoursBack} hour(s) matched "
+                    $"No active query snapshots on {resolved.DisplayName} in the last {hoursBack} hour(s) matched "
                     + DescribeActiveQueryFilters(databases, blockingOnly, waitFilter) + ".");
-            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_snapshots", cancellationToken)
+            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
                 ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
         }
 
@@ -393,7 +393,7 @@ public sealed class DarlingMcpSessionTools
         var shown = truncated ? page.Snapshots.GetRange(0, limit) : page.Snapshots;
         return JsonSerializer.Serialize(new
         {
-            server = resolved.ServerName,
+            server = resolved.DisplayName,
             hours_back = hoursBack,
             filters_applied = new { database_name = databaseEcho, blocking_only = blockingOnly, wait_type = waitFilter },
             /* The filtered population's snapshot count, from the same statement as the list. */

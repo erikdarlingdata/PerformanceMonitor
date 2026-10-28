@@ -1160,7 +1160,7 @@
                                                     <Ellipse Grid.Row="5" Grid.Column="0" Width="9" Height="9" Fill="{Binding CollectorSeverityBrush}" VerticalAlignment="Center" Margin="0,2,6,2"/>
                                                     <TextBlock Grid.Row="5" Grid.Column="1" Text="Collectors:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
                                                     <TextBlock Grid.Row="5" Grid.Column="2" Text="{Binding CollectorDisplay}" FontSize="11" Foreground="{Binding CollectorSeverityBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
-                                                    <TextBlock Grid.Row="5" Grid.Column="3" Text="{Binding CollectorDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
+                                                    <TextBlock Grid.Row="5" Grid.Column="3" Text="{Binding CollectorDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,2"/>
 
                                                     <!-- Identity capacity (#6875): shown only when a column is at the warning bar or past it, the way the web
                                                          fleet card's chip is. Not a band: nothing above reads it. -->
