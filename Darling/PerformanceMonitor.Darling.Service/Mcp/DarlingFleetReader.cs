@@ -1602,8 +1602,10 @@ GROUP BY server_id, collector_name";
     /// alone has no range seek on it and, on a runtime without index skip scan, walks every retained row on each fleet roll-up. Measured on
     /// PostgreSQL 18 over 3.24M rows (50 servers, 30 databases, hourly for 90 days): 50 index-only seeks for the newest times plus 50 seeks for the
     /// capture rows, about 1.0 to 1.4 ms and 1,516 buffer hits. The time-only shape was 1.9 to 2.7 ms there, and only that fast because PostgreSQL 18
-    /// skips ahead through the leading column. $1 is the window start.</summary>
-    internal const string FleetDatabaseProtectionSql = @"
+    /// skips ahead through the leading column. The <c>WHERE</c> after the lateral is the one the other per-server laterals carry
+    /// (<see cref="SqlServerCollectedTargetSql"/>, #3895): it skips PostgreSQL and Aurora targets, which never write this SQL Server-only table,
+    /// and disabled servers, so neither pays a lateral probe on each fleet read. $1 is the window start.</summary>
+    internal const string FleetDatabaseProtectionSql = $@"
 SELECT d.server_id, d.collection_time, d.database_name, d.state_desc, d.recovery_model_desc, d.create_date, d.replica_role, d.platform,
        d.last_good_checkdb_time, d.checkdb_state, d.last_full_backup_time, d.full_backup_state, d.last_log_backup_time, d.log_backup_state
 FROM servers AS s
@@ -1614,7 +1616,9 @@ CROSS JOIN LATERAL
     WHERE x.server_id = s.server_id
     AND   x.collection_time >= $1
 ) AS n
-JOIN collect.database_protection AS d ON d.server_id = s.server_id AND d.collection_time = n.collection_time";
+JOIN collect.database_protection AS d ON d.server_id = s.server_id AND d.collection_time = n.collection_time
+WHERE s.is_enabled
+AND   {SqlServerCollectedTargetSql}";
 
     /// <summary>The overdue facts per server, for the servers that have any (#6873). The judgment is
     /// <see cref="DatabaseProtectionBands.OverdueFacts"/>, the one the alerts, the tool and the Viewer use; this only batches the read.

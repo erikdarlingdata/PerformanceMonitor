@@ -274,7 +274,10 @@ public sealed class DatabaseProtectionAlertTests
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>One capture of the given databases, every row stamped with ONE collection_time (a pass stamps one for every database).</summary>
-    private static async Task InsertCaptureAsync(NpgsqlConnection connection, CancellationToken ct, DateTime at, params DatabaseProtectionFact[] facts)
+    private static Task InsertCaptureAsync(NpgsqlConnection connection, CancellationToken ct, DateTime at, params DatabaseProtectionFact[] facts) =>
+        InsertCaptureForAsync(connection, ct, ServerId, Name, at, facts);
+
+    private static async Task InsertCaptureForAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, DateTime at, params DatabaseProtectionFact[] facts)
     {
         foreach (var f in facts)
         {
@@ -282,7 +285,7 @@ public sealed class DatabaseProtectionAlertTests
 (collection_id, collection_time, server_id, server_name, database_name, state_desc, recovery_model_desc, create_date, replica_role, platform,
  last_good_checkdb_time, checkdb_state, last_full_backup_time, full_backup_state, last_log_backup_time, log_backup_state)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
-                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, Name, f.DatabaseName, f.StateDesc, f.RecoveryModelDesc,
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), serverId, serverName, f.DatabaseName, f.StateDesc, f.RecoveryModelDesc,
                 f.CreateDate is { } created ? DarlingMcpTestData.Naive(created) : null, f.ReplicaRole, f.Platform,
                 f.LastGoodCheckDbTime is { } k ? DarlingMcpTestData.Naive(k) : null, f.CheckDbState,
                 f.LastFullBackupTime is { } b ? DarlingMcpTestData.Naive(b) : null, f.FullBackupState,
@@ -420,6 +423,18 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
                 Db("AzureDb", managed, TimeSpan.FromDays(400), TimeSpan.FromDays(400), null, DatabaseProtectionCollector.PlatformManaged,
                     checkDbState: DatabaseProtectionCollector.CheckDbNever));
             Assert.Empty(await DarlingFleetReader.ReadDatabaseProtectionOverdueAsync(postgres, DateTime.UtcNow.AddSeconds(1), ct));
+
+            /* A PostgreSQL target and a disabled server are not probed (the lateral's WHERE), so an overdue capture on either lists nothing. */
+            var overdueAt = DateTime.UtcNow;
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, engine_kind)
+VALUES (515152, 'PROTECTION-PG', 'PROTECTION-PG', TRUE, 0, $1), (515153, 'PROTECTION-OFF', 'PROTECTION-OFF', FALSE, 0, NULL)", MonitoredEngineKind.Postgres);
+            await InsertCaptureForAsync(connection, ct, 515152, "PROTECTION-PG", overdueAt, Db("Sales", overdueAt, TimeSpan.FromDays(30), TimeSpan.FromMinutes(90), TimeSpan.FromDays(2)));
+            await InsertCaptureForAsync(connection, ct, 515153, "PROTECTION-OFF", overdueAt, Db("Sales", overdueAt, TimeSpan.FromDays(30), TimeSpan.FromMinutes(90), TimeSpan.FromDays(2)));
+            await InsertCaptureAsync(connection, ct, overdueAt, Db("Sales", overdueAt, TimeSpan.FromDays(30), TimeSpan.FromMinutes(90), TimeSpan.FromDays(2)));
+            var scoped = await DarlingFleetReader.ReadDatabaseProtectionOverdueAsync(postgres, DateTime.UtcNow, ct);
+            Assert.True(scoped.ContainsKey(ServerId));
+            Assert.False(scoped.ContainsKey(515152));
+            Assert.False(scoped.ContainsKey(515153));
             return 0;
         });
     }
