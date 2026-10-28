@@ -245,7 +245,7 @@ public sealed class IdentityCapacityCollectorTests
         Assert.True(answer > 0 && answer < returns && returns < enter, "the skip answer and RETURN come before the database is entered");
 
         /* The payload carries the ninth column on both result sets of its UNION. */
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(IdentityCapacityCollector.BuildPayloadBody(), "varchar\(20\), NULL").Count);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(IdentityCapacityCollector.BuildPayloadBody(), @"varchar\(20\), NULL").Count);
     }
 
     [Theory]

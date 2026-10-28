@@ -1005,7 +1005,14 @@ GROUP BY server_id, collector_name";
     /// skips a disabled server and a PostgreSQL target, which never write this table, so they get no probe (the filter sits after the lateral, the
     /// form the siblings use, and the planner applies it to <c>servers</c> before the lateral runs). A skip row (<c>skip_reason</c> set) is not a
     /// scan marker. $1 is the window start, $2 the percent of the warning bar.
-    /// EXPLAINPLACEHOLDER
+    ///
+    /// <para><b>Measured (EXPLAIN (ANALYZE, BUFFERS), PostgreSQL 18.6 scratch store, 60 registered servers of which 41 enabled SQL Server targets wrote rows,
+    /// 265,680 rows over 90 days, six databases each).</b> Without the filter the lateral ran 60 times (19 probes for servers that never write this
+    /// table), with it 41. The window predicate on the column rows (<c>c.collection_time &gt;= $1</c>, implied by the join to the marker but not visible to
+    /// the planner) matters more: without it the planner hashed every column row of a server over all 90 days (a bitmap scan of
+    /// <c>idx_identity_capacity_time</c>, 2,160 rows and about 3,200 buffers per server) and the statement took 111 to 115 ms and 138,700 buffers. With it
+    /// the plan is a nested loop of a seq scan of <c>servers</c> (41 rows after the filter), the marker index bitmap scan with a unique sort per server,
+    /// and one index scan of <c>idx_identity_capacity_time</c> per kept marker (246 loops): 9 to 11.5 ms and 10,800 buffers, the same 246 rows.</para>
     /// </summary>
     internal const string FleetIdentityCapacitySql = $@"
 SELECT c.server_id, c.percent_used
@@ -1022,6 +1029,7 @@ CROSS JOIN LATERAL
 ) AS n
 JOIN collect.identity_capacity AS c
   ON c.server_id = s.server_id AND c.collection_time = n.collection_time AND c.database_name = n.database_name
+  AND c.collection_time >= $1
 WHERE s.is_enabled
 AND   {SqlServerCollectedTargetSql}
 AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
