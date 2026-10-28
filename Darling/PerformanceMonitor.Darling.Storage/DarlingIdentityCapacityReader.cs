@@ -71,11 +71,27 @@ public sealed record IdentityColumnFact(
 /// <param name="ScannedAt">Its newest marker in the window (UTC).</param>
 public sealed record IdentityScannedDatabase(string DatabaseName, DateTime ScannedAt);
 
+/// <summary>
+/// An online database of the server that has no scan marker in the window: the pass budget's rotation has not reached it yet, or it is
+/// one the collector never scans (a snapshot, a readable secondary), which the database config capture cannot tell apart. It is never
+/// "clean".
+/// </summary>
+/// <param name="DatabaseName">The database.</param>
+/// <param name="LastScannedAt">Its newest marker before the window (UTC), null when the store holds none.</param>
+public sealed record IdentityNotYetScannedDatabase(string DatabaseName, DateTime? LastScannedAt);
+
 /// <summary>What <see cref="DarlingIdentityCapacityReader.ReadAsync"/> found.</summary>
 /// <param name="Columns">Every column above 10 percent in each scanned database's newest scan, fullest first. Empty when every scanned database is clean.</param>
-/// <param name="Databases">The databases with a marker in the window, by name. A database absent here was not scanned in the window.</param>
-public sealed record IdentityCapacityRead(IReadOnlyList<IdentityColumnFact> Columns, IReadOnlyList<IdentityScannedDatabase> Databases)
+/// <param name="Databases">The databases with a marker in the window, by name.</param>
+/// <param name="NotYetScanned">The server's online databases from its newest database config capture that have no marker in the window, by name, each with the time of its last scan when an older one exists. Empty when the server has no config capture.</param>
+public sealed record IdentityCapacityRead(
+    IReadOnlyList<IdentityColumnFact> Columns,
+    IReadOnlyList<IdentityScannedDatabase> Databases,
+    IReadOnlyList<IdentityNotYetScannedDatabase>? NotYetScanned = null)
 {
+    /// <summary>The databases with no marker in the window, never null.</summary>
+    public IReadOnlyList<IdentityNotYetScannedDatabase> Unscanned => NotYetScanned ?? Array.Empty<IdentityNotYetScannedDatabase>();
+
     /// <summary>At least one database was scanned in the window.</summary>
     public bool HasScan => Databases.Count > 0;
 }
@@ -113,6 +129,24 @@ LEFT JOIN LATERAL (
     ORDER BY w.collection_time LIMIT 1) AS f ON c.column_name IS NOT NULL
 ORDER BY c.percent_used DESC NULLS LAST, s.database_name, c.schema_name, c.table_name, c.column_name";
 
+    /// <summary>
+    /// The server's online user databases in its newest database config capture at or before the window's end, each with its newest
+    /// marker at or before the end. The reader drops the ones that have a marker in the window. $1 server, $2 end, $3 database filter,
+    /// $4 the names the collector never scans.
+    /// </summary>
+    public static string ListedDatabasesSql(DatabaseFilter databases) => $@"
+SELECT d.database_name,
+       (SELECT MAX(i.collection_time) FROM collect.identity_capacity AS i
+        WHERE i.server_id = $1 AND i.database_name = d.database_name AND i.column_name IS NULL AND i.collection_time <= $2)
+FROM (
+    SELECT DISTINCT database_name FROM v_database_config
+    WHERE server_id = $1
+    AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1 AND capture_time <= $2)
+    AND   state_desc = 'ONLINE'
+    AND   database_name IS NOT NULL
+    AND   database_name <> ALL($4){databases.Clause("database_name", 3)}) AS d
+ORDER BY d.database_name";
+
     /// <summary>Reads the newest scan of every database with a marker in the window <paramref name="start"/> to <paramref name="end"/> (UTC).</summary>
     public static async Task<IdentityCapacityRead> ReadAsync(
         NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, DateTime start, DateTime end,
@@ -146,10 +180,32 @@ ORDER BY c.percent_used DESC NULLS LAST, s.database_name, c.schema_name, c.table
                 Big(12), reader.IsDBNull(11) ? null : reader.GetDateTime(11)));
         }
 
+        await reader.CloseAsync();
+
+        // A database the rotation has not reached has no marker, so the scan answer alone would leave it out and the server could look
+        // clean. The server's database list is its newest database config capture (every online database, once per capture).
+        var notYetScanned = new List<IdentityNotYetScannedDatabase>();
+        await using (var listing = postgres.CreateCommand(ListedDatabasesSql(databases)))
+        {
+            listing.CommandTimeout = commandTimeoutSeconds;
+            listing.Parameters.AddWithValue(serverId);
+            listing.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
+            listing.Parameters.Add(databases.Parameter());
+            listing.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = IdentityCapacityCollector.SkippedDatabaseNames.ToArray() });
+            await using var names = await listing.ExecuteReaderAsync(cancellationToken);
+            while (await names.ReadAsync(cancellationToken))
+            {
+                var name = names.GetString(0);
+                if (!scanned.ContainsKey(name))
+                    notYetScanned.Add(new IdentityNotYetScannedDatabase(name, names.IsDBNull(1) ? null : names.GetDateTime(1)));
+            }
+        }
+
         return new IdentityCapacityRead(
             columns.OrderByDescending(c => c.PercentUsed ?? -1)
                 .ThenBy(c => c.DatabaseName, StringComparer.Ordinal).ThenBy(c => c.SchemaName, StringComparer.Ordinal)
                 .ThenBy(c => c.TableName, StringComparer.Ordinal).ThenBy(c => c.ColumnName, StringComparer.Ordinal).ToList(),
-            scanned.OrderBy(d => d.Key, StringComparer.Ordinal).Select(d => new IdentityScannedDatabase(d.Key, d.Value)).ToList());
+            scanned.OrderBy(d => d.Key, StringComparer.Ordinal).Select(d => new IdentityScannedDatabase(d.Key, d.Value)).ToList(),
+            notYetScanned);
     }
 }

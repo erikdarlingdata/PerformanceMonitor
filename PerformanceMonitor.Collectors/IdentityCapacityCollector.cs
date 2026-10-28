@@ -107,6 +107,17 @@ public sealed class IdentityCapacityCollector : CollectorDefinitionBase<Identity
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target is not null && target.IsAzureSqlDb;
 
     /// <summary>
+    /// The system, vendor and service databases <see cref="OnPremDatabaseListQueryText"/> leaves out by name, so the reader that lists a
+    /// server's not-yet-scanned databases from the database config capture skips the same ones (it must not call a database "not yet
+    /// scanned" that the collector never scans). Keep the two lists equal.
+    /// </summary>
+    public static readonly IReadOnlyList<string> SkippedDatabaseNames = new[]
+    {
+        "master", "model", "msdb", "tempdb", "PerformanceMonitor", "rdsadmin", "gcloud_cloudsqladmin",
+        "ReportServer", "ReportServerTempDB", "DWConfiguration", "DWDiagnostics", "DWQueue", "DBAUtil", "DBAUtils", "Utility",
+    };
+
+    /// <summary>
     /// The Query Store collectors' list (online, vendor and system databases out, secondaries out), plus the snapshot screen
     /// (<c>source_database_id IS NULL</c>). A restoring database is not ONLINE, so it is out with the offline ones.
     /// </summary>

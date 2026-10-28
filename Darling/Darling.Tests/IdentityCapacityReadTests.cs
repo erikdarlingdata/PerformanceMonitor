@@ -296,4 +296,65 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             Assert.Contains("identity_capacity", empty.GetProperty("message").GetString());
         });
     }
+
+    private static Task ConfigRow(NpgsqlConnection c, CancellationToken ct, string database, string state, DateTime at) =>
+        DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO database_config (config_id, capture_time, server_id, server_name, database_name, state_desc) VALUES ($1,$2,$3,$4,$5,$6)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), DataId, DataServer, database, state);
+
+    [Fact]
+    public async Task ADatabaseWithNoScanInTheWindow_IsListedAsNotYetScanned_WithItsLastScanWhenOneExists_NeverLeftOutOrClean()
+    {
+        var now = DateTime.UtcNow;
+        var oldConfig = now.AddDays(-3);
+        var newConfig = now.AddHours(-2);
+        var scanAt = now.AddHours(-1);
+        var earlierScan = now.AddDays(-20);
+        await WithStoreAsync(async (c, ct) =>
+        {
+            /* An older config capture still lists a database that was dropped since: only the newest capture counts. */
+            await ConfigRow(c, ct, "Dropped", "ONLINE", oldConfig);
+            foreach (var (name, state) in new[]
+            {
+                ("Sales", "ONLINE"), ("Fresh", "ONLINE"), ("Behind", "ONLINE"), ("Offline", "OFFLINE"),
+                ("ReportServer", "ONLINE"), ("master", "ONLINE"), ("PerformanceMonitor", "ONLINE"),
+            })
+                await ConfigRow(c, ct, name, state, newConfig);
+
+            /* Sales was scanned in the window (and is clean). Behind was scanned 20 days ago, outside the 7-day window. Fresh never was. */
+            await Marker(c, ct, DataId, DataServer, "Sales", scanAt);
+            await Marker(c, ct, DataId, DataServer, "Behind", earlierScan);
+            await Marker(c, ct, DataId, DataServer, "Behind", earlierScan.AddDays(-1));
+        }, async (postgres, ct) =>
+        {
+            var read = await DarlingIdentityCapacityReader.ReadAsync(postgres, DataId, DatabaseFilter.All, now.AddHours(-168), now, 30, ct);
+
+            Assert.Equal(new[] { "Sales" }, read.Databases.Select(d => d.DatabaseName).ToArray());
+            Assert.Equal(new[] { "Behind", "Fresh" }, read.Unscanned.Select(d => d.DatabaseName).ToArray());
+            Assert.Equal(DarlingMcpTestData.Naive(earlierScan), read.Unscanned.Single(d => d.DatabaseName == "Behind").LastScannedAt!.Value, TimeSpan.FromMilliseconds(5));
+            Assert.Null(read.Unscanned.Single(d => d.DatabaseName == "Fresh").LastScannedAt);
+
+            /* The database filter narrows the list the same way it narrows the scans. */
+            var one = await DarlingIdentityCapacityReader.ReadAsync(postgres, DataId, DatabaseFilter.One("Fresh"), now.AddHours(-168), now, 30, ct);
+            Assert.Equal(new[] { "Fresh" }, one.Unscanned.Select(d => d.DatabaseName).ToArray());
+            Assert.Empty(one.Databases);
+
+            var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, ct));
+            Assert.False(root.TryGetProperty("status", out _), "a server with a database not yet scanned is not an empty (clean) answer");
+            Assert.Equal(1, root.GetProperty("summary").GetProperty("databases_scanned").GetInt32());
+            Assert.Equal(2, root.GetProperty("summary").GetProperty("databases_not_yet_scanned").GetInt32());
+            var databases = root.GetProperty("databases").EnumerateArray().ToDictionary(d => d.GetProperty("database").GetString()!);
+            Assert.True(databases["Sales"].GetProperty("scanned").GetBoolean());
+            Assert.False(databases["Fresh"].GetProperty("scanned").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, databases["Fresh"].GetProperty("last_scanned_at").ValueKind);
+            Assert.Equal(JsonValueKind.String, databases["Behind"].GetProperty("last_scanned_at").ValueKind);
+            Assert.False(databases.ContainsKey("Dropped") || databases.ContainsKey("Offline") || databases.ContainsKey("ReportServer")
+                || databases.ContainsKey("master") || databases.ContainsKey("PerformanceMonitor"));
+
+            /* No scan in the window at all, but databases waiting: unavailable, naming them. */
+            var none = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, "Fresh", 200, ct));
+            Assert.Equal("unavailable", none.GetProperty("status").GetString());
+            Assert.Contains("1 database(s) not yet scanned (Fresh)", none.GetProperty("message").GetString());
+        });
+    }
 }
