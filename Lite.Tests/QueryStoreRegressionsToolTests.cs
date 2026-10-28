@@ -305,6 +305,9 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
         Assert.Contains("This window (", message, StringComparison.Ordinal);
         Assert.Contains($"is older than this server's raw Query Store data, which starts {baseNow.AddDays(-3).ToString("MMM d", System.Globalization.CultureInfo.InvariantCulture)}, so there is nothing to compare", message, StringComparison.Ordinal);
         Assert.DoesNotContain("no Query Store sample has been stored yet", message, StringComparison.Ordinal);
+        /* A productive run at or before the window's start is the evidence, so the sentence says retention MAY have dropped the data. */
+        Assert.Contains("may have been dropped by retention", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("has since aged out", message, StringComparison.Ordinal);
         var hints = root.GetProperty("hints");
         Assert.True(hints.GetProperty("window_truncated").GetBoolean());
         Assert.NotEqual(JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);

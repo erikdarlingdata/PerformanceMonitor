@@ -111,9 +111,9 @@ public sealed class AgentChangesWebLiveTests
             Assert.Equal("unknown", (string)planRow["result"]!);
 
             var planCall = await ScalarAsync(owner, "SELECT journal_id FROM config.investigation_journal WHERE detail->>'kind' = 'plan_force'", ct);
-            /* A refusal is journaled once per request, token, tool, code and HOUR, so two refusals that straddle an hour boundary
-               journal twice. The hour is read on both sides of the loop and the count follows it. */
-            var hourBefore = DateTime.UtcNow.Hour;
+            /* A refusal is journaled once per call, code and HOUR, keyed on the stamp the store took (its own clock, which the web route
+               cannot be given), so two refusals journal one row inside an hour and two rows across an hour boundary. The journal's own
+               stamps own both ends of that: one row per distinct UTC hour, and one or two rows, wherever the hour happened to fall. */
             foreach (var payload in new[] { "{}", "{\"confirm\":true}" })
             {
                 var refused = await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "application/json", payload);
@@ -122,8 +122,8 @@ public sealed class AgentChangesWebLiveTests
                 Assert.Contains("config_server_actions", (string)refused.Body["error"]!, StringComparison.Ordinal);
             }
 
-            var hourAfter = DateTime.UtcNow.Hour;
-            Assert.Equal(hourBefore == hourAfter ? "1" : "2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND actor LIKE 'person:%' AND reason = 'server_action_off'", ct));
+            var refusals = await ScalarAsync(owner, "SELECT count(*) || ':' || count(DISTINCT date_trunc('hour', event_time AT TIME ZONE 'UTC')) FROM config.investigation_journal WHERE event = 'refused' AND actor LIKE 'person:%' AND reason = 'server_action_off'", ct);
+            Assert.True(refusals is "1:1" or "2:2", $"two refusals journal one row per distinct UTC hour, so 1 or 2 rows (rows:hours), got {refusals}");
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'action_undone'", ct));
             Assert.Equal(400, (await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "application/json", "[1]")).Status);
             Assert.Equal(415, (await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "text/plain", "{}")).Status);

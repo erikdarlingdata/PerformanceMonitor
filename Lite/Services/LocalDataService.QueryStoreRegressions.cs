@@ -579,18 +579,17 @@ SELECT
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = @"
-SELECT EXISTS (
-    SELECT 1
-    FROM v_collection_log
-    WHERE server_id = $1
-    AND   collector_name = $2
-    AND   status = 'SUCCESS'
-    AND   rows_collected > 0
-    AND   collection_time <= $3
-)";
+SELECT 1
+FROM v_collection_log
+WHERE server_id = $1
+AND   collector_name = $2
+AND   status = 'SUCCESS'
+AND   rows_collected > 0
+AND   collection_time <= $3
+LIMIT 1";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = collectorName });
         command.Parameters.Add(new DuckDBParameter { Value = cutoffUtc });
-        return await command.ExecuteScalarAsync() is true;
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
     }
 }

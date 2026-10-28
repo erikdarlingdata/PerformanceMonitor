@@ -817,10 +817,10 @@ public sealed class McpQueryTools
         if (!hasBaseline && !hasRecent)
         {
             /* #6877: a window that ENDS before the kept data starts (an as_of replay) is not a server that has stored nothing yet: when
-               Query Store rows were being stored before the window, they were stored and aged out. Say that, with the window-floor hints,
+               Query Store rows were being stored before the window, the window's data may have aged out. Say that, with the window-floor hints,
                and leave out the first-interval answer, which describes the server now and not the window. Twin of Darling's. */
-            /* The window-floor probe is null for a window that ends before the data starts, so the oldest row is read here. */
-            floor ??= await dataService.GetOldestQueryStoreRowAsync(serverId);
+            /* The window-floor probe is null for a window that ends before the data starts, so the oldest row is read here, as Darling's does. */
+            floor = await dataService.GetOldestQueryStoreRowAsync(serverId);
             if (floor is DateTime kept && kept + TruncationSlack >= windowEnd
                 && await dataService.CollectorStoredRowsAtOrBeforeAsync(serverId, "query_store", baselineStart + TruncationSlack))
             {
@@ -828,7 +828,8 @@ public sealed class McpQueryTools
                 var inv = System.Globalization.CultureInfo.InvariantCulture;
                 return McpHelpers.Status(
                     "unavailable",
-                    $"This window ({baselineStart.ToString("MMM d", inv)} to {windowEnd.ToString("MMM d", inv)}) is older than this server's raw Query Store data, which starts {kept.ToString("MMM d", inv)}, so there is nothing to compare. The data from this window was stored and has since aged out.",
+                    $"This window ({baselineStart.ToString("MMM d", inv)} to {windowEnd.ToString("MMM d", inv)}) is older than this server's raw Query Store data, which starts {kept.ToString("MMM d", inv)}, so there is nothing to compare. This server was already being monitored before this window began, so the window's data may have been dropped by retention. "
+                    + "get_collection_health shows whether the collector was running then.",
                     notice.AsHints());
             }
 

@@ -262,6 +262,9 @@ WHERE NOT {(collectionGap ? "TRUE" : "FALSE")} OR t < now() - INTERVAL '10 days'
         Assert.Contains($"is older than this server's raw Query Store data, which starts {await OldestRawRowDateAsync(rig, ct)}, so there is nothing to compare", message, StringComparison.Ordinal);
         Assert.DoesNotContain("no Query Store sample has been stored yet", message, StringComparison.Ordinal);
         Assert.DoesNotContain("Query Store is on for", message, StringComparison.Ordinal);
+        /* The evidence is a productive run at or before the window's start, so the sentence says retention MAY have dropped the data. */
+        Assert.Contains("may have been dropped by retention", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("has since aged out", message, StringComparison.Ordinal);
         var hints = root.GetProperty("hints");
         Assert.True(hints.GetProperty("window_truncated").GetBoolean());
         Assert.NotEqual(JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
@@ -309,6 +312,52 @@ WHERE NOT {(collectionGap ? "TRUE" : "FALSE")} OR t < now() - INTERVAL '10 days'
         await QueryStoreIntervalWideBelowFloorLiveTests.ExecAsync(rig.Connection, "UPDATE servers SET created_date = now() - INTERVAL '30 days' WHERE server_id = @server_id", null, ct);
         var registeredAfter = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 24, as_of: ReplayAsOf(80))).RootElement;
         Assert.Contains("no Query Store sample has been stored yet", registeredAfter.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #6877: the collection-gap shape through the replay path. The collector ran 20 to 10 days back and again from 2 days back, so the
+    /// replay window (days 14 to 6) held no collection at all although a run exists at or before its start. The sentence reports where
+    /// the data starts and that retention may have dropped the window's data, and never that it was stored and aged out.
+    /// </summary>
+    [Fact]
+    public async Task AReplayWindowInsideACollectionGap_SaysRetentionMayHaveDroppedIt_NotThatItDid()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await StartAsync(collectorFromDaysBack: 20, ct, collectionGap: true);
+
+        var root = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 24, as_of: ReplayAsOf(6))).RootElement;
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains($"is older than this server's raw Query Store data, which starts {await OldestRawRowDateAsync(rig, ct)}, so there is nothing to compare", message, StringComparison.Ordinal);
+        Assert.Contains("may have been dropped by retention", message, StringComparison.Ordinal);
+        Assert.Contains("get_collection_health", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("has since aged out", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("was stored", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #6877: the registration date stands in for the aged-out collection log only for the window answer. #6829's server-wide and
+    /// per-database answers say retention dropped the baseline, which registration does not support, so a replay older than the log's
+    /// horizon keeps their log-only result (null: the stock causes stay) however long ago the server was registered.
+    /// </summary>
+    [Fact]
+    public async Task AReplayOlderThanTheCollectionLog_KeepsTheServerWideAndPerDatabaseAnswersOnTheLogAlone()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await StartAsync(collectorFromDaysBack: 20, ct);
+        await QueryStoreIntervalWideBelowFloorLiveTests.ExecAsync(rig.Connection, "UPDATE servers SET created_date = now() - INTERVAL '200 days' WHERE server_id = @server_id", null, ct);
+
+        /* A baseline window 87 to 80 days back: older than the log's 60 days, and the data (floor) starts after its end. */
+        var baselineEnd = DateTime.UtcNow.AddDays(-80);
+        var baselineStart = baselineEnd.AddDays(-7);
+        var floor = DateTime.UtcNow.AddDays(-3);
+
+        Assert.Null(await RetentionCause.ForServerAsync(rig.Postgres, ServerId, baselineStart, baselineEnd, floor, false, ct));
+        Assert.Null(await RetentionCause.ForDatabaseAsync(rig.Postgres, ServerId, baselineStart, baselineEnd, floor, false, true, ct));
+
+        /* The window answer, which says only that the server was monitored before the window, does use the registration date. */
+        Assert.NotNull(await RetentionCause.ForWindowAsync(rig.Postgres, ServerId, baselineStart, baselineEnd, null, false, ct));
     }
 
     /// <summary>One READ_WRITE Query Store health snapshot, so the first-interval answer is available on a path that reaches it.</summary>
