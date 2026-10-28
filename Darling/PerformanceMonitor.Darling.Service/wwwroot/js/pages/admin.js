@@ -114,6 +114,7 @@ const GROUP_LABELS = {
   poison_wait: "Poison wait",
   runnable_queue: "Runnable queue",
   client_timeouts: "Client timeouts",
+  identity_capacity: "Identity capacity",
   long_running_query: "Long-running query",
   tempdb_space: "TempDB space",
   low_disk: "Low disk",
@@ -166,7 +167,7 @@ export function settingLabel(prefix, key) {
 export const SETTING_SECTIONS = [
   {
     title: "Alert thresholds",
-    groups: ["cpu", "blocking", "deadlocks", "poison_wait", "runnable_queue", "client_timeouts", "long_running_query", "tempdb_space", "low_disk",
+    groups: ["cpu", "blocking", "deadlocks", "poison_wait", "runnable_queue", "client_timeouts", "identity_capacity", "long_running_query", "tempdb_space", "low_disk",
       "self_alerts", "pvs", "file_growth", "long_running_job", "failed_job", "database_state", "ag", "delivery"],
     top: ["alerts_enabled", "notify_connection_changes", "notify_connection_down_at_startup", "connection_refire_minutes",
       "cooldown_minutes"],
@@ -195,6 +196,7 @@ export const GROUP_FIELDS = {
   poison_wait: ["enabled", "threshold_ms"],
   runnable_queue: ["enabled", "warning_per_scheduler", "critical_per_scheduler"],
   client_timeouts: ["enabled", "warning_per_minute", "critical_per_minute", "warning_multiple", "critical_multiple"],
+  identity_capacity: ["enabled", "warning_percent", "critical_percent"],
   long_running_query: ["enabled", "threshold_minutes", "max_results", "exclude_sp_server_diagnostics", "exclude_wait_for",
     "exclude_backups", "exclude_misc_waits", "exclude_cdc", "excluded_program_name_prefixes", "excluded_logins"],
   tempdb_space: ["enabled", "threshold_percent"],

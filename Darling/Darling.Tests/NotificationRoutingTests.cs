@@ -558,6 +558,8 @@ public sealed class NotificationRoutingTests
             RunnableQueueEvaluator.MetricName,
             /* #5640: the Client Timeouts alert fires from AlertEngine.CheckAttentionAsync through AttentionEvaluator.MetricName. */
             AttentionEvaluator.MetricName,
+            /* #6875: the Identity Capacity alert fires through DarlingSelfAlertEvaluator.IdentityCapacityMetric, a constant the FireAsync literal scan cannot see. */
+            DarlingSelfAlertEvaluator.IdentityCapacityMetric,
         };
 
         /* The literals: the third argument of every `new AlertOutcome(` in the shared engine and the worker

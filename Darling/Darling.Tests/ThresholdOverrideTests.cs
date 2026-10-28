@@ -54,7 +54,10 @@ public sealed class ThresholdOverrideTests
 
         Assert.Null(DarlingThresholdKeys.RefusalFor(DarlingThresholdKeys.PgBlockingCount));
         Assert.Null(DarlingThresholdKeys.RefusalFor(DarlingThresholdKeys.PgDeadlockCount));
-        Assert.Equal(Enum.GetValues<AlertThresholdKey>().Length + 2, DarlingThresholdKeys.Entries.Count);
+        /* #6875: the Identity Capacity alert's two bars are Darling's own keys, tunable per server and per database like the engine ones. */
+        Assert.Null(DarlingThresholdKeys.RefusalFor(DarlingThresholdKeys.IdentityCapacityWarning));
+        Assert.Null(DarlingThresholdKeys.RefusalFor(DarlingThresholdKeys.IdentityCapacityCritical));
+        Assert.Equal(Enum.GetValues<AlertThresholdKey>().Length + 4, DarlingThresholdKeys.Entries.Count);
     }
 
     [Theory]

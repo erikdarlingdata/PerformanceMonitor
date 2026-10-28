@@ -178,6 +178,9 @@ public sealed class McpAlertSettingsKeyTests
     /// that test is where it shows up.</summary>
     private const string FleetSweepGroup = "fleet_sweep";
 
+    /// <summary>#6875: the Identity Capacity alert is Darling-only (the collector behind it has no Lite twin), so Lite reports no such group.</summary>
+    private const string IdentityCapacityGroup = "identity_capacity";
+
     /// <summary>#3368: the other group Darling reports and Lite does not. The health-band tiers decide what
     /// colour a server's card reads and how the worst-first ranking and <c>get_fleet_overview</c> count bands
     /// — and Lite has NO health band at all: it never constructs <c>ServerHealthMetrics</c>, never calls
@@ -329,7 +332,7 @@ public sealed class McpAlertSettingsKeyTests
 
         foreach (var (group, darlingKeys) in darling)
         {
-            if (group == SelfAlertsGroup || group == HealthBandsGroup || group == FleetSweepGroup) continue;
+            if (group == SelfAlertsGroup || group == HealthBandsGroup || group == FleetSweepGroup || group == IdentityCapacityGroup) continue;
 
             if (!root.TryGetProperty(group, out var element))
             {
@@ -459,6 +462,15 @@ public sealed class McpAlertSettingsKeyTests
     /// sweep, this scan is where that shows up, the group comes out of the parity skip, and the members
     /// compare — #2426's ag history, repeated at group grain.
     /// </summary>
+    /// <summary>#6875: the Identity Capacity group is omitted at group grain, in the fleet-sweep shape: Darling must still emit it (or the
+    /// parity skip hides a Darling regression) and Lite, which collects no identity columns, must not.</summary>
+    [Fact]
+    public void GetAlertSettings_OmitsIdentityCapacity_BecauseLiteDoesNotCollectIdentityColumns()
+    {
+        Assert.Contains(IdentityCapacityGroup, DarlingPayloadShape().Select(g => g.Key));
+        Assert.DoesNotContain(IdentityCapacityGroup, KeysOf(Settings()));
+    }
+
     [Fact]
     public void GetAlertSettings_OmitsFleetSweep_BecauseLiteHasNoFleetToSweep()
     {

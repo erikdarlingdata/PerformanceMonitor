@@ -128,13 +128,14 @@ public sealed class AgentLevel2ToolPolicyTests
         Assert.True(DarlingMcpAgentActions.IsProtectedMetric(metric));
 
     [Fact]
-    public void EverySelfAlertMetricConstant_IsProtected_ExceptTheNineAnAgentMayMute()
+    public void EverySelfAlertMetricConstant_IsProtected_ExceptTheTenAnAgentMayMute()
     {
         var unprotected = new[]
         {
             DarlingSelfAlertEvaluator.AgFailoverMetric, DarlingSelfAlertEvaluator.AgReplicaDisconnectedMetric,
             DarlingSelfAlertEvaluator.AgReplicaReconnectedMetric, DarlingSelfAlertEvaluator.AgSyncFellBehindMetric,
             DarlingSelfAlertEvaluator.AgDatabaseSuspendedMetric, DarlingSelfAlertEvaluator.AgentDownMetric,
+            DarlingSelfAlertEvaluator.IdentityCapacityMetric,
             DarlingSelfAlertEvaluator.CollectorCostDigestMetric, DarlingSelfAlertEvaluator.FleetSweepRollupMetric,
             DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric,
         };
@@ -373,6 +374,7 @@ VALUES ('{id}', {(enabled ? "TRUE" : "FALSE")}, now() AT TIME ZONE 'utc', {(serv
 
     [Theory]
     [InlineData("Agent Not Running")]
+    [InlineData("Identity Capacity")]
     [InlineData("Collector Cost Digest")]
     [InlineData("AG Failover")]
     public async Task AMuteOnAnUncoveredSelfAlert_IsAllowed(string metric)

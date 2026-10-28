@@ -59,6 +59,7 @@ public static partial class CustomViewValidation
             ["get_collection_log"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("limit", false), new("as_of", false), new("collector_name", false), new("min_duration_ms", false), new("status", false) },
             ["get_current_waits_trend"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("database_name", false), new("as_of", false) },
             ["get_client_timeouts"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("limit", false), new("as_of", false) },
+            ["get_identity_capacity"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false), new("database_name", false), new("limit", false) },
             ["get_blocking_stats"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("database_name", false), new("as_of", false) },
             ["get_cpu_utilization"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false), new("bucket_minutes", false) },
             ["get_file_io_stats"] = new ReadPanelParam[] { new("server", false), new("database_name", false) },

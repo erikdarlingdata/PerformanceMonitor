@@ -997,20 +997,26 @@ GROUP BY server_id, collector_name";
     internal static readonly TimeSpan IdentityCapacityWindow = TimeSpan.FromHours(168);
 
     /// <summary>
-    /// Each database's newest scan in the window, and its columns at the warning bar or past it, one statement for the fleet (#6875). The marker rows
-    /// find the newest scan per database (<c>idx_identity_capacity_markers</c>), the column rows at that same instant are the answer. $1 is the window start,
-    /// $2 the percent of the warning bar.
+    /// Each database's newest scan in the window, and its columns at the warning bar or past it, one statement for the fleet (#6875). Shaped like the
+    /// other per-server reads in this file: <c>servers</c> drives a lateral that range-scans the marker index (<c>idx_identity_capacity_markers</c>,
+    /// <c>server_id, database_name, collection_time</c>, markers only) on the server_id prefix and keeps each database's newest marker, then the
+    /// column rows at that same instant are read through <c>idx_identity_capacity_time</c> (<c>server_id, collection_time</c>). A time-only predicate
+    /// over the whole table is never used, so a fleet load does not walk the 90-day table. $1 is the window start, $2 the percent of the warning bar.
     /// </summary>
     internal const string FleetIdentityCapacitySql = @"
-WITH newest AS (
-    SELECT server_id, database_name, MAX(collection_time) AS collection_time
-    FROM collect.identity_capacity
-    WHERE collection_time >= $1 AND column_name IS NULL
-    GROUP BY server_id, database_name)
 SELECT c.server_id, c.percent_used
-FROM newest AS n
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT DISTINCT ON (x.database_name) x.database_name, x.collection_time
+    FROM collect.identity_capacity AS x
+    WHERE x.server_id = s.server_id
+    AND   x.column_name IS NULL
+    AND   x.collection_time >= $1
+    ORDER BY x.database_name, x.collection_time DESC
+) AS n
 JOIN collect.identity_capacity AS c
-  ON c.server_id = n.server_id AND c.database_name = n.database_name AND c.collection_time = n.collection_time
+  ON c.server_id = s.server_id AND c.collection_time = n.collection_time AND c.database_name = n.database_name
 WHERE c.column_name IS NOT NULL AND c.percent_used >= $2";
 
     /// <summary>The worst band and the count of columns at warning or critical per server, for the servers that have any (#6875). The band is
