@@ -47,6 +47,38 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     /// <summary>The <see cref="HttpContext.Items"/> key the auth middleware stores the resolved seat under.</summary>
     internal const string HttpContextItemKey = "darling.web.seat";
 
+    /// <summary>The request header a front door sends with every request it forwards for a person whose seat cannot edit (#6840). The
+    /// front door signs in to a store once, with the store's shared token, and shares that one session between its viewers and its
+    /// editors, so the store would otherwise answer a viewer as the shared-token seat (the Admin server form's login name, the
+    /// investigation export, the edit flags). See <see cref="ApplyFrontDoorRole"/>.</summary>
+    internal const string FrontDoorRoleHeader = "X-Darling-Front-Door-Role";
+
+    /// <summary>The response header a store sets when it applied <see cref="FrontDoorRoleHeader"/>. The front door refuses a viewer's
+    /// answer that lacks it, so a store on a build without this support never answers a viewer as the shared-token seat.</summary>
+    internal const string FrontDoorRoleAppliedHeader = "X-Darling-Front-Door-Role-Applied";
+
+    /// <summary>The one value <see cref="FrontDoorRoleHeader"/> carries.</summary>
+    internal const string FrontDoorViewerRole = "viewer";
+
+    /// <summary>
+    /// The seat a request runs as once <see cref="FrontDoorRoleHeader"/> is read (#6840), decided per request (a front door shares one
+    /// session between viewers and editors). With the header set to <see cref="FrontDoorViewerRole"/>, a seat that can edit becomes
+    /// <see cref="ReadsOnly"/> and the request is marked with <see cref="FrontDoorRoleAppliedHeader"/>. Every store handler then answers
+    /// exactly what it answers a reads-only caller, with no list of routes to keep. The header can only lower a seat: it names
+    /// nobody, a seat that cannot edit stays as it is, and any other value, or no header, changes nothing. Whoever sends it can
+    /// already use the session it rides on with that session's full reach.
+    /// </summary>
+    internal static DarlingWebSeat ApplyFrontDoorRole(HttpContext context, DarlingWebSeat seat)
+    {
+        if (!string.Equals(context.Request.Headers[FrontDoorRoleHeader].ToString(), FrontDoorViewerRole, StringComparison.Ordinal))
+        {
+            return seat;
+        }
+
+        context.Response.Headers[FrontDoorRoleAppliedHeader] = FrontDoorViewerRole;
+        return seat.CanEdit ? ReadsOnly : seat;
+    }
+
     /// <summary>Seat-encoding prefixes inside the session cookie's subject slot. Versioned (<c>o1</c>, <c>o2</c>) so a
     /// future shape can coexist with cookies already in browsers instead of signing everyone out. <c>o1</c> carries no
     /// owner key and is only ever read; sign-in writes <c>o2</c> (#6214).</summary>

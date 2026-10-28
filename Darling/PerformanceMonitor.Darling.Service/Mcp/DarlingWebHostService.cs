@@ -1476,6 +1476,10 @@ public sealed class DarlingWebHostService : BackgroundService
                             seat = DarlingWebSeat.ReadsOnly;
                         }
 
+                        /* #6840: a front door forwarding for a viewer lowers its shared-token session to the reads-only seat for
+                           this one request, so every handler below answers the viewer as it answers any reads-only caller. */
+                        seat = DarlingWebSeat.ApplyFrontDoorRole(context, seat);
+
                         /* The seat rides HttpContext.Items so EVERY downstream consumer — /api/session,
                            the updated_by stamps, endpoints added on any parallel branch — resolves the
                            same identity without per-endpoint wiring. */

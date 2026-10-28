@@ -25,6 +25,7 @@ using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Darling.Service.Hosting;
 
 namespace Darling.Tests.FrontDoor;
 
@@ -89,6 +90,12 @@ internal sealed class FakeWebPeer : IAsyncDisposable
 
     /// <summary>When set, every signed-in <c>/api/*</c> call answers a redirect to this address instead of its answer.</summary>
     internal string? RedirectTo;
+
+    /// <summary>When set, the peer acts as a build without the front door's role header (#6840): it never confirms it.</summary>
+    internal bool OlderBuild;
+
+    /// <summary>When set, every signed-in <c>/api/*</c> call answers this <c>Content-Type</c> instead of JSON.</summary>
+    internal string? AnswerContentType;
 
     /// <summary>Completes when a call reaches the delay.</summary>
     internal TaskCompletionSource ApiStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -176,6 +183,12 @@ internal sealed class FakeWebPeer : IAsyncDisposable
             return;
         }
 
+        /* What a current store's sign-in gate does with the front door's role header, before any route runs. */
+        if (!OlderBuild && context.Request.Headers[DarlingWebSeat.FrontDoorRoleHeader] == DarlingWebSeat.FrontDoorViewerRole)
+        {
+            context.Response.Headers[DarlingWebSeat.FrontDoorRoleAppliedHeader] = DarlingWebSeat.FrontDoorViewerRole;
+        }
+
         if (RedirectTo is { } redirect)
         {
             context.Response.Redirect(redirect);
@@ -210,7 +223,7 @@ internal sealed class FakeWebPeer : IAsyncDisposable
             return;
         }
 
-        context.Response.ContentType = "application/json; charset=utf-8";
+        context.Response.ContentType = AnswerContentType ?? "application/json; charset=utf-8";
         await context.Response.WriteAsync("{\"peer\":\"" + Name + "\",\"path\":\"" + context.Request.Path.Value + "\"}");
     }
 

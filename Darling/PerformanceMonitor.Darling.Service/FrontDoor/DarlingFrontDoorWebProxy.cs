@@ -45,7 +45,15 @@ namespace PerformanceMonitor.Darling.Service.FrontDoor;
 /// cookie from <see cref="DarlingFrontDoorWebSession"/>. Nothing else is copied, so the browser's cookie, <c>Authorization</c>,
 /// <c>Origin</c>, <c>Referer</c>, <c>X-Forwarded-*</c> and <c>X-Darling-Store</c> never reach a store, and <c>Host</c> is the store's
 /// own. Back: the status, <c>Content-Type</c>, <c>Retry-After</c> and the body, streamed. A store's <c>Set-Cookie</c> and its security
-/// headers are dropped: a browser never holds a store's session, and the front door's own headers are the ones on every answer.</para>
+/// headers are dropped: a browser never holds a store's session, and the front door's own headers are the ones on every answer. An
+/// answer whose type is not JSON is sent as a download (<see cref="CopyContentType"/>), so it never opens as a page on the front
+/// door's address.</para>
+///
+/// <para><b>A viewer's role at the store.</b> The store's session is the shared token's, which can edit. For a person whose seat cannot
+/// edit, every forwarded request carries <see cref="DarlingWebSeat.FrontDoorRoleHeader"/>, and the store answers it as a reads-only
+/// caller (<see cref="DarlingWebSeat.ApplyFrontDoorRole"/>): its own handlers refuse what they refuse a viewer and report a viewer's
+/// flags. An answer without <see cref="DarlingWebSeat.FrontDoorRoleAppliedHeader"/> is refused with 502, because a store on a build
+/// without this support would have answered as the shared-token seat.</para>
 /// </summary>
 internal sealed class DarlingFrontDoorWebProxy
 {
@@ -270,7 +278,9 @@ internal sealed class DarlingFrontDoorWebProxy
             }
         }
 
-        var route = request.Path.Value ?? string.Empty;
+        /* Decoded, so a %0D%0A in the address is a real line break by now: the log gets the sanitized form. */
+        var route = DarlingHttpRefusalLog.Sanitize(request.Path.Value);
+        var viewer = !DarlingWebSeat.FromContext(context).CanEdit;
         var started = Stopwatch.GetTimestamp();
 
         /* The page closing cancels RequestAborted, and the timeout cancels the same token: the peer call, its sign-in and the copy of
@@ -287,7 +297,7 @@ internal sealed class DarlingFrontDoorWebProxy
             while (true)
             {
                 var cookie = await _session.GetCookieAsync(store, ct);
-                using var peerRequest = BuildRequest(request, store.WebUrl, body, cookie);
+                using var peerRequest = BuildRequest(request, store.WebUrl, body, cookie, viewer);
                 using var response = await _session.ClientFor(store).SendAsync(peerRequest, HttpCompletionOption.ResponseHeadersRead, ct);
 
                 if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
@@ -315,12 +325,15 @@ internal sealed class DarlingFrontDoorWebProxy
                         store.Name, $"Store '{store.Name}' answered with a redirect (HTTP {status}). Check that the store's webUrl in the front door's configuration is the address it serves.");
                 }
 
+                if (viewer && !response.Headers.Contains(DarlingWebSeat.FrontDoorRoleAppliedHeader))
+                {
+                    throw new FrontDoorPeerUnavailableException(
+                        store.Name, $"Store '{store.Name}' did not confirm it answered as a viewer, so its answer is not passed on. Update it to a build whose dashboard reads the front door's role header.");
+                }
+
                 finalStatus = status;
                 context.Response.StatusCode = status;
-                if (response.Content.Headers.ContentType is { } contentType)
-                {
-                    context.Response.ContentType = contentType.ToString();
-                }
+                CopyContentType(response.Content.Headers.ContentType, context.Response);
 
                 if (response.Headers.TryGetValues("Retry-After", out var retryAfter))
                 {
@@ -383,9 +396,36 @@ internal sealed class DarlingFrontDoorWebProxy
         }
     }
 
-    private static HttpRequestMessage BuildRequest(HttpRequest request, Uri webUrl, byte[]? body, string cookie)
+    /// <summary>
+    /// Copies a store's <c>Content-Type</c> (#6840). JSON passes as it is: it is what every dashboard read answers, and the front door's
+    /// own <c>X-Content-Type-Options: nosniff</c> keeps a browser from reading it as anything else. Any other type, or none, is sent as
+    /// a download (<c>Content-Disposition: attachment</c>, plus <c>nosniff</c> on the answer itself): a page's own fetch reads the body
+    /// the same either way, but an answer that was changed on a plain http link to a store, to <c>text/html</c> or a script, never runs
+    /// on the front door's address, which holds a session for every store.
+    /// </summary>
+    internal static void CopyContentType(MediaTypeHeaderValue? contentType, HttpResponse response)
+    {
+        if (contentType is not null)
+        {
+            response.ContentType = contentType.ToString();
+        }
+
+        if (!string.Equals(contentType?.MediaType, "application/json", StringComparison.OrdinalIgnoreCase))
+        {
+            response.Headers.ContentDisposition = "attachment";
+            response.Headers.XContentTypeOptions = "nosniff";
+        }
+    }
+
+    private static HttpRequestMessage BuildRequest(HttpRequest request, Uri webUrl, byte[]? body, string cookie, bool viewer)
     {
         var message = new HttpRequestMessage(new HttpMethod(request.Method), PeerUri(webUrl, request.Path.ToUriComponent(), request.QueryString.Value));
+
+        /* Set by the front door alone (the browser's own copy is not on the allow-list below), and only for a seat that cannot edit. */
+        if (viewer)
+        {
+            message.Headers.TryAddWithoutValidation(DarlingWebSeat.FrontDoorRoleHeader, DarlingWebSeat.FrontDoorViewerRole);
+        }
 
         /* An allow-list, not a drop-list: what the browser sent that a store does not read stays here. Host comes from the target. */
         foreach (var name in new[] { "Accept", "Accept-Language" })
