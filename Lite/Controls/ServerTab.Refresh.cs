@@ -929,6 +929,9 @@ public partial class ServerTab : UserControl
             UpdateTempDbChart(tempDbTask.Result, hoursBack, fromDate, toDate);
             UpdateTempDbSizeChart(tempDbTask.Result, hoursBack, fromDate, toDate);
             UpdateTempDbFileIoChart(tempDbFileIoTask.Result, hoursBack, fromDate, toDate);
+            await ShowTempDbOutcomeAsync(tempDbTask.Result.Count);
+            (TempDbFileIoNoDataMessage.Text, TempDbFileIoNoDataMessage.Visibility) =
+                TempDbFileIoGapState(_server.DisplayName, _isAzureSqlDatabase, tempDbFileIoTask.Result.Count);
         }
         catch (Exception ex)
         {

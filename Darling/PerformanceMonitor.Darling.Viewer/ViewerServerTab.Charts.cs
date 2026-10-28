@@ -131,6 +131,13 @@ public partial class ViewerServerTab : IDisposable
         RenderTempDbUsageChart(trend, startUtc, endUtc);
         RenderTempDbSizeChart(trend, startUtc, endUtc);
         RenderTempDbFileIoChart(fileIo, startUtc, endUtc);
+
+        /* #6861: a refused tempdb_stats leaves the trend empty, and the note says why in the MCP's words, without its closing paragraph for an MCP client. The file I/O chart
+           reads file_io_stats, so it neither feeds nor clears the note. */
+        await ShowEngineGapAsync(TempDbNoDataMessage, "tempdb_stats", trend.Count);
+
+        (TempDbFileIoNoDataMessage.Text, TempDbFileIoNoDataMessage.Visibility) =
+            TempDbFileIoGapState(_server.DisplayName, _server.EngineEdition, fileIo.Count);
     }
 
     private void RenderCpuChart(List<CpuUtilizationSample> data, DateTime startUtc, DateTime endUtc)
