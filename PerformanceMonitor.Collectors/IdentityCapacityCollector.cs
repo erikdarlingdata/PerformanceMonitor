@@ -37,6 +37,10 @@ namespace PerformanceMonitor.Collectors;
 /// has to be close: the stored percent comes from <see cref="IdentityCapacityMath"/>, and <see cref="KeepTop"/> makes the final cut on
 /// it. Each database has its own <see cref="PerItemWallClockBudget"/>: one that runs past it ships no rows, so no marker.</para>
 ///
+/// <para><b>Bounded for hundreds of databases.</b> The whole pass has a <see cref="PassWallClockBudget"/> too. A pass that spends it starts no
+/// further database, and the next pass resumes at the database after the last one started and wraps (<see cref="PassBudget"/>). A database a
+/// pass did not reach writes nothing, marker included, so "no marker" still means "not scanned" and never "scanned clean".</para>
+///
 /// <para>A plain table on every store (<see cref="StaysPlainTable"/>): at most 21 rows per database per pass.</para>
 /// </summary>
 public sealed class IdentityCapacityCollector : CollectorDefinitionBase<IdentityCapacityCollector.Row>
@@ -86,6 +90,9 @@ public sealed class IdentityCapacityCollector : CollectorDefinitionBase<Identity
 
     /// <summary>Each database's own wall clock, the Query Store hints collector's: a database past it ships nothing, so it has no marker.</summary>
     public override TimeSpan? PerItemWallClockBudget => TimeSpan.FromSeconds(120);
+
+    /// <summary>The whole pass's wall clock (#6875). A pass that spends it stops starting databases and the next pass resumes at the database after the last one started.</summary>
+    public override TimeSpan? PassWallClockBudget => TimeSpan.FromMinutes(5);
 
     /// <summary>A plain table with a time-sliced DELETE, the hints decision (at most 21 rows per database per pass).</summary>
     public override bool StaysPlainTable => true;

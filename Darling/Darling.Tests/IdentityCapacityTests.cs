@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -27,7 +28,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class IdentityCapacityMathTests
 {
-    private static IdentityCapacity? Calc(string type, int precision, BigInteger seed, BigInteger increment, BigInteger? last) =>
+    private static IdentityCapacity? Calc(string? type, int precision, BigInteger seed, BigInteger increment, BigInteger? last) =>
         IdentityCapacityMath.Calculate(type, precision, seed, increment, last);
 
     [Theory]
@@ -357,6 +358,113 @@ public sealed class IdentityCapacityCollectorTests
         Assert.Equal(new[] { "Slow" }, failed.ToArray());
         Assert.Equal(1, result.Failed);
         Assert.Equal(3, result.Attempted);
+    }
+
+    /// <summary>A clock that moves only when a read says so, so the pass budget is exercised without waiting.</summary>
+    private sealed class HandClock : TimeProvider
+    {
+        private long _ticks;
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => _ticks;
+        public void Advance(TimeSpan by) => _ticks += by.Ticks;
+    }
+
+    /// <summary>One pass through the real driver: each database costs a minute of the hand clock and stores the marker the collector reads.</summary>
+    private static async Task<(EnumeratedRunResult Result, List<string> Scanned)> RunPassAsync(
+        IReadOnlyList<string> allDatabases, string? resumeAfter, TimeSpan budget)
+    {
+        var clock = new HandClock();
+        var scanned = new List<string>();
+        var result = await EnumeratedCollectorDriver.RunAsync<IdentityCapacityCollector.Row>(
+            PassBudget.ResumeOrder(allDatabases, resumeAfter),
+            perItemWatermark: null,
+            readItem: async (item, _) =>
+            {
+                clock.Advance(TimeSpan.FromMinutes(1));
+                var table = NewTable();
+                AddMarker(table);
+                return await ReadAsync(item, table);
+            },
+            writeBatch: (batch, _) =>
+            {
+                scanned.AddRange(batch.Where(r => r.IsMarker).Select(r => r.DbName));
+                return Task.CompletedTask;
+            },
+            onItemComplete: (_, _, _, _) => { },
+            onItemError: (_, _) => { },
+            TestContext.Current.CancellationToken,
+            passBudget: new PassBudget(budget, clock));
+        return (result, scanned);
+    }
+
+    [Fact]
+    public async Task APassThatSpendsItsBudget_StopsAfterDatabaseK_TheNextStartsAtKPlusOne_AndWraps()
+    {
+        var databases = new[] { "A", "B", "C", "D", "E" };
+
+        var (pass1, scanned1) = await RunPassAsync(databases, resumeAfter: null, TimeSpan.FromMinutes(2));
+        Assert.Equal(new[] { "A", "B" }, scanned1.ToArray());
+        Assert.Equal("B", pass1.StoppedAfter);
+        Assert.Equal(2, pass1.Attempted);
+        Assert.Equal(5, pass1.Total);
+
+        var (pass2, scanned2) = await RunPassAsync(databases, resumeAfter: pass1.StoppedAfter, TimeSpan.FromMinutes(4));
+        Assert.Equal(new[] { "C", "D", "E", "A" }, scanned2.ToArray());
+        Assert.Equal("A", pass2.StoppedAfter);
+
+        /* B is the one pass 2 did not reach: it holds no marker from that pass, only the one pass 1 stored. */
+        Assert.DoesNotContain("B", scanned2);
+        Assert.Contains("B", scanned1);
+
+        var (pass3, scanned3) = await RunPassAsync(databases, resumeAfter: pass2.StoppedAfter, TimeSpan.FromMinutes(30));
+        Assert.Equal(new[] { "B", "C", "D", "E", "A" }, scanned3.ToArray());
+        Assert.Null(pass3.StoppedAfter);
+    }
+
+    [Fact]
+    public async Task ABudgetSmallerThanOneDatabase_StillReadsOne_SoTheRotationMovesOn()
+    {
+        var databases = new[] { "A", "B", "C" };
+        var (pass, scanned) = await RunPassAsync(databases, resumeAfter: "A", TimeSpan.FromTicks(1));
+        Assert.Equal(new[] { "B" }, scanned.ToArray());
+        Assert.Equal("B", pass.StoppedAfter);
+    }
+
+    [Theory]
+    [InlineData(null, "A,B,C")]
+    [InlineData("A", "B,C,A")]
+    [InlineData("B", "C,A,B")]
+    [InlineData("C", "A,B,C")]
+    [InlineData("BB", "C,A,B")]
+    [InlineData("0", "A,B,C")]
+    public void TheResumeOrder_StartsAfterTheLastDatabaseStarted_ByValue_AndWraps(string? resumeAfter, string expected)
+    {
+        Assert.Equal(expected, string.Join(',', PassBudget.ResumeOrder(new[] { "C", "A", "B" }, resumeAfter)));
+    }
+
+    [Fact]
+    public async Task TheRunner_KeepsWhereAStoppedPassEnded_PerServerAndCollector_AndClearsItWhenAPassCoversEveryDatabase()
+    {
+        await using var postgres = NpgsqlDataSource.Create("Host=127.0.0.1;Database=never_opened");
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var identity = IdentityCapacityCollector.Instance;
+        var databases = new[] { "C", "A", "B" };
+
+        var (first, firstOrder) = runner.BeginPass(identity, serverId: 7, databases);
+        Assert.NotNull(first);
+        Assert.Equal("A,B,C", string.Join(',', firstOrder));
+        Assert.NotNull(runner.EndPass(first, identity, 7, stoppedAfter: "A", reached: 1, total: 3));
+
+        /* The next pass on that server starts at B. Another server, and a collector with no pass budget, are untouched. */
+        var (second, secondOrder) = runner.BeginPass(identity, 7, databases);
+        Assert.Equal("B,C,A", string.Join(',', secondOrder));
+        Assert.Equal("A,B,C", string.Join(',', runner.BeginPass(identity, 8, databases).Items));
+        var (none, untouched) = runner.BeginPass(AgentStatusCollector.Instance, 7, databases);
+        Assert.Null(none);
+        Assert.Equal("C,A,B", string.Join(',', untouched));
+
+        Assert.Null(runner.EndPass(second, identity, 7, stoppedAfter: null, reached: 3, total: 3));
+        Assert.Equal("A,B,C", string.Join(',', runner.BeginPass(identity, 7, databases).Items));
     }
 
     [Fact]

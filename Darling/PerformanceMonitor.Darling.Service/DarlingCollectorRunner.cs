@@ -708,6 +708,43 @@ public sealed class DarlingCollectorRunner
        first-contact behaviour, not a regression. */
     private readonly ConcurrentDictionary<int, bool> _lastPgLogUsesCsvlogVerdict = new();
 
+    /* #6875: where a per-database pass that spent its PassWallClockBudget stopped, per (server, collector): the last database
+       it started. The next pass reads the databases after it first and wraps (PassBudget.ResumeOrder). A pass that covered every
+       database removes its entry, so the next one starts at the first. In memory on purpose, like the caches around it: a restart
+       begins at the first database, which only repeats the databases the pass before it already read. */
+    private readonly ConcurrentDictionary<(int ServerId, string Collector), string> _passResumeAfter = new();
+
+    /// <summary>The pass budget for one run of <paramref name="definition"/> on <paramref name="server"/>, and the databases in the order it
+    /// reads them (#6875). A definition with no pass budget gets a null budget and the list as it came.</summary>
+    internal (PassBudget? Budget, IReadOnlyList<string> Items) BeginPass(ICollectorSchemaInfo definition, int serverId, IReadOnlyList<string> items)
+    {
+        if (definition.PassWallClockBudget is not { } span)
+        {
+            return (null, items);
+        }
+
+        _passResumeAfter.TryGetValue((serverId, definition.Name), out var resumeAfter);
+        return (new PassBudget(span), PassBudget.ResumeOrder(items, resumeAfter));
+    }
+
+    /// <summary>Keeps (or clears) the resume point after a pass and returns the stop note, null when the pass covered every database (#6875).</summary>
+    internal string? EndPass(PassBudget? budget, ICollectorSchemaInfo definition, int serverId, string? stoppedAfter, int reached, int total)
+    {
+        if (budget is null)
+        {
+            return null;
+        }
+
+        if (stoppedAfter is null)
+        {
+            _passResumeAfter.TryRemove((serverId, definition.Name), out _);
+            return null;
+        }
+
+        _passResumeAfter[(serverId, definition.Name)] = stoppedAfter;
+        return PassBudget.StopNote(budget.BudgetSeconds, reached, total);
+    }
+
     /* #4735: the (target, log-tail collector) pairs whose last cycle used every read start and was refused at each.
        A start inside a character is cured by one of the later starts. A byte that is invalid in the database
        encoding, anywhere in the 4 MB window, is refused at all four and would be again on every cycle, so while a
@@ -2935,9 +2972,27 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                (completing an importer commits that database — commit-1..N-1 semantics on abort). */
             await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
 
+            /* #6875: the same pass budget and rotation as the enumerated driver, for the per-database connection loop. */
+            var (azurePassBudget, azureOrder) = BeginPass(definition, server.ServerId, databases);
+            if (azurePassBudget is not null)
+            {
+                databases = [.. azureOrder];
+            }
+
+            string? azureLastStarted = null;
+            string? azureStoppedAfter = null;
+
             foreach (var databaseName in databases)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+
+                if (attempted > 0 && azurePassBudget is { Spent: true })
+                {
+                    azureStoppedAfter = azureLastStarted;
+                    break;
+                }
+
+                azureLastStarted = databaseName;
                 attempted++;
 
                 /* #2150: THE path the field report is on — Azure SQL DB collects query_store per database
@@ -3612,8 +3667,10 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                 emptyListNote,
                 EnumeratedCollectorDriver.MergeNotes(
                     cycleProbeFailures.Note,
-                    EnumeratedCollectorDriver.BuildPartialFailureNote(
-                        failed, attempted, failedDatabases, firstFailure?.Message)));
+                    EnumeratedCollectorDriver.MergeNotes(
+                        EnumeratedCollectorDriver.BuildPartialFailureNote(
+                            failed, attempted, failedDatabases, firstFailure?.Message),
+                        EndPass(azurePassBudget, definition, server.ServerId, azureStoppedAfter, attempted, databases.Count))));
             LogEnumerationProbeFailures(definition, server, cycleProbeFailures.Failures);
 
             /* One database failing is routine (offline, mid-restore, a permissions oddity) and stays a
@@ -3704,6 +3761,10 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                        were simply quiet (#1837). Mirrors Lite's _lastCollectionNote. */
                     return new CollectorRunResult(0, sqlMs, 0, CollectorContext.NoMeasurements, enumeration.Note);
                 }
+
+                /* #6875: a collector with a pass budget reads the databases from where the last pass stopped. */
+                var (passBudget, passItems) = BeginPass(definition, server.ServerId, items);
+                items = passItems;
 
                 /* Optional quick scalar probe (query_store's live PRODUCTVERSION check) —
                    best-effort on a 10-second budget; failure leaves the documented default. */
@@ -4234,7 +4295,8 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                        Not "every collector but query_store", which is what this said: four definitions
                        declare a budget and two of them also enumerate, so plan_correction arrives here
                        non-null too. */
-                    perItemBudget: definition.PerItemWallClockBudget);
+                    perItemBudget: definition.PerItemWallClockBudget,
+                    passBudget: passBudget);
 
                 /* #3754: the enumerated fan-out's failure account, treated exactly as the Azure per-database
                    loop above treats its own (#2623) - and for the first time. Until this the driver handed
@@ -4257,6 +4319,9 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                    failed. rowsWritten and the slices are assigned only on the surviving path: a run that
                    read nothing has no rows to report and RunOneAsync's fault arm reports its own wall clock. */
                 collectionNote = EnumeratedCollectorDriver.MergeNotes(collectionNote, driverResult.PartialFailureNote);
+                collectionNote = EnumeratedCollectorDriver.MergeNotes(
+                    collectionNote,
+                    EndPass(passBudget, definition, server.ServerId, driverResult.StoppedAfter, driverResult.Attempted, driverResult.Total));
 
                 if (driverResult.AllItemsFailed)
                 {

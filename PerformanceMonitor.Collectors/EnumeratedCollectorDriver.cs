@@ -57,6 +57,10 @@ namespace PerformanceMonitor.Collectors;
 /// (<see cref="AllItemsFailed"/>) surfaces the ORIGINAL type and stack for classification — a SqlException
 /// still classifies PERMISSIONS on its number, a TimeoutException still reads as a timeout. Null when
 /// nothing failed.</param>
+/// <param name="StoppedAfter">The last item the loop started when the pass budget (<see cref="PassBudget"/>) ended it
+/// before the list was done. Null when the loop covered every item. The host keeps it and hands it to the next
+/// pass's <see cref="PassBudget.ResumeOrder"/>.</param>
+/// <param name="Total">The item list's count, so the stop note can say how many were left.</param>
 public readonly record struct EnumeratedRunResult(
     int Rows,
     long SqlMs,
@@ -64,7 +68,9 @@ public readonly record struct EnumeratedRunResult(
     int Attempted = 0,
     int Failed = 0,
     IReadOnlyList<string>? FailedItems = null,
-    Exception? FirstError = null)
+    Exception? FirstError = null,
+    string? StoppedAfter = null,
+    int Total = 0)
 {
     /// <summary>
     /// True when the loop reached at least one item and EVERY item it reached faulted — the run stored
@@ -814,6 +820,11 @@ public static class EnumeratedCollectorDriver
     /// the WRITE is deliberately outside the budget, because abandoning a flush that is already underway
     /// would trade a slow cycle for a partially-written one.
     /// </param>
+    /// <param name="passBudget">
+    /// The whole pass's ceiling (#6875), from <c>ICollectorDefinition.PassWallClockBudget</c>. Null leaves the loop
+    /// as it was. Once spent, no further item starts and <see cref="EnumeratedRunResult.StoppedAfter"/> names the
+    /// last one started.
+    /// </param>
     public static async Task<EnumeratedRunResult> RunAsync<TRow>(
         IReadOnlyList<string> items,
         Func<string, CancellationToken, Task>? perItemWatermark,
@@ -822,9 +833,12 @@ public static class EnumeratedCollectorDriver
         Action<string, int, long, long> onItemComplete,
         Action<string, Exception> onItemError,
         CancellationToken cancellationToken,
-        TimeSpan? perItemBudget = null)
+        TimeSpan? perItemBudget = null,
+        PassBudget? passBudget = null)
     {
         var totalRows = 0;
+        string? stoppedAfter = null;
+        string? lastStarted = null;
         long sqlMs = 0;
         long storageMs = 0;
 
@@ -843,6 +857,18 @@ public static class EnumeratedCollectorDriver
         foreach (var item in items)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            /* #6875: the pass budget, checked before an item STARTS and never inside one. The first item always
+               runs (attempted is still 0), so a budget shorter than one database's read still moves the rotation
+               on. Items from here on are not read and write nothing, so a collector that stores a per-database
+               marker stores none for them. */
+            if (attempted > 0 && passBudget is { Spent: true })
+            {
+                stoppedAfter = lastStarted;
+                break;
+            }
+
+            lastStarted = item;
             attempted++;
 
             List<TRow>? batch = null;
@@ -939,7 +965,7 @@ public static class EnumeratedCollectorDriver
             onItemComplete(item, batch.Count, itemSqlMs, itemStorageMs);
         }
 
-        return new EnumeratedRunResult(totalRows, sqlMs, storageMs, attempted, failed, failedItems, firstError);
+        return new EnumeratedRunResult(totalRows, sqlMs, storageMs, attempted, failed, failedItems, firstError, stoppedAfter, items.Count);
     }
 
     /// <summary>
