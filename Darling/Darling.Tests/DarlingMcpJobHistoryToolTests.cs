@@ -124,6 +124,26 @@ public sealed class DarlingMcpJobHistoryToolSurfaceTests
     }
 
     [Fact]
+    public void AManagedInstanceSnapshotReadsRunning_ButAnExpressShapedOneStillHasNoService()
+    {
+        var now = new DateTime(2026, 3, 11, 12, 0, 0, DateTimeKind.Utc);
+        var window = TimeSpan.FromMinutes(30);
+        var captured = now - TimeSpan.FromMinutes(1);
+        var next = now.AddHours(1);
+
+        /* #6886: the collector's query stores running with the platform-managed description for EngineEdition 8. */
+        var mi = DarlingJobReader.ResolveAgentState("mi", true, "Running (managed by Azure SQL Managed Instance)", next, captured, now, window);
+        Assert.True(mi.AgentRunning);
+        Assert.Equal("Running (managed by Azure SQL Managed Instance)", mi.AgentStatusDesc);
+        Assert.Equal(next, mi.NextRunUtc);
+
+        /* The Express or Agent-off container shape (false with NULL descriptions) is unchanged. */
+        var express = DarlingJobReader.ResolveAgentState("express", false, null, null, captured, now, window);
+        Assert.Null(express.AgentRunning);
+        Assert.Equal("no SQL Agent service found", express.AgentStatusDesc);
+    }
+
+    [Fact]
     public void AFreshRowWithNoAgentServiceIsNotStopped_ButAStoppedOneIs()
     {
         var now = new DateTime(2026, 3, 11, 12, 0, 0, DateTimeKind.Utc);
@@ -893,6 +913,47 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
             var sixty = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, as_of: AsOfText, cancellationToken: ct)).RootElement;
             Assert.False(sixty.GetProperty("agent_running").GetBoolean());
             Assert.Equal("Stopped", sixty.GetProperty("agent_status_desc").GetString());
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    [Fact]
+    public async Task AManagedInstanceSnapshot_ReadsRunning_AndIsNotListedAsNotRunning()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            await SetStaleMinutesAsync(c, ct, 30);
+            /* #6886: Bravo is a Managed Instance, whose snapshot the collector now stores as running with the platform description.
+               Alpha has the Express shape (false with NULL descriptions) and still has no service. */
+            await SeedAgentAsync(c, ct, ServerA, NameA, false, null, TimeSpan.FromMinutes(2));
+            await SeedAgentAsync(c, ct, ServerB, NameB, true, "Running (managed by Azure SQL Managed Instance)", TimeSpan.FromMinutes(2), AsOf.AddHours(1));
+
+            var named = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameB, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            Assert.True(named.GetProperty("agent_running").GetBoolean());
+            Assert.Equal("Running (managed by Azure SQL Managed Instance)", named.GetProperty("agent_status_desc").GetString());
+            Assert.NotEqual(JsonValueKind.Null, named.GetProperty("next_run").ValueKind);
+
+            var express = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            Assert.Equal(JsonValueKind.Null, express.GetProperty("agent_running").ValueKind);
+            Assert.Equal("no SQL Agent service found", express.GetProperty("agent_status_desc").GetString());
+
+            var fleet = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            var listed = fleet.GetProperty("agents_not_running").EnumerateArray()
+                .Select(a => a.GetProperty("server").GetString()!)
+                .Where(n => n.StartsWith("jobhist-", StringComparison.Ordinal)).ToList();
+            Assert.Equal(new[] { NameA }, listed);
+            Assert.True(fleet.GetProperty("agents_running").GetInt32() >= 1);
             ok = true;
         }
         finally

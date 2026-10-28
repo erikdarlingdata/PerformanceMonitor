@@ -58,7 +58,7 @@ public sealed class AgentStatusReaderSqlTests : IClassFixture<SharedDuckDbFixtur
     private static DateTime Truncate(DateTime t) =>
         new(t.Year, t.Month, t.Day, t.Hour, t.Minute, t.Second, DateTimeKind.Unspecified);
 
-    private async Task SeedAsync(int serverId, string serverName, DateTime collectionTimeUtc, bool agentRunning)
+    private async Task SeedAsync(int serverId, string serverName, DateTime collectionTimeUtc, bool agentRunning, string? statusDesc = null, bool nullStartup = false)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -72,8 +72,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
         cmd.Parameters.Add(new DuckDBParameter { Value = serverName });
         cmd.Parameters.Add(new DuckDBParameter { Value = agentRunning });
-        cmd.Parameters.Add(new DuckDBParameter { Value = agentRunning ? "Running" : "Stopped" });
-        cmd.Parameters.Add(new DuckDBParameter { Value = "Automatic" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = statusDesc ?? (agentRunning ? "Running" : "Stopped") });
+        cmd.Parameters.Add(new DuckDBParameter { Value = nullStartup ? (object)DBNull.Value : "Automatic" });
         cmd.Parameters.Add(new DuckDBParameter { Value = DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
@@ -97,6 +97,26 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
         Assert.False(row.IsStale);
         Assert.True(row.IsAgentProblem);
         Assert.Equal("Stopped", row.StatusDisplay);
+    }
+
+    [Fact]
+    public async Task AManagedInstanceSnapshot_ReadsRunning_NotNotPresent()
+    {
+        /* #6886: Managed Instance returns no sys.dm_server_services rows, so the collector used to store the
+           Agent-less shape (false, NULL descriptions) and Lite drew "not present". Its query now stores running
+           with the platform-managed description, and the header reads Running with no problem treatment. */
+        var service = new LocalDataService(_duckDb);
+
+        await SeedAsync(5105, "MI", DateTime.UtcNow.AddMinutes(-3), agentRunning: true,
+            statusDesc: "Running (managed by Azure SQL Managed Instance)", nullStartup: true);
+
+        var row = Assert.Single(await service.GetAgentStatusAsync(5105));
+
+        Assert.True(row.AgentRunning);
+        Assert.Equal("Running (managed by Azure SQL Managed Instance)", row.AgentStatusDesc);
+        Assert.Null(row.AgentStartupDesc);
+        Assert.Equal("Running", row.StatusDisplay);
+        Assert.False(row.IsAgentProblem);
     }
 
     [Fact]

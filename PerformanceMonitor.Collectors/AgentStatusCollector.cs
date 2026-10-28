@@ -36,7 +36,9 @@ namespace PerformanceMonitor.Collectors;
 /// OS/service-control state <c>sys.dm_server_services</c> reads; a login without msdb access can't read the
 /// <c>sysjobschedules</c> next-run decode. <see cref="AppliesTo"/> =
 /// <c>!IsAzureSqlDb &amp;&amp; !IsAwsRds</c>, the single authoritative gate both hosts
-/// consult, mirroring <see cref="RunningJobsCollector"/>. On-prem and Managed Instance collect normally.</para>
+/// consult, mirroring <see cref="RunningJobsCollector"/>. On-prem and Managed Instance collect. Managed Instance returns
+/// no <c>sys.dm_server_services</c> rows, so the query itself reports it as running (#6886): the platform owns the Agent and it
+/// cannot be stopped.</para>
 /// </summary>
 public sealed class AgentStatusCollector : CollectorDefinitionBase<AgentStatusCollector.Row>
 {
@@ -55,14 +57,19 @@ public sealed class AgentStatusCollector : CollectorDefinitionBase<AgentStatusCo
     /* Agent service status from sys.dm_server_services (the service row whose name starts "SQL Server
        Agent"), plus the next scheduled run across all enabled jobs decoded from sysjobschedules via
        msdb.dbo.agent_datetime. Scalar subqueries with no outer FROM => exactly one row every cycle, even
-       when the Agent service row is absent (agent_running 0, descriptions NULL). READ UNCOMMITTED like every
-       collector; OPTION(RECOMPILE) for a trivially cheap plan. */
+       when the Agent service row is absent (agent_running 0, descriptions NULL). Azure SQL Managed Instance
+       (#6886) returns no rows from sys.dm_server_services, yet its Agent is always on and cannot be stopped, so
+       EngineEdition 8 reads as running with a description that says the platform manages it; every other engine
+       keeps the service-view read. READ UNCOMMITTED like every collector; OPTION(RECOMPILE) for a trivially
+       cheap plan. */
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */
     agent_running =
         CASE
+            WHEN CONVERT(int, SERVERPROPERTY(N'EngineEdition')) = 8
+            THEN CONVERT(bit, 1)
             WHEN EXISTS
             (
                 SELECT 1
@@ -74,12 +81,17 @@ SELECT /* PerformanceMonitorLite */
             ELSE CONVERT(bit, 0)
         END,
     agent_status_desc =
-    (
-        SELECT TOP (1) dss.status_desc
-        FROM sys.dm_server_services AS dss
-        WHERE dss.servicename LIKE N'SQL Server Agent%'
-        ORDER BY dss.servicename
-    ),
+        CASE
+            WHEN CONVERT(int, SERVERPROPERTY(N'EngineEdition')) = 8
+            THEN CONVERT(nvarchar(256), N'Running (managed by Azure SQL Managed Instance)')
+            ELSE
+            (
+                SELECT TOP (1) dss.status_desc
+                FROM sys.dm_server_services AS dss
+                WHERE dss.servicename LIKE N'SQL Server Agent%'
+                ORDER BY dss.servicename
+            )
+        END,
     agent_startup_desc =
     (
         SELECT TOP (1) dss.startup_type_desc
