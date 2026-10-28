@@ -162,11 +162,31 @@ public sealed class DarlingMcpJobTools
             var fetched = await DarlingJobHistoryReader.GetAsync(
                 postgres, requestedStart, scope?.ServerId, limit + 1, McpCommandDeadlines.ReadSeconds, filter, cancellationToken);
             var truncated = fetched.Count > limit;
-            /* The reader's SQL label is the Viewer's column. The answer takes its name from AnswerNameOf instead, so a row of a server the
-               enabled registry no longer holds keeps the raw collected name. */
+            /* The reader's SQL label is the Viewer's column: COALESCE(display_name, collected name) over every registered server, enabled
+               or not. The answer must not take it. A row of an enabled server answers AnswerNameOf (the clash check is over the enabled
+               registry). Every other row (a disabled server, a removed one, or one with no servers row) answers its connection key,
+               servers.server_name when a servers row exists, else the collected name, and never a display name: a disabled server that
+               still carries a display name an enabled server also carries would otherwise show two servers under one name. */
             var answerNames = servers.ToDictionary(x => x.ServerId, x => DarlingServerResolver.AnswerNameOf(servers, x));
-            var rows = fetched.Take(limit)
-                .Select(r => answerNames.TryGetValue(r.ServerId, out var named) ? r with { ServerName = named } : r)
+            var shown = fetched.Take(limit).ToList();
+            var otherIds = shown.Select(r => r.ServerId).Where(id => !answerNames.ContainsKey(id)).Distinct().ToArray();
+            var keys = new Dictionary<int, string>();
+            if (otherIds.Length > 0)
+            {
+                await using var keyConnection = await postgres.OpenConnectionAsync(cancellationToken);
+                using var keyCommand = new NpgsqlCommand("SELECT server_id, server_name FROM servers WHERE server_id = ANY($1)", keyConnection);
+                keyCommand.Parameters.AddWithValue(otherIds);
+                keyCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                using var keyReader = await keyCommand.ExecuteReaderAsync(cancellationToken);
+                while (await keyReader.ReadAsync(cancellationToken))
+                {
+                    keys[keyReader.GetInt32(0)] = keyReader.GetString(1);
+                }
+            }
+
+            var rows = shown
+                .Select(r => answerNames.TryGetValue(r.ServerId, out var named) ? r with { ServerName = named }
+                    : keys.TryGetValue(r.ServerId, out var key) ? r with { ServerName = key } : r)
                 .ToList();
 
             var source = DataWindowFloor.Source.ForCollectorTable("job_history");

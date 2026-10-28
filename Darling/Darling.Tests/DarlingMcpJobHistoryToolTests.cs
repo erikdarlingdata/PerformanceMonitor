@@ -593,6 +593,39 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
     }
 
     [Fact]
+    public async Task TheFleetForm_NamesADisabledServersRowsByItsKey_NeverByItsDisplayName()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            /* #6860: an enabled and a disabled server carry one display name. The reader's label would show both under it. */
+            const string shared = "Orders Primary";
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1 WHERE server_id IN ($2, $3)", shared, ServerA, ServerB);
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET is_enabled = false WHERE server_id = $1", ServerB);
+
+            var body = await DarlingMcpJobTools.GetJobHistory(postgres, null, as_of: AsOfText, cancellationToken: ct);
+            using var doc = JsonDocument.Parse(body);
+            var runs = doc.RootElement.GetProperty("runs").EnumerateArray().ToArray();
+            var byName = runs.GroupBy(r => r.GetProperty("server").GetString()!).ToDictionary(g => g.Key, g => g.Select(r => r.GetProperty("job_name").GetString()!).Order().ToArray());
+
+            Assert.Equal(new[] { NameB, shared }.Order().ToArray(), byName.Keys.Order().ToArray());
+            Assert.Equal(new[] { "Index Rebuild", "Nightly ETL", "Nightly ETL", "Nightly ETL" }, byName[shared]);
+            Assert.Equal(new[] { "Log Backup", "Nightly ETL" }, byName[NameB]);
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    [Fact]
     public async Task Filters_AndFleetMode_AndLimit()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
