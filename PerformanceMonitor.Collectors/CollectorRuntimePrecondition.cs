@@ -270,7 +270,26 @@ public static class CollectorRuntimePrecondition
         string collectorName,
         string? status,
         string? errorMessage,
-        DateTime? observedUtc)
+        DateTime? observedUtc) =>
+        BuildCollectionOutcome(serverName, collectorName, status, errorMessage, observedUtc, forReader: false);
+
+    /// <summary>
+    /// The sentence the DEGRADED answer closes on for an MCP client (#6869): it tells a caller what to do with the stored sentence, which a
+    /// person reading a panel or the web page has no use for. <see cref="CollectionOutcomeReaderMessage"/> leaves it out, and so does
+    /// <c>runtimePreconditionText</c> in plain-text.js.
+    /// </summary>
+    public const string DegradedClientSentence =
+        "Act on that sentence — it is what the monitored server itself answered, and it distinguishes the states this " +
+        "one status carries: a grant the login was refused, a source object that does not exist " +
+        "on this target, and a feature the platform does not implement or has switched off.";
+
+    private static string? BuildCollectionOutcome(
+        string serverName,
+        string collectorName,
+        string? status,
+        string? errorMessage,
+        DateTime? observedUtc,
+        bool forReader)
     {
         if (string.IsNullOrWhiteSpace(status))
         {
@@ -308,10 +327,8 @@ public static class CollectorRuntimePrecondition
         {
             return $"The {collectorName} collector is running against {serverName} but cannot read its " +
                    $"source: its last run{observed} was recorded as a non-fatal skip rather than a failure, " +
-                   $"so {CapturePathOf(collectorName)} is not being stored.{said} Act on that sentence — it " +
-                   "is what the monitored server itself answered, and it distinguishes the states this " +
-                   "one status carries: a grant the login was refused, a source object that does not exist " +
-                   "on this target, and a feature the platform does not implement or has switched off. " +
+                   $"so {CapturePathOf(collectorName)} is not being stored.{said} " +
+                   (forReader ? "" : DegradedClientSentence + " ") +
                    PreconditionEpilogue;
         }
 
@@ -322,8 +339,8 @@ public static class CollectorRuntimePrecondition
     /// <see cref="CollectionOutcomeMessage"/> as a person reading a desktop panel or the web page should see it (#6861, the rule
     /// #6764 set for <see cref="GatedOffReaderMessage"/>): the same classification, so the panel and the MCP tool decide from the
     /// same facts, without the closing paragraph that labels itself a runtime PRECONDITION and says the read re-derives on every
-    /// call, which only an MCP client can use. The web page cuts the MCP answer at the same paragraph
-    /// (<c>runtimePreconditionText</c> in plain-text.js). Null where <see cref="CollectionOutcomeMessage"/> is null.
+    /// call, and without the DEGRADED answer's <see cref="DegradedClientSentence"/> (#6869), which only an MCP client can use. The web page cuts
+    /// the MCP answer the same way (<c>runtimePreconditionText</c> in plain-text.js). Null where <see cref="CollectionOutcomeMessage"/> is null.
     /// <see cref="CollectionOutcomeMessage"/> itself is unchanged: it is the MCP answer.
     /// </summary>
     public static string? CollectionOutcomeReaderMessage(
@@ -333,7 +350,7 @@ public static class CollectorRuntimePrecondition
         string? errorMessage,
         DateTime? observedUtc)
     {
-        var message = CollectionOutcomeMessage(serverName, collectorName, status, errorMessage, observedUtc);
+        var message = BuildCollectionOutcome(serverName, collectorName, status, errorMessage, observedUtc, forReader: true);
 
         return message is not null && message.EndsWith(PreconditionEpilogue, StringComparison.Ordinal)
             ? message[..^PreconditionEpilogue.Length].TrimEnd()
