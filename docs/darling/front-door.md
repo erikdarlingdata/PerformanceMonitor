@@ -49,7 +49,7 @@ The block sits at the top level of `darling.json`, next to `postgres` and `mcp`.
 | `mcpEncryptedToken` or `mcpToken` | yes, one of them | The store's operator-role MCP token. `mcpEncryptedToken` is the Windows DPAPI form and is read first. `mcpToken` is the token as text, or an `env:NAME` or `file:PATH` reference. |
 | `mcpEncryptedAgentToken` or `mcpAgentToken` | no | The store's agent-role MCP token, in the same two forms. See [the agent role](#the-agent-role). |
 | `webUrl` | no | The address of the store's web dashboard, with the same rules as `mcpUrl`. Without it the store has no web pages through the front door. |
-| `webEncryptedToken` or `webToken` | no | The shared token that the front door signs in to the store's web dashboard with, in the same two forms. Without it the front door cannot sign in, and web calls to the store answer 502. |
+| `webEncryptedToken` or `webToken` | when `webUrl` is set | The shared token that the front door signs in to the store's web dashboard with, in the same two forms. A store with a `webUrl` and no web token is refused when the service starts, and the message names the store's place in the list. |
 | `certificateSha256` | no | The SHA-256 thumbprint of the store's certificate, 64 hex characters (colons and spaces are allowed). When set, the front door accepts only that exact certificate and does not check the certificate chain. Use it for a store with a self-signed certificate. When absent, the system's trust decides. |
 
 To make an encrypted value, use the same `--encrypt-password` verb that the `mcp` and `web` tokens use. The `env:` and `file:` forms are for Linux and the compose setup, where there is no DPAPI. On a platform other than Windows, an encrypted value cannot be read, so use the plain form there.
@@ -227,7 +227,7 @@ Redirects are never followed. A store that answers with a redirect gets a 502 th
 
 ## Limits
 
-- **The store sees the shared token, not the person.** Every web call reaches a store through the front door's shared-token sign-in. The store cannot tell people apart. It attributes a change that a person makes at the front door to that shared sign-in. The front door's own log does not record who made a change. Personal views are off through the front door (`can_own` is `false`). Roles count at the front door. To keep a person read-only, give that person a read-only role at the front door.
+- **The store sees the shared token, not the person.** Every web call reaches a store through the front door's shared-token sign-in. The store cannot tell people apart. It attributes a change that a person makes at the front door to that shared sign-in. The front door's own log does record it: for every change that is not a GET, it writes one Information line with the signed-in name and role, the store, the method, the path without its query string, and the store's status code. It never logs the body, a token, a cookie or the query string. Personal views are off through the front door (`can_own` is `false`). Roles count at the front door. To keep a person read-only, give that person a read-only role at the front door.
 - **Plain `http` to a store that is not on this machine only warns.** The front door starts and uses the address. The store's token crosses the network in clear text, so use `https`.
 - **No merging.** A fan-out answer lists the stores one after another. The front door does not add up counts or merge servers across stores.
 - **Selection by server is by name only.** The front door does not route by `server_id`, because ids belong to one store.
