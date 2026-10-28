@@ -5338,6 +5338,10 @@ function identityScanState(r) {
   const n = r.columns_above_10_percent;
   return n > 0 ? "Scanned, " + n + (n === 1 ? " column" : " columns") + " above 10 percent" : "Scanned, clean";
 }
+function identityLastScanned(r) {
+  const at = r.scanned_at || r.last_scanned_at;
+  return at ? localTime(at) : "—";
+}
 const IDENTITY_COLUMNS = [
   { key: "database", label: "Database" },
   { key: "table", label: "Table", render: (r) => el("span", { text: identityTable(r) }), sortValue: identityTable },
@@ -5352,7 +5356,8 @@ const IDENTITY_COLUMNS = [
 const IDENTITY_SCAN_COLUMNS = [
   { key: "database", label: "Database" },
   { key: "scan_state", label: "Scan state", render: (r) => el("span", { text: identityScanState(r) }), sortValue: identityScanState },
-  { key: "scanned_at", label: "Last scanned", format: "time", small: true },
+  /* A database not yet scanned has no scan in the window: its last scan before the window (if any) is shown instead. */
+  { key: "scanned_at", label: "Last scanned", format: "time", small: true, render: (r) => el("span", { text: identityLastScanned(r) }), sortValue: (r) => r.scanned_at || r.last_scanned_at || "" },
 ];
 function identityCapacityPanels(server) {
   const columnsShell = panelShell("Identity Capacity", "identity_capacity collector, every 6 hours", 2, "get_identity_capacity");

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Numerics;
 using System.Text.Json;
@@ -36,10 +37,15 @@ public sealed class ViewerIdentityCapacityTextTests
         new(database, "dbo", table, "Id", "int", 10, last, 1, 1, stored, Captured,
             firstValue ?? last, firstValue is null ? Captured : Captured.AddDays(-4));
 
-    private static ViewerIdentityCapacityRead Read(IReadOnlyList<IdentityColumnFact> columns, params (string Database, DateTime At)[] scanned)
+    private static ViewerIdentityCapacityRead Read(IReadOnlyList<IdentityColumnFact> columns, params (string Database, DateTime At)[] scanned) =>
+        ReadWithUnscanned(columns, [], scanned);
+
+    private static ViewerIdentityCapacityRead ReadWithUnscanned(
+        IReadOnlyList<IdentityColumnFact> columns, IReadOnlyList<IdentityNotYetScannedDatabase> unscanned, params (string Database, DateTime At)[] scanned)
     {
-        var read = new IdentityCapacityRead(columns, scanned.Select(s => new IdentityScannedDatabase(s.Database, s.At)).ToList());
-        return new ViewerIdentityCapacityRead(columns.Count > 0 ? ViewerIdentityCapacityRead.Data : ViewerIdentityCapacityRead.Empty, null, read);
+        var read = new IdentityCapacityRead(columns, scanned.Select(s => new IdentityScannedDatabase(s.Database, s.At)).ToList(), unscanned);
+        return new ViewerIdentityCapacityRead(
+            columns.Count > 0 || unscanned.Count > 0 ? ViewerIdentityCapacityRead.Data : ViewerIdentityCapacityRead.Empty, null, read);
     }
 
     [Fact]
@@ -90,7 +96,7 @@ public sealed class ViewerIdentityCapacityTextTests
             [Int("Sales", "Audit", 2_000_000_000, 93.1), Int("Sales", "Warm", 1_600_000_000, 74.5), Int("Sales", "Orders", 1_000_000_000, 46.6)],
             ("Sales", Captured), ("Clean", Captured));
 
-        Assert.Equal("Critical: 1   Warning: 1   Columns above 10 percent: 3   Databases scanned: 2", ViewerIdentityCapacityText.StatusLine(read));
+        Assert.Equal("Critical: 1   Warning: 1   Columns above 10 percent: 3   Databases scanned: 2   Not yet scanned: 0", ViewerIdentityCapacityText.StatusLine(read));
     }
 
     [Fact]
@@ -103,6 +109,23 @@ public sealed class ViewerIdentityCapacityTextTests
         Assert.Equal(["Clean", "Sales"], rows.Select(r => r.Database).ToArray());
         Assert.Equal(["Scanned, clean", "Scanned, 2 columns above 10 percent"], rows.Select(r => r.State).ToArray());
         Assert.Equal("Scanned, 1 column above 10 percent", ViewerIdentityCapacityText.ScanState(1));
+    }
+
+    [Fact]
+    public void ADatabaseTheRotationHasNotReached_IsNotYetScanned_NeverCleanAndNeverLeftOut()
+    {
+        var earlier = new DateTime(2026, 9, 1, 8, 30, 0, DateTimeKind.Utc);
+        var read = ReadWithUnscanned(
+            [], [new IdentityNotYetScannedDatabase("Fresh", null), new IdentityNotYetScannedDatabase("Stale", earlier)], ("Clean", Captured));
+
+        var rows = ViewerIdentityCapacityText.ScanRows(read);
+
+        Assert.Equal(["Clean", "Fresh", "Stale"], rows.Select(r => r.Database).ToArray());
+        Assert.Equal(["Scanned, clean", "Not yet scanned", "Not yet scanned"], rows.Select(r => r.State).ToArray());
+        Assert.Equal("-", rows[1].LastScanned);
+        Assert.Equal(earlier.ToLocalTime().ToString("g", CultureInfo.CurrentCulture), rows[2].LastScanned);
+        Assert.Equal("Critical: 0   Warning: 0   Columns above 10 percent: 0   Databases scanned: 1   Not yet scanned: 2", ViewerIdentityCapacityText.StatusLine(read));
+        Assert.Equal(ViewerIdentityCapacityRead.Data, read.Status);
     }
 
     [Fact]
@@ -207,6 +230,13 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id','int',10,$7::numeric,1,1,$8)",
             await Column(c, ct, "Sales", "Audit", "2000000000", 93.1, newAt);
             await Column(c, ct, "Sales", "Warm", "1600000000", 74.5, newAt);
             await Marker(c, ct, "Clean", newAt);
+            /* Fresh is online in the newest database config capture and has no marker: the rotation has not reached it. */
+            foreach (var database in new[] { "Sales", "Clean", "Fresh" })
+            {
+                await DarlingMcpTestData.ExecAsync(c, ct,
+                    "INSERT INTO database_config (config_id, capture_time, server_id, server_name, database_name, state_desc) VALUES ($1,$2,$3,$4,$5,'ONLINE')",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddHours(-2)), ServerId, ServerName, database);
+            }
         }, async (postgres, cs, ct) =>
         {
             var web = await WebReadAsync(postgres);
@@ -232,8 +262,13 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id','int',10,$7::numeric,1,1,$8)",
             Assert.Equal("-", rows[1].RatePerDay);
 
             var scan = web.GetProperty("databases").EnumerateArray().ToDictionary(d => d.GetProperty("database").GetString()!, d => d.GetProperty("columns_above_10_percent").GetInt32());
-            Assert.Equal(new Dictionary<string, int> { ["Clean"] = 0, ["Sales"] = 2 }, scan);
-            Assert.Equal(["Scanned, clean", "Scanned, 2 columns above 10 percent"], ViewerIdentityCapacityText.ScanRows(read).Select(r => r.State).ToArray());
+            Assert.Equal(new Dictionary<string, int> { ["Clean"] = 0, ["Sales"] = 2, ["Fresh"] = 0 }, scan);
+            var fresh = web.GetProperty("databases").EnumerateArray().Single(d => d.GetProperty("database").GetString() == "Fresh");
+            Assert.False(fresh.GetProperty("scanned").GetBoolean());
+            Assert.Equal(1, web.GetProperty("summary").GetProperty("databases_not_yet_scanned").GetInt32());
+            Assert.Equal(
+                ["Scanned, clean", "Scanned, 2 columns above 10 percent", "Not yet scanned"],
+                ViewerIdentityCapacityText.ScanRows(read).Select(r => r.State).ToArray());
             return 0;
         });
     }

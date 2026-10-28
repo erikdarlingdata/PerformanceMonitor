@@ -17,7 +17,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
 /// What the Identity Capacity tab reads for one server (#6875): the same answer <c>get_identity_capacity</c> gives. <see cref="Status"/>
-/// is <c>data</c> (at least one column above 10 percent), <c>empty</c> (databases were scanned and none has one), or the read's own word
+/// is <c>data</c> (at least one column above 10 percent, or a database not yet scanned), <c>empty</c> (databases were scanned, none has one and none waits), or the read's own word
 /// when nothing was scanned: <c>not_collected</c> (this engine has no such data), <c>precondition</c> (the collector's latest run was refused
 /// or denied here) or <c>unavailable</c> (no scan in the window). <see cref="Message"/> is the sentence for the last three.
 /// </summary>
@@ -53,7 +53,7 @@ public sealed partial class ViewerDataService
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
         if (read.HasScan)
         {
-            return new ViewerIdentityCapacityRead(read.Columns.Count > 0 ? ViewerIdentityCapacityRead.Data : ViewerIdentityCapacityRead.Empty, null, read);
+            return new ViewerIdentityCapacityRead(read.Columns.Count > 0 || read.Unscanned.Count > 0 ? ViewerIdentityCapacityRead.Data : ViewerIdentityCapacityRead.Empty, null, read);
         }
 
         var engineGap = ViewerServerTab.EngineGapNote(server.DisplayName, server.EngineEdition, server.EngineKind, "identity_capacity");

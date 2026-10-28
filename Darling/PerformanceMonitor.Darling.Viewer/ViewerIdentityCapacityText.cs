@@ -58,7 +58,7 @@ public static class ViewerIdentityCapacityText
         var critical = scan.Columns.Count(c => c.Band == IdentityCapacityMath.BandCritical);
         var warning = scan.Columns.Count(c => c.Band == IdentityCapacityMath.BandWarning);
         return string.Create(CultureInfo.InvariantCulture,
-            $"Critical: {critical}   Warning: {warning}   Columns above 10 percent: {scan.Columns.Count}   Databases scanned: {scan.Databases.Count}");
+            $"Critical: {critical}   Warning: {warning}   Columns above 10 percent: {scan.Columns.Count}   Databases scanned: {scan.Databases.Count}   Not yet scanned: {scan.Unscanned.Count}");
     }
 
     /// <summary>The columns, critical and warning first (the reader's order is fullest first), one row each.</summary>
@@ -84,13 +84,19 @@ public static class ViewerIdentityCapacityText
             return [];
         }
 
-        return read.Read.Databases
+        /* Scanned databases first, then the ones the rotation has not reached: never listed as clean, never left out. */
+        var scanned = read.Read.Databases
             .Select(d => new ViewerIdentityScanRow(
                 d.DatabaseName,
                 ScanState(read.Read.Columns.Count(c => string.Equals(c.DatabaseName, d.DatabaseName, StringComparison.Ordinal))),
-                DateTime.SpecifyKind(d.ScannedAt, DateTimeKind.Utc).ToLocalTime().ToString("g", CultureInfo.CurrentCulture)))
-            .ToList();
+                LocalTime(d.ScannedAt)));
+        var waiting = read.Read.Unscanned
+            .Select(u => new ViewerIdentityScanRow(u.DatabaseName, NotYetScanned, u.LastScannedAt is { } last ? LocalTime(last) : Dash));
+        return scanned.Concat(waiting).ToList();
     }
+
+    private static string LocalTime(DateTime utc) =>
+        DateTime.SpecifyKind(utc, DateTimeKind.Utc).ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
 
     /// <summary>The sentence under the scan list when it has no row.</summary>
     public static string ScanEmptyText(ViewerIdentityCapacityRead read)
