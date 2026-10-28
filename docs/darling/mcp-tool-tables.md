@@ -53,6 +53,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_daily_summary_range` | `collect.wait_stats` (through the view `collect.v_wait_stats`)<br>`collect.query_stats` (through the view `collect.v_query_stats`)<br>`collect.deadlocks` (through the view `collect.v_deadlocks`)<br>`collect.blocked_process_reports` (through the view `collect.v_blocked_process_reports`)<br>`collect.dmv_blocking_snapshots` (through the view `collect.v_dmv_blocking_snapshots`)<br>`collect.cpu_utilization_stats` (through the view `collect.v_cpu_utilization_stats`)<br>`collect.collection_log` (through the view `collect.v_collection_log`)<br>`collect.memory_pressure_events` (through the view `collect.v_memory_pressure_events`)<br>`config.config_alert_log`<br>`config.config_alert_settings`<br>`config.config_collector_schedules`<br>`collect.query_stats_hourly`<br>`collect.query_stats_interval_hourly`<br>`collect.query_stats_daily` |
 | `get_database_config` | `collect.database_config`<br>`collect.v_database_config` |
 | `get_database_config_changes` | `collect.database_config`<br>`collect.v_database_config` |
+| `get_database_protection` | `collect.database_protection`<br>`collect.servers`<br>`collect.collection_log` |
 | `get_database_scoped_config` | `collect.database_scoped_config`<br>`collect.v_database_scoped_config` |
 | `get_database_sizes` | `collect.database_size_stats` (through the view `collect.v_database_size_stats`) |
 | `get_database_state_expectations` | `collect.database_states`<br>`config.database_state_expected` |
