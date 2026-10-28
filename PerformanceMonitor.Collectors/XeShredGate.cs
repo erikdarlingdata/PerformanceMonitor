@@ -27,14 +27,17 @@ namespace PerformanceMonitor.Collectors;
 /// Both collectors read it in <c>BuildQuery</c>, BEFORE the cast, in the same batch, and skip the cast+shred
 /// entirely when it has not moved.</para>
 ///
-/// <para><b>The three shapes that always shred</b> -- the conservative default, the same rule
+/// <para><b>The four shapes that always shred</b> -- the conservative default, the same rule
 /// <see cref="QueryStoreOpenIntervalState"/> uses for its own stale-or-absent stamp: the counter is
 /// unreadable this cycle (NULL -- the session or target is missing, mid-provisioning, or the DMV join found
-/// no row); there is no stored prior (first run, a restarted host, or a store that lost the row); or the
-/// counter no longer AGREES with the stored prior, whether it grew (the ordinary case) or fell (the session
-/// restarted or was recreated, so the ring buffer's contents no longer correspond to what the prior was
-/// measured against). Only an exact match skips -- every other case runs the same full read the collector
-/// always ran before this gate existed, so the rows stored are identical either way.</para>
+/// no row); the counter reads 0 (#6868: an Azure SQL Managed Instance never moves
+/// <c>execution_count</c> off 0 even with events in the ring buffer, so 0 = 0 would skip every run after the
+/// first, and on a boxed server a session that has delivered nothing reads 0 too, where shredding an empty
+/// buffer is cheap); there is no stored prior (first run, a restarted host, or a store that lost the row); or
+/// the counter no longer AGREES with the stored prior, whether it grew (the ordinary case) or fell (the
+/// session restarted or was recreated, so the ring buffer's contents no longer correspond to what the prior
+/// was measured against). Only a non-zero exact match skips -- every other case runs the same full read the
+/// collector always ran before this gate existed, so the rows stored are identical either way.</para>
 /// </summary>
 public static class XeShredGate
 {
@@ -72,7 +75,8 @@ public static class XeShredGate
 
     /// <summary>
     /// The pure decision, unit-testable without a server: shred unless BOTH the current and the prior
-    /// execution_count are known and EQUAL. Anything else -- an unreadable current count, no prior, a
+    /// execution_count are known, EQUAL and non-zero. Anything else -- an unreadable current count, a
+    /// current count of 0 (#6868: a Managed Instance never moves the count off 0), no prior, a
     /// count that grew, or one that fell -- shreds, which is the same full read every one of these
     /// collectors always ran before this gate existed. The actual gate lives server-side (an IF in the
     /// collector's own T-SQL, evaluated on the SAME values this method would be given), because the whole
@@ -81,6 +85,7 @@ public static class XeShredGate
     /// </summary>
     public static bool ShouldShred(long? currentExecutionCount, long? lastExecutionCount) =>
         currentExecutionCount is null
+        || currentExecutionCount.Value == 0
         || lastExecutionCount is null
         || currentExecutionCount.Value != lastExecutionCount.Value;
 
