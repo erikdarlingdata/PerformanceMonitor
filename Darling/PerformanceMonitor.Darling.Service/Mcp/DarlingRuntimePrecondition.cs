@@ -112,13 +112,7 @@ SELECT (
     /// index cannot serve a second key, so the sort would cover the server's whole newest chunk (1,158 buffers
     /// against 5). $1 server_id, $2 collector.</para>
     /// </summary>
-    public const string LatestCollectorOutcomeSql = @"
-SELECT status, error_message, collection_time
-FROM collection_log
-WHERE server_id = $1
-AND   collector_name = $2
-ORDER BY collection_time DESC, log_id DESC
-LIMIT 1";
+    public const string LatestCollectorOutcomeSql = CollectorOutcomeStatements.LatestCollectorOutcomeSql;
 
     /// <summary>
     /// The latest per-database Query Store configuration snapshot, optionally narrowed to the one database a

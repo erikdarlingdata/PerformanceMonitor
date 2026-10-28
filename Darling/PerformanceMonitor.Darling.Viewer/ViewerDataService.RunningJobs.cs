@@ -270,27 +270,15 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// The latest run of one collector for one server: its status, the explanation the runner stored and when it ran (#6861). It is
-    /// the Darling service's own <c>DarlingRuntimePrecondition.LatestCollectorOutcomeSql</c>, which the get_* tools'
-    /// <c>precondition</c> answer reads, copied here because the viewer does not reference the service. The tab note for a
-    /// collector that recorded a named skip such as PERMISSIONS is built from it. The read is one row from
-    /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>.
-    /// $1 server_id, $2 collector.
+    /// The latest run's status, explanation and time for one collector and server, or all null when it has no run (#6861). It reads
+    /// <see cref="CollectorOutcomeStatements.LatestCollectorOutcomeSql"/>, the one statement the Darling service's get_* tools also
+    /// read for their <c>precondition</c> answer. The tab note for a collector that recorded a named skip such as PERMISSIONS is
+    /// built from it.
     /// </summary>
-    public const string LatestCollectorOutcomeSql = """
-        SELECT status, error_message, collection_time
-        FROM collection_log
-        WHERE server_id = $1
-        AND   collector_name = $2
-        ORDER BY collection_time DESC, log_id DESC
-        LIMIT 1
-        """;
-
-    /// <summary>The latest run's status, explanation and time for one collector and server, or all null when it has no run.</summary>
     public async Task<(string? Status, string? ErrorMessage, DateTime? ObservedUtc)> GetLatestCollectorOutcomeAsync(
         int serverId, string collectorName, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(LatestCollectorOutcomeSql);
+        await using var command = _dataSource.CreateCommand(CollectorOutcomeStatements.LatestCollectorOutcomeSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });

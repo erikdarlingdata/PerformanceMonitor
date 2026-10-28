@@ -126,12 +126,12 @@ public partial class ViewerServerTab
     /// A read that fails leaves the surface on its own empty state: this note is a diagnostic, and it must not turn an empty
     /// grid into a failed tab load. A read that sees the collector run adds it to <paramref name="collectorsSeenToRun"/> when
     /// <see cref="RunSettlesNeverRanRule"/> says one run settles it, so a later refresh of the same empty surface makes no
-    /// read. <paramref name="readLastRun"/> is <see cref="ViewerDataService.GetCollectorLastRunAsync"/> on the live path.
+    /// read. <paramref name="readLastRun"/> is <see cref="ViewerDataService.GetCollectorLastRunAsync"/> on the live path, and <paramref name="readLatestOutcome"/> is <see cref="ViewerDataService.GetLatestCollectorOutcomeAsync"/> (#6861). It has no default, so a caller cannot leave a named skip unexplained by omitting it.
     /// </summary>
     internal static async Task<(string Text, Visibility Visibility)> ReadEngineGapStateAsync(
         CollectorLastRunReader readLastRun, ISet<string>? collectorsSeenToRun, int serverId, string serverName,
         int engineEdition, string? engineKind, string collectorName, int rowCount,
-        CollectorOutcomeReader? readLatestOutcome = null)
+        CollectorOutcomeReader readLatestOutcome)
     {
         DateTime? collectorLastRunUtc = null;
         DateTime? serverLastCollectedUtc = null;
@@ -163,7 +163,7 @@ public partial class ViewerServerTab
            no status to read, so it makes no second pass through its history. */
         string? outcomeNote = null;
 
-        if (needsRead && readLatestOutcome is not null && (seenToRun || collectorLastRunUtc is not null))
+        if (needsRead && (seenToRun || collectorLastRunUtc is not null))
         {
             try
             {
@@ -182,14 +182,15 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
-    /// The sentence for a collector whose latest run was a named skip such as PERMISSIONS: the one
-    /// <see cref="CollectorRuntimePrecondition.CollectionOutcomeMessage"/> gives the MCP tools' <c>precondition</c> answer, so the
-    /// tab, the web dashboard and the MCP say the same thing (#6861). Null for every other status, and for a run with none.
+    /// The sentence for a collector whose latest run was a named skip such as PERMISSIONS: the MCP tools' <c>precondition</c>
+    /// answer (<see cref="CollectorRuntimePrecondition.CollectionOutcomeMessage"/>) worded for a reader, without its closing
+    /// paragraph for an MCP client (<see cref="CollectorRuntimePrecondition.CollectionOutcomeReaderMessage"/>, #6861). The web
+    /// dashboard cuts the MCP answer at the same paragraph. Null for every other status, and for a run with none.
     /// </summary>
     internal static string? CollectorOutcomeNote(
         string serverName, string collectorName, string? status, string? errorMessage, DateTime? observedUtc) =>
         CollectorRuntimePrecondition.IsNamedSkip(status)
-            ? CollectorRuntimePrecondition.CollectionOutcomeMessage(serverName, collectorName, status, errorMessage, observedUtc)
+            ? CollectorRuntimePrecondition.CollectionOutcomeReaderMessage(serverName, collectorName, status, errorMessage, observedUtc)
             : null;
 
     /// <summary>

@@ -52,17 +52,44 @@ public sealed class ViewerCollectorOutcomeNoteTests
             reads.LastRun, seen, 7, ServerName, edition, MonitoredEngineKind.SqlServer, collector, rows, reads.Outcome);
 
     [Fact]
-    public async Task EmptyTempdb_WithAPermissionsRun_ShowsTheMcpSentence()
+    public async Task EmptyTempdb_WithAPermissionsRun_ShowsTheReaderSentence_WithoutTheMcpClosingParagraph()
     {
-        var expected = CollectorRuntimePrecondition.CollectionOutcomeMessage(
+        var mcp = CollectorRuntimePrecondition.CollectionOutcomeMessage(
             ServerName, "tempdb_stats", CollectorRuntimePrecondition.DegradedStatus, Refused, Ran);
-        Assert.NotNull(expected);
+        Assert.NotNull(mcp);
+        Assert.Contains("This is a runtime PRECONDITION", mcp, StringComparison.Ordinal);
 
         var (text, visibility) = await Read(new Reads(CollectorRuntimePrecondition.DegradedStatus), null, "tempdb_stats", 0);
 
         Assert.Equal(Visibility.Visible, visibility);
-        Assert.Equal(expected, text);
+        Assert.Contains("is running against " + ServerName + " but cannot read its source", text, StringComparison.Ordinal);
         Assert.Contains(Refused, text, StringComparison.Ordinal);
+        Assert.DoesNotContain("This is a runtime PRECONDITION", text, StringComparison.Ordinal);
+        Assert.StartsWith(text, mcp, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(CollectorRuntimePrecondition.CaptureSessionMissingStatus)]
+    [InlineData(CollectorRuntimePrecondition.ExtensionMissingStatus)]
+    [InlineData(CollectorRuntimePrecondition.DegradedStatus)]
+    public void ReaderMessage_IsTheMcpMessage_MinusItsClosingParagraph(string status)
+    {
+        var mcp = CollectorRuntimePrecondition.CollectionOutcomeMessage(ServerName, "tempdb_stats", status, Refused, Ran);
+        var reader = CollectorRuntimePrecondition.CollectionOutcomeReaderMessage(ServerName, "tempdb_stats", status, Refused, Ran);
+
+        Assert.NotNull(mcp);
+        Assert.NotNull(reader);
+        Assert.NotEqual(mcp, reader);
+        Assert.StartsWith(reader, mcp, StringComparison.Ordinal);
+        Assert.DoesNotContain("PRECONDITION", reader, StringComparison.Ordinal);
+        Assert.Contains(Refused, reader, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReaderMessage_IsNullWhereTheMcpMessageIs()
+    {
+        Assert.Null(CollectorRuntimePrecondition.CollectionOutcomeReaderMessage(ServerName, "tempdb_stats", "SUCCESS", Refused, Ran));
+        Assert.Null(CollectorRuntimePrecondition.CollectionOutcomeReaderMessage(ServerName, "tempdb_stats", null, Refused, Ran));
     }
 
     [Fact]

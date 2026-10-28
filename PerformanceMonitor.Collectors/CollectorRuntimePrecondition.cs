@@ -319,6 +319,28 @@ public static class CollectorRuntimePrecondition
     }
 
     /// <summary>
+    /// <see cref="CollectionOutcomeMessage"/> as a person reading a desktop panel or the web page should see it (#6861, the rule
+    /// #6764 set for <see cref="GatedOffReaderMessage"/>): the same classification, so the panel and the MCP tool decide from the
+    /// same facts, without the closing paragraph that labels itself a runtime PRECONDITION and says the read re-derives on every
+    /// call, which only an MCP client can use. The web page cuts the MCP answer at the same paragraph
+    /// (<c>runtimePreconditionText</c> in plain-text.js). Null where <see cref="CollectionOutcomeMessage"/> is null.
+    /// <see cref="CollectionOutcomeMessage"/> itself is unchanged: it is the MCP answer.
+    /// </summary>
+    public static string? CollectionOutcomeReaderMessage(
+        string serverName,
+        string collectorName,
+        string? status,
+        string? errorMessage,
+        DateTime? observedUtc)
+    {
+        var message = CollectionOutcomeMessage(serverName, collectorName, status, errorMessage, observedUtc);
+
+        return message is not null && message.EndsWith(PreconditionEpilogue, StringComparison.Ordinal)
+            ? message[..^PreconditionEpilogue.Length].TrimEnd()
+            : message;
+    }
+
+    /// <summary>
     /// The explanation for a read whose collector <b>is not being invoked</b> on a server that is demonstrably
     /// collecting other things, or null when that is not the case, in which case the caller falls through to its
     /// own miss vocabulary. There are three answers, one for each case <see cref="ClassifyGatedOff"/> finds: a

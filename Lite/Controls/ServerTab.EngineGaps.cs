@@ -185,21 +185,33 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// The note a chart shows when its collector's latest run recorded a named skip such as PERMISSIONS and the window has no rows
-    /// (#6861): the sentence <see cref="CollectorRuntimePrecondition.CollectionOutcomeMessage"/> gives the MCP tools'
-    /// <c>precondition</c> answer, which the Darling viewer shows too. The engine note wins, as it does in
-    /// <see cref="EngineGapState"/>. With rows, or for any other status, the note stays hidden and the chart looks as it always did.
+    /// The note a chart shows when its collector's latest run recorded a named skip such as PERMISSIONS, or when the collector
+    /// has no run, and the window has no rows (#6861). The named skip's sentence is
+    /// <see cref="CollectorRuntimePrecondition.CollectionOutcomeReaderMessage"/>: the MCP tools' <c>precondition</c> answer worded
+    /// for a reader, without its closing paragraph for an MCP client, which the Darling viewer and the web page show too. A
+    /// collector with no run takes the same sentences as <see cref="NoRunNote"/>: the shared "not run yet" sentence inside the
+    /// first-run grace, then <see cref="NeverCollectedNote"/>, and only on a server that has collected something. The engine note
+    /// wins, as it does in <see cref="EngineGapState"/>, and a collector with a latest run has run, so a named skip displaces the
+    /// no-run sentences. With rows, or for any other status, the note stays hidden and the chart looks as it always did.
     /// </summary>
     internal static (string Text, Visibility Visibility) CollectorOutcomeState(
         string serverName, bool isAzureSqlDatabase, string collectorName, int rowCount,
-        string? status, string? errorMessage, DateTime? observedUtc)
+        string? status, string? errorMessage, DateTime? observedUtc,
+        DateTime? collectorLastRunUtc, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc)
     {
-        var text = EngineGapNote(serverName, isAzureSqlDatabase, collectorName)
-            ?? (CollectorRuntimePrecondition.IsNamedSkip(status)
-                ? CollectorRuntimePrecondition.CollectionOutcomeMessage(serverName, collectorName, status, errorMessage, observedUtc)
-                : null);
+        string? noRun = null;
 
-        return text is not null && rowCount == 0 ? (text, Visibility.Visible) : ("", Visibility.Collapsed);
+        if (CollectorRuntimePrecondition.IsNamedSkip(status))
+        {
+            noRun = CollectorRuntimePrecondition.CollectionOutcomeReaderMessage(serverName, collectorName, status, errorMessage, observedUtc);
+        }
+        else if (collectorLastRunUtc is null && serverLastCollectedUtc is not null)
+        {
+            noRun = CollectorRuntimePrecondition.NotYetRunMessage(serverName, collectorName, serverLastCollectedUtc, serverFirstCollectedUtc)
+                ?? NeverCollectedNote(serverName, collectorName);
+        }
+
+        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, noRun);
     }
 
     /// <summary>
@@ -217,28 +229,43 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// Fills the tempdb tab's note (#6861). It reads the latest tempdb_stats run only when the window has no tempdb rows and
-    /// the engine does not rule the collector out, and a failed read leaves no note.
+    /// Fills the tempdb tab's note (#6861). It reads the collector's last run and then its latest tempdb_stats run only when the
+    /// window has no tempdb rows and the engine does not rule the collector out. A collector with no run has no status to read.
+    /// A failed read leaves no note.
     /// </summary>
     private async System.Threading.Tasks.Task ShowTempDbOutcomeAsync(int rowCount)
     {
         string? status = null;
         string? errorMessage = null;
         DateTime? observedUtc = null;
+        DateTime? collectorLastRunUtc = null;
+        DateTime? serverLastCollectedUtc = null;
+        DateTime? serverFirstCollectedUtc = null;
 
         if (rowCount == 0 && EngineGapNote(_server.DisplayName, _isAzureSqlDatabase, "tempdb_stats") is null)
         {
             try
             {
-                (status, errorMessage, observedUtc) = await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestCollectorOutcomeAsync(_serverId, "tempdb_stats"));
+                (collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc) =
+                    await System.Threading.Tasks.Task.Run(() => _dataService.GetCollectorLastRunAsync(_serverId, "tempdb_stats"));
+
+                if (collectorLastRunUtc is not null)
+                {
+                    (status, errorMessage, observedUtc) =
+                        await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestCollectorOutcomeAsync(_serverId, "tempdb_stats"));
+                }
             }
             catch (Exception ex)
             {
                 AppLogger.Info("ServerTab", $"[{_server.DisplayName}] tempdb_stats outcome read failed: {ex.Message}");
+                status = null;
+                collectorLastRunUtc = serverLastCollectedUtc = serverFirstCollectedUtc = null;
             }
         }
 
-        var (text, visibility) = CollectorOutcomeState(_server.DisplayName, _isAzureSqlDatabase, "tempdb_stats", rowCount, status, errorMessage, observedUtc);
+        var (text, visibility) = CollectorOutcomeState(
+            _server.DisplayName, _isAzureSqlDatabase, "tempdb_stats", rowCount, status, errorMessage, observedUtc,
+            collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
         TempDbNoDataMessage.Text = text;
         TempDbNoDataMessage.Visibility = visibility;
     }
