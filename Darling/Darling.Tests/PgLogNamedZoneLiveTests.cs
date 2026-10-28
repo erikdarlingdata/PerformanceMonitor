@@ -88,7 +88,8 @@ public sealed class PgLogNamedZoneLiveTests
                 PgLogZoneResolver = async (zone, pairs, token) =>
                 {
                     Interlocked.Increment(ref resolverCalls);
-                    await using var own = new NpgsqlConnection(target);
+                    /* The connection the service gives its own resolver: type loading off, search_path pinned. */
+                    await using var own = PostgresTargetProvider.CreatePinnedConnection(PgLogNamedZoneTests.PinnedConnectionString(target!));
                     await own.OpenAsync(token);
                     return await PgLogNamedZone.ResolveAsync(own, zone, pairs, 30, token);
                 },

@@ -2215,6 +2215,63 @@ public sealed class PgLogEventsPipelineTests
     }
 
     /// <summary>
+    /// #6866: one read on a named-zone target makes exactly one trip to the server to prove its stamps, however many
+    /// lines or repeated stamps the slab holds, and the stored instants are the ones it proved. A UTC target, and a
+    /// named-zone slab with no line to prove, make none.
+    /// </summary>
+    [Fact]
+    public async Task OneReadOnANamedZoneTarget_AsksTheServerOnce_AndAUtcTargetOrAnEmptySlabNever()
+    {
+        var body = "2026-10-24 12:00:00.000 CEST [11] ERROR:  first\n"
+                   + "2026-10-24 12:00:00.000 CEST [12] ERROR:  same stamp\n"
+                   + "2026-10-24 13:30:00.500 CEST [13] ERROR:  later\n";
+        var calls = 0;
+        IReadOnlyCollection<PgLogZonePair>? asked = null;
+
+        CollectorContext Counting()
+        {
+            var context = TestContext();
+            context.PgLogZoneResolver = (_, pairs, _) =>
+            {
+                calls++;
+                asked = pairs;
+                return Task.FromResult<PgLogZoneMap?>(PgLogZoneMap.FromMatches(
+                [
+                    ("2026-10-24 12:00:00.000", "CEST", 1, new DateTime(2026, 10, 24, 10, 0, 0)),
+                    ("2026-10-24 13:30:00.500", "CEST", 1, new DateTime(2026, 10, 24, 11, 30, 0, 500)),
+                ]));
+            };
+            return context;
+        }
+
+        using (var reader = new FakeReader(new object?[][] { new object?[] { body, "Europe/Berlin" } }))
+        {
+            var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, Counting(), CancellationToken.None);
+
+            Assert.Equal(3, rows.Count);
+            Assert.Equal(1, calls);
+            Assert.Equal(2, asked!.Count);
+            Assert.Equal(
+                new[] { new DateTime(2026, 10, 24, 10, 0, 0), new DateTime(2026, 10, 24, 10, 0, 0), new DateTime(2026, 10, 24, 11, 30, 0, 500) },
+                rows.Select(r => r.OccurredAtUtc).OrderBy(t => t).ToArray());
+        }
+
+        calls = 0;
+        using (var reader = new FakeReader(new object?[][] { new object?[] { "no log lines in this slab\n", "Europe/Berlin" } }))
+        {
+            await PgLogEventsCollector.Instance.ReadAsync(reader, Counting(), CancellationToken.None);
+            Assert.Equal(0, calls);
+        }
+
+        using (var reader = new FakeReader(new object?[][] { new object?[] { SelfHostedLog, "UTC" } }))
+        {
+            var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, Counting(), CancellationToken.None);
+            Assert.Equal(15, rows.Count);
+            Assert.Equal(0, calls);
+        }
+    }
+
+    /// <summary>
     /// #4046's other half: when the target's log_timezone is not UTC, or the row carries no setting (a marker arm's
     /// NULL, or a route that could not read it), a line in another zone refuses the read exactly as #2993 did.
     /// </summary>

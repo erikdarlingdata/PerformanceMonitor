@@ -323,7 +323,11 @@ GROUP BY m.stamp, m.zone;";
 
         if (entries.Count > 0 && NeedsServerCheck(logTimezoneIsUtc, logTimezoneSetting, resolver))
         {
-            var zones = await resolver!(logTimezoneSetting!, PairsOf(entries), cancellationToken);
+            /* The same pairs ResolveBodyAsync asks about: a stamp the server cannot be asked is not a pair. With none
+               left there is nothing to prove, so the refusal below stands, exactly as the stderr route keeps it (an
+               empty map would instead drop every record and report the read as clean). */
+            var pairs = PairsOf(entries).Where(p => IsAskable(p.Stamp)).ToList();
+            var zones = pairs.Count == 0 ? null : await resolver!(logTimezoneSetting!, pairs, cancellationToken);
 
             if (zones is not null)
             {

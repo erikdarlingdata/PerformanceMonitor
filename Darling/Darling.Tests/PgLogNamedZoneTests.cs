@@ -14,6 +14,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Targets;
 using Xunit;
 
 namespace Darling.Tests;
@@ -102,6 +104,89 @@ public sealed class PgLogNamedZoneTests
         Assert.Null(zones);
     }
 
+    private static PgLogEntry Entry(string stamp, string zone) =>
+        new($"{stamp} {zone}", zone, DateTime.MinValue, 1, "", "ERROR", "boom", null, null, null, null, null, null, null, "raw");
+
+    /// <summary>
+    /// The csvlog, jsonlog and RDS route and the stderr route agree when there is nothing the server can be asked
+    /// about (every stamp malformed): both keep the refusal, neither asks, and neither reports the read as clean.
+    /// Before, the record route sent an empty ask and got an empty map back, which dropped every record and counted
+    /// them as skipped lines instead of refusing.
+    /// </summary>
+    [Fact]
+    public async Task WhenNoStampCanBeAsked_TheRecordRouteKeepsTheRefusal_AsTheStderrRouteDoes()
+    {
+        var calls = 0;
+        PgLogZoneResolver resolver = (_, _, _) =>
+        {
+            calls++;
+            return Task.FromResult<PgLogZoneMap?>(PgLogZoneMap.Empty);
+        };
+
+        var forged = new List<PgLogEntry> { Entry("2026-13-45 99:99:99.000", "CEST") };
+
+        await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(() =>
+            PgLogNamedZone.FilterEntriesAsync(forged, false, "Europe/Berlin", resolver, CancellationToken.None));
+
+        var body = Line("2026-13-45 99:99:99.000", "CEST", 1, "forged");
+        var zones = await PgLogNamedZone.ResolveBodyAsync(body, false, "Europe/Berlin", resolver, CancellationToken.None);
+        Assert.Null(zones);
+        Assert.Throws<PgLogTimezoneUnsupportedException>(() => PgLogEntryAssembler.Assemble(body, false, null, zones, out _));
+
+        Assert.Equal(0, calls);
+    }
+
+    /// <summary>A setting that is not a named zone is the resolver's refusal (null): the record route refuses with it.</summary>
+    [Fact]
+    public async Task WhenTheResolverRefuses_TheRecordRouteRefuses()
+    {
+        PgLogZoneResolver resolver = (_, _, _) => Task.FromResult<PgLogZoneMap?>(null);
+        var entries = new List<PgLogEntry> { Entry("2026-10-24 12:00:00.000", "-03") };
+
+        await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(() =>
+            PgLogNamedZone.FilterEntriesAsync(entries, false, "-03", resolver, CancellationToken.None));
+    }
+
+    /// <summary>With some stamps askable, a malformed one is skipped and counted while the proven one is stored, in one ask.</summary>
+    [Fact]
+    public async Task WhenSomeStampsCanBeAsked_TheOthersAreSkippedAndCounted_InOneAsk()
+    {
+        var calls = 0;
+        PgLogZoneResolver resolver = (_, pairs, _) =>
+        {
+            calls++;
+            Assert.Equal(new PgLogZonePair("2026-10-24 12:00:00.000", "CEST"), Assert.Single(pairs));
+            return Task.FromResult<PgLogZoneMap?>(Proven(("2026-10-24 12:00:00.000", "CEST", 1, "2026-10-24 10:00:00")));
+        };
+
+        var entries = new List<PgLogEntry> { Entry("2026-10-24 12:00:00.000", "CEST"), Entry("2026-13-45 99:99:99.000", "CEST") };
+
+        var (kept, foreign) = await PgLogNamedZone.FilterEntriesAsync(entries, false, "Europe/Berlin", resolver, CancellationToken.None);
+
+        Assert.Equal(1, calls);
+        Assert.Equal(1, foreign);
+        Assert.Equal(new DateTime(2026, 10, 24, 10, 0, 0, DateTimeKind.Utc), Assert.Single(kept).OccurredAtUtc);
+    }
+
+    /// <summary>
+    /// A connection the way the service opens a monitored target (#6143): from <see cref="PostgresTargetProvider"/>,
+    /// with type loading off and <c>search_path</c> pinned to <c>pg_catalog,pg_temp</c>, so
+    /// <see cref="PgLogNamedZone.ResolveSql"/>'s <c>text[]</c> parameters and <c>timestamp</c> result are proven to read
+    /// on it. Skips, with the reason, when the cluster variable is not set, so a run without it says skipped.
+    /// </summary>
+    internal static async Task<NpgsqlConnection> OpenPinnedAsync(string variable = "DARLING_TEST_PG")
+    {
+        var target = Environment.GetEnvironmentVariable(variable);
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(target), $"Set {variable} to a PostgreSQL connection string to run the #6866 server checks.");
+
+        var connection = PostgresTargetProvider.CreatePinnedConnection(PinnedConnectionString(target!));
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        return connection;
+    }
+
+    internal static string PinnedConnectionString(string target) =>
+        new NpgsqlConnectionStringBuilder(target) { Options = MonitoredServerConnection.PinnedSearchPathOption }.ConnectionString;
+
     /// <summary>The real server renders the reporter's rows, Berlin and Los Angeles, and Moscow's one ambiguous stamp.</summary>
     [Theory]
     [InlineData("Europe/Berlin", "2026-10-25 02:30:00.123", "CEST", "2026-10-25 00:30:00.123")]
@@ -112,15 +197,7 @@ public sealed class PgLogNamedZoneTests
     [InlineData("America/Los_Angeles", "2026-07-04 12:00:00", "PDT", "2026-07-04 19:00:00")]
     public async Task TheServerProvesTheTrueUtcInstant(string setting, string stamp, string abbrev, string expectedUtc)
     {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-
-        if (string.IsNullOrWhiteSpace(connectionString))
-        {
-            return;
-        }
-
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await OpenPinnedAsync();
 
         var zones = await PgLogNamedZone.ResolveAsync(
             connection, setting, new[] { new PgLogZonePair(stamp, abbrev) }, 30, CancellationToken.None);
@@ -133,15 +210,7 @@ public sealed class PgLogNamedZoneTests
     [Fact]
     public async Task TheServer_RejectsTheSkippedHour_TheWrongAbbreviation_TwoMatches_AndANonNamedSetting()
     {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-
-        if (string.IsNullOrWhiteSpace(connectionString))
-        {
-            return;
-        }
-
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await OpenPinnedAsync();
 
         var pairs = new[]
         {
