@@ -19,6 +19,13 @@ namespace PerformanceMonitor.Collectors;
 public readonly record struct IdentityCapacity(BigInteger Used, BigInteger Total, BigInteger Remaining, double PercentUsed);
 
 /// <summary>
+/// How fast a column is filling, from two stored samples of its last value: <see cref="StepsPerDay"/> identity values issued per day
+/// (one step is one increment, so it is in the same unit as <see cref="IdentityCapacity.Remaining"/>) and <see cref="DaysLeft"/>, the days
+/// until the values left are issued at that rate. 0 when the column is already full.
+/// </summary>
+public readonly record struct IdentityExhaustion(double StepsPerDay, double DaysLeft);
+
+/// <summary>
 /// The identity capacity arithmetic for #6875 (<c>identity_capacity</c>), pure so the collector's top-20 filter and the later readers
 /// share one definition.
 ///
@@ -36,6 +43,25 @@ public static class IdentityCapacityMath
 {
     /// <summary>A column is kept only when more than this percent of it is used.</summary>
     public const double MinimumPercentKept = 10.0;
+
+    /// <summary>The percent used at which a column reads as warning (the default the alert uses, #6875).</summary>
+    public const double WarningPercent = 70.0;
+
+    /// <summary>The percent used at which a column reads as critical (the default the alert uses, #6875).</summary>
+    public const double CriticalPercent = 90.0;
+
+    /// <summary>Band word under <see cref="WarningPercent"/>.</summary>
+    public const string BandOk = "ok";
+
+    /// <summary>Band word from <see cref="WarningPercent"/> up to <see cref="CriticalPercent"/>.</summary>
+    public const string BandWarning = "warning";
+
+    /// <summary>Band word from <see cref="CriticalPercent"/> up.</summary>
+    public const string BandCritical = "critical";
+
+    /// <summary>The band of a percent used: ok under 70, warning from 70, critical from 90.</summary>
+    public static string Band(double percentUsed) =>
+        percentUsed >= CriticalPercent ? BandCritical : percentUsed >= WarningPercent ? BandWarning : BandOk;
 
     /// <summary>The most columns kept per database per pass.</summary>
     public const int MaxColumnsPerDatabase = 20;
@@ -118,5 +144,49 @@ public static class IdentityCapacityMath
         /* Four decimals through integer division: exact for any magnitude, where a double division of two 10^38 values is not. */
         var percent = (double)(used * 1_000_000 / total) / 10_000d;
         return new IdentityCapacity(used, total, total - used, percent);
+    }
+
+    /// <summary>
+    /// Days until the column is full, from two samples of <c>last_value</c> (#6875): <paramref name="oldValue"/> at <paramref name="oldTime"/>
+    /// and <paramref name="newValue"/> at <paramref name="newTime"/>. The rate is the values issued per day toward the end the increment moves
+    /// to, <c>(new - old) / |increment| / days</c>, and the days left are <see cref="IdentityCapacity.Remaining"/> at the newer sample over
+    /// that rate. The arithmetic is integer (<see cref="BigInteger"/>, to the tick) until the final division, so a
+    /// <c>decimal(38,0)</c> value is exact.
+    ///
+    /// <para>Null when there is nothing to divide: a missing sample, no time between the samples, a value that did not move (rate 0), one that
+    /// moved away from the end (the column was reseeded between the samples, or its increment is the other sign), or a type with no
+    /// capacity here.</para>
+    /// </summary>
+    public static IdentityExhaustion? EstimateExhaustion(
+        string? dataType, int precision, BigInteger seed, BigInteger increment,
+        BigInteger? oldValue, DateTime oldTime, BigInteger? newValue, DateTime newTime)
+    {
+        if (oldValue is null || newValue is null || newTime <= oldTime)
+        {
+            return null;
+        }
+
+        var steps = ((newValue.Value - oldValue.Value) * increment.Sign);
+        if (steps.Sign <= 0 || increment.IsZero)
+        {
+            return null;
+        }
+
+        steps /= BigInteger.Abs(increment);
+        if (steps.IsZero)
+        {
+            return null;
+        }
+
+        if (Calculate(dataType, precision, seed, increment, newValue) is not { } capacity)
+        {
+            return null;
+        }
+
+        var spanTicks = new BigInteger((newTime - oldTime).Ticks);
+        var ticksPerDay = new BigInteger(TimeSpan.TicksPerDay);
+        var stepsPerDay = (double)(steps * ticksPerDay) / (double)spanTicks;
+        var ticksLeft = capacity.Remaining * spanTicks / steps;
+        return new IdentityExhaustion(stepsPerDay, (double)ticksLeft / (double)ticksPerDay);
     }
 }

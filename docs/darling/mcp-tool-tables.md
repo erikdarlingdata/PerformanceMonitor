@@ -77,6 +77,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_health_parser_severe_errors` | `collect.system_health_events`<br>`collect.collection_log`<br>`collect.database_size_stats`<br>`collect.v_system_health_events`<br>`collect.v_collection_log`<br>`collect.v_database_size_stats` |
 | `get_health_parser_significant_waits` | `collect.system_health_events`<br>`collect.collection_log`<br>`collect.v_system_health_events`<br>`collect.v_collection_log` |
 | `get_health_parser_system_health` | `collect.system_health_events`<br>`collect.collection_log`<br>`collect.v_system_health_events`<br>`collect.v_collection_log` |
+| `get_identity_capacity` | `collect.identity_capacity`<br>`collect.servers` |
 | `get_index_usage` | `collect.index_object_stats` (through the view `collect.v_index_object_stats`) |
 | `get_job_history` | `collect.job_history`<br>`collect.server_properties`<br>`collect.servers`<br>`collect.agent_status`<br>`config.config_alert_settings` |
 | `get_latch_stats` | `collect.latch_stats` (through the view `collect.v_latch_stats`) |

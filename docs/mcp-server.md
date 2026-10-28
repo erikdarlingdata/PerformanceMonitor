@@ -134,6 +134,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Alerts | `get_alert_history`, `get_alert_settings`, `get_mute_rules`, and in Darling `get_known_patterns` (the entries you wrote about alerts that recur) and, with writes on, `create_known_pattern`, `update_known_pattern`, `delete_known_pattern` |
 | Waits | `get_wait_stats`, `get_wait_types`, `get_wait_trend`, `get_waiting_tasks` |
 | Queries | `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_cpu_by_database`, `get_load_by_caller`, `get_query_pileups`, `get_query_store_top`, `get_query_store_aborts`, `get_query_store_query_history`, `get_forced_plans`, `get_query_store_hints`, `get_query_duration_trend`, `get_query_trend`, `get_resource_use_by_tag` |
+| Identity capacity (Darling) | `get_identity_capacity` (how full each identity column is, as percent used, inserts left and the days until it runs out. A warning band starts at 70 percent and a critical band at 90. A scanned database with nothing above 10 percent reads as clean. A database that was not scanned is not listed) |
 | Active Queries | `get_active_queries` |
 | CPU | `get_cpu_utilization` |
 | Memory | `get_memory_stats`, `get_memory_trend`, `get_memory_clerks`, `get_memory_grants`, `get_resource_semaphore` |
