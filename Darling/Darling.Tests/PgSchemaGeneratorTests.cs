@@ -61,7 +61,8 @@ public sealed class PgSchemaGeneratorTests
            CollectorCatalog.AppliesTo(definition, target). */
         /* 73 since #5632: query_store_forced_plans (V195), also a plain table, so the hypertable count stays 71. */
         /* 74 since #6581: query_store_hints (V217), also a plain table, so the hypertable count stays 71. */
-        Assert.Equal(74, CollectorCatalog.All.Count);
+        /* 75 since #6873: database_protection (V222), also a plain table, so the hypertable count stays 71. */
+        Assert.Equal(75, CollectorCatalog.All.Count);
 
         /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here
            had drifted to 45 while the real figure tracked the count, so the test that exists to catch a

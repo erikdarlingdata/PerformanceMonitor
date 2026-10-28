@@ -59,6 +59,7 @@ GRANT SELECT ON dbo.sysjobschedules TO [YourLogin];
 GRANT SELECT ON dbo.syscategories   TO [YourLogin];
 GRANT SELECT ON dbo.syssessions     TO [YourLogin];
 GRANT EXECUTE ON dbo.agent_datetime TO [YourLogin];
+GRANT SELECT ON dbo.backupset      TO [YourLogin];  -- Darling: the last full and log backup per database
 ```
 
 Two operational notes. The msdb grants live inside a system database that SQL Server setup can rewrite — re-check them after a CU or version upgrade. And if a security review rejects `CONNECT ANY DATABASE`, the documented fallback is a real user per database (the same shape as the [FinOps loop below](#finops-index-analysis-per-database-grants), minus the `sql_expression_dependencies` grant) — at the cost of not covering databases created later.

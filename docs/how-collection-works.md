@@ -49,7 +49,7 @@ Optional behaviours a definition can opt into, all with sensible defaults on the
 | `EmitsProbeFailures` | The definition returns a trailing `(item, error)` result set so per-item failures get summarized instead of lost |
 | `YieldsOnLockTimeout` | Treat a lock timeout as "come back later," not an error (only `query_snapshots`) |
 | `StateKeys` | Persist a cursor the SQL can't derive — e.g. `default_trace_events` remembering its last trace file |
-| `CommandTimeoutSecondsOverride` | Raise the command timeout above its default (60 seconds in Darling, 30 in Lite). Five definitions do: `index_object_stats` (300 s), `query_store` (500 s), `query_store_forced_plans` (120 s), `pg_buffer_usage` (120 s) and `pg_wait_sampling` (120 s) |
+| `CommandTimeoutSecondsOverride` | Raise the command timeout above its default (60 seconds in Darling, 30 in Lite). Seven definitions do: `index_object_stats` (300 s), `query_store` (500 s), `query_store_forced_plans` (120 s), `query_store_hints` (120 s), `database_protection` (120 s), `pg_buffer_usage` (120 s) and `pg_wait_sampling` (120 s) |
 | `PerItemTextByteBudget` | Stop a text-heavy drain mid-read and defer the backlog rather than ballooning memory |
 
 ### The three registration tables

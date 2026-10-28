@@ -2450,6 +2450,38 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
         "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.HashHourlyCreateSql;
 
     /// <summary>
+    /// V222 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
+    /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
+    /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
+    /// word for each of the three facts (never, unknown, none_in_window, not_expected, unavailable), so a reader can tell "no backup in 60
+    /// days" from "the platform owns this". The overdue judgment is the reader's. A PLAIN table on every store (<c>StaysPlainTable</c>),
+    /// 90-day time-sliced DELETE. Columns and the (server_id, collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a
+    /// fresh store (V1's catalog walk) and an upgraded one agree. New table, no data moves, no grant (the <c>collect</c> schema carries
+    /// blanket SELECT). Every statement is idempotent.
+    /// </summary>
+    private const string V222Sql = @"
+CREATE TABLE IF NOT EXISTS collect.database_protection (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    state_desc text,
+    recovery_model_desc text,
+    create_date timestamp,
+    replica_role text,
+    platform text,
+    last_good_checkdb_time timestamp,
+    checkdb_state text,
+    last_full_backup_time timestamp,
+    full_backup_state text,
+    last_log_backup_time timestamp,
+    log_backup_state text
+);
+
+CREATE INDEX IF NOT EXISTS idx_database_protection_time ON collect.database_protection(server_id, collection_time);";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2845,6 +2877,7 @@ $rung$;";
         new Migration(219, "query-store-self-keys", V219Sql),
         new Migration(220, "job-history-success-index", V220Sql),
         new Migration(221, "query-store-hash-hourly", V221Sql),
+        new Migration(222, "database-protection", V222Sql),
     };
 
     /// <summary>

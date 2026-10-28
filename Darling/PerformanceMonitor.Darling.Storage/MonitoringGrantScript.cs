@@ -128,6 +128,7 @@ public static class MonitoringGrantScript
         new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.syscategories", false, "Optional: SQL Agent job monitoring."),
         new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.syssessions", false, "Optional: SQL Agent job monitoring."),
         new(GrantSet.Base, GrantScope.Msdb, "EXECUTE", "dbo.agent_datetime", false, "Optional: SQL Agent job monitoring."),
+        new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.backupset", false, "Optional: the last full and log backup per database. Without it the database_protection collector records a permissions skip."),
         new(GrantSet.FinOps, GrantScope.EachDatabase, "VIEW DATABASE STATE", null, true, "FinOps Index Analysis runs sp_IndexCleanup in each database you inspect."),
         new(GrantSet.FinOps, GrantScope.EachDatabase, "VIEW DEFINITION", null, true, "FinOps Index Analysis."),
         new(GrantSet.FinOps, GrantScope.EachDatabase, "SELECT", "sys.sql_expression_dependencies", true,
