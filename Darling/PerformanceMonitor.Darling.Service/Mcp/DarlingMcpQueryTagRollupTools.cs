@@ -164,7 +164,8 @@ public sealed class DarlingMcpQueryTagRollupTools
                 {
                     var from = allowed.Values.Max();
                     /* #6800: the fleet route starts every server's read on the hour, so the first instant read is the rounded-up start and the
-                       section says what that dropped. window_truncated stays the gate's own judgment (the table floor), not the rounding's. */
+                       section says what that dropped. window_truncated is the gate's own judgment (the table floor), not the rounding's, and it is also true
+                       when the backlog cut left the first hours out (#6865): two causes, the second one named by backlog_note. */
                     reach["effective_start"] = McpHelpers.FormatEffectiveStart(read.RoutedStarts is { Count: > 0 } routed ? routed.Values.Max() : from);
                     reach["window_truncated"] = RawWindowFloor.IsTruncated(from, windowStart) || read.BacklogHoursWaiting > 0;
                     if (read.BacklogHoursWaiting > 0)

@@ -272,6 +272,83 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
     }
 
     /// <summary>
+    /// #6865: a writer of the wide table that opens after the six normal builds holds the extra backlog builds back (its start time is not readable, so it
+    /// holds every hour). Those extras are opportunistic: they are the next tick's backlog, so they are not "deferred" and not "deferred for writers". The
+    /// plan held 6 hours and all 6 built, so <c>Deferred</c> is 0, not the 22 extras the writer held. The clock opens the writer the first time it sees six
+    /// hours built, which is before the first extra starts.
+    /// </summary>
+    [Fact]
+    public async Task AWriterThatOpensAfterTheNormalBuilds_HoldsOnlyExtras_SoDeferredStaysAtThePlansOwnZero()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        NpgsqlConnection? writer = null;
+        NpgsqlTransaction? open = null;
+        try
+        {
+            await ExecAsync(connection, "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);
+            await ExecAsync(connection, "DELETE FROM collect.query_store_hash_hourly", ct);
+            var plan = await PlanAsync(connection, hourNow, ct);
+            Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick, plan.Builds.Count);
+            Assert.Equal(22, plan.ExtraBacklog!.Count);
+
+            using var clockConnection = source.OpenConnection();
+            TimeSpan Elapsed()
+            {
+                using var command = new NpgsqlCommand("SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", clockConnection);
+                var built = Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+                if (built >= QueryStoreComposeStamp.MaxBuildsPerTick && writer is null)
+                {
+                    writer = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { ApplicationName = "writer_6865", Options = "-c track_activities=off" }.ConnectionString);
+                    writer.Open();
+                    open = writer.BeginTransaction();
+                    var at = ComposeStampLiveSupport.At(hourNow.AddMinutes(-10));
+                    using var insert = new NpgsqlCommand($@"
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+ module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us, runtime_stats_interval_id)
+VALUES (TIMESTAMP '{at}', 1, 'dbX', 99, 99, 'Regular', TIMESTAMP '{at}', TIMESTAMP '{at}', 'modX', 'hashX', 7, 1000, 500, 2000, 900, 9300001)", writer, open);
+                    insert.ExecuteNonQuery();
+                }
+
+                return TimeSpan.Zero;
+            }
+
+            var now = ComposeStampLiveSupport.ClockWithin(hourNow);
+            var tick = await QueryStoreComposeStamp.RunTickAsync(
+                source, now, ComposeStampLiveSupport.RetentionDays, NullLogger.Instance, Elapsed, ct, new QueryStoreComposeStamp.TickOptions(StoreNow: now));
+
+            Assert.NotNull(writer);
+            Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick, tick.Built);
+            Assert.Equal(tick.Built, tick.BuiltBacklog);
+            Assert.Equal(0, tick.Failed);
+            Assert.Equal(0, tick.Deferred);
+            Assert.Equal(0, tick.DeferredForWriters);
+            Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            if (open is not null)
+            {
+                await open.RollbackAsync(ct);
+            }
+
+            if (writer is not null)
+            {
+                await writer.DisposeAsync();
+            }
+
+            await source.DisposeAsync();
+            await connection.DisposeAsync();
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+            await scratch.DisposeAsync();
+        }
+    }
+
+    /// <summary>
     /// A tick whose clock reads <paramref name="perBuild"/> for every hour already built into the hash table, so the elapsed time the tick sees is what
     /// its builds cost: the budget and the tick limit are reached by building, not by a call counter.
     /// </summary>
@@ -318,6 +395,7 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             Assert.Equal(tick.Built, tick.BuiltBacklog);
             Assert.Equal(0, tick.Failed);
             Assert.Equal(0, tick.Deferred);
+            Assert.Equal(0, tick.DeferredForWriters);
             Assert.Equal(tick.Built, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
             Assert.True(perBuild * tick.Built < QueryStoreComposeStamp.MaxTickDuration);
             bodySucceeded = true;
@@ -355,6 +433,7 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             Assert.Equal(4, started);
             Assert.Equal(started, tick.Built);
             Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick - started, tick.Deferred);
+            Assert.Equal(0, tick.DeferredForWriters);
             Assert.Equal(started, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
             bodySucceeded = true;
         }

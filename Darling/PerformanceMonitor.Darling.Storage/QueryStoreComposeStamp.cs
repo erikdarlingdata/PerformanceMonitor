@@ -89,8 +89,10 @@ public static class QueryStoreComposeStamp
     /// <summary>The most backlog hours (see <see cref="Build.Backlog"/>) one tick builds on top of its <see cref="MaxBuildsPerTick"/> (#6865).</summary>
     public const int MaxExtraBacklogBuilds = 24;
 
-    /// <summary>The wall-clock budget of a tick's extra backlog builds (#6865): no extra build starts once they have run this long. About 21 s
-    /// of the tick's 10 minutes is the normal six builds, so three minutes is a fraction of <see cref="MaxTickDuration"/> and about 50 more hours.</summary>
+    /// <summary>The wall-clock budget of a tick's extra backlog builds (#6865): no extra build starts once they have run this long. It is a fraction of
+    /// <see cref="MaxTickDuration"/> (the normal six builds take about 21 s of it). At that speed (about 3.5 s a build) the budget would allow about 50
+    /// hours, so <see cref="MaxExtraBacklogBuilds"/> (24, which makes 6 + 24 = 30 hours a tick) is what ends the extras, and the budget binds only when a
+    /// build takes more than about 7.5 s (3 minutes over 24 builds).</summary>
     public static readonly TimeSpan ExtraBacklogBudget = TimeSpan.FromMinutes(3);
 
     /// <summary>The server-side <c>statement_timeout</c> each build's transaction runs under.</summary>
@@ -1323,7 +1325,13 @@ WHERE hour < $1;";
             {
                 if (await BuildHourAsync(connection, item.Hour, nowUtc, cancellationToken, statementTimeoutSeconds: timeoutSeconds) is null)
                 {
-                    deferredForWriters++;
+                    /* Only a plan hour is "deferred" by a writer: an extra the writer held is opportunistic and is the next tick's backlog, so it is in
+                       neither Deferred nor the writer warning's count (it would report hours the plan never held, #6865). */
+                    if (!isExtra)
+                    {
+                        deferredForWriters++;
+                    }
+
                     continue;
                 }
 

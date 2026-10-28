@@ -126,7 +126,7 @@ public static class DarlingQueryTagRollupReader
             return new QueryStoreRead(allowed, refused, facts, false);
         }
 
-        return await ReadAllowedAsync(connection, allowed, refused, windowEnd, readSeconds, cancellationToken);
+        return await ReadAllowedAsync(connection, allowed, refused, windowStart, windowEnd, readSeconds, cancellationToken);
     }
 
     /// <summary>
@@ -136,13 +136,13 @@ public static class DarlingQueryTagRollupReader
     /// start, and each stale pair, with its own server (#6800 part 2, step 2b).
     /// </summary>
     internal static async Task<QueryStoreRead> ReadAllowedAsync(
-        NpgsqlConnection connection, Dictionary<int, DateTime> allowed, Dictionary<int, string> refused, DateTime windowEnd, int readSeconds, CancellationToken cancellationToken)
+        NpgsqlConnection connection, Dictionary<int, DateTime> allowed, Dictionary<int, string> refused, DateTime windowStart, DateTime windowEnd, int readSeconds, CancellationToken cancellationToken)
     {
         var facts = new List<QueryTagRollupFact>();
         /* #6800 part 2: a fleet read takes the hours the hourly builder has done from collect.query_store_hash_hourly and the rest from the
            wide table (QueryTagRollupHashRoute). One server, a store without the table, or no hour the table can answer yet: today's
            statement. The route's two small reads and the statement share this snapshot. */
-        var route = await QueryTagRollupHashRoute.TryPlanAsync(connection, allowed, windowEnd, readSeconds, cancellationToken);
+        var route = await QueryTagRollupHashRoute.TryPlanAsync(connection, allowed, windowStart, windowEnd, readSeconds, cancellationToken);
         try
         {
             await using var command = route is null

@@ -66,9 +66,16 @@ public static class QueryTagUsageNotes
         return sentences.Count == 0 ? lead : lead + " " + string.Join(" ", sentences);
     }
 
-    /// <summary>#6865: the fleet read leaves out the hours that wait for the hourly builder, so the section is the newest span that needs none of them.</summary>
-    public static string QueryStoreBacklog(DateTime servedStart, int hoursLeftOut, int hoursWaiting, Func<DateTime, string> at) =>
-        QueryTagRollupHashRoute.BacklogNote(at(servedStart), hoursLeftOut, hoursWaiting);
+    /// <summary>
+    /// #6865: the fleet read leaves out the hours that wait for the hourly builder, so the section is the newest span that needs none of them.
+    /// <paramref name="edgesNote"/> is the tier and edges sentence the same read produced (<see cref="QueryStore"/>), if any: it stays, after the backlog
+    /// sentence, the order the tool's keys and the page give them.
+    /// </summary>
+    public static string QueryStoreBacklog(DateTime servedStart, int hoursLeftOut, int hoursWaiting, Func<DateTime, string> at, string? edgesNote = null)
+    {
+        var backlog = QueryTagRollupHashRoute.BacklogNote(at(servedStart), hoursLeftOut, hoursWaiting);
+        return string.IsNullOrEmpty(edgesNote) ? backlog : backlog + " " + edgesNote;
+    }
 
     /// <summary>A raw read that starts after the window does: what the raw collections still hold.</summary>
     public static string RawFloor(string sectionName, DateTime effectiveStart, Func<DateTime, string> at) =>

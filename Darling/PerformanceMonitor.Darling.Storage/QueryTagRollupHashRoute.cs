@@ -189,13 +189,15 @@ public static class QueryTagRollupHashRoute
     /// are read exactly as without a backlog (table hours, day rows, the tail, and real late-write stale pairs from the wide table).
     /// Pure. <paramref name="backlogHours"/> are the backlog hours of the ledger. Returns each server's start moved to the end of the newest backlog hour
     /// when that is later than its own start (the starts are the snapped ones), and how many distinct backlog hours lie in the span the read would
-    /// otherwise have covered (<c>HoursWaiting</c>), and how many whole hours the read leaves out, from the first whole hour of the window to where the
-    /// figures start (<c>HoursLeftOut</c>: the latest server's start after the move, which is the cut unless a server's own start is already past it,
-    /// so the count and the start the notes name are the same instant; it holds the backlog hours plus every other hour before that start);
+    /// otherwise have covered (<c>HoursWaiting</c>), and how many whole hours the read leaves out, from the first whole hour of the REQUESTED window
+    /// (<paramref name="windowStart"/>, not the earliest read start: the interval table's floor may already have cut the starts) to where the figures
+    /// start (<c>HoursLeftOut</c>: the latest server's start after the move, which is the cut unless a server's own start is already past it,
+    /// so the count and the start the notes name are the same instant; it holds the backlog hours plus every other hour before that start, among them
+    /// the hours the table's floor cut);
     /// an empty dictionary and 0, 0 when no backlog hour is in the span.
     /// </summary>
     public static (Dictionary<int, DateTime> Starts, int HoursWaiting, int HoursLeftOut) SpanPastBacklog(
-        IReadOnlyDictionary<int, DateTime> readStarts, DateTime windowEnd, ISet<DateTime> backlogHours)
+        IReadOnlyDictionary<int, DateTime> readStarts, DateTime windowStart, DateTime windowEnd, ISet<DateTime> backlogHours)
     {
         ArgumentNullException.ThrowIfNull(readStarts);
         ArgumentNullException.ThrowIfNull(backlogHours);
@@ -222,13 +224,13 @@ public static class QueryTagRollupHashRoute
         /* The count runs to the instant every surface names as the start of the figures: the latest server's snapped start, which is the cut
            unless a server's own start (a server added later) is already past it. */
         var figuresStart = moved.Values.Select(CeilHour).Max();
-        return (moved, inSpan.Count, (int)((figuresStart - first).TotalHours));
+        return (moved, inSpan.Count, (int)((figuresStart - CeilHour(windowStart)).TotalHours));
     }
 
     /// <summary>
     /// #6865: the one sentence the MCP section, the Viewer and (as a copy in query-tag-usage.js) the web page give when the read leaves out the first
-    /// hours of the window. <paramref name="hoursLeftOut"/> is the size of the gap, <paramref name="hoursWaiting"/> the backlog hours inside it that
-    /// are the reason. The two are different numbers, and the text never gives the second as the first.
+    /// hours of the window. <paramref name="hoursLeftOut"/> is the size of the gap, counted from the window's first whole hour, and
+    /// <paramref name="hoursWaiting"/> the backlog hours inside it that are the reason. The two are different numbers, and the text never gives the second as the first.
     /// </summary>
     public static string BacklogNote(string startText, int hoursLeftOut, int hoursWaiting) =>
         $"The figures start at {startText}, which leaves out the first {hoursLeftOut} {(hoursLeftOut == 1 ? "hour" : "hours")} of the window, because "
@@ -243,7 +245,7 @@ public static class QueryTagRollupHashRoute
     /// could return no rows for that server (#6800 step 3c). Do not move the day read out of this transaction.
     /// </summary>
     public static async Task<Plan?> TryPlanAsync(
-        NpgsqlConnection connection, IReadOnlyDictionary<int, DateTime> allowed, DateTime windowEnd, int readSeconds, CancellationToken cancellationToken)
+        NpgsqlConnection connection, IReadOnlyDictionary<int, DateTime> allowed, DateTime windowStart, DateTime windowEnd, int readSeconds, CancellationToken cancellationToken)
     {
         if (allowed.Count < 2 || StorageVersion.SchemaVersion < MinSchemaVersion)
         {
@@ -308,7 +310,7 @@ public static class QueryTagRollupHashRoute
            back-off, or retried by the normal selection), so it may not build for a day or more, and an hour that stays stale must not pin the cut
            and take every older hour with it. Such an hour is read wide, as before, unless a backlog hour newer than it puts it before the cut. */
         var backlog = stale.Select(p => p.Hour).Where(h => built.Contains(h) && !lateWriteHours.Contains(h) && !failingHours.Contains(h)).ToHashSet();
-        var (moved, waiting, leftOut) = SpanPastBacklog(allowed, windowEnd, backlog);
+        var (moved, waiting, leftOut) = SpanPastBacklog(allowed, windowStart, windowEnd, backlog);
         var plan = Split(waiting == 0 ? allowed : moved, windowEnd, built, stale, validDays) with { BacklogHoursWaiting = waiting, BacklogHoursLeftOut = leftOut };
         /* With hours left out the route answers even with no table hour in the span: today's statement would read the whole window wide. */
         return waiting == 0 && plan.TablePairs.Count == 0 && plan.DayPairs.Count == 0 ? null : plan;

@@ -190,7 +190,7 @@ JOIN (VALUES (1, 'hash1', 'tag-a'), (1, 'hash2', 'tag-b'), (2, 'hash1', 'tag-a')
         Assert.True(read.UsedHashHourly, what);
         Assert.NotEmpty(read.Facts);
         Assert.Equal(Canon(await TodaysAsync(a, Snapped(read), end, ct)), Canon(read.Facts));
-        var plan = await QueryTagRollupHashRoute.TryPlanAsync(a.Connection, Servers.ToDictionary(s => s, _ => start), end, 120, ct);
+        var plan = await QueryTagRollupHashRoute.TryPlanAsync(a.Connection, Servers.ToDictionary(s => s, _ => start), start, end, 120, ct);
         Assert.NotNull(plan);
         Assert.Equal(plan.UsesDays, read.UsedHashDaily);
         return plan;
