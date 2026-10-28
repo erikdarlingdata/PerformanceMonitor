@@ -172,9 +172,6 @@ public sealed class QueryStoreComposeStampTests
     {
         var plan = QueryStoreComposeStamp.PlanSql;
         Assert.Contains("ORDER BY p.stale DESC, p.blocked, p.hour DESC", plan, StringComparison.Ordinal);
-        /* The cap is per kind (stale, never built) and per blocked (an hour an open writer would defer); ChooseBuilds splits one tick's builds between the two kinds. */
-        Assert.Contains("row_number() OVER (PARTITION BY u.stale, u.blocked ORDER BY u.hour DESC)", plan, StringComparison.Ordinal);
-        Assert.Contains("WHERE p.rn <= $2", plan, StringComparison.Ordinal);
         Assert.Contains("b.built_seq IS DISTINCT FROM b.late_seq", plan, StringComparison.Ordinal);
         /* The build lag is read off the STORE's clock, the one the row trigger's WHEN uses; the service's clock is only the retention floor. */
         /* #5867: the store clock moved into the plan's clock CTE, which the failure filter reads too. */
@@ -478,5 +475,51 @@ public sealed class QueryStoreComposeStampTests
         Assert.Contains("QueryStoreComposeStamp.RunTickAsync(", builder, StringComparison.Ordinal);
         Assert.Contains("DarlingRetention.QueryStoreIntervalWideRetentionDays", builder, StringComparison.Ordinal);
         Assert.DoesNotContain("throw", builder, StringComparison.Ordinal);
+    }
+
+    private static QueryStoreComposeStamp.Build Backlog(int hoursAgo) => B(hoursAgo, true) with { Backlog = true };
+
+    /// <summary>#6865: hours that are stale only for the hash table do not take the never-built half. The never-built hours build first,
+    /// and the backlog fills the rest of the tick; a real late-write stale hour still takes its half.</summary>
+    [Fact]
+    public void ChooseBuilds_GivesBacklogHoursNoShareOfTheNeverBuiltHalf_AndLetsThemFillWhatIsLeft()
+    {
+        var backlog = Enumerable.Range(10, 40).Select(Backlog).ToList();
+
+        /* One never-built hour waiting: it builds, and the backlog gets the other five slots (the old rule gave it three). */
+        var one = QueryStoreComposeStamp.ChooseBuilds(backlog.Append(B(3, false)).ToList(), 6);
+        Assert.Equal(new[] { B(3, false), Backlog(10), Backlog(11), Backlog(12), Backlog(13), Backlog(14) }, one);
+
+        /* Late-write stale hours keep the protection: stale takes half, the never-built hours take the rest, and the backlog gets none. */
+        var late = Enumerable.Range(3, 10).Select(h => B(h, true));
+        var missing = Enumerable.Range(20, 10).Select(h => B(h, false));
+        var mixed = QueryStoreComposeStamp.ChooseBuilds(late.Concat(missing).Concat(backlog).ToList(), 6);
+        Assert.Equal(new[] { B(3, true), B(4, true), B(5, true), B(20, false), B(21, false), B(22, false) }, mixed);
+
+        /* Late-write stale hours with no never-built hour waiting take the whole tick before the backlog does. */
+        var noMissing = QueryStoreComposeStamp.ChooseBuilds(late.Concat(backlog).ToList(), 6);
+        Assert.Equal(Enumerable.Range(3, 6).Select(h => B(h, true)), noMissing);
+    }
+
+    [Fact]
+    public void ChooseExtraBacklog_TakesTheBacklogHoursTheTickDidNotChoose_NewestFirst_AtMostTheCap_AndNeverAFailedOrLateWriteHour()
+    {
+        var candidates = Enumerable.Range(10, 40).Select(Backlog).ToList();
+        candidates.Add(B(4, true));
+        candidates.Add(B(5, false));
+        candidates.Add(Backlog(6) with { Failures = 2 });
+        var chosen = QueryStoreComposeStamp.ChooseBuilds(candidates, 6);
+
+        var extra = QueryStoreComposeStamp.ChooseExtraBacklog(candidates, chosen, QueryStoreComposeStamp.MaxExtraBacklogBuilds);
+
+        Assert.Equal(24, extra.Count);
+        Assert.All(extra, b => Assert.True(b.Backlog && b.Failures == 0));
+        Assert.DoesNotContain(extra, b => chosen.Any(c => c.Hour == b.Hour));
+        /* The normal builds took the late-write hour (4), the never-built hour (5), the failed backlog hour (6) and backlog 10, 11, 12; the extras are 13 on, newest first. */
+        Assert.Equal(extra.OrderByDescending(b => b.Hour).Select(b => b.Hour), extra.Select(b => b.Hour));
+        Assert.Equal(B(13, true).Hour, extra[0].Hour);
+        Assert.Equal(B(36, true).Hour, extra[^1].Hour);
+        Assert.Empty(QueryStoreComposeStamp.ChooseExtraBacklog(candidates, chosen, 0));
+        Assert.Empty(QueryStoreComposeStamp.ChooseExtraBacklog(Array.Empty<QueryStoreComposeStamp.Build>(), Array.Empty<QueryStoreComposeStamp.Build>(), 24));
     }
 }

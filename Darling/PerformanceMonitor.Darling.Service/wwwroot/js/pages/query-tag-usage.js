@@ -181,6 +181,14 @@ export function edgesText(block) {
   return sentences.length ? sentences.join(" ") : null;
 }
 
+/** #6865: why the section starts later than the window does, in the page's own clock. */
+export function backlogText(block) {
+  const n = block.backlog_hours_waiting;
+  const start = typeof block.effective_start === "string" && parseUtc(block.effective_start) ? localTime(block.effective_start) : null;
+  return "The full window took too long to read, because " + n + (n === 1 ? " hour is" : " hours are") + " still being built into the hourly Query Store table. "
+    + (start ? "The figures start at " + start + " instead of the start of the window. " : "") + "The full window answers once they are built.";
+}
+
 /** A section with no rows in the window says so in one line; the table of zeros under it is not drawn. */
 function isEmptyBlock(block) {
   return !!block && block.status === "empty";
@@ -196,6 +204,8 @@ export function sectionCard(section, block, onTag, range = "this time range", se
   if (section.name === "deadlocks") parts.push(el("div", { class: "muted", text: DEADLOCK_NOTE }));
   /* #6794: an hourly-rollup section says which edges the hour buckets moved (the note names the materialization ceiling). */
   const edges = edgesText(block);
+  /* #6865: a fleet read that timed out while hours wait for the hourly builder is the newest span that needs none of them. */
+  if (block.window_truncated === true && Number.isInteger(block.backlog_hours_waiting) && block.backlog_hours_waiting > 0) parts.push(el("div", { class: "muted", text: backlogText(block) }));
   if (edges) parts.push(el("div", { class: "muted", text: edges }));
   else if (block.tier === "hourly" && block.window_end && parseUtc(block.window_end)) parts.push(el("div", { class: "muted", text: "Read from the hourly rollup up to " + localTime(block.window_end) + "." }));
   if (isEmptyBlock(block) && !Array.isArray(block.servers)) {

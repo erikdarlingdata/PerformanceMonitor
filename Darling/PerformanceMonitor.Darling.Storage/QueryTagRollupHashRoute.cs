@@ -165,6 +165,47 @@ public static class QueryTagRollupHashRoute
         return new Plan(tablePairs, wideRanges, starts, readStarts.Count == 0 ? windowEnd : DateTime.SpecifyKind(readStarts.Values.Max(), DateTimeKind.Unspecified), dayPairs);
     }
 
+    /// <summary>The newest span of a plan that needs no backlog hour (<see cref="NarrowPastBacklog"/>): the narrowed plan and how many distinct hours it left out
+    /// because they are still waiting for the hourly builder.</summary>
+    public readonly record struct Narrowed(Plan Plan, int HoursWaiting);
+
+    /// <summary>
+    /// #6865: the plan for the newest span whose whole hours are table hours or day rows, for a read whose full plan timed out because hours
+    /// the hourly builder has not done yet (or whose hash rows are stale) had to be read from the wide table. The start moves to the end of the
+    /// newest wide range that is not the tail, every server's start moving to it at least, so nothing older than it is read and no hour of the
+    /// span needs the wide table except the tail, which is always wide. Null when the plan has no such range (nothing to leave out, so a
+    /// timeout has another cause). Pure: no connection.
+    /// </summary>
+    public static Narrowed? NarrowPastBacklog(Plan plan, DateTime windowEnd)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        var wholeEnd = FloorHour(windowEnd);
+        var backlog = plan.WideRanges.Where(r => r.To <= wholeEnd).ToList();
+        if (backlog.Count == 0)
+        {
+            return null;
+        }
+
+        var cut = backlog.Max(r => r.To);
+        var waiting = new HashSet<DateTime>();
+        foreach (var range in backlog)
+        {
+            for (var hour = range.From; hour < range.To; hour = hour.Add(Hour))
+            {
+                waiting.Add(hour);
+            }
+        }
+
+        var starts = plan.Starts.ToDictionary(s => s.Key, s => s.Value < cut ? cut : s.Value);
+        var narrowed = new Plan(
+            plan.TablePairs.Where(p => p.Hour >= cut).ToList(),
+            plan.WideRanges.Where(r => r.From >= cut).ToList(),
+            starts,
+            cut,
+            plan.DayPairs.Where(p => p.Day >= cut).ToList());
+        return new Narrowed(narrowed, waiting.Count);
+    }
+
     /// <summary>
     /// Decides whether the fleet read is routed and, if so, how: null means today's statement (one allowed server, a store below
     /// <see cref="MinSchemaVersion"/> or without the table, or no hour the table can answer yet, for example right after the upgrade before the

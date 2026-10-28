@@ -66,6 +66,11 @@ public static class QueryTagUsageNotes
         return sentences.Count == 0 ? lead : lead + " " + string.Join(" ", sentences);
     }
 
+    /// <summary>#6865: the full window timed out while hours wait for the hourly builder, so the section is the newest span that needs none of them.</summary>
+    public static string QueryStoreBacklog(DateTime servedStart, int hoursWaiting, Func<DateTime, string> at) =>
+        $"The full window took too long to read, because {hoursWaiting} {(hoursWaiting == 1 ? "hour is" : "hours are")} still being built into the hourly Query Store table. "
+        + "The figures start at " + at(servedStart) + " instead of the start of the window. The full window answers once they are built.";
+
     /// <summary>A raw read that starts after the window does: what the raw collections still hold.</summary>
     public static string RawFloor(string sectionName, DateTime effectiveStart, Func<DateTime, string> at) =>
         $"The raw {sectionName} collections no longer hold the whole window. The figures start at {at(effectiveStart)}.";

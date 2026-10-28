@@ -112,6 +112,13 @@ public sealed partial class ViewerDataService
                 notes[QueryTagRollupSection.QueryStore.Name] = QueryTagUsageNotes.QueryStore(qs.UsedHashDaily, first, qs.StartDroppedFrom, endUtc, at);
             }
 
+            if (qs.BacklogHoursWaiting > 0)
+            {
+                /* #6865: the fleet read ran into the statement timeout while hours wait for the hourly builder; this is the newest span that needs none. */
+                var served = qs.RoutedStarts is { Count: > 0 } span ? span.Values.Max() : startUtc;
+                notes[QueryTagRollupSection.QueryStore.Name] = QueryTagUsageNotes.QueryStoreBacklog(served, qs.BacklogHoursWaiting, at);
+            }
+
             if (qs.Allowed.Count == 0)
             {
                 unavailable[QueryTagRollupSection.QueryStore.Name] = "Query Store is read from the composed interval table only, and it is not readable here: "

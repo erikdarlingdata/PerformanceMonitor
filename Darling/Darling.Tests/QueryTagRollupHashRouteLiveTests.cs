@@ -610,6 +610,54 @@ AND first_execution_time <= LEAST(TIMESTAMP '{At(group.Key.To)}', TIMESTAMP '{At
     }
 
     /// <summary>
+    /// #6865: a fleet read that runs into the statement timeout while hours wait for the hourly builder is answered from the newest span that
+    /// needs none of them, with the count of hours it left out. The first attempt is forced to time out through the reader's test seam. The
+    /// answer must equal the wide statement's over that span, and a read that finishes keeps its full window.
+    /// </summary>
+    [Fact]
+    public async Task ARoutedReadThatTimesOut_AnswersTheNewestSpanWithNoBacklogHour_AndSaysHowManyHoursWait()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var a = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            /* The state mid-backlog: the hours 13 and more back have no valid hash rows (the post-V221 state), the newer ones do. */
+            var backlogBelow = a.HourNow.AddHours(-12);
+            await ExecAsync(a.Connection, $"UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL WHERE hour < TIMESTAMP '{At(backlogBelow)}'", ct);
+            await ExecAsync(a.Connection, $"DELETE FROM collect.query_store_hash_hourly WHERE hour < TIMESTAMP '{At(backlogBelow)}'", ct);
+            var starts = Servers.ToDictionary(s => s, _ => a.Start);
+
+            /* A read that finishes: the full window, no backlog note. */
+            var full = await FleetFromAsync(a, starts, ct);
+            Assert.True(full.UsedHashHourly);
+            Assert.Equal(0, full.BacklogHoursWaiting);
+            Assert.All(full.RoutedStarts!.Values, start => Assert.Equal(QueryTagRollupHashRoute.CeilHour(a.Start), start));
+
+            /* The same read with its first attempt forced past a 1 ms statement timeout. */
+            await using var transaction = await a.Connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct);
+            var cut = await DarlingQueryTagRollupReader.ReadAllowedAsync(
+                a.Connection, new Dictionary<int, DateTime>(starts), [], a.End, 120, ct, firstAttemptStatementTimeout: TimeSpan.FromMilliseconds(1));
+            await transaction.CommitAsync(ct);
+
+            Assert.True(cut.UsedHashHourly);
+            /* Hours 23 back to 13 back wait: 11 of them. */
+            Assert.Equal(11, cut.BacklogHoursWaiting);
+            Assert.All(cut.RoutedStarts!.Values, start => Assert.Equal(backlogBelow, start));
+            Assert.Equal(3, cut.RoutedStarts!.Count);
+            Assert.NotEmpty(cut.Facts);
+            var span = Servers.ToDictionary(s => s, _ => backlogBelow);
+            Assert.Equal(Canon(await TodaysAsync(a, span, a.End, ct)), Canon(cut.Facts));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(a, bodySucceeded);
+        }
+    }
+
+    /// <summary>
     /// The batched Query Store commands bind their servers and each server's own start (or stale pairs) as parallel arrays, and nothing
     /// else would show a mis-pairing: when every server resolves to the same start, reversing one array changes no figure. Here the three
     /// servers read from three different starts and each has stale hours of its own. Both batched commands are reached through the
