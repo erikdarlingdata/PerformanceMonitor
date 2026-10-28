@@ -53,7 +53,7 @@ public sealed partial class ViewerDataService
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
         if (read.HasScan)
         {
-            return new ViewerIdentityCapacityRead(read.Columns.Count > 0 || read.Unscanned.Count > 0 ? ViewerIdentityCapacityRead.Data : ViewerIdentityCapacityRead.Empty, null, read);
+            return new ViewerIdentityCapacityRead(read.Columns.Count > 0 || read.Unscanned.Count > 0 || read.Skipped.Count > 0 ? ViewerIdentityCapacityRead.Data : ViewerIdentityCapacityRead.Empty, null, read);
         }
 
         var engineGap = ViewerServerTab.EngineGapNote(server.DisplayName, server.EngineEdition, server.EngineKind, "identity_capacity");

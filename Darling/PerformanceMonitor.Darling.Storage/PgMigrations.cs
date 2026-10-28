@@ -2478,7 +2478,8 @@ CREATE TABLE IF NOT EXISTS collect.identity_capacity (
     last_value numeric(38,0),
     seed_value numeric(38,0),
     increment_value numeric(38,0),
-    percent_used double precision
+    percent_used double precision,
+    skip_reason text
 );
 
 CREATE INDEX IF NOT EXISTS idx_identity_capacity_time ON collect.identity_capacity(server_id, collection_time);

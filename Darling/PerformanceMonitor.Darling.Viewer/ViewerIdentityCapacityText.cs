@@ -58,7 +58,7 @@ public static class ViewerIdentityCapacityText
         var critical = scan.Columns.Count(c => c.Band == IdentityCapacityMath.BandCritical);
         var warning = scan.Columns.Count(c => c.Band == IdentityCapacityMath.BandWarning);
         return string.Create(CultureInfo.InvariantCulture,
-            $"Critical: {critical}   Warning: {warning}   Columns above 10 percent: {scan.Columns.Count}   Databases scanned: {scan.Databases.Count}   Not yet scanned: {scan.Unscanned.Count}");
+            $"Critical: {critical}   Warning: {warning}   Columns above 10 percent: {scan.Columns.Count}   Databases scanned: {scan.Databases.Count}   Not yet scanned: {scan.Unscanned.Count}   Skipped: {scan.Skipped.Count}");
     }
 
     /// <summary>The columns, critical and warning first (the reader's order is fullest first), one row each.</summary>
@@ -92,7 +92,9 @@ public static class ViewerIdentityCapacityText
                 LocalTime(d.ScannedAt)));
         var waiting = read.Read.Unscanned
             .Select(u => new ViewerIdentityScanRow(u.DatabaseName, NotYetScanned, u.LastScannedAt is { } last ? LocalTime(last) : Dash));
-        return scanned.Concat(waiting).ToList();
+        var skipped = read.Read.Skipped
+            .Select(u => new ViewerIdentityScanRow(u.DatabaseName, char.ToUpperInvariant(u.Text[0]) + u.Text[1..], u.LastScannedAt is { } last ? LocalTime(last) : Dash));
+        return scanned.Concat(waiting).Concat(skipped).ToList();
     }
 
     private static string LocalTime(DateTime utc) =>

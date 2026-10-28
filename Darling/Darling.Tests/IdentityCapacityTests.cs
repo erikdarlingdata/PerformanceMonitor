@@ -149,14 +149,18 @@ public sealed class IdentityCapacityCollectorTests
         table.Columns.Add("last_value", typeof(string));
         table.Columns.Add("seed_value", typeof(string));
         table.Columns.Add("increment_value", typeof(string));
+        table.Columns.Add("skip_reason", typeof(string));
         return table;
     }
 
     private static void AddMarker(DataTable table) =>
-        table.Rows.Add(DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value);
+        table.Rows.Add(DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value);
+
+    private static void AddSkip(DataTable table, string reason) =>
+        table.Rows.Add(DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, reason);
 
     private static void AddInt(DataTable table, string name, long last) =>
-        table.Rows.Add("dbo", name, "id", "int", 10, last.ToString(System.Globalization.CultureInfo.InvariantCulture), "1", "1");
+        table.Rows.Add("dbo", name, "id", "int", 10, last.ToString(System.Globalization.CultureInfo.InvariantCulture), "1", "1", DBNull.Value);
 
     private static async Task<List<IdentityCapacityCollector.Row>> ReadAsync(string database, DataTable table)
     {
@@ -203,9 +207,12 @@ public sealed class IdentityCapacityCollectorTests
         var query = IdentityCapacityCollector.Instance.BuildEnumerationQuery(context)!;
 
         Assert.Contains("d.state_desc = N'ONLINE'", query.Text, StringComparison.Ordinal);
-        Assert.Contains("d.source_database_id IS NULL", query.Text, StringComparison.Ordinal);
         Assert.Contains("d.database_id > 4", query.Text, StringComparison.Ordinal);
-        Assert.Contains("drs.is_primary_replica = 1", query.Text, StringComparison.Ordinal);
+
+        /* A snapshot, a secondary and a database the login cannot enter stay in the list: the per-database text records each with its reason. */
+        Assert.DoesNotContain("source_database_id", query.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("is_primary_replica", query.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("HAS_DBACCESS", query.Text, StringComparison.Ordinal);
         Assert.Contains("@scope_db_0", query.Text, StringComparison.Ordinal);
         Assert.Contains("@excl_db_0", query.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("/*EXCLUSION_FILTER*/", query.Text, StringComparison.Ordinal);
@@ -220,6 +227,55 @@ public sealed class IdentityCapacityCollectorTests
     }
 
     [Fact]
+    public void ADatabaseTheCollectorSkipsOnPurpose_IsAnsweredWithItsReasonBeforeItIsEntered()
+    {
+        var perItem = IdentityCapacityCollector.Instance.BuildPerItemQuery("O'Brien", Context()).Text;
+
+        /* The catalog check names the item (quote-doubled), the three reasons, and answers before the database is entered. */
+        Assert.Contains("WHERE d.name = N'O''Brien'", perItem, StringComparison.Ordinal);
+        Assert.Contains("THEN 'snapshot'", perItem, StringComparison.Ordinal);
+        Assert.Contains("THEN 'secondary'", perItem, StringComparison.Ordinal);
+        Assert.Contains("THEN 'no_access'", perItem, StringComparison.Ordinal);
+        Assert.Contains("HAS_DBACCESS(d.name) <> 1", perItem, StringComparison.Ordinal);
+        Assert.Contains("d.source_database_id IS NOT NULL", perItem, StringComparison.Ordinal);
+        Assert.Contains("ISNULL(drs.is_primary_replica, 0) <> 1", perItem, StringComparison.Ordinal);
+        var answer = perItem.IndexOf("skip_reason = @skip_reason", StringComparison.Ordinal);
+        var returns = perItem.IndexOf("RETURN;", StringComparison.Ordinal);
+        var enter = perItem.IndexOf("EXECUTE [O'Brien].sys.sp_executesql", StringComparison.Ordinal);
+        Assert.True(answer > 0 && answer < returns && returns < enter, "the skip answer and RETURN come before the database is entered");
+
+        /* The payload carries the ninth column on both result sets of its UNION. */
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(IdentityCapacityCollector.BuildPayloadBody(), "varchar\(20\), NULL").Count);
+    }
+
+    [Theory]
+    [InlineData("secondary", "not scanned: readable secondary")]
+    [InlineData("snapshot", "not scanned: database snapshot")]
+    [InlineData("no_access", "not scanned: the monitoring login has no access to this database (on Amazon RDS it needs a user in each database)")]
+    public async Task ASkippedDatabase_StoresOneRowWithItsReason_NoMarker_AndNoColumns(string reason, string text)
+    {
+        var table = NewTable();
+        AddSkip(table, reason);
+
+        var rows = await ReadAsync("SkippedDb", table);
+
+        var row = Assert.Single(rows);
+        Assert.True(row.IsSkip);
+        Assert.False(row.IsMarker, "a skipped database is not a scan marker");
+        Assert.Equal(reason, row.SkipReason);
+        Assert.Equal("SkippedDb", row.DbName);
+        Assert.Null(row.ColumnName);
+        Assert.Equal(text, IdentityCapacityCollector.SkipReasonText(reason));
+    }
+
+    [Fact]
+    public void AnUnknownSkipReason_HasNoSentenceOfItsOwn()
+    {
+        Assert.Null(IdentityCapacityCollector.SkipReasonText("made_up"));
+        Assert.Null(IdentityCapacityCollector.SkipReasonText(null));
+    }
+
+    [Fact]
     public async Task ACleanDatabase_StoresTheMarkerRowAlone()
     {
         var table = NewTable();
@@ -229,6 +285,7 @@ public sealed class IdentityCapacityCollectorTests
 
         var marker = Assert.Single(rows);
         Assert.True(marker.IsMarker);
+        Assert.Null(marker.SkipReason);
         Assert.Equal("CleanDb", marker.DbName);
         Assert.Null(marker.ColumnName);
         Assert.Null(marker.PercentUsed);
@@ -534,6 +591,7 @@ public sealed class IdentityCapacityStoreLiveTests
             var rows = new[]
             {
                 new IdentityCapacityCollector.Row { DbName = "Clean" },
+                new IdentityCapacityCollector.Row { DbName = "Rds", SkipReason = IdentityCapacityCollector.SkipNoAccess },
                 new IdentityCapacityCollector.Row { DbName = "Sales" },
                 new IdentityCapacityCollector.Row
                 {
@@ -565,12 +623,14 @@ public sealed class IdentityCapacityStoreLiveTests
                 await importer.CompleteAsync(ct);
             }
 
-            Assert.Equal(4L, await ScalarAsync(connection, "SELECT count(*) FROM collect.identity_capacity WHERE server_id = " + ServerId, ct));
-            Assert.Equal(2L, await ScalarAsync(connection, "SELECT count(*) FROM collect.identity_capacity WHERE server_id = " + ServerId + " AND column_name IS NULL", ct));
+            Assert.Equal(5L, await ScalarAsync(connection, "SELECT count(*) FROM collect.identity_capacity WHERE server_id = " + ServerId, ct));
+            Assert.Equal(3L, await ScalarAsync(connection, "SELECT count(*) FROM collect.identity_capacity WHERE server_id = " + ServerId + " AND column_name IS NULL", ct));
+            Assert.Equal("Rds", (string)(await ScalarAsync(connection, "SELECT database_name FROM collect.identity_capacity WHERE skip_reason = 'no_access'", ct))!);
+            Assert.Equal(1L, await ScalarAsync(connection, "SELECT count(*) FROM collect.identity_capacity WHERE skip_reason IS NOT NULL", ct));
 
             /* The marker is all NULL but the database. */
             Assert.Equal(0L, await ScalarAsync(connection,
-                "SELECT count(*) FROM collect.identity_capacity WHERE column_name IS NULL AND (schema_name IS NOT NULL OR table_name IS NOT NULL OR data_type IS NOT NULL OR type_precision IS NOT NULL "
+                "SELECT count(*) FROM collect.identity_capacity WHERE column_name IS NULL AND skip_reason IS NULL AND (schema_name IS NOT NULL OR table_name IS NOT NULL OR data_type IS NOT NULL OR type_precision IS NOT NULL "
                 + "OR last_value IS NOT NULL OR seed_value IS NOT NULL OR increment_value IS NOT NULL OR percent_used IS NOT NULL)", ct));
 
             Assert.Equal("Sales.dbo.Orders.OrderId:int:10:1500000000:1:1:69.8491", (string)(await ScalarAsync(connection,

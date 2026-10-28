@@ -72,13 +72,25 @@ public sealed record IdentityColumnFact(
 public sealed record IdentityScannedDatabase(string DatabaseName, DateTime ScannedAt);
 
 /// <summary>
-/// An online database of the server that has no scan marker in the window: the pass budget's rotation has not reached it yet, or it is
-/// one the collector never scans (a snapshot, a readable secondary), which the database config capture cannot tell apart. It is never
-/// "clean".
+/// An online database of the server that has no scan marker in the window and that the collector did not skip on purpose: the pass
+/// budget's rotation has not reached it yet. It is never "clean".
 /// </summary>
 /// <param name="DatabaseName">The database.</param>
 /// <param name="LastScannedAt">Its newest marker before the window (UTC), null when the store holds none.</param>
 public sealed record IdentityNotYetScannedDatabase(string DatabaseName, DateTime? LastScannedAt);
+
+/// <summary>
+/// A database with no scan marker in the window that the collector skipped on purpose and said why (a readable secondary, a snapshot, a
+/// database the monitoring login cannot enter). Never "clean" and never "not yet scanned": waiting does not change it.
+/// </summary>
+/// <param name="DatabaseName">The database.</param>
+/// <param name="Reason">The reason word the collector stored (<see cref="IdentityCapacityCollector.SkipSecondary"/>, <see cref="IdentityCapacityCollector.SkipSnapshot"/>, <see cref="IdentityCapacityCollector.SkipNoAccess"/>).</param>
+/// <param name="LastScannedAt">Its newest marker before the window (UTC), null when the store holds none.</param>
+public sealed record IdentitySkippedDatabase(string DatabaseName, string Reason, DateTime? LastScannedAt)
+{
+    /// <summary>"not scanned: readable secondary" and its siblings, the reason word itself for one this build does not know.</summary>
+    public string Text => IdentityCapacityCollector.SkipReasonText(Reason) ?? "not scanned: " + Reason;
+}
 
 /// <summary>What <see cref="DarlingIdentityCapacityReader.ReadAsync"/> found.</summary>
 /// <param name="Columns">Every column above 10 percent in each scanned database's newest scan, fullest first. Empty when every scanned database is clean.</param>
@@ -87,8 +99,12 @@ public sealed record IdentityNotYetScannedDatabase(string DatabaseName, DateTime
 public sealed record IdentityCapacityRead(
     IReadOnlyList<IdentityColumnFact> Columns,
     IReadOnlyList<IdentityScannedDatabase> Databases,
-    IReadOnlyList<IdentityNotYetScannedDatabase>? NotYetScanned = null)
+    IReadOnlyList<IdentityNotYetScannedDatabase>? NotYetScanned = null,
+    IReadOnlyList<IdentitySkippedDatabase>? SkippedOnPurpose = null)
 {
+    /// <summary>The databases the collector skipped on purpose with a stored reason, never null.</summary>
+    public IReadOnlyList<IdentitySkippedDatabase> Skipped => SkippedOnPurpose ?? Array.Empty<IdentitySkippedDatabase>();
+
     /// <summary>The databases with no marker in the window, never null.</summary>
     public IReadOnlyList<IdentityNotYetScannedDatabase> Unscanned => NotYetScanned ?? Array.Empty<IdentityNotYetScannedDatabase>();
 
@@ -114,11 +130,11 @@ public static class DarlingIdentityCapacityReader
     public static string ScanSql(DatabaseFilter databases) => $@"
 WITH win AS (
     SELECT collection_time, database_name, schema_name, table_name, column_name, data_type, type_precision,
-           last_value::text AS last_value, seed_value::text AS seed_value, increment_value::text AS increment_value, percent_used
+           last_value::text AS last_value, seed_value::text AS seed_value, increment_value::text AS increment_value, percent_used, skip_reason
     FROM collect.identity_capacity
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)}),
 scan AS (
-    SELECT database_name, MAX(collection_time) AS scanned_at FROM win WHERE column_name IS NULL GROUP BY database_name)
+    SELECT database_name, MAX(collection_time) AS scanned_at FROM win WHERE column_name IS NULL AND skip_reason IS NULL GROUP BY database_name)
 SELECT s.database_name, s.scanned_at, c.schema_name, c.table_name, c.column_name, c.data_type, c.type_precision,
        c.last_value, c.seed_value, c.increment_value, c.percent_used, f.collection_time, f.last_value
 FROM scan AS s
@@ -131,13 +147,18 @@ ORDER BY c.percent_used DESC NULLS LAST, s.database_name, c.schema_name, c.table
 
     /// <summary>
     /// The server's online user databases in its newest database config capture at or before the window's end, each with its newest
-    /// marker at or before the end. The reader drops the ones that have a marker in the window. $1 server, $2 end, $3 database filter,
-    /// $4 the names the collector never scans.
+    /// marker at or before the end, and the reason the collector stored for skipping it on purpose in the window (newest wins). The reader
+    /// drops the ones that have a marker in the window. A skip row has <c>column_name</c> NULL too, so a marker read says
+    /// <c>skip_reason IS NULL</c>. $1 server, $2 end, $3 database filter, $4 the names the collector never scans, $5 window start.
     /// </summary>
     public static string ListedDatabasesSql(DatabaseFilter databases) => $@"
 SELECT d.database_name,
        (SELECT MAX(i.collection_time) FROM collect.identity_capacity AS i
-        WHERE i.server_id = $1 AND i.database_name = d.database_name AND i.column_name IS NULL AND i.collection_time <= $2)
+        WHERE i.server_id = $1 AND i.database_name = d.database_name AND i.column_name IS NULL AND i.skip_reason IS NULL AND i.collection_time <= $2),
+       (SELECT i.skip_reason FROM collect.identity_capacity AS i
+        WHERE i.server_id = $1 AND i.database_name = d.database_name AND i.column_name IS NULL AND i.skip_reason IS NOT NULL
+        AND   i.collection_time >= $5 AND i.collection_time <= $2
+        ORDER BY i.collection_time DESC LIMIT 1)
 FROM (
     SELECT DISTINCT database_name FROM v_database_config
     WHERE server_id = $1
@@ -185,6 +206,7 @@ ORDER BY d.database_name";
         // A database the rotation has not reached has no marker, so the scan answer alone would leave it out and the server could look
         // clean. The server's database list is its newest database config capture (every online database, once per capture).
         var notYetScanned = new List<IdentityNotYetScannedDatabase>();
+        var skipped = new List<IdentitySkippedDatabase>();
         await using (var listing = postgres.CreateCommand(ListedDatabasesSql(databases)))
         {
             listing.CommandTimeout = commandTimeoutSeconds;
@@ -192,12 +214,19 @@ ORDER BY d.database_name";
             listing.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
             listing.Parameters.Add(databases.Parameter());
             listing.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = IdentityCapacityCollector.SkippedDatabaseNames.ToArray() });
+            listing.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
             await using var names = await listing.ExecuteReaderAsync(cancellationToken);
             while (await names.ReadAsync(cancellationToken))
             {
                 var name = names.GetString(0);
-                if (!scanned.ContainsKey(name))
-                    notYetScanned.Add(new IdentityNotYetScannedDatabase(name, names.IsDBNull(1) ? null : names.GetDateTime(1)));
+                if (scanned.ContainsKey(name))
+                    continue;
+
+                var lastScannedAt = names.IsDBNull(1) ? null : (DateTime?)names.GetDateTime(1);
+                if (names.IsDBNull(2))
+                    notYetScanned.Add(new IdentityNotYetScannedDatabase(name, lastScannedAt));
+                else
+                    skipped.Add(new IdentitySkippedDatabase(name, names.GetString(2), lastScannedAt));
             }
         }
 
@@ -206,6 +235,7 @@ ORDER BY d.database_name";
                 .ThenBy(c => c.DatabaseName, StringComparer.Ordinal).ThenBy(c => c.SchemaName, StringComparer.Ordinal)
                 .ThenBy(c => c.TableName, StringComparer.Ordinal).ThenBy(c => c.ColumnName, StringComparer.Ordinal).ToList(),
             scanned.OrderBy(d => d.Key, StringComparer.Ordinal).Select(d => new IdentityScannedDatabase(d.Key, d.Value)).ToList(),
-            notYetScanned);
+            notYetScanned,
+            skipped);
     }
 }

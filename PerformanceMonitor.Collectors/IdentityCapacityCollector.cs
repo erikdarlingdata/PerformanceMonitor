@@ -70,8 +70,34 @@ public sealed class IdentityCapacityCollector : CollectorDefinitionBase<Identity
         /// <summary>From <see cref="IdentityCapacityMath"/>; NULL on the marker row.</summary>
         public double? PercentUsed { get; set; }
 
-        public bool IsMarker => ColumnName is null;
+        public bool IsMarker => ColumnName is null && SkipReason is null;
+
+        /// <summary>
+        /// Set only on the row of a database the collector skipped on purpose (<see cref="SkipSecondary"/>, <see cref="SkipSnapshot"/>,
+        /// <see cref="SkipNoAccess"/>). Such a row is NOT a scan marker: no reader may count it as "scanned".
+        /// </summary>
+        public string? SkipReason { get; set; }
+
+        public bool IsSkip => SkipReason is not null;
     }
+
+    /// <summary>A readable secondary replica: the primary replica's copy is the one scanned.</summary>
+    public const string SkipSecondary = "secondary";
+
+    /// <summary>A database snapshot: it has no identity state of its own.</summary>
+    public const string SkipSnapshot = "snapshot";
+
+    /// <summary>The monitoring login cannot enter the database (<c>HAS_DBACCESS</c>). On Amazon RDS a user must exist in each database.</summary>
+    public const string SkipNoAccess = "no_access";
+
+    /// <summary>What a reader says for a database stored with <paramref name="reason"/>, or null for a reason this build does not know.</summary>
+    public static string? SkipReasonText(string? reason) => reason switch
+    {
+        SkipSecondary => "not scanned: readable secondary",
+        SkipSnapshot => "not scanned: database snapshot",
+        SkipNoAccess => "not scanned: the monitoring login has no access to this database (on Amazon RDS it needs a user in each database)",
+        _ => null,
+    };
 
     /// <summary>The per-command deadline: a catalog read that is not done in this long is not going to be.</summary>
     public const int CommandTimeoutSeconds = 120;
@@ -118,8 +144,9 @@ public sealed class IdentityCapacityCollector : CollectorDefinitionBase<Identity
     };
 
     /// <summary>
-    /// The Query Store collectors' list (online, vendor and system databases out, secondaries out), plus the snapshot screen
-    /// (<c>source_database_id IS NULL</c>). A restoring database is not ONLINE, so it is out with the offline ones.
+    /// The online user databases, vendor and system databases out. A readable secondary, a snapshot and a database the login cannot enter
+    /// stay IN the list: <see cref="BuildPerItemQuery"/> records each with its reason (<see cref="SkipReasonSql"/>) and never enters it. A
+    /// restoring database is not ONLINE, so it is out with the offline ones, silently.
     /// </summary>
     internal const string OnPremDatabaseListQueryText = @"
 SET NOCOUNT ON;
@@ -128,15 +155,10 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SELECT /* PerformanceMonitorLite */
     d.name
 FROM sys.databases AS d
-LEFT JOIN sys.dm_hadr_database_replica_states AS drs
-    ON d.database_id = drs.database_id
-    AND drs.is_local = 1
 WHERE d.database_id > 4
 AND   d.database_id < 32761
 AND   d.state_desc = N'ONLINE'
-AND   d.source_database_id IS NULL
 AND   d.name <> N'PerformanceMonitor'
-AND   HAS_DBACCESS(d.name) = 1
 AND   d.name NOT IN
       (
           N'master', N'model', N'msdb', N'tempdb',
@@ -145,11 +167,6 @@ AND   d.name NOT IN
           N'DWConfiguration', N'DWDiagnostics', N'DWQueue',
           N'DBAUtil', N'DBAUtils', N'Utility'
       )
-AND
-(
-    drs.database_id IS NULL
-    OR drs.is_primary_replica = 1
-)
 /*EXCLUSION_FILTER*/
 ORDER BY d.name
 OPTION(RECOMPILE);";
@@ -198,7 +215,8 @@ SELECT /* PerformanceMonitorLite */
     type_precision = CONVERT(integer, NULL),
     last_value = CONVERT(varchar(40), NULL),
     seed_value = CONVERT(varchar(40), NULL),
-    increment_value = CONVERT(varchar(40), NULL)
+    increment_value = CONVERT(varchar(40), NULL),
+    skip_reason = CONVERT(varchar(20), NULL)
 UNION ALL
 SELECT
     c.schema_name,
@@ -208,7 +226,8 @@ SELECT
     c.type_precision,
     c.last_value,
     c.seed_value,
-    c.increment_value
+    c.increment_value,
+    CONVERT(varchar(20), NULL)
 FROM
 (
     SELECT TOP ({IdentityCapacityMath.MaxColumnsPerDatabase})
@@ -287,12 +306,58 @@ OPTION(RECOMPILE);";
         ArgumentNullException.ThrowIfNull(item);
         ArgumentNullException.ThrowIfNull(context);
 
+        /* The skip check reads the server's own catalog from the connection's database, so a database the login cannot enter, a snapshot
+           or a secondary is answered with its reason and never entered. */
         var text = $@"
+SET NOCOUNT ON;
+
+DECLARE
+    @skip_reason varchar(20) = {SkipReasonSql(item)};
+
+IF @skip_reason IS NOT NULL
+BEGIN
+    SELECT /* PerformanceMonitorLite */
+        schema_name = CONVERT(nvarchar(128), NULL),
+        table_name = CONVERT(nvarchar(128), NULL),
+        column_name = CONVERT(nvarchar(128), NULL),
+        data_type = CONVERT(nvarchar(128), NULL),
+        type_precision = CONVERT(integer, NULL),
+        last_value = CONVERT(varchar(40), NULL),
+        seed_value = CONVERT(varchar(40), NULL),
+        increment_value = CONVERT(varchar(40), NULL),
+        skip_reason = @skip_reason;
+
+    RETURN;
+END;
+
 EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
     N'{BuildPayloadBody().Replace("'", "''", StringComparison.Ordinal)}'";
 
         return new CollectorQuery(text);
     }
+
+    /// <summary>
+    /// The scalar subquery that names why <paramref name="item"/> is not scanned, or yields NULL when it is. A snapshot first, then a
+    /// database that is not the primary replica's copy, then one the login cannot enter: a secondary is skipped whoever can enter it.
+    /// </summary>
+    internal static string SkipReasonSql(string item) => $@"
+    (
+        SELECT
+            CASE
+                WHEN d.source_database_id IS NOT NULL
+                THEN '{SkipSnapshot}'
+                WHEN drs.database_id IS NOT NULL
+                AND  ISNULL(drs.is_primary_replica, 0) <> 1
+                THEN '{SkipSecondary}'
+                WHEN HAS_DBACCESS(d.name) <> 1
+                THEN '{SkipNoAccess}'
+            END
+        FROM sys.databases AS d
+        LEFT JOIN sys.dm_hadr_database_replica_states AS drs
+            ON d.database_id = drs.database_id
+            AND drs.is_local = 1
+        WHERE d.name = N'{item.Replace("'", "''", StringComparison.Ordinal)}'
+    )";
 
     public override async ValueTask ReadItemAsync(string item, DbDataReader reader, List<Row> rows, CollectorContext context, CancellationToken cancellationToken)
     {
@@ -318,12 +383,17 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
     private static async Task<List<Row>> ReadDatabaseAsync(DbDataReader reader, string databaseName, CancellationToken cancellationToken)
     {
         var sawMarker = false;
+        string? skipReason = null;
         var candidates = new List<Row>();
 
         while (await reader.ReadAsync(cancellationToken))
         {
             var row = ReadRow(reader, databaseName);
-            if (row.IsMarker)
+            if (row.IsSkip)
+            {
+                skipReason = row.SkipReason;
+            }
+            else if (row.IsMarker)
             {
                 sawMarker = true;
             }
@@ -334,7 +404,12 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
         }
 
         var rows = new List<Row>();
-        if (sawMarker)
+        if (skipReason is not null)
+        {
+            /* Skipped on purpose: the reason and no marker, so no reader counts the database as scanned. */
+            rows.Add(new Row { DbName = databaseName, SkipReason = skipReason });
+        }
+        else if (sawMarker)
         {
             rows.Add(new Row { DbName = databaseName });
             rows.AddRange(KeepTop(candidates));
@@ -393,6 +468,7 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
             LastValue = NullableBigInteger(reader, 5),
             SeedValue = NullableBigInteger(reader, 6),
             IncrementValue = NullableBigInteger(reader, 7),
+            SkipReason = reader.FieldCount > 8 ? NullableString(reader, 8) : null,
         };
 
     private static string? NullableString(DbDataReader reader, int ordinal) =>
@@ -415,6 +491,7 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
         new CollectorColumn("seed_value", CollectorColumnType.Decimal, 38, 0),
         new CollectorColumn("increment_value", CollectorColumnType.Decimal, 38, 0),
         new CollectorColumn("percent_used", CollectorColumnType.Double),
+        new CollectorColumn("skip_reason", CollectorColumnType.Varchar),
     };
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
@@ -432,7 +509,8 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
             .Value(ToDecimal(row.LastValue))        /* last_value NUMERIC(38,0), NULL when no row was inserted yet */
             .Value(ToDecimal(row.SeedValue))        /* seed_value NUMERIC(38,0) */
             .Value(ToDecimal(row.IncrementValue))   /* increment_value NUMERIC(38,0) */
-            .Value(row.PercentUsed);                /* percent_used DOUBLE PRECISION */
+            .Value(row.PercentUsed)                 /* percent_used DOUBLE PRECISION */
+            .Value(row.SkipReason);                 /* skip_reason VARCHAR, set only on the row of a database skipped on purpose */
     }
 
     /// <summary>

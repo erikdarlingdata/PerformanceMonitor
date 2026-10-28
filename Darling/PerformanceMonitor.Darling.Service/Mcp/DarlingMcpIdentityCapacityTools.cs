@@ -50,7 +50,7 @@ public sealed class DarlingMcpIdentityCapacityTools
         "columns[] lists them fullest first: percent_used, band (ok under 70, warning from 70, critical from 90), values_remaining (inserts left, as text because bigint and decimal values exceed what a JSON number holds exactly), last_value, seed_value, increment_value, data_type. " +
         "Percent is of the values from the seed to the end the increment moves to (the type's maximum for a positive increment, its minimum for a negative one), not of the whole type range. " +
         "rate_per_day is identity values issued per day and days_to_exhaustion the days until values_remaining is issued at that rate. Both come from the column's newest stored value and its oldest stored value in the window (hours_back, default 168), and are null when the window holds one sample of the column, when the value did not move, or when it moved backwards (the column was reseeded). " +
-        "columns[] holds at most limit columns (default and most 200), fullest first: truncated is true when more exist, and summary counts them all. databases[] lists each database scanned in the window and when. A scanned database with no column in columns[] has nothing above 10 percent: that is clean, not missing. An online database of the server (from its newest database config capture) with no scan in the window is listed in databases[] with scanned false and last_scanned_at (its last scan before the window, null when none): it is NOT clean, it is not yet scanned (the pass budget has not reached it yet, or the collector never scans it: snapshot, readable secondary). A database that is offline, restoring, system, vendor or left out by the server's database filter is in neither list. " +
+        "columns[] holds at most limit columns (default and most 200), fullest first: truncated is true when more exist, and summary counts them all. databases[] lists each database scanned in the window and when. A scanned database with no column in columns[] has nothing above 10 percent: that is clean, not missing. An online database of the server (from its newest database config capture) with no scan in the window is listed in databases[] with scanned false and last_scanned_at (its last scan before the window, null when none): it is NOT clean, it is not yet scanned (the pass budget has not reached it yet) when skip_reason is null, and skipped on purpose when skip_reason is secondary, snapshot or no_access (scan_note says why). A database that is offline, restoring, system, vendor or left out by the server's database filter is in neither list. " +
         "Reads the identity_capacity collector, never a monitored server. Status words: empty (databases were scanned, none has a column above 10 percent and none is waiting to be scanned), unavailable (no database was scanned in the window: the collector has not run in it, or has not reached the database yet), precondition (the collector's latest run was refused or denied on the monitored server, with its own sentence), not_collected (the engine has no such data).")]
     public static Task<string> GetIdentityCapacity(
         NpgsqlDataSource postgres,
@@ -89,6 +89,7 @@ public sealed class DarlingMcpIdentityCapacityTools
             var scope = databases.Describe();
             var where = scope is null ? "" : $" for database '{scope}'";
             var unscanned = read.Unscanned;
+            var skipped = read.Skipped;
             if (!read.HasScan)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "identity_capacity", cancellationToken)
@@ -97,9 +98,11 @@ public sealed class DarlingMcpIdentityCapacityTools
                     ?? McpHelpers.Status("unavailable",
                         $"No identity capacity scan{where} in the {hours_back}-hour window ending {Format(windowEnd)}" +
                         (unscanned.Count == 0 ? "" : $", and {unscanned.Count} database(s) not yet scanned ({string.Join(", ", unscanned.Take(10).Select(u => u.DatabaseName))}{(unscanned.Count > 10 ? ", ..." : "")})") +
+                        (skipped.Count == 0 ? "" : $", and {skipped.Count} database(s) skipped on purpose ({string.Join("; ", skipped.Take(10).Select(u => $"{u.DatabaseName} - {u.Text}"))}{(skipped.Count > 10 ? "; ..." : "")})") +
                         ". The identity_capacity collector has not run in it, " +
                         "or has not reached the database yet (it runs every 6 hours, stops a pass after 5 minutes and starts the next one where the last stopped). " +
-                        "A database that is offline, restoring, a snapshot, a readable secondary, a system or vendor database, or left out by the server's database filter is never scanned.");
+                        "A snapshot, a readable secondary or a database the monitoring login cannot enter is skipped on purpose and listed with its reason. " +
+                        "A database that is offline, restoring, a system or vendor database, or left out by the server's database filter is never scanned.");
             }
 
             var worst = read.Columns.Count == 0 ? null : read.Columns[0];
@@ -109,6 +112,7 @@ public sealed class DarlingMcpIdentityCapacityTools
             {
                 databases_scanned = read.Databases.Count,
                 databases_not_yet_scanned = unscanned.Count,
+                databases_skipped = skipped.Count,
                 oldest_scan = Format(read.Databases.Min(d => d.ScannedAt)),
                 newest_scan = Format(read.Databases.Max(d => d.ScannedAt)),
                 columns_above_10_percent = read.Columns.Count,
@@ -124,6 +128,8 @@ public sealed class DarlingMcpIdentityCapacityTools
                 scanned = true,
                 scanned_at = Format(d.ScannedAt),
                 last_scanned_at = (string?)null,
+                skip_reason = (string?)null,
+                scan_note = (string?)null,
                 columns_above_10_percent = read.Columns.Count(c => string.Equals(c.DatabaseName, d.DatabaseName, StringComparison.Ordinal)),
             }).Concat(unscanned.Select(u => new
             {
@@ -131,10 +137,21 @@ public sealed class DarlingMcpIdentityCapacityTools
                 scanned = false,
                 scanned_at = (string?)null,
                 last_scanned_at = Format(u.LastScannedAt),
+                skip_reason = (string?)null,
+                scan_note = (string?)null,
+                columns_above_10_percent = 0,
+            })).Concat(skipped.Select(u => new
+            {
+                database = u.DatabaseName,
+                scanned = false,
+                scanned_at = (string?)null,
+                last_scanned_at = Format(u.LastScannedAt),
+                skip_reason = (string?)u.Reason,
+                scan_note = (string?)u.Text,
                 columns_above_10_percent = 0,
             })).ToList();
 
-            if (read.Columns.Count == 0 && unscanned.Count == 0)
+            if (read.Columns.Count == 0 && unscanned.Count == 0 && skipped.Count == 0)
             {
                 return JsonSerializer.Serialize(new
                 {

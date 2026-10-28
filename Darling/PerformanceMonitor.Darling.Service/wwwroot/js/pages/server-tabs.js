@@ -5334,7 +5334,7 @@ function identityType(r) {
   return (r.data_type === "decimal" || r.data_type === "numeric") && r.type_precision > 0 ? r.data_type + "(" + r.type_precision + ")" : r.data_type || "—";
 }
 function identityScanState(r) {
-  if (!r || r.scanned !== true) return "Not yet scanned";
+  if (!r || r.scanned !== true) return r && r.scan_note ? r.scan_note.charAt(0).toUpperCase() + r.scan_note.slice(1) : "Not yet scanned";
   const n = r.columns_above_10_percent;
   return n > 0 ? "Scanned, " + n + (n === 1 ? " column" : " columns") + " above 10 percent" : "Scanned, clean";
 }

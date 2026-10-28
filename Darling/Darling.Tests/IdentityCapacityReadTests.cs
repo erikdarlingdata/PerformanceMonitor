@@ -190,6 +190,11 @@ public sealed class IdentityCapacityReadLiveTests
             "INSERT INTO collect.identity_capacity (collection_id, collection_time, server_id, server_name, database_name) VALUES ($1,$2,$3,$4,$5)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), serverId, server, database);
 
+    private static Task Skip(NpgsqlConnection c, CancellationToken ct, string database, string reason, DateTime at) =>
+        DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO collect.identity_capacity (collection_id, collection_time, server_id, server_name, database_name, skip_reason) VALUES ($1,$2,$3,$4,$5,$6)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), DataId, DataServer, database, reason);
+
     private static Task Column(
         NpgsqlConnection c, CancellationToken ct, string database, string table, string type, int precision, string last, string seed, string increment,
         double percent, DateTime at) =>
@@ -334,6 +339,65 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             Assert.Equal(worst.Value.WorstBand, viewerCard!.WorstBand);
             Assert.Equal(worst.Value.ColumnsAtBar, viewerCard.ColumnsAtBar);
             Assert.Null(await viewer.GetIdentityCapacityCardAsync(CleanId, now, ct));
+        });
+    }
+
+    [Fact]
+    public async Task ASkippedDatabase_ComesBackWithItsReason_NeverScanned_NeverNotYetScanned_AndNeverClean()
+    {
+        var now = DateTime.UtcNow;
+        var config = now.AddHours(-2);
+        var scanAt = now.AddHours(-1);
+        await WithStoreAsync(async (c, ct) =>
+        {
+            foreach (var name in new[] { "Sales", "Fresh", "Mirror", "Snap", "Locked", "Old", "Both" })
+                await ConfigRow(c, ct, name, "ONLINE", config);
+
+            /* Sales is scanned and clean. Mirror, Snap and Locked were skipped on purpose (the newest skip row wins). Old's skip row is
+               older than the window, so it is just waiting. Both was scanned in the window and later skipped: the scan stands. Fresh has nothing. */
+            await Marker(c, ct, DataId, DataServer, "Sales", scanAt);
+            await Skip(c, ct, "Mirror", IdentityCapacityCollector.SkipNoAccess, now.AddHours(-9));
+            await Skip(c, ct, "Mirror", IdentityCapacityCollector.SkipSecondary, now.AddHours(-3));
+            await Skip(c, ct, "Snap", IdentityCapacityCollector.SkipSnapshot, now.AddHours(-3));
+            await Skip(c, ct, "Locked", IdentityCapacityCollector.SkipNoAccess, now.AddHours(-3));
+            await Skip(c, ct, "Old", IdentityCapacityCollector.SkipSnapshot, now.AddDays(-20));
+            await Marker(c, ct, DataId, DataServer, "Both", now.AddHours(-30));
+            await Column(c, ct, "Both", "Orders", "int", 10, "2040000000", "1", "1", 95.0, now.AddHours(-30));
+            await Skip(c, ct, "Both", IdentityCapacityCollector.SkipSecondary, now.AddHours(-3));
+        }, async (postgres, ct) =>
+        {
+            var read = await DarlingIdentityCapacityReader.ReadAsync(postgres, DataId, DatabaseFilter.All, now.AddHours(-168), now, 30, ct);
+
+            /* A skip row is not a scan marker: it never makes a database scanned. */
+            Assert.Equal(new[] { "Both", "Sales" }, read.Databases.Select(d => d.DatabaseName).ToArray());
+            Assert.Equal(new[] { "Fresh", "Old" }, read.Unscanned.Select(d => d.DatabaseName).ToArray());
+            Assert.Equal(
+                new[] { "Locked:no_access", "Mirror:secondary", "Snap:snapshot" },
+                read.Skipped.Select(d => d.DatabaseName + ":" + d.Reason).ToArray());
+            Assert.Equal("not scanned: readable secondary", read.Skipped.Single(d => d.DatabaseName == "Mirror").Text);
+
+            var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, ct));
+            Assert.False(root.TryGetProperty("status", out _), "skipped databases are not an empty (clean) answer");
+            var summary = root.GetProperty("summary");
+            Assert.Equal(2, summary.GetProperty("databases_scanned").GetInt32());
+            Assert.Equal(2, summary.GetProperty("databases_not_yet_scanned").GetInt32());
+            Assert.Equal(3, summary.GetProperty("databases_skipped").GetInt32());
+            var databases = root.GetProperty("databases").EnumerateArray().ToDictionary(d => d.GetProperty("database").GetString()!);
+            Assert.False(databases["Locked"].GetProperty("scanned").GetBoolean());
+            Assert.Equal("no_access", databases["Locked"].GetProperty("skip_reason").GetString());
+            Assert.Contains("Amazon RDS", databases["Locked"].GetProperty("scan_note").GetString());
+            Assert.Equal(JsonValueKind.Null, databases["Fresh"].GetProperty("skip_reason").ValueKind);
+            Assert.Equal(JsonValueKind.Null, databases["Sales"].GetProperty("skip_reason").ValueKind);
+
+            /* Only skipped databases in the filter: still not clean. */
+            var onlySkipped = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, "Snap", 200, ct));
+            Assert.Equal("unavailable", onlySkipped.GetProperty("status").GetString());
+            Assert.Contains("Snap - not scanned: database snapshot", onlySkipped.GetProperty("message").GetString());
+
+            /* The fleet chip keeps the newest SCAN: Both's later skip row must not become "the newest marker" and hide its 95 percent column. */
+            var card = await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, now, ct);
+            Assert.Equal(1, card[DataId].ColumnsAtBar);
+            Assert.Equal(IdentityCapacityMath.BandCritical, card[DataId].WorstBand);
         });
     }
 

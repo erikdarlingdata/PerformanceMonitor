@@ -1001,9 +1001,13 @@ GROUP BY server_id, collector_name";
     /// other per-server reads in this file: <c>servers</c> drives a lateral that range-scans the marker index (<c>idx_identity_capacity_markers</c>,
     /// <c>server_id, database_name, collection_time</c>, markers only) on the server_id prefix and keeps each database's newest marker, then the
     /// column rows at that same instant are read through <c>idx_identity_capacity_time</c> (<c>server_id, collection_time</c>). A time-only predicate
-    /// over the whole table is never used, so a fleet load does not walk the 90-day table. $1 is the window start, $2 the percent of the warning bar.
+    /// over the whole table is never used, so a fleet load does not walk the 90-day table. Like <see cref="FleetCpuSql"/> and its siblings it
+    /// skips a disabled server and a PostgreSQL target, which never write this table, so they get no probe (the filter sits after the lateral, the
+    /// form the siblings use, and the planner applies it to <c>servers</c> before the lateral runs). A skip row (<c>skip_reason</c> set) is not a
+    /// scan marker. $1 is the window start, $2 the percent of the warning bar.
+    /// EXPLAINPLACEHOLDER
     /// </summary>
-    internal const string FleetIdentityCapacitySql = @"
+    internal const string FleetIdentityCapacitySql = $@"
 SELECT c.server_id, c.percent_used
 FROM servers AS s
 CROSS JOIN LATERAL
@@ -1012,12 +1016,15 @@ CROSS JOIN LATERAL
     FROM collect.identity_capacity AS x
     WHERE x.server_id = s.server_id
     AND   x.column_name IS NULL
+    AND   x.skip_reason IS NULL
     AND   x.collection_time >= $1
     ORDER BY x.database_name, x.collection_time DESC
 ) AS n
 JOIN collect.identity_capacity AS c
   ON c.server_id = s.server_id AND c.collection_time = n.collection_time AND c.database_name = n.database_name
-WHERE c.column_name IS NOT NULL AND c.percent_used >= $2";
+WHERE s.is_enabled
+AND   {SqlServerCollectedTargetSql}
+AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
 
     /// <summary>The worst band and the count of columns at warning or critical per server, for the servers that have any (#6875). The band is
     /// <see cref="IdentityCapacityMath.Band(double)"/>.</summary>
