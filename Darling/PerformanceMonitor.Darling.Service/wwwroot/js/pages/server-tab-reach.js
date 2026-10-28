@@ -97,6 +97,11 @@ export const SQL_TAB_REACH = {
     reachReads: [
       "get_collection_log", "get_server_trend"
     ]
+  },
+  config: {
+    reachReads: [
+      "get_identity_capacity"
+    ]
   }
 };
 

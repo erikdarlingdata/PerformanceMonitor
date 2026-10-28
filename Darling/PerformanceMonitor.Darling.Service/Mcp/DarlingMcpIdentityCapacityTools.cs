@@ -51,7 +51,7 @@ public sealed class DarlingMcpIdentityCapacityTools
         "Percent is of the values from the seed to the end the increment moves to (the type's maximum for a positive increment, its minimum for a negative one), not of the whole type range. " +
         "rate_per_day is identity values issued per day and days_to_exhaustion the days until values_remaining is issued at that rate. Both come from the column's newest stored value and its oldest stored value in the window (hours_back, default 168), and are null when the window holds one sample of the column, when the value did not move, or when it moved backwards (the column was reseeded). " +
         "columns[] holds at most limit columns (default and most 200), fullest first: truncated is true when more exist, and summary counts them all. databases[] lists each database scanned in the window and when. A scanned database with no column in columns[] has nothing above 10 percent: that is clean, not missing. A database absent from databases[] was not scanned in the window (not yet reached, or skipped on purpose: offline, restoring, snapshot, readable secondary, system, vendor, or left out by the server's database filter). " +
-        "Reads the identity_capacity collector, never a monitored server. Status words: empty (databases were scanned and none has a column above 10 percent), unavailable (no database was scanned in the window: the collector has not run in it, or has not reached the database yet).")]
+        "Reads the identity_capacity collector, never a monitored server. Status words: empty (databases were scanned and none has a column above 10 percent), unavailable (no database was scanned in the window: the collector has not run in it, or has not reached the database yet), precondition (the collector's latest run was refused or denied on the monitored server, with its own sentence), not_collected (the engine has no such data).")]
     public static async Task<string> GetIdentityCapacity(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -59,6 +59,15 @@ public sealed class DarlingMcpIdentityCapacityTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         [Description("Maximum columns to list, fullest first. Default and most 200.")] int limit = MaxListed,
+        CancellationToken cancellationToken = default) =>
+        GetIdentityCapacity(postgres, server_name, hours_back, as_of, DatabaseFilter.One(database_name), limit, cancellationToken);
+
+    /// <summary>
+    /// <c>get_identity_capacity</c> over a SET of databases (<see cref="DatabaseFilter.All"/> = every database): the web server page's
+    /// database filter (#5244) sends the chosen databases, and the MCP tool sends the one it was given.
+    /// </summary>
+    public static async Task<string> GetIdentityCapacity(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, DatabaseFilter databases, int limit,
         CancellationToken cancellationToken = default)
     {
         if (limit < 1 || limit > MaxListed)
@@ -70,7 +79,6 @@ public sealed class DarlingMcpIdentityCapacityTools
         var validation = DarlingReadWindow.Validate(hours_back, as_of, MaxHoursBack, out var windowEnd);
         if (validation != null) return validation;
         var start = windowEnd.AddHours(-hours_back);
-        var databases = DatabaseFilter.One(database_name);
 
         try
         {
@@ -83,6 +91,8 @@ public sealed class DarlingMcpIdentityCapacityTools
             if (!read.HasScan)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "identity_capacity", cancellationToken)
+                    /* A refused or denied run says so in the monitored server's own words, as the Viewer's tab does. */
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "identity_capacity", cancellationToken)
                     ?? McpHelpers.Status("unavailable",
                         $"No identity capacity scan{where} in the {hours_back}-hour window ending {Format(windowEnd)}. The identity_capacity collector has not run in it, " +
                         "or has not reached the database yet (it runs every 6 hours, stops a pass after 5 minutes and starts the next one where the last stopped). " +
