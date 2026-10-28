@@ -636,6 +636,20 @@ public sealed class ViewerServerSummaryDisplayTests
         Assert.Equal("Healthy: 0, Failing: 0", nothingBanded.CollectorDetail);
     }
 
+    /// <summary>#6878: the whole Collectors detail is the text the card draws (the card wraps it rather than trimming it, so the
+    /// "Not collected" count that #6838 added is no longer cut off at 1366 px). The count and the warning count show only when
+    /// there is one.</summary>
+    [Fact]
+    public void CollectorDetail_NamesTheWarningAndNotCollectedCounts_InFull()
+    {
+        Assert.Equal(
+            "Healthy: 42, Failing: 0, Not collected: 8",
+            new ServerSummaryItem { HealthyCollectorCount = 42, NotCollectedCollectorCount = 8, CollectorCount = 42 }.CollectorDetail);
+        Assert.Equal(
+            "Healthy: 40, Warning: 2, Failing: 1, Not collected: 8",
+            new ServerSummaryItem { HealthyCollectorCount = 40, WarningCollectorCount = 2, FailedCollectorCount = 1, NotCollectedCollectorCount = 8, CollectorCount = 43 }.CollectorDetail);
+    }
+
     /// <summary>#3539 A8d: the collector dot is graded on the FAILING share — one of forty is Warning,
     /// nine of forty (past the collector-health classifier's 20% bar) is Critical, forty of forty is
     /// Critical; a card with no denominator declared is Warning and never Critical.</summary>

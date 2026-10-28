@@ -145,8 +145,8 @@ public sealed class FinOpsUtilizationFiguresTests
     }
 
     [Theory]
-    [InlineData("OVER_PROVISIONED", 0, "CPU is lightly loaded (avg 12.5%, max 40%) and buffer pool uses only 50% of physical RAM. This server may have more resources than it needs.")]
-    [InlineData("OVER_PROVISIONED", 5, "CPU is lightly loaded (avg 12.5%, max 40%) and buffer pool uses only 50% of the database's memory limit. This database may have more resources than it needs.")]
+    [InlineData("OVER_PROVISIONED", 0, "CPU is lightly loaded (avg 12.5%, max 40%) and the buffer pool uses 50% of physical RAM. This server may have more resources than it needs.")]
+    [InlineData("OVER_PROVISIONED", 5, "CPU is lightly loaded (avg 12.5%, max 40%) and the buffer pool uses 50% of the database's memory limit. This database may have more resources than it needs.")]
     [InlineData("NOT_APPLICABLE", 0, null)]
     [InlineData("", 0, "")]
     public void Explanation_ForTheOtherStatuses_IsTheirSentence(string status, int edition, string? expected)
