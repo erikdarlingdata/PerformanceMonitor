@@ -781,7 +781,7 @@ public static class AlertContextBuilders
         if (finding.ExcludedSamples > 0)
         {
             reading.Fields.Add(("Excluded", string.Create(CultureInfo.InvariantCulture,
-                $"{finding.ExcludedSamples:N0} of {finding.SampledEvents:N0} sampled events came from SSMS IntelliSense and VS Code mssql metadata connections cancelling their own metadata queries; they are left out of the rate judged")));
+                $"{finding.ExcludedSamples:N0} of {finding.SampledEvents:N0} sampled events came from {AttentionEvaluator.ExcludedToolNames(finding.ExcludedSsmsSamples > 0, finding.ExcludedVsCodeSamples > 0)} cancelling their own metadata queries; they are left out of the rate judged")));
         }
 
         if (finding.Bars is not null)

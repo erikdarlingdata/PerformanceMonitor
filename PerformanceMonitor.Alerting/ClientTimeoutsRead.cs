@@ -193,13 +193,13 @@ public static class ClientTimeoutsRead
             : reading.TotalCount;
         return new
         {
-            client_apps = new[] { "SSMS IntelliSense", "VS Code mssql extension metadata connections" },
+            client_apps = reading.ExcludedApps,
             sampled_events = excluded,
             count_judged = Math.Round(judgedCount, 1, MidpointRounding.AwayFromZero),
             rate_per_minute_judged = excluded > 0
                 ? Math.Round(judgedCount / reading.CoveredMinutes, 2, MidpointRounding.AwayFromZero)
                 : rate,
-            note = "SSMS IntelliSense and the VS Code mssql extension cancel their own metadata queries (language service, Object Explorer, general connection) when the user keeps typing. The Client Timeouts alert leaves these " +
+            note = AttentionEvaluator.ExcludedToolNames(true, true) + " cancel their own metadata queries (language service, Object Explorer, general connection) when the user keeps typing. client_apps lists the client_app_name values in this range that the alert leaves out, exactly as top_client_apps shows them. The Client Timeouts alert leaves these " +
                    "sampled events out of the rate it judges (count_judged is an estimate from the sampled share); they stay listed here, " +
                    "marked excluded.",
         };
