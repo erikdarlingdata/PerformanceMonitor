@@ -305,7 +305,7 @@ public sealed class AttentionAlertTests
         Assert.Contains("SSMS IntelliSense and VS Code mssql", finding.Summary, StringComparison.Ordinal);
         Assert.Contains("SSMS IntelliSense and VS Code mssql", ExcludedContextLine(finding, window), StringComparison.Ordinal);
 
-        /* client_apps are the exact client_app_name strings, most sampled events first, so a reader can join them to top_client_apps. */
+        /* client_apps are the exact client_app_name strings, most sampled events first. */
         Assert.Equal(
             new[] { AttentionEvaluator.IntelliSenseClientApp, "vscode-mssql-ObjectExplorer", "vscode-mssql-GeneralConnection-languageService" },
             ExcludedClientApps(window));
@@ -331,6 +331,56 @@ public sealed class AttentionAlertTests
             ClientTimeoutsRead.Payload(reading!, window, Array.Empty<ClientTimeoutSample>(), 20, 2000)));
         return doc.RootElement.GetProperty("excluded_from_alert").GetProperty("note").GetString()!;
     }
+
+    [Fact]
+    public void ClientApps_ListsEveryLeftOutName_EvenWhenTopClientAppsStopsAtFive()
+    {
+        var runs = Runs(T0.AddSeconds(-5), 6);
+        var window = Window(runs, new[] { Count(runs[0], 540) }, new[]
+        {
+            Sample(runs[0], "sales", "web", 100),
+            Sample(runs[0], "master", AttentionEvaluator.IntelliSenseClientApp, 60),
+            Sample(runs[0], "master", "vscode-mssql-ObjectExplorer", 40),
+            Sample(runs[0], "master", "vscode-mssql-GeneralConnection", 30),
+            Sample(runs[0], "master", "vscode-mssql-ObjectExplorer-languageService", 20),
+            Sample(runs[0], "master", "vscode-mssql-languageService", 10),
+        }) with
+        {
+            /* The window's application list is capped at five rows (AttentionWindowSql.TopCount), so the sixth application is not in it. */
+            TopApplications = new[]
+            {
+                new AttentionTopItem("web", 100),
+                new AttentionTopItem(AttentionEvaluator.IntelliSenseClientApp, 60),
+                new AttentionTopItem("vscode-mssql-ObjectExplorer", 40),
+                new AttentionTopItem("vscode-mssql-GeneralConnection", 30),
+                new AttentionTopItem("vscode-mssql-ObjectExplorer-languageService", 20),
+            },
+        };
+
+        var (_, reading) = ClientTimeoutsRead.Classify(window, T0);
+        using var doc = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(
+            ClientTimeoutsRead.Payload(reading!, window, Array.Empty<ClientTimeoutSample>(), 20, 2000)));
+        var topApps = doc.RootElement.GetProperty("top_client_apps").EnumerateArray()
+            .Select(a => a.GetProperty("client_app_name").GetString()!).ToArray();
+
+        Assert.Equal(5, topApps.Length);
+        Assert.DoesNotContain("vscode-mssql-languageService", topApps);
+        Assert.Equal(
+            new[]
+            {
+                AttentionEvaluator.IntelliSenseClientApp, "vscode-mssql-ObjectExplorer", "vscode-mssql-GeneralConnection",
+                "vscode-mssql-ObjectExplorer-languageService", "vscode-mssql-languageService",
+            },
+            ExcludedClientApps(window));
+        /* The note must not promise a match against lists that can be shorter. */
+        var note = ExcludedNote(window);
+        Assert.DoesNotContain("exactly as top_client_apps shows them", note, StringComparison.Ordinal);
+        Assert.Contains("can name an application that top_client_apps", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExcludedToolNames_WithNeitherToolSet_Throws() =>
+        Assert.Throws<ArgumentException>(() => AttentionEvaluator.ExcludedToolNames(false, false));
 
     [Fact]
     public void SsmsOnlyWindow_NamesOnlySsmsIntelliSense_EverywhereTheLeftOutCancelsAreExplained()

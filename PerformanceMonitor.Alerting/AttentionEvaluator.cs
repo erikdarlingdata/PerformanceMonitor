@@ -184,7 +184,7 @@ public static class AttentionEvaluator
     /// <summary>
     /// The tool-naming part of every sentence that says where the left-out cancels came from (#6856): the alert summary, the alert context
     /// line and the <c>get_client_timeouts</c> note all call this, so a tool added to the rule is named in one place. Names only the tools
-    /// whose flag is set, so an SSMS-only server is not told about VS Code. The one exception is the <c>get_client_timeouts</c> note, which
+    /// whose flag is set, so an SSMS-only server is not told about VS Code. With neither flag set there is nothing to name, so it throws. The one exception is the <c>get_client_timeouts</c> note, which
     /// describes the rule in general rather than one window, so it passes both flags.
     /// </summary>
     public static string ExcludedToolNames(bool ssmsIntelliSense, bool vsCodeMetadata) =>
@@ -192,7 +192,10 @@ public static class AttentionEvaluator
         {
             (true, true) => "SSMS IntelliSense and VS Code mssql metadata connections",
             (false, true) => "VS Code mssql metadata connections",
-            _ => "SSMS IntelliSense",
+            (true, false) => "SSMS IntelliSense",
+            /* No caller reaches this: each guards on left-out samples above zero, and those come from one of the two tools. A tool added to the rule
+               must get its own arm here rather than be named as SSMS. */
+            (false, false) => throw new ArgumentException("At least one excluded tool must be set.", nameof(ssmsIntelliSense)),
         };
 
     /// <summary>The VS Code mssql extension's metadata connections (#6856). The SQL Tools Service it runs appends the connection purpose to
@@ -482,7 +485,7 @@ public static class AttentionEvaluator
 
         if (sampleTotal > 0 && (isGroupMuted is not null || excludedSamples > 0))
         {
-            /* #6552: SSMS IntelliSense's own cancels are left out the way a muted group is, by the same proportion of the sampled events. */
+            /* #6552, #6856: the own cancels of SSMS IntelliSense and the VS Code mssql metadata connections are left out the way a muted group is, by the same proportion of the sampled events. */
             var unmuted = reading.Groups
                 .Where(g => !IsExcludedApp(g.ClientAppName) && (isGroupMuted is null || !isGroupMuted(g.DatabaseName, g.ClientAppName)))
                 .Sum(g => g.Samples);

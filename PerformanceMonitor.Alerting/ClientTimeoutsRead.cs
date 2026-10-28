@@ -199,7 +199,7 @@ public static class ClientTimeoutsRead
             rate_per_minute_judged = excluded > 0
                 ? Math.Round(judgedCount / reading.CoveredMinutes, 2, MidpointRounding.AwayFromZero)
                 : rate,
-            note = AttentionEvaluator.ExcludedToolNames(true, true) + " cancel their own metadata queries (language service, Object Explorer, general connection) when the user keeps typing. client_apps lists the client_app_name values in this range that the alert leaves out, exactly as top_client_apps shows them. The Client Timeouts alert leaves these " +
+            note = AttentionEvaluator.ExcludedToolNames(true, true) + " cancel their own metadata queries (language service, Object Explorer, general connection) when the user keeps typing. client_apps lists the exact client_app_name values in this range that the alert leaves out, most sampled events first. It has no cap, so it can name an application that top_client_apps (the top five) or the paged sampled_events do not show. The Client Timeouts alert leaves these " +
                    "sampled events out of the rate it judges (count_judged is an estimate from the sampled share); they stay listed here, " +
                    "marked excluded.",
         };
