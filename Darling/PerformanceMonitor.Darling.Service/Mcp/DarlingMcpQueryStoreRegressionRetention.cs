@@ -59,9 +59,10 @@ internal static class RetentionCause
         NpgsqlDataSource postgres, int serverId, DateTime windowStart, DateTime windowEnd, DateTime? floor, bool fromTables,
         CancellationToken cancellationToken)
     {
-        /* The window-floor probe answers null for a window that ends before the data starts (the start would be at or after the
-           window's end), which is exactly this case, so the server's oldest row is read here. */
-        if (floor is null)
+        /* On the raw path the window-floor probe is no help for a window that ends before the data starts: with no row at or before
+           the window's end it falls back to the server's registration date, which is older than the data. So the server's oldest
+           stored row is read here and stands for where the data starts. The table path's floor is the arms' own start, a real row. */
+        if (!fromTables)
         {
             await using var oldest = postgres.CreateCommand("SELECT min(collection_time) FROM collect.query_store_stats WHERE server_id = $1");
             oldest.CommandTimeout = McpCommandDeadlines.ReadSeconds;

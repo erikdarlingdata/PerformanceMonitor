@@ -111,6 +111,9 @@ public sealed class AgentChangesWebLiveTests
             Assert.Equal("unknown", (string)planRow["result"]!);
 
             var planCall = await ScalarAsync(owner, "SELECT journal_id FROM config.investigation_journal WHERE detail->>'kind' = 'plan_force'", ct);
+            /* A refusal is journaled once per request, token, tool, code and HOUR, so two refusals that straddle an hour boundary
+               journal twice. The hour is read on both sides of the loop and the count follows it. */
+            var hourBefore = DateTime.UtcNow.Hour;
             foreach (var payload in new[] { "{}", "{\"confirm\":true}" })
             {
                 var refused = await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "application/json", payload);
@@ -119,7 +122,8 @@ public sealed class AgentChangesWebLiveTests
                 Assert.Contains("config_server_actions", (string)refused.Body["error"]!, StringComparison.Ordinal);
             }
 
-            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND actor LIKE 'person:%' AND reason = 'server_action_off'", ct));
+            var hourAfter = DateTime.UtcNow.Hour;
+            Assert.Equal(hourBefore == hourAfter ? "1" : "2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND actor LIKE 'person:%' AND reason = 'server_action_off'", ct));
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'action_undone'", ct));
             Assert.Equal(400, (await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "application/json", "[1]")).Status);
             Assert.Equal(415, (await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "text/plain", "{}")).Status);
