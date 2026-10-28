@@ -2589,6 +2589,11 @@
                 <Border Grid.Row="2" Margin="0,4,0,0">
                     <scottplot:WpfPlot x:Name="TempDbFileIoChart"/>
                 </Border>
+
+                <!-- Shown over the usage and size charts when tempdb_stats recorded a named skip such as PERMISSIONS for this server and the window has no tempdb rows (#6861). -->
+                <TextBlock Grid.Row="0" Grid.RowSpan="2" x:Name="TempDbNoDataMessage" Style="{StaticResource EmptyHint}"/>
+                <!-- Shown over the file latency chart on an Azure SQL Database, whose file I/O view never returns tempdb's files (#6861). -->
+                <TextBlock Grid.Row="2" x:Name="TempDbFileIoNoDataMessage" Style="{StaticResource EmptyHint}"/>
             </Grid>
             </ScrollViewer>
         </TabItem>

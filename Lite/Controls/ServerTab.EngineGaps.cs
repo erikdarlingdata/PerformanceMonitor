@@ -185,6 +185,65 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
+    /// The note a chart shows when its collector's latest run recorded a named skip such as PERMISSIONS and the window has no rows
+    /// (#6861): the sentence <see cref="CollectorRuntimePrecondition.CollectionOutcomeMessage"/> gives the MCP tools'
+    /// <c>precondition</c> answer, which the Darling viewer shows too. The engine note wins, as it does in
+    /// <see cref="EngineGapState"/>. With rows, or for any other status, the note stays hidden and the chart looks as it always did.
+    /// </summary>
+    internal static (string Text, Visibility Visibility) CollectorOutcomeState(
+        string serverName, bool isAzureSqlDatabase, string collectorName, int rowCount,
+        string? status, string? errorMessage, DateTime? observedUtc)
+    {
+        var text = EngineGapNote(serverName, isAzureSqlDatabase, collectorName)
+            ?? (CollectorRuntimePrecondition.IsNamedSkip(status)
+                ? CollectorRuntimePrecondition.CollectionOutcomeMessage(serverName, collectorName, status, errorMessage, observedUtc)
+                : null);
+
+        return text is not null && rowCount == 0 ? (text, Visibility.Visible) : ("", Visibility.Collapsed);
+    }
+
+    /// <summary>
+    /// What the tempdb file latency chart's note shows (#6861): the Azure SQL Database sentence from
+    /// <see cref="CollectorEngineCapability.TempDbFileIoNotCollectedMessage"/> while the chart has no points, and nothing on any
+    /// other engine or once points exist. The Darling viewer shows the same sentence.
+    /// </summary>
+    internal static (string Text, Visibility Visibility) TempDbFileIoGapState(string serverName, bool isAzureSqlDatabase, int pointCount)
+    {
+        var note = CollectorEngineCapability.TempDbFileIoNotCollectedMessage(
+            serverName,
+            isAzureSqlDatabase ? CollectorEngineCapability.AzureSqlDatabaseEngineEdition : CollectorEngineCapability.UnknownEngineEdition);
+
+        return (note ?? "", note is not null && pointCount == 0 ? Visibility.Visible : Visibility.Collapsed);
+    }
+
+    /// <summary>
+    /// Fills the tempdb tab's note (#6861). It reads the latest tempdb_stats run only when the window has no tempdb rows and
+    /// the engine does not rule the collector out, and a failed read leaves no note.
+    /// </summary>
+    private async System.Threading.Tasks.Task ShowTempDbOutcomeAsync(int rowCount)
+    {
+        string? status = null;
+        string? errorMessage = null;
+        DateTime? observedUtc = null;
+
+        if (rowCount == 0 && EngineGapNote(_server.DisplayName, _isAzureSqlDatabase, "tempdb_stats") is null)
+        {
+            try
+            {
+                (status, errorMessage, observedUtc) = await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestCollectorOutcomeAsync(_serverId, "tempdb_stats"));
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Info("ServerTab", $"[{_server.DisplayName}] tempdb_stats outcome read failed: {ex.Message}");
+            }
+        }
+
+        var (text, visibility) = CollectorOutcomeState(_server.DisplayName, _isAzureSqlDatabase, "tempdb_stats", rowCount, status, errorMessage, observedUtc);
+        TempDbNoDataMessage.Text = text;
+        TempDbNoDataMessage.Visibility = visibility;
+    }
+
+    /// <summary>
     /// What the Running Jobs tab says in place of "No SQL Agent jobs are running." when the read itself failed: an empty
     /// list from a read that never answered would be a claim nobody checked.
     /// </summary>
