@@ -157,6 +157,25 @@ public sealed class DarlingFrontDoorRoutingTests
         Assert.Empty(peers.Calls);
     }
 
+    [Fact]
+    public async Task AServerNameThatIsAmbiguous_DoesNotRefreshTheDirectory_AndIsRefusedWithTheDirectorysMessage()
+    {
+        var directory = new FakeFrontDoorDirectory("use1", "use2")
+        {
+            Resolver = _ => new FrontDoorRoute.Refused(
+                "'sql-a' matches servers on use1 and use2. Name the store.", Ambiguous: true, Stores: new[] { "use1", "use2" }),
+        };
+        var peers = new FakeFrontDoorPeers();
+
+        var result = await RouterOf(directory, peers).CallAsync(
+            "get_wait_stats", Args(("server_name", "\"sql-a\"")), agentRole: false, CancellationToken.None);
+
+        AssertRefusal(result, "server_name");
+        Assert.Contains("matches servers on use1 and use2", TextOf(result));
+        Assert.Equal(0, directory.RefreshCalls);
+        Assert.Empty(peers.Calls);
+    }
+
     [Theory]
     [InlineData("create_mute_rule")]
     [InlineData("add_servers")]

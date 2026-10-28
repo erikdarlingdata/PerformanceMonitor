@@ -86,7 +86,7 @@ internal sealed class DarlingFrontDoorWebProxy
             logger);
 
     /// <summary>Maps every <c>/api/*</c> route. It runs where the dashboard's own endpoints would, after the sign-in and role gates.</summary>
-    internal void Map(WebApplication app)
+    internal void AddRoutes(WebApplication app)
     {
         app.Lifetime.ApplicationStopped.Register(_session.Dispose);
         app.MapMethods("/api/{**rest}", ForwardedMethods, (RequestDelegate)DispatchAsync);
@@ -279,6 +279,8 @@ internal sealed class DarlingFrontDoorWebProxy
         linked.CancelAfter(_peerTimeout);
         var ct = linked.Token;
 
+        /* The store's status for a change (0 until there is one), which the finally below logs: who made each write (D1). */
+        var finalStatus = 0;
         try
         {
             var signedInAgain = false;
@@ -313,6 +315,7 @@ internal sealed class DarlingFrontDoorWebProxy
                         store.Name, $"Store '{store.Name}' answered with a redirect (HTTP {status}). Check that the store's webUrl in the front door's configuration is the address it serves.");
                 }
 
+                finalStatus = status;
                 context.Response.StatusCode = status;
                 if (response.Content.Headers.ContentType is { } contentType)
                 {
@@ -330,6 +333,7 @@ internal sealed class DarlingFrontDoorWebProxy
         }
         catch (FrontDoorPeerUnavailableException ex) when (!context.Response.HasStarted)
         {
+            finalStatus = StatusCodes.Status502BadGateway;
             Note(store.Name, route, StatusCodes.Status502BadGateway, ex.Message, started);
             await WriteStoreErrorAsync(context, StatusCodes.Status502BadGateway, "store_unavailable", store.Name, ex.Message);
         }
@@ -339,6 +343,7 @@ internal sealed class DarlingFrontDoorWebProxy
         }
         catch (OperationCanceledException)
         {
+            finalStatus = StatusCodes.Status504GatewayTimeout;
             Note(store.Name, route, StatusCodes.Status504GatewayTimeout, "timed out", started);
             if (context.Response.HasStarted)
             {
@@ -353,14 +358,28 @@ internal sealed class DarlingFrontDoorWebProxy
         catch (HttpRequestException ex) when (!context.Response.HasStarted)
         {
             var why = DescribeConnectFailure(ex);
+            finalStatus = StatusCodes.Status502BadGateway;
             Note(store.Name, route, StatusCodes.Status502BadGateway, why, started);
             await WriteStoreErrorAsync(context, StatusCodes.Status502BadGateway, "store_unavailable", store.Name, $"Store '{store.Name}' could not be reached: {why}.");
         }
         catch (Exception ex) when (ex is HttpRequestException or FrontDoorPeerUnavailableException or IOException)
         {
             /* The answer had started: nothing can be written over it, so the connection ends and the page sees the failure. */
+            finalStatus = context.Response.StatusCode;
             Note(store.Name, route, context.Response.StatusCode, "the connection ended mid-answer", started);
             context.Abort();
+        }
+        finally
+        {
+            if (!isGet && finalStatus != 0)
+            {
+                /* One line per change: the signed-in person and role, the store, the method, the path without its query, and the
+                   store's status. Never the body, a token, a cookie or the query string. */
+                var seat = DarlingWebSeat.FromContext(context);
+                _logger.LogInformation(
+                    "Front door web change: {User} ({Role}) sent {Method} {Route} to store {Store}, which answered {Status}",
+                    seat.EditorPrincipal, seat.CanEdit ? "admin" : "viewer", request.Method, route, store.Name, finalStatus);
+            }
         }
     }
 

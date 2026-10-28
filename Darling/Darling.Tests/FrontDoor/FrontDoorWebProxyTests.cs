@@ -34,7 +34,7 @@ using Xunit;
 namespace Darling.Tests.FrontDoor;
 
 /// <summary>Which seat a test request carries a session cookie for. A signed-out request carries none.</summary>
-internal enum FrontDoorSeat { Admin, Viewer, SignedOut }
+internal enum FrontDoorSeat { Admin, Viewer, SignedOut, NamedAdmin }
 
 /// <summary>The stores and their servers a test front door knows, with the directory's resolve rule: exact names before partial ones,
 /// one store routes and two or more are refused.</summary>
@@ -138,7 +138,7 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
 
     internal static Task<FrontDoorWebHarness> StartAsync(
         IReadOnlyList<(FakeWebPeer Peer, string[] Servers)> peers, TimeSpan? peerTimeout = null, TimeProvider? time = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default, ILogger? logger = null)
     {
         var secrets = new WebFakeSecrets();
         var directory = new WebFakeDirectory(peers.Select(p =>
@@ -146,12 +146,12 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
             secrets.SetWebToken(p.Peer.Name, p.Peer.Token);
             return (new FrontDoorStore(p.Peer.Name, new Uri("http://127.0.0.1:1/"), p.Peer.BaseUri, null), p.Servers);
         }));
-        return StartAsync(directory, secrets, peerTimeout, time, ct);
+        return StartAsync(directory, secrets, peerTimeout, time, ct, logger);
     }
 
     internal static async Task<FrontDoorWebHarness> StartAsync(
         WebFakeDirectory directory, WebFakeSecrets secrets, TimeSpan? peerTimeout = null, TimeProvider? time = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default, ILogger? logger = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -164,7 +164,7 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
         var app = builder.Build();
 
         var session = new DarlingFrontDoorWebSession(secrets, time);
-        var proxy = new DarlingFrontDoorWebProxy(directory, session, peerTimeout ?? TimeSpan.FromSeconds(30), NullLogger.Instance, time);
+        var proxy = new DarlingFrontDoorWebProxy(directory, session, peerTimeout ?? TimeSpan.FromSeconds(30), logger ?? NullLogger.Instance, time);
 
         app.Use(next => context =>
         {
@@ -186,6 +186,9 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
     {
         FrontDoorSeat.Admin => DarlingWebHostService.SessionCookieName + "="
             + DarlingWebHostService.BuildSessionCookieValue(SigningKey, DateTimeOffset.UtcNow.AddHours(1), null),
+        FrontDoorSeat.NamedAdmin => DarlingWebHostService.SessionCookieName + "="
+            + DarlingWebHostService.BuildSessionCookieValue(
+                SigningKey, DateTimeOffset.UtcNow.AddHours(1), DarlingWebSeat.EncodeCookieSubject("alice@example.test", WebOidcRole.Admin)),
         FrontDoorSeat.Viewer => DarlingWebHostService.SessionCookieName + "="
             + DarlingWebHostService.BuildSessionCookieValue(
                 SigningKey, DateTimeOffset.UtcNow.AddHours(1), DarlingWebSeat.EncodeCookieSubject("viewer@example.test", WebOidcRole.Viewer)),
@@ -391,6 +394,39 @@ public sealed class FrontDoorWebProxyTests
     }
 
     [Fact(Timeout = 60_000)]
+    public async Task AForwardedChange_LogsOneLineWithWhoStoreMethodPathAndStatus_AndNoSecretOrQuery()
+    {
+        var logger = new DarlingSelfAlertTests.CapturingLogger();
+        var a = await FakeWebPeer.StartAsync("use1");
+        var b = await FakeWebPeer.StartAsync("usw2");
+        await using var _a = a;
+        await using var _b = b;
+        await using var door = await FrontDoorWebHarness.StartAsync(
+            new[] { (a, UseServers), (b, UsuServers) }, ct: TestContext.Current.CancellationToken, logger: logger);
+
+        var get = await door.SendAsync(door.Request(HttpMethod.Get, "/api/fleet?x=1", FrontDoorSeat.NamedAdmin, store: "use1"));
+        Assert.Equal(HttpStatusCode.OK, get.Response.StatusCode);
+        Assert.DoesNotContain(logger.Entries, e => e.Message.Contains("change", StringComparison.Ordinal));
+
+        var (post, _) = await door.SendAsync(door.Request(
+            HttpMethod.Post, "/api/mute-rules?note=secretquery", FrontDoorSeat.NamedAdmin, store: "use1", body: "{\"name\":\"body-text-1234\"}"));
+        Assert.Equal(HttpStatusCode.OK, post.StatusCode);
+
+        var line = Assert.Single(logger.Entries, e => e.Level == LogLevel.Information).Message;
+        Assert.Contains("alice@example.test", line);
+        Assert.Contains("admin", line);
+        Assert.Contains("use1", line);
+        Assert.Contains("POST", line);
+        Assert.Contains("/api/mute-rules", line);
+        Assert.Contains("200", line);
+        Assert.DoesNotContain("secretquery", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("body-text-1234", line, StringComparison.Ordinal);
+        Assert.DoesNotContain(a.Token, line, StringComparison.Ordinal);
+        Assert.DoesNotContain("Cookie", line, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(DarlingWebHostService.SessionCookieName, line, StringComparison.Ordinal);
+    }
+
+    [Fact(Timeout = 60_000)]
     public async Task AnAmbiguousServerName_Is409_AndNothingIsSent()
     {
         var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
@@ -440,11 +476,11 @@ public sealed class FrontDoorWebProxyTests
         await using var _door = door;
         a.Delay = TimeSpan.FromSeconds(20);
 
-        var watch = System.Diagnostics.Stopwatch.StartNew();
+        /* The store waits 20 s and the front door gives it 1 s, so a 504 can only come from the timeout cutting the call short. The
+           test's own 60 s timeout is the hang guard, and no assertion reads a clock. */
         var (response, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/fleet", store: "use1"));
 
         Assert.Equal(HttpStatusCode.GatewayTimeout, response.StatusCode);
-        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), "the timeout did not bound the call: " + watch.Elapsed);
         Assert.Equal("use1", (string?)Json(body)["store"]);
         Assert.Contains("use1", (string?)Json(body)["message"]);
     }

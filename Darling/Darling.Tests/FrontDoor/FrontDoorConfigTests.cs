@@ -201,6 +201,7 @@ public sealed class FrontDoorConfigTests
     {
         var store = Store();
         store.WebUrl = url;
+        store.WebToken = Secret;
         Assert.Empty(Problems(store));
     }
 
@@ -211,6 +212,7 @@ public sealed class FrontDoorConfigTests
     {
         var store = Store();
         store.WebUrl = url;
+        store.WebToken = Secret;
         var problems = Problems(store);
         Assert.Single(problems);
         Assert.Contains("webUrl", problems[0]);
@@ -237,6 +239,33 @@ public sealed class FrontDoorConfigTests
         var reference = Store();
         reference.McpToken = "env:SOME_TOKEN";
         Assert.Empty(Problems(reference));
+    }
+
+    [Fact]
+    public void AWebToken_IsRequiredWhenTheWebUrlIsSet_ButEitherFormCounts()
+    {
+        var none = Store("use3");
+        none.WebUrl = "https://peer.example.test:5153/";
+        var problem = Assert.Single(Problems(none));
+        Assert.Contains("frontDoor.stores[0]", problem);
+        Assert.Contains("a web token is required", problem);
+
+        var blank = Store();
+        blank.WebUrl = "https://peer.example.test:5153/";
+        blank.WebToken = "  ";
+        Assert.Single(Problems(blank));
+
+        var encrypted = Store();
+        encrypted.WebUrl = "https://peer.example.test:5153/";
+        encrypted.WebEncryptedToken = "blob";
+        Assert.Empty(Problems(encrypted));
+
+        var reference = Store();
+        reference.WebUrl = "https://peer.example.test:5153/";
+        reference.WebToken = "env:SOME_WEB_TOKEN";
+        Assert.Empty(Problems(reference));
+
+        Assert.Empty(Problems(Store()));
     }
 
     [Theory]
@@ -329,6 +358,7 @@ public sealed class FrontDoorConfigTests
         var store = Store("use1");
         store.McpUrl = "http://peer.example.test:5152/";
         store.WebUrl = "http://peer.example.test:5153/";
+        store.WebToken = Secret;
         var block = Block(store);
 
         Assert.Empty(FrontDoorConfig.Validate(block));

@@ -1684,7 +1684,7 @@ public sealed class DarlingWebHostService : BackgroundService
         {
             /* #6840: a front door answers the four local routes and forwards the rest of /api/* to a store. It sits exactly where MapAll
                does, behind the gates above, so a request reaches it only after sign-in, the CIDR test and the role gate. */
-            frontDoorProxy.Map(app);
+            frontDoorProxy.AddRoutes(app);
         }
         else
         {

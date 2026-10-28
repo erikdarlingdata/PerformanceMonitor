@@ -3333,6 +3333,13 @@ public sealed class FrontDoorConfig
                 problems.Add($"{label}: an MCP token is required (mcpEncryptedToken, or mcpToken as text or an env:/file: reference).");
             }
 
+            /* A store with a web address and no web token would answer 502 on every web request at run time. */
+            if (!string.IsNullOrWhiteSpace(store.WebUrl)
+                && string.IsNullOrWhiteSpace(store.WebEncryptedToken) && string.IsNullOrWhiteSpace(store.WebToken))
+            {
+                problems.Add($"{label}: a web token is required when webUrl is set (webEncryptedToken, or webToken as text or an env:/file: reference).");
+            }
+
             if (!string.IsNullOrWhiteSpace(store.CertificateSha256) && FrontDoorStoreConfig.NormalizePin(store.CertificateSha256) is null)
             {
                 problems.Add($"{label}: certificateSha256 must be the certificate's SHA-256 thumbprint, 64 hex characters (colons and spaces allowed).");

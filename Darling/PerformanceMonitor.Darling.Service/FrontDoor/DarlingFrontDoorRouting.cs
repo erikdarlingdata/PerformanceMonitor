@@ -220,7 +220,8 @@ internal static class DarlingFrontDoorRouting
         if (named)
         {
             var route = directory.ResolveServer(serverName!);
-            if (route is FrontDoorRoute.Refused)
+            /* An ambiguous name is not a miss: it matched in more than one store, and a refresh cannot settle that. */
+            if (route is FrontDoorRoute.Refused { Ambiguous: false })
             {
                 await directory.RefreshOnMissAsync(ct).ConfigureAwait(false);
                 route = directory.ResolveServer(serverName!);
