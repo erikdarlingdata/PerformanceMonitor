@@ -45,6 +45,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public partial class SettingsWindow : Window
 {
+    /// <summary>#6875: the Identity Capacity bars as loaded. The window shows only the switch, and a Save writes these back.</summary>
+    private int _identityCapacityWarningPercent = 70;
+    private int _identityCapacityCriticalPercent = 90;
+
     /// <summary>Branding the shared email/webhook renderers stamp on test messages (mirrors the service's).</summary>
     private static readonly AlertBranding s_branding = new("Performance Monitor Darling", null);
 
@@ -931,6 +935,10 @@ public partial class SettingsWindow : Window
         AlertFailedJobCheckBox.IsChecked = r.FailedJobEnabled;
         AlertFailedJobLookbackBox.Text = r.FailedJobLookbackMinutes.ToString(CultureInfo.InvariantCulture);
         AlertDatabaseStateCheckBox.IsChecked = r.DatabaseStateEnabled;
+        AlertIdentityCapacityCheckBox.IsChecked = r.IdentityCapacityEnabled;
+        /* #6875: the two bars have no box here (update_alert_settings and the threshold overrides set them), so a Save carries the loaded values back unchanged. */
+        _identityCapacityWarningPercent = r.IdentityCapacityWarningPercent;
+        _identityCapacityCriticalPercent = r.IdentityCapacityCriticalPercent;
         AlertCooldownBox.Text = r.CooldownMinutes.ToString(CultureInfo.InvariantCulture);
         AnalysisEnabledCheckBox.IsChecked = r.AnalysisEnabled;
         AnalysisIntervalBox.Text = r.AnalysisIntervalMinutes.ToString(CultureInfo.InvariantCulture);
@@ -1000,6 +1008,9 @@ public partial class SettingsWindow : Window
             LongRunningJobEnabled = AlertLongRunningJobCheckBox.IsChecked == true,
             FailedJobEnabled = AlertFailedJobCheckBox.IsChecked == true,
             DatabaseStateEnabled = AlertDatabaseStateCheckBox.IsChecked == true,
+            IdentityCapacityEnabled = AlertIdentityCapacityCheckBox.IsChecked == true,
+            IdentityCapacityWarningPercent = _identityCapacityWarningPercent,
+            IdentityCapacityCriticalPercent = _identityCapacityCriticalPercent,
             AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true,
             AnalysisNotificationsEnabled = AnalysisNotificationsCheckBox.IsChecked == true,
             /* #3712 (V137): the combo's Tag IS the stored value -- 'digest' / 'page', or empty for NULL ("the file
@@ -1401,6 +1412,8 @@ public partial class SettingsWindow : Window
             parts.Add($"file growth > {AlertFileGrowthRiseMbBox.Text} {AlertContextBuilders.FileGrowthRiseUnit} over {AlertFileGrowthLookbackMinutesBox.Text}m or volume > {AlertFileGrowthVolumePercentBox.Text}%");
         if (AlertLongRunningJobCheckBox.IsChecked == true)
             parts.Add($"jobs > {AlertLongRunningJobMultiplierBox.Text}x avg");
+        if (AlertIdentityCapacityCheckBox.IsChecked == true)
+            parts.Add("identity columns near the end of their type");
         if (AlertFailedJobCheckBox.IsChecked == true)
             parts.Add($"failed jobs (last {AlertFailedJobLookbackBox.Text}m)");
 
@@ -1511,6 +1524,7 @@ public partial class SettingsWindow : Window
         AlertLongRunningJobCheckBox.IsEnabled = enabled;
         AlertLongRunningJobMultiplierBox.IsEnabled = enabled;
         AlertFailedJobCheckBox.IsEnabled = enabled;
+        AlertIdentityCapacityCheckBox.IsEnabled = enabled;
         AlertFailedJobLookbackBox.IsEnabled = enabled;
         UpdateAlertPreviewText();
     }

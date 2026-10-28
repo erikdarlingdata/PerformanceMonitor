@@ -108,6 +108,7 @@ public static class AlertFamily
         ["Version Store (PVS)"] = Performance,
         ["Database File Growth"] = Performance,
         ["Database State"] = Performance,
+        ["Identity Capacity"] = Performance,
         ["Forced Plan Failing"] = Performance,
 
         /* ---- performance: the PostgreSQL-only alerts ---- */

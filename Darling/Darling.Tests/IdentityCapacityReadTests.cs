@@ -297,6 +297,46 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
         });
     }
 
+    [Fact]
+    public async Task TheFleetCardField_CountsTheColumnsAtAWarningOrCriticalBar_InEachDatabasesNewestScanOnly_AndMatchesTheViewerCard()
+    {
+        var now = DateTime.UtcNow;
+        var oldAt = now.AddDays(-3);
+        var newAt = now.AddHours(-1);
+        await WithStoreAsync(async (c, ct) =>
+        {
+            /* Orders was at 95 percent in the older scan and is at 60 in the newest (reseeded): only the newest scan counts. */
+            await Marker(c, ct, DataId, DataServer, "Sales", oldAt);
+            await Column(c, ct, "Sales", "Orders", "int", 10, "2040000000", "1", "1", 95.0, oldAt);
+            await Marker(c, ct, DataId, DataServer, "Sales", newAt);
+            await Column(c, ct, "Sales", "Orders", "int", 10, "1290000000", "1", "1", 60.0, newAt);
+            await Column(c, ct, "Sales", "Warm", "int", 10, "1600000000", "1", "1", 74.5, newAt);
+            await Column(c, ct, "Sales", "Audit", "int", 10, "2000000000", "1", "1", 93.1, newAt);
+            /* A second database with a warning column, and a clean one. */
+            await Marker(c, ct, DataId, DataServer, "Hr", newAt);
+            await Column(c, ct, "Hr", "Leave", "int", 10, "1580000000", "1", "1", 73.6, newAt);
+            await Marker(c, ct, DataId, DataServer, "Clean", newAt);
+            /* The other server has a clean scan only. */
+            await Marker(c, ct, CleanId, CleanServer, "Quiet", newAt);
+        }, async (postgres, ct) =>
+        {
+            var card = await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, now, ct);
+
+            var worst = Assert.Single(card);
+            Assert.Equal(DataId, worst.Key);
+            Assert.Equal("critical", worst.Value.WorstBand);
+            Assert.Equal(3, worst.Value.ColumnsAtBar);
+            Assert.DoesNotContain(CleanId, card.Keys);
+            Assert.DoesNotContain(EmptyId, card.Keys);
+
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(postgres.ConnectionString);
+            var viewerCard = await viewer.GetIdentityCapacityCardAsync(DataId, now, ct);
+            Assert.Equal(worst.Value.WorstBand, viewerCard!.WorstBand);
+            Assert.Equal(worst.Value.ColumnsAtBar, viewerCard.ColumnsAtBar);
+            Assert.Null(await viewer.GetIdentityCapacityCardAsync(CleanId, now, ct));
+        });
+    }
+
     private static Task ConfigRow(NpgsqlConnection c, CancellationToken ct, string database, string state, DateTime at) =>
         DarlingMcpTestData.ExecAsync(c, ct,
             "INSERT INTO database_config (config_id, capture_time, server_id, server_name, database_name, state_desc) VALUES ($1,$2,$3,$4,$5,$6)",

@@ -157,6 +157,13 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, bool> _activeCaptureDown = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastCaptureDownAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeAgentDown = new();
+    /* #6875: the Identity Capacity alert's standing state, the same two maps as Agent Not Running. */
+    private readonly ConcurrentDictionary<string, bool> _activeIdentityCapacity = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastIdentityCapacityAlert = new();
+    private readonly Func<bool> _identityCapacityEnabled;
+    private readonly Func<int> _identityCapacityWarningPercent;
+    private readonly Func<int> _identityCapacityCriticalPercent;
+    private readonly Func<string, string, string?, int, int> _resolveThreshold;
     private readonly ConcurrentDictionary<string, DateTime> _lastAgentDownAlert = new();
 
     /// <summary>The failed-send streaks behind <see cref="AfterSelfFire"/> (#4795): per (alert metric, key), how
@@ -1277,7 +1284,11 @@ internal sealed class DarlingSelfAlertEvaluator
         string? storeName = null,
         ISelfAlertDeliveryStampStore? deliveryStamps = null,
         Func<TimeSpan, CancellationToken, Task>? retryDelay = null,
-        Func<IReadOnlyList<WebhookChannelFailureCount>>? webhookChannelFailures = null)
+        Func<IReadOnlyList<WebhookChannelFailureCount>>? webhookChannelFailures = null,
+        Func<bool>? identityCapacityEnabled = null,
+        Func<int>? identityCapacityWarningPercent = null,
+        Func<int>? identityCapacityCriticalPercent = null,
+        Func<string, string, string?, int, int>? resolveThreshold = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
@@ -1292,6 +1303,12 @@ internal sealed class DarlingSelfAlertEvaluator
         /* Unsupplied AG seams fall back to the V35 DDL defaults (master switch on, 5-minute lag, redo queue
            off) so an evaluator built without them behaves like a store at its shipped defaults. */
         _notifyAgHealth = notifyAgHealth ?? (() => true);
+        /* #6875: an evaluator built without these seams behaves like a store at its shipped defaults: the Identity Capacity alert is off, its bars are 70 and
+           90 percent, and no override applies. */
+        _identityCapacityEnabled = identityCapacityEnabled ?? (() => false);
+        _identityCapacityWarningPercent = identityCapacityWarningPercent ?? (() => 70);
+        _identityCapacityCriticalPercent = identityCapacityCriticalPercent ?? (() => 90);
+        _resolveThreshold = resolveThreshold ?? ((_, _, _, global) => global);
         _agLagAlertSeconds = agLagAlertSeconds ?? (() => 300);
         _agRedoQueueAlertKb = agRedoQueueAlertKb ?? (() => 0);
         _agDisconnectRefireMinutes = agDisconnectRefireMinutes ?? (() => 0);
@@ -1523,6 +1540,27 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             _logger?.LogError("[{Server}] Agent-not-running self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(Key(serverId), AgentStatusReadName, agentReadClock.ElapsedMilliseconds);
+        }
+
+        /* Identity Capacity (#6875): off by default, so a fleet that never turned it on pays no read here. A server with no scan in the window
+           (the collector has not run, or has not reached any database) is judged on nothing: it neither fires nor clears. */
+        if (_identityCapacityEnabled())
+        {
+            var identityReadClock = Stopwatch.StartNew();
+            try
+            {
+                var read = await ReadIdentityCapacityAsync(postgres, serverId, cancellationToken);
+                await ApplyIdentityCapacityAsync(serverId, serverName, read, cancellationToken, sweepGeneration: generation);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("[{Server}] Identity-capacity self-alert failed after {ElapsedMs} ms: {Message}", serverName, identityReadClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(Key(serverId), IdentityCapacityReadName, identityReadClock.ElapsedMilliseconds);
+            }
         }
 
         /* Availability Group health (#991). Skipped entirely when the master AG switch is off, so a fleet that
@@ -4296,6 +4334,111 @@ internal sealed class DarlingSelfAlertEvaluator
             await RecordResolutionAsync(new AlertResolution(
                 key, serverName, AgentDownMetric,
                 "Agent Restarted", $"{serverName}: SQL Server Agent service is running again"), cancellationToken);
+        }
+    }
+
+    /// <summary>The scans the Identity Capacity alert judges: seven days, the window <c>get_identity_capacity</c> reads by default, so a database
+    /// the pass budget has not reached again keeps the answer of its last scan.</summary>
+    internal static readonly TimeSpan IdentityCapacityWindow = TimeSpan.FromHours(168);
+
+    /// <summary>Longest list of columns the alert's detail names before it says how many more there are.</summary>
+    internal const int IdentityCapacityDetailColumns = 10;
+
+    /// <summary>
+    /// The newest scan of each database in the last <see cref="IdentityCapacityWindow"/> (#6875), or null when no database was scanned in it.
+    /// A database is judged by its own newest marker.
+    /// </summary>
+    internal async Task<IdentityCapacityRead?> ReadIdentityCapacityAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var now = _utcNow();
+        var read = await ReadWithOneRetryAsync(
+            token => DarlingIdentityCapacityReader.ReadAsync(
+                postgres, serverId, DatabaseFilter.All, now - IdentityCapacityWindow, now, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, token),
+            serverId, IdentityCapacityReadName, cancellationToken);
+        return read.HasScan ? read : null;
+    }
+
+    /// <summary>
+    /// Edge-applies "Identity Capacity" (#6875) from <see cref="ReadIdentityCapacityAsync"/>. A column is judged by the same percent and the same
+    /// <see cref="IdentityCapacityMath.Band(double, double, double)"/> the tool and the Viewer use, against the bars that apply to its server and
+    /// database (a threshold override replaces the global bar for that scope, the critical bar never below the warning bar). Fires once when a column
+    /// reaches a bar, again when the worst band rises from warning to critical, re-fires after the cooldown while one stands, and writes one
+    /// "Identity Capacity Cleared" history row when no column is at a bar any more. A null <paramref name="read"/> judges nothing. Off unless the
+    /// <c>identity_capacity_enabled</c> setting is on, and gated on the master alerts switch.
+    /// </summary>
+    internal async Task ApplyIdentityCapacityAsync(
+        int serverId, string serverName, IdentityCapacityRead? read, CancellationToken cancellationToken, int? sweepGeneration = null)
+    {
+        if (IsStaleSweep(serverId, sweepGeneration) || !_settings.AlertsEnabled || !_identityCapacityEnabled() || read is null)
+        {
+            return;
+        }
+
+        var key = Key(serverId);
+        var now = _utcNow();
+        var globalWarning = Math.Clamp(_identityCapacityWarningPercent(), 1, 100);
+        var globalCritical = Math.Clamp(_identityCapacityCriticalPercent(), globalWarning, 100);
+        var hits = new List<(IdentityColumnFact Column, double Percent, string Band, int Warning, int Critical)>();
+        foreach (var column in read.Columns)
+        {
+            if (column.PercentUsed is not double percent)
+            {
+                continue;
+            }
+
+            var warning = Math.Clamp(_resolveThreshold(DarlingThresholdKeys.IdentityCapacityWarning, key, column.DatabaseName, globalWarning), 1, 100);
+            var critical = Math.Max(warning, Math.Clamp(_resolveThreshold(DarlingThresholdKeys.IdentityCapacityCritical, key, column.DatabaseName, globalCritical), 1, 100));
+            var band = IdentityCapacityMath.Band(percent, warning, critical);
+            if (band != IdentityCapacityMath.BandOk)
+            {
+                hits.Add((column, percent, band, warning, critical));
+            }
+        }
+
+        if (hits.Count > 0)
+        {
+            hits.Sort((a, b) => b.Percent.CompareTo(a.Percent));
+            var isCritical = hits.Any(h => h.Band == IdentityCapacityMath.BandCritical);
+            _activeIdentityCapacity[key] = true;
+            var decision = DecideStateAlert(_lastIdentityCapacityAlert, key, IdentityCapacityMetric, key, now, out var refire, severityRank: isCritical ? 2 : 1);
+            if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
+            {
+                _lastIdentityCapacityAlert[key] = now;
+                var worst = hits[0];
+                var worstBar = worst.Band == IdentityCapacityMath.BandCritical ? worst.Critical : worst.Warning;
+                var lines = hits.Take(IdentityCapacityDetailColumns).Select(h =>
+                    $"{h.Column.DatabaseName}.{h.Column.SchemaName}.{h.Column.TableName}.{h.Column.ColumnName}: {h.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used ({h.Band}), " +
+                    (h.Column.Exhaustion is { } e
+                        ? $"about {e.DaysLeft.ToString("F0", CultureInfo.InvariantCulture)} days to exhaustion."
+                        : "days to exhaustion unknown."));
+                var more = hits.Count > IdentityCapacityDetailColumns ? $" And {hits.Count - IdentityCapacityDetailColumns} more." : "";
+                var delivery = await FireAsync(
+                    key, serverName, IdentityCapacityMetric,
+                    $"{worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}%",
+                    $"{worstBar.ToString(CultureInfo.InvariantCulture)}%",
+                    detail: StateRepeatNote(decision, refire) +
+                        $"{hits.Count} identity column(s) on this server are near the end of their type. An identity column that runs out stops every insert into its table. " +
+                        string.Join(" ", lines) + more,
+                    severity: isCritical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+                    shortMessage: $"{hits.Count} identity column(s) near the end of their type, fullest {worst.Column.DatabaseName}.{worst.Column.TableName}.{worst.Column.ColumnName} at {worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used",
+                    numericCurrentValue: worst.Percent,
+                    numericThresholdValue: worstBar,
+                    cancellationToken);
+                if (IsStaleSweep(serverId, sweepGeneration))
+                {
+                    return;
+                }
+
+                NoteStateSend(IdentityCapacityMetric, key, delivery);
+            }
+        }
+        else if (_activeIdentityCapacity.TryRemove(key, out var was) && was)
+        {
+            EndStateAlert(_lastIdentityCapacityAlert, key, IdentityCapacityMetric, key);
+            await RecordResolutionAsync(new AlertResolution(
+                key, serverName, IdentityCapacityMetric,
+                "Identity Capacity Cleared", $"{serverName}: no identity column is at its warning bar"), cancellationToken);
         }
     }
 
@@ -8411,6 +8554,9 @@ WHERE c.is_enabled";
         _lastCaptureDownAlert.TryRemove(key, out _);
         _activeAgentDown.TryRemove(key, out _);
         _lastAgentDownAlert.TryRemove(key, out _);
+        _activeIdentityCapacity.TryRemove(key, out _);
+        _lastIdentityCapacityAlert.TryRemove(key, out _);
+        _stateRetries.Clear(StateRetryKey(IdentityCapacityMetric, key));
         _stateRetries.Clear(StateRetryKey(CaptureDownMetric, key));
         _stateRetries.Clear(StateRetryKey(AgentDownMetric, key));
         _connectionState.TryRemove(key, out _);
@@ -9072,6 +9218,8 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
 
     internal const string CaptureDownMetric = "Capture Down";
     internal const string AgentDownMetric = "Agent Not Running";
+    internal const string IdentityCapacityMetric = "Identity Capacity";
+    internal const string IdentityCapacityReadName = "identity-capacity self-alert";
 
     /// <summary>
     /// #5493: retries of the lasting-state self-alerts, keyed by <see cref="StateRetryKey"/>. Collection Stopped and

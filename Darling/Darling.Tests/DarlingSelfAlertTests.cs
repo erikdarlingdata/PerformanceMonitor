@@ -307,6 +307,11 @@ public sealed class DarlingSelfAlertTests
         /// Purge Over Horizon read-failure count.</summary>
         public AlertReadFailureCounter? ReadFailures { get; set; }
 
+        /// <summary>#6875: the Identity Capacity switch, read live. Default off, the shipped default. The bars default to 70 and 90, and an override
+        /// resolver (wire, server key, database, global) replaces them for a scope.</summary>
+        public bool IdentityCapacityEnabled { get; set; }
+        public Func<string, string, string?, int, int>? ResolveThreshold { get; set; }
+
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /// <summary>#1681: captures what the evaluator writes to the service log, so the firing/recovery pair
@@ -328,7 +333,9 @@ public sealed class DarlingSelfAlertTests
             retentionHoldWarnRatio: WireRetentionHoldKnobs ? () => RetentionHoldWarnRatio : null,
             retentionHoldCriticalRatio: WireRetentionHoldKnobs ? () => RetentionHoldCriticalRatio : null,
             readFailures: ReadFailures,
-            storeName: StoreName);
+            storeName: StoreName,
+            identityCapacityEnabled: () => IdentityCapacityEnabled,
+            resolveThreshold: ResolveThreshold);
     }
 
     /* ---------------- #991 Availability Group fixtures ---------------- */

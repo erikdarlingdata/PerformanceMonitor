@@ -3633,6 +3633,11 @@ LIMIT 1";
                through the same by-reference alertSettings seam, so a store edit takes effect on the next sweep
                without a restart (and the clamps live on the settings properties, not here). */
             notifyAgHealth: () => alertSettings.NotifyAgHealth,
+            /* #6875: the Identity Capacity switch and bars, read live, and the per-server and per-database override resolution. Off until an operator turns it on. */
+            identityCapacityEnabled: () => alertSettings.IdentityCapacityEnabled,
+            identityCapacityWarningPercent: () => alertSettings.IdentityCapacityWarningPercent,
+            identityCapacityCriticalPercent: () => alertSettings.IdentityCapacityCriticalPercent,
+            resolveThreshold: (wire, serverKey, database, global) => _thresholdOverrides.ResolveWire(wire, serverKey, database, global),
             agLagAlertSeconds: () => alertSettings.AgLagAlertSeconds,
             agRedoQueueAlertKb: () => alertSettings.AgRedoQueueAlertKb,
             agDisconnectRefireMinutes: () => alertSettings.AgDisconnectRefireMinutes,

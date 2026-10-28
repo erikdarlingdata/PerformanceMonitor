@@ -586,6 +586,9 @@ public sealed partial class DarlingMcpAlertTools
         long_running_job = new { enabled = s.LongRunningJobEnabled, multiplier = s.LongRunningJobMultiplier },
         failed_job = new { enabled = s.FailedJobEnabled, lookback_minutes = s.FailedJobLookbackMinutes },
         database_state = new { enabled = s.DatabaseStateEnabled },
+        /* #6875: the Identity Capacity alert (an identity column is nearly out of values). Off by default. The two bars are percent used; a threshold override
+           (identity_capacity.warning_percent, identity_capacity.critical_percent) replaces them for one server or one database. */
+        identity_capacity = new { enabled = s.IdentityCapacityEnabled, warning_percent = s.IdentityCapacityWarningPercent, critical_percent = s.IdentityCapacityCriticalPercent },
         /* #2417: the AG family, read out of the store since V35/V37 and emitted to nobody until now -- so
            an agent asked why nothing alerted when a replica fell behind could not see the lag threshold,
            could not see whether AG notification was on at all, and had no way to tell "configured not to
@@ -3142,6 +3145,19 @@ public sealed partial class DarlingMcpAlertTools
                             case "enabled": AddBool("failed_job_enabled", n, "failed_job.enabled"); break;
                             case "lookback_minutes": AddInt("failed_job_lookback_minutes", n, "failed_job.lookback_minutes", 1, 1440); break;
                             default: error = $"Unknown field 'failed_job.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "identity_capacity":
+                    Group(prop.Value, "identity_capacity", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("identity_capacity_enabled", n, "identity_capacity.enabled"); break;
+                            case "warning_percent": AddInt("identity_capacity_warning_percent", n, "identity_capacity.warning_percent", 1, 100); break;
+                            case "critical_percent": AddInt("identity_capacity_critical_percent", n, "identity_capacity.critical_percent", 1, 100); break;
+                            default: error = $"Unknown field 'identity_capacity.{k}'."; break;
                         }
                     });
                     break;

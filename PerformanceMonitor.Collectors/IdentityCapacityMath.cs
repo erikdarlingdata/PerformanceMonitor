@@ -60,8 +60,11 @@ public static class IdentityCapacityMath
     public const string BandCritical = "critical";
 
     /// <summary>The band of a percent used: ok under 70, warning from 70, critical from 90.</summary>
-    public static string Band(double percentUsed) =>
-        percentUsed >= CriticalPercent ? BandCritical : percentUsed >= WarningPercent ? BandWarning : BandOk;
+    public static string Band(double percentUsed) => Band(percentUsed, WarningPercent, CriticalPercent);
+
+    /// <summary>The band against bars other than the defaults: the Identity Capacity alert uses the bars that apply to a column's server and database (a threshold override). Critical from <paramref name="criticalPercent"/> up, warning from <paramref name="warningPercent"/>.</summary>
+    public static string Band(double percentUsed, double warningPercent, double criticalPercent) =>
+        percentUsed >= criticalPercent ? BandCritical : percentUsed >= warningPercent ? BandWarning : BandOk;
 
     /// <summary>The most columns kept per database per pass.</summary>
     public const int MaxColumnsPerDatabase = 20;

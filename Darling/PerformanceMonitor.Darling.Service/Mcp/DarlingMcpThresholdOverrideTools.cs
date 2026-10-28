@@ -388,6 +388,8 @@ public sealed class DarlingMcpThresholdOverrideTools
         "failed_job.lookback_minutes" => s.FailedJobLookbackMinutes,
         DarlingThresholdKeys.PgBlockingCount => s.PgBlockingCountThreshold,
         DarlingThresholdKeys.PgDeadlockCount => s.PgDeadlockCountThreshold,
+        DarlingThresholdKeys.IdentityCapacityWarning => s.IdentityCapacityWarningPercent,
+        DarlingThresholdKeys.IdentityCapacityCritical => s.IdentityCapacityCriticalPercent,
         _ => throw new ArgumentOutOfRangeException(nameof(wire), wire, "Not a tunable threshold."),
     };
 }

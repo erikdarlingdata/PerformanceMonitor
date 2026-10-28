@@ -2458,6 +2458,10 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
     /// collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a fresh store (V1's catalog walk) and an upgraded one
     /// agree. The marker index finds a database's newest scan by one seek. New table, no data moves, no grant (the <c>collect</c> schema
     /// carries blanket SELECT). Every statement is idempotent.
+    /// The same rung adds three <c>config.config_alert_settings</c> columns for the "Identity Capacity" alert (catalog-only): <c>identity_capacity_enabled</c>
+    /// (<c>boolean NOT NULL DEFAULT FALSE</c>, the alert ships OFF) and the warning and critical bars <c>identity_capacity_warning_percent</c> (70) and
+    /// <c>identity_capacity_critical_percent</c> (90), the global values a per-server or per-database threshold override replaces. An older build never
+    /// reads the columns.
     /// </summary>
     private const string V222Sql = @"
 CREATE TABLE IF NOT EXISTS collect.identity_capacity (
@@ -2480,7 +2484,12 @@ CREATE TABLE IF NOT EXISTS collect.identity_capacity (
 CREATE INDEX IF NOT EXISTS idx_identity_capacity_time ON collect.identity_capacity(server_id, collection_time);
 
 CREATE INDEX IF NOT EXISTS idx_identity_capacity_markers
-    ON collect.identity_capacity (server_id, database_name, collection_time) WHERE column_name IS NULL;";
+    ON collect.identity_capacity (server_id, database_name, collection_time) WHERE column_name IS NULL;
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS identity_capacity_enabled boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS identity_capacity_warning_percent integer NOT NULL DEFAULT 70,
+    ADD COLUMN IF NOT EXISTS identity_capacity_critical_percent integer NOT NULL DEFAULT 90;";
 
     /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>

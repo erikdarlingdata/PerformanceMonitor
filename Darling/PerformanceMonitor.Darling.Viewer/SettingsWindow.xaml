@@ -405,6 +405,12 @@
                                     <Button x:Name="ConfigureDatabaseStatesButton" Content="Configure…" Margin="8,0,0,0" Padding="8,2"
                                             VerticalAlignment="Center" Click="ConfigureDatabaseStatesButton_Click"/>
                                 </WrapPanel>
+                                <!-- #6875: off by default. Alerts when an identity column is at or past the warning bar (70 percent used) or the
+                                     critical bar (90 percent) of its type's capacity. The bars are set with update_alert_settings or a threshold override. -->
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertIdentityCapacityCheckBox" Content="Identity column running out of values (off by default)"
+                                              VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
                                 <!-- #3368: Server Health Bands. Its own section, and NOT an alert section — these two tiers
                                      decide what colour a server's Overview card and the fleet roll-up read, not whether
                                      anything is delivered. They are deliberately absent from SetAlertControlsEnabled for

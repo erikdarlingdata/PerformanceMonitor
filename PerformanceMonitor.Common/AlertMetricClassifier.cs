@@ -192,7 +192,7 @@ namespace PerformanceMonitor.Common
                "Collection Falling Behind" (#4732) stores the share of due collector slots that were skipped, and the
                share that fires it (5): both are percentages, and the grid showed them as a bare 97.30 and 5.00. */
             "High CPU" or "tempdb Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job"
-                or "Collection Falling Behind" => $"{value:F1}%",
+                or "Collection Falling Behind" or "Identity Capacity" => $"{value:F1}%",
 
             /* Poison wait carries milliseconds — since #3539 A4 the wait ACCUMULATED over the ten-minute
                window on both engines (before that, SQL Server's average ms per wait; rows from then still

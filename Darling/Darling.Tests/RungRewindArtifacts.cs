@@ -554,7 +554,11 @@ ALTER TABLE collect.query_store_compose_stamp_built DROP COLUMN IF EXISTS hash_b
         // V222 (#6875): the identity capacity table. The table is the probe's newest sentinel. The rewind drops it (its indexes go with it), so a
         // re-run of V222 does everything again. Safe on a store that never had it.
         new(222, "hasIdentityCapacity",
-            "DROP TABLE IF EXISTS collect.identity_capacity;"),
+            @"DROP TABLE IF EXISTS collect.identity_capacity;
+ALTER TABLE config.config_alert_settings
+    DROP COLUMN IF EXISTS identity_capacity_enabled,
+    DROP COLUMN IF EXISTS identity_capacity_warning_percent,
+    DROP COLUMN IF EXISTS identity_capacity_critical_percent;"),
     ];
 
     /// <summary>

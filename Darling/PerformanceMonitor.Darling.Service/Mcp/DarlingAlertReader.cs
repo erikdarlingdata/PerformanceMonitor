@@ -532,7 +532,11 @@ LIMIT 1";
         IReadOnlyList<string> ExcludedVolumes,
         /* #5736 (V211): the relative Client Timeouts bars' two multiples (integer NOT NULL, defaults 3 and 10). APPENDED, same reason. */
         int ClientTimeoutsWarningMultiple,
-        int ClientTimeoutsCriticalMultiple);
+        int ClientTimeoutsCriticalMultiple,
+        /* #6875 (V222): the Identity Capacity switch (boolean NOT NULL, default off) and its warning and critical bars (integer NOT NULL, 70 and 90). APPENDED, same reason. */
+        bool IdentityCapacityEnabled,
+        int IdentityCapacityWarningPercent,
+        int IdentityCapacityCriticalPercent);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -570,7 +574,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler,
        client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute,
        excluded_volumes,
-       client_timeouts_warning_multiple, client_timeouts_critical_multiple
+       client_timeouts_warning_multiple, client_timeouts_critical_multiple,
+       identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -637,7 +642,9 @@ WHERE id = 1";
             /* #6098 (V200): the excluded mount points at 76. */
             reader.IsDBNull(76) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(76),
             /* #5736 (V211): the multiples at 77-78. */
-            reader.GetInt32(77), reader.GetInt32(78));
+            reader.GetInt32(77), reader.GetInt32(78),
+            /* #6875 (V222): the Identity Capacity switch and bars at 79-81. */
+            reader.GetBoolean(79), reader.GetInt32(80), reader.GetInt32(81));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */
