@@ -134,6 +134,15 @@ public static class DatabaseProtectionBands
         return new(stored ?? Unknown, false, null, threshold);
     }
 
+    /// <summary>"3 days 4 hours", "5 hours 10 minutes" or "42 minutes": the two largest units. The tool and the Viewer say an age this way.</summary>
+    public static string Describe(TimeSpan age)
+    {
+        string Unit(long n, string unit) => string.Create(CultureInfo.InvariantCulture, $"{n} {unit}{(n == 1 ? "" : "s")}");
+        if (age.TotalDays >= 1) return Unit(age.Days, "day") + (age.Hours > 0 ? " " + Unit(age.Hours, "hour") : "");
+        if (age.TotalHours >= 1) return Unit(age.Hours, "hour") + (age.Minutes > 0 ? " " + Unit(age.Minutes, "minute") : "");
+        return Unit((long)age.TotalMinutes, "minute");
+    }
+
     /// <summary>The server answer: how many databases were judged and which are overdue on what.</summary>
     public static DatabaseProtectionSummary Summarize(IReadOnlyList<(DatabaseProtectionFact Fact, DatabaseProtectionBand Band)> bands)
     {
