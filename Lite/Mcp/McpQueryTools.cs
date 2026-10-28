@@ -655,7 +655,7 @@ public sealed class McpQueryTools
 
             if (rows.Count == 0)
                 return McpHelpers.WithDatabasesLeftOut(
-                    await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, databases), leftOut)!;
+                    await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, databases, floor, baselineStart, !string.IsNullOrWhiteSpace(as_of)), leftOut)!;
 
             var truncated = rows.Count > limit;
 
@@ -808,7 +808,7 @@ public sealed class McpQueryTools
     /// </summary>
     private static async Task<string> EmptyRegressionsAsync(
         LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice,
-        string[]? databases)
+        string[]? databases, DateTime? floor, DateTime baselineStart, bool replay)
     {
         /* The anchor is threaded in rather than resolved again: the coverage probe answers "does a BEFORE
            exist for this window", and a window it computed for itself would be a different one. */
@@ -816,11 +816,27 @@ public sealed class McpQueryTools
 
         if (!hasBaseline && !hasRecent)
         {
+            /* #6877: a window that ENDS before the kept data starts (an as_of replay) is not a server that has stored nothing yet: when
+               Query Store rows were being stored before the window, they were stored and aged out. Say that, with the window-floor hints,
+               and leave out the first-interval answer, which describes the server now and not the window. Twin of Darling's. */
+            /* The window-floor probe is null for a window that ends before the data starts, so the oldest row is read here. */
+            floor ??= await dataService.GetOldestQueryStoreRowAsync(serverId);
+            if (floor is DateTime kept && kept + TruncationSlack >= windowEnd
+                && await dataService.CollectorStoredRowsAtOrBeforeAsync(serverId, "query_store", baselineStart + TruncationSlack))
+            {
+                notice = WindowNotice(kept, baselineStart, "query_store_stats");
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                return McpHelpers.Status(
+                    "unavailable",
+                    $"This window ({baselineStart.ToString("MMM d", inv)} to {windowEnd.ToString("MMM d", inv)}) is older than this server's raw Query Store data, which starts {kept.ToString("MMM d", inv)}, so there is nothing to compare. The data from this window was stored and has since aged out.",
+                    notice.AsHints());
+            }
+
             /* #6181: Query Store on, collector healthy, first interval not closed yet: say so instead of "may be OFF". */
             return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, "query_store")
                 ?? (await McpRuntimePrecondition.QueryStoreFirstIntervalMessageAsync(
                         dataService, serverId, serverName, databases is { Length: 1 } ? databases[0] : null)
-                    is { } firstInterval ? McpHelpers.Status("unavailable", firstInterval + " There is nothing to compare yet, so this is not a report of zero regressions.") : null)
+                    is { } firstInterval ? McpHelpers.Status("unavailable", firstInterval + (replay ? $" That is this server's state now, not as of {windowEnd:yyyy-MM-dd HH:mm}Z, the end of the requested window, which holds no Query Store sample." : "") + " There is nothing to compare yet, so this is not a report of zero regressions.") : null)
                 ?? McpHelpers.Status(
                     "unavailable",
                     $"No Query Store data has EVER been collected for {serverName}, so this is NOT a report of zero regressions — there is nothing to compare. Query Store may be OFF on this server's databases, which get_query_store_health will say; otherwise check that collection is running for this server.");

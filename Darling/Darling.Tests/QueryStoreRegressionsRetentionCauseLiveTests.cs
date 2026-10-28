@@ -239,6 +239,83 @@ WHERE NOT {(collectionGap ? "TRUE" : "FALSE")} OR t < now() - INTERVAL '10 days'
         Assert.DoesNotContain("days of raw", message, StringComparison.Ordinal);
     }
 
+    /// <summary>The as_of of a replay whose 24 hour window and 7 day baseline all end before raw's data starts (raw's oldest row is about 3 days back).</summary>
+    private static string ReplayAsOf(int daysBack) => DateTime.UtcNow.AddDays(-daysBack).ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// #6877: an as_of replay whose window ends before the raw data starts, on a server collected long before it. The answer is not
+    /// "no sample stored yet": it names where the raw data starts, says there is nothing to compare, and carries the window-floor
+    /// hints. The 168 hour read without as_of keeps its #6829 answer.
+    /// </summary>
+    [Fact]
+    public async Task AReplayWindowEndingBeforeTheRawData_OnAServerCollectedBeforeIt_NamesWhereTheDataStarts()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await StartAsync(collectorFromDaysBack: 20, ct);
+        await SeedHealthyQueryStoreAsync(rig, ct);
+
+        var root = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 24, as_of: ReplayAsOf(6))).RootElement;
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("This window (", message, StringComparison.Ordinal);
+        Assert.Contains($"is older than this server's raw Query Store data, which starts {await OldestRawRowDateAsync(rig, ct)}, so there is nothing to compare", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("no Query Store sample has been stored yet", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Query Store is on for", message, StringComparison.Ordinal);
+        var hints = root.GetProperty("hints");
+        Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+        Assert.NotEqual(JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
+
+        var unchanged = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 168)).RootElement.GetProperty("message").GetString()!;
+        Assert.StartsWith($"{ServerName} has no Query Store capture", unchanged, StringComparison.Ordinal);
+        Assert.Contains("The baseline window (", unchanged, StringComparison.Ordinal);
+        Assert.Contains($"raw Query Store data, which starts {await OldestRawRowDateAsync(rig, ct)}, so there is no baseline to compare against", unchanged, StringComparison.Ordinal);
+    }
+
+    /// <summary>#6877: a server whose first productive run is after the window still gets the first-interval answer, labelled as the server now.</summary>
+    [Fact]
+    public async Task AReplayWindowEndingBeforeTheRawData_OnAServerAddedAfterIt_StillSaysNoSampleStoredYet()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await StartAsync(collectorFromDaysBack: 2, ct);
+        await SeedHealthyQueryStoreAsync(rig, ct);
+
+        var root = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 24, as_of: ReplayAsOf(6))).RootElement;
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("no Query Store sample has been stored yet", message, StringComparison.Ordinal);
+        Assert.Contains("That is this server's state now, not as of", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("which starts", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #6877: a window older than the collection log's 60 days cannot be answered by the log, whose rows have aged out. The server's
+    /// registration date stands in, so a server registered before the window still gets the aged-out answer; one registered after it
+    /// does not.
+    /// </summary>
+    [Fact]
+    public async Task AReplayWindowOlderThanTheCollectionLog_UsesTheServersRegistrationDate()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await StartAsync(collectorFromDaysBack: 20, ct);
+        await SeedHealthyQueryStoreAsync(rig, ct);
+
+        await QueryStoreIntervalWideBelowFloorLiveTests.ExecAsync(rig.Connection, "UPDATE servers SET created_date = now() - INTERVAL '200 days' WHERE server_id = @server_id", null, ct);
+        var registeredBefore = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 24, as_of: ReplayAsOf(80))).RootElement;
+        Assert.Contains("so there is nothing to compare", registeredBefore.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.True(registeredBefore.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+
+        await QueryStoreIntervalWideBelowFloorLiveTests.ExecAsync(rig.Connection, "UPDATE servers SET created_date = now() - INTERVAL '30 days' WHERE server_id = @server_id", null, ct);
+        var registeredAfter = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 24, as_of: ReplayAsOf(80))).RootElement;
+        Assert.Contains("no Query Store sample has been stored yet", registeredAfter.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>One READ_WRITE Query Store health snapshot, so the first-interval answer is available on a path that reaches it.</summary>
+    private static Task SeedHealthyQueryStoreAsync(Rig rig, CancellationToken ct) => QueryStoreIntervalWideBelowFloorLiveTests.ExecAsync(rig.Connection, $@"
+INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason, interval_length_minutes)
+VALUES (9001, now() - INTERVAL '5 minutes', @server_id, '{ServerName}', '{Db}', 'READ_WRITE', 'READ_WRITE', 0, 60)", null, ct);
+
     /// <summary>The date, in the answer's own form, of the oldest row the store holds for the server.</summary>
     private static async Task<string> OldestRawRowDateAsync(Rig rig, CancellationToken ct)
     {

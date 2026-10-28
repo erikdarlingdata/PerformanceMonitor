@@ -50,6 +50,39 @@ internal static class RetentionCause
             + $"so there is no baseline to compare against. An hours_back shorter than the span from {Date(kept)} to the window's end moves the baseline's end past that date, and the read then compares against the partial baseline from {Date(kept)} to that end.";
     }
 
+    /// <summary>#6877: the answer for a window that holds nothing on either side because it ENDS before the kept data starts, which an
+    /// <c>as_of</c> replay can ask for. Null (keep the first-interval and never-collected answers) unless the data starts at or after
+    /// the window's end (less the slack) and the server was being collected before the window began, so what the window would have
+    /// compared was stored and later aged out. The wording is <see cref="ForServerAsync"/>'s: where the kept data starts, never a
+    /// retention figure. The caller carries the same window-floor hints.</summary>
+    internal static async Task<(string Message, DateTime Floor)?> ForWindowAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime windowStart, DateTime windowEnd, DateTime? floor, bool fromTables,
+        CancellationToken cancellationToken)
+    {
+        /* The window-floor probe answers null for a window that ends before the data starts (the start would be at or after the
+           window's end), which is exactly this case, so the server's oldest row is read here. */
+        if (floor is null)
+        {
+            await using var oldest = postgres.CreateCommand("SELECT min(collection_time) FROM collect.query_store_stats WHERE server_id = $1");
+            oldest.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(oldest, serverId);
+            floor = await oldest.ExecuteScalarAsync(cancellationToken) is DateTime first ? first : null;
+        }
+
+        if (floor is not { } kept || kept + DurationTrendRouting.TruncationSlack < windowEnd)
+        {
+            return null;
+        }
+
+        if (!await CollectedBeforeAsync(postgres, serverId, windowStart, cancellationToken))
+        {
+            return null;
+        }
+
+        return ($"This window ({Date(windowStart)} to {Date(windowEnd)}) is older than this server's {DataKind(fromTables)}, which starts {Date(kept)}, "
+            + "so there is nothing to compare. The data from this window was stored and has since aged out.", kept);
+    }
+
     /// <summary>The answer for a database filter, reached only when the server has a baseline. The kept data starts inside the baseline
     /// window, so a database's older baseline may have been dropped, and the sentence says it may be that rather than that it is. Null
     /// unless the collector ran before the baseline window began and the data starts after its start.</summary>
@@ -87,11 +120,16 @@ internal static class RetentionCause
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddText(command, "query_store");
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(baselineStart.Add(DurationTrendRouting.TruncationSlack), DateTimeKind.Unspecified) });
+        var cutoff = DateTime.SpecifyKind(baselineStart.Add(DurationTrendRouting.TruncationSlack), DateTimeKind.Unspecified);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DarlingRetentionHorizons.CollectionLogHorizon(DateTime.UtcNow) });
         return await command.ExecuteScalarAsync(cancellationToken) is true;
     }
 
-    /// <summary>$1 server_id, $2 collector_name, $3 the latest run time that counts (naive UTC).</summary>
+    /// <summary>$1 server_id, $2 collector_name, $3 the latest run time that counts (naive UTC), $4 the collection log's horizon (naive UTC).
+    /// #6877: a window older than the log's horizon (60 days) cannot be answered by the log, whose rows aged out, so the server's oldest
+    /// stored evidence stands in: the day it was added to monitoring (servers.created_date). That is weaker than a productive run, and
+    /// is used only where the log cannot say, so a window the log still covers is never decided by it.</summary>
     internal const string CollectedBeforeSql = """
         SELECT EXISTS
         (
@@ -102,6 +140,17 @@ internal static class RetentionCause
             AND   status = 'SUCCESS'
             AND   rows_collected > 0
             AND   collection_time <= $3
+        )
+        OR
+        (
+            $3 < $4
+            AND EXISTS
+            (
+                SELECT 1
+                FROM servers
+                WHERE server_id = $1
+                AND   created_date <= $3
+            )
         )
         """;
 }
