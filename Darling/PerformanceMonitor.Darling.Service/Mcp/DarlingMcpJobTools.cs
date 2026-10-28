@@ -139,14 +139,15 @@ public sealed class DarlingMcpJobTools
         {
             /* Fleet-wide when no server is named: the resolver would auto-pick or refuse, and neither is the
                answer to "every server". A named server resolves through the registry as everywhere else. */
-            (int ServerId, string ServerName)? scope = null;
+            (int ServerId, string DisplayName)? scope = null;
             if (!string.IsNullOrWhiteSpace(server_name))
             {
                 var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
                 if (fault != null) return fault;
-                var (resolved, error) = DarlingServerResolver.ResolveOrError(servers, server_name);
+                /* #6860: the answer names the server by its display name (#6179), like every other tool, not the registry connection key. */
+                var (resolved, error) = DarlingServerResolver.ResolveOrErrorForAnswer(servers, server_name);
                 if (error != null) return error;
-                scope = resolved;
+                scope = (resolved.ServerId, resolved.DisplayName);
             }
 
             var filter = new JobHistoryFilter(
@@ -177,7 +178,7 @@ public sealed class DarlingMcpJobTools
             {
                 if (scope is { } s1)
                 {
-                    var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, s1.ServerId, s1.ServerName, "job_history", cancellationToken);
+                    var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, s1.ServerId, s1.DisplayName, "job_history", cancellationToken);
                     if (notCollected != null) return notCollected;
                 }
                 else
@@ -213,7 +214,7 @@ public sealed class DarlingMcpJobTools
             }).ToList();
 
             var envelope = new Dictionary<string, object?>();
-            envelope["server"] = scope?.ServerName;
+            envelope["server"] = scope?.DisplayName;
             envelope["hours_back"] = hours_back;
             envelope["effective_start"] = McpHelpers.FormatEffectiveStart(effectiveStart);
             envelope["window_truncated"] = windowTruncated;
@@ -258,7 +259,7 @@ public sealed class DarlingMcpJobTools
     /// as one whose snapshot is stale at that instant. A null <paramref name="states"/> (the read failed) adds nothing.
     /// </summary>
     private static void AddAgentState(
-        Dictionary<string, object?> envelope, (int ServerId, string ServerName)? scope, List<DarlingJobReader.AgentState>? states)
+        Dictionary<string, object?> envelope, (int ServerId, string DisplayName)? scope, List<DarlingJobReader.AgentState>? states)
     {
         if (states is null) return;
         if (scope is null)
@@ -273,7 +274,7 @@ public sealed class DarlingMcpJobTools
 
         var one = states.Count > 0
             ? states[0]
-            : new DarlingJobReader.AgentState(scope.Value.ServerName, null, DarlingJobReader.AgentUnknownDescription, null, default);
+            : new DarlingJobReader.AgentState(scope.Value.DisplayName, null, DarlingJobReader.AgentUnknownDescription, null, default);
         envelope["agent_running"] = one.AgentRunning;
         envelope["agent_status_desc"] = one.AgentStatusDesc;
         envelope["next_run"] = McpHelpers.FormatEffectiveStart(one.NextRunUtc);

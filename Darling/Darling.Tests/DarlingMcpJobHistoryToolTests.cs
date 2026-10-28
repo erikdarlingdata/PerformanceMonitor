@@ -506,6 +506,51 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         }
     }
 
+    /// <summary>#6860: a server registered with a display name that differs from its connection key is named by the display name in
+    /// every part of the answer, as every other tool names it (#6179): the envelope's <c>server</c>, the rows' <c>server</c> and the
+    /// not_collected sentence. The key must not appear, whether the caller named the server by its key or by its display name.</summary>
+    [Fact]
+    public async Task ADisplayNamedServer_IsAnsweredByItsDisplayName_NotItsConnectionKey()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            const string displayA = "Payroll Agent Box";
+            const string displayC = "Reporting Azure Database";
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1 WHERE server_id = $2", displayA, ServerA);
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1, sql_engine_edition = 5 WHERE server_id = $2", displayC, ServerC);
+
+            foreach (var asked in new[] { NameA, displayA })
+            {
+                var body = await DarlingMcpJobTools.GetJobHistory(postgres, asked, as_of: AsOfText, cancellationToken: ct);
+                using var doc = JsonDocument.Parse(body);
+                Assert.Equal(displayA, doc.RootElement.GetProperty("server").GetString());
+                Assert.All(doc.RootElement.GetProperty("runs").EnumerateArray(), r => Assert.Equal(displayA, r.GetProperty("server").GetString()));
+                Assert.DoesNotContain(NameA, body, StringComparison.Ordinal);
+            }
+
+            foreach (var asked in new[] { NameC, displayC })
+            {
+                var body = await DarlingMcpJobTools.GetJobHistory(postgres, asked, as_of: AsOfText, cancellationToken: ct);
+                Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(body));
+                Assert.Contains(displayC, body, StringComparison.Ordinal);
+                Assert.DoesNotContain(NameC, body, StringComparison.Ordinal);
+            }
+
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
     [Fact]
     public async Task Filters_AndFleetMode_AndLimit()
     {
