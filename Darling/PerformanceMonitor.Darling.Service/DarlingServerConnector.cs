@@ -435,7 +435,12 @@ SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
             using var command = new NpgsqlCommand(
                 PostgresAuroraProbeQueryText.Replace("{0}", schema, StringComparison.Ordinal), connection) { CommandTimeout = 15 };
             /* Both statements go in one batch, so they share one implicit transaction and the is_local setting the DO
-               block wrote is still there for the SELECT. The DO block returns no rows: the answer is the SELECT's. */
+               block wrote is still there for the SELECT. The DO block returns no rows: the answer is the SELECT's.
+               That holds only because Npgsql sends both statements before ONE Sync, and the server runs everything up
+               to a Sync in one implicit transaction, so set_config(..., true) persists from the DO block to the SELECT.
+               Two NpgsqlCommands, or anything else that ends the transaction between them, would make current_setting
+               return NULL here with no error, and every Aurora cluster would silently read as stock PostgreSQL (#2340:
+               pg_wait_stats and pg_statement_stats dropped). Keep them one command. */
             string? answer = null;
             using (var reader = await command.ExecuteReaderAsync(cancellationToken))
             {
@@ -738,6 +743,17 @@ SELECT s.system_identifier::text AS system_identifier,
        pg_catalog.current_setting('port') AS port
 FROM pg_catalog.pg_control_system() AS s";
 
+    /// <summary>
+    /// #6888: asked first, on its own round trip, whether this role may call <c>pg_control_system()</c>. PostgreSQL checks a
+    /// function's privilege when the statement starts, so a <c>CASE</c> or <c>WHERE</c> around the call in <see cref="PostgresIdentityQueryText"/>
+    /// would still raise 42501 on a role that is refused, and the server would write <c>permission denied for function
+    /// pg_control_system</c> into its own log on every connect. <c>has_function_privilege</c> is callable by any role and
+    /// <c>to_regprocedure</c> makes a missing function read as NULL, so the answer is false either way.
+    /// </summary>
+    internal const string PostgresIdentityPrivilegeQueryText =
+        "SELECT COALESCE(pg_catalog.has_function_privilege(current_user, "
+        + "pg_catalog.to_regprocedure('pg_catalog.pg_control_system()'), 'EXECUTE'), false)";
+
     internal static async Task<string?> ProbePostgresIdentityAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken, bool isAurora = false)
     {
         /* #6340 round 2 (N4): none on Aurora. No AWS documentation shows system_identifier to be unique per Aurora cluster (the control
@@ -750,6 +766,16 @@ FROM pg_catalog.pg_control_system() AS s";
 
         try
         {
+            /* #6888: a refused role is told apart BEFORE the call, so the server never raises (and logs) 42501 for it. */
+            using (var privilege = new NpgsqlCommand(PostgresIdentityPrivilegeQueryText, connection) { CommandTimeout = 30 })
+            {
+                if (await privilege.ExecuteScalarAsync(cancellationToken) is not true)
+                {
+                    logger?.LogDebug("pg_control_system() is not callable by this role; the target is matched by host text alone");
+                    return null;
+                }
+            }
+
             using var command = new NpgsqlCommand(PostgresIdentityQueryText, connection) { CommandTimeout = 30 };
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) && !reader.IsDBNull(1))

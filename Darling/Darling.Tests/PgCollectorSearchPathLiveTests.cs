@@ -184,8 +184,8 @@ public sealed class PgCollectorSearchPathLiveTests
 
             /* pg_qualstats is not created here, and public holds a same-named function. The host reads the extension
                list, finds it missing and records the missing extension without sending the query (#6888): 42P01 is the
-               fault it raises, 42883 what the query itself would have raised. The database is skipped; the function in
-               public never runs. */
+               fault it raises. A 42883 here would be the query's own failure, so the gate was skipped. The database is
+               skipped; the function in public never runs. */
             PostgresException? qualstatsFailure = null;
             try
             {
@@ -197,7 +197,7 @@ public sealed class PgCollectorSearchPathLiveTests
                 qualstatsFailure = ex;
             }
 
-            Assert.True(qualstatsFailure is null || qualstatsFailure.SqlState is PostgresErrorCodes.UndefinedTable or PostgresErrorCodes.UndefinedFunction,
+            Assert.True(qualstatsFailure is null || qualstatsFailure.SqlState == PostgresErrorCodes.UndefinedTable,
                 $"pg_predicate_stats failed with {qualstatsFailure?.SqlState}: {qualstatsFailure?.MessageText}");
             Assert.Equal(0L, await ScalarLongAsync(ownedAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM lookalike.calls", ct));
 

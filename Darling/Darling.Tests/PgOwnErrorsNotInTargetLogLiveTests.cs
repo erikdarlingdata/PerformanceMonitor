@@ -20,9 +20,10 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #6888: Darling must not put ERROR lines into a monitored PostgreSQL server's own log. Two sources did: an extension
-/// collector sending its query when the extension was not created (42883 / 42P01), and the connect-time Aurora probe
-/// calling <c>aurora_version()</c> on a server that is not Aurora.
+/// #6888: Darling must not put ERROR lines into a monitored PostgreSQL server's own log. Three sources did: an extension
+/// collector sending its query when the extension was not created (42883 / 42P01), the connect-time Aurora probe
+/// calling <c>aurora_version()</c> on a server that is not Aurora, and the connect-time identity probe calling
+/// <c>pg_control_system()</c> as a role the server refuses it.
 /// <para>The throwaway cluster's server log is read after each run (its file sits beside the data directory, as the
 /// start helpers write it). A bare call that is known to fail is run first as the control, so a log that cannot be read
 /// fails the test instead of passing it with nothing in it.</para>
@@ -108,10 +109,21 @@ public sealed class PgOwnErrorsNotInTargetLogLiveTests
         {
             await ResetAsync(admin.ConnectionString, ct);
             await ExecAsync(admin.ConnectionString, $"CREATE DATABASE {Database}", ct);
+            var log = await ServerLog.OpenAsync(admin.ConnectionString, ct);
 
             await using var connection = new NpgsqlConnection(target.ConnectionString);
             await connection.OpenAsync(ct);
             var major = connection.PostgreSqlVersion.Major;
+
+            /* The control: the query the statements collector used to send on a database without the extension, sent. */
+            var mark = log.Mark();
+            await Assert.ThrowsAsync<PostgresException>(async () =>
+            {
+                await using var bare = new NpgsqlCommand("SELECT * FROM pg_stat_statements", connection);
+                await bare.ExecuteNonQueryAsync(ct);
+            });
+            Assert.Single(log.ErrorLinesSince(mark, "pg_stat_statements"));
+            mark = log.Mark();
 
             /* Aurora reads aurora_stat_statements(), which needs no extension: pg_stat_statements is not created and the
                collector still runs. A stock target needs it. */
@@ -130,6 +142,10 @@ public sealed class PgOwnErrorsNotInTargetLogLiveTests
             var waits = await Assert.ThrowsAsync<PostgresException>(async () =>
                 await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(dropped, PgWaitSamplingCollector.Instance, connection, null, ct));
             Assert.Equal("42P01", waits.SqlState);
+
+            /* Neither arm put anything into the server's log: the host raised both faults itself. */
+            Assert.Empty(log.ErrorLinesSince(mark, "pg_stat_statements"));
+            Assert.Empty(log.ErrorLinesSince(mark, "pg_wait_sampling"));
 
             /* Created: the read succeeds and names the extension's schema, as before. */
             await ExecAsync(target.ConnectionString, "CREATE EXTENSION pg_stat_statements SCHEMA public", ct);
@@ -199,6 +215,68 @@ public sealed class PgOwnErrorsNotInTargetLogLiveTests
             await LiveStoreCleanup.RunAsync(admin.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DropAsync(admin.ConnectionString, cleanup, cleanupCt));
         }
+    }
+
+    [Fact]
+    public async Task IdentityProbe_OnARoleRefusedPgControlSystem_ReadsNoIdentity_WithNoErrorInTheServerLog_AndStillReadsItWhenGranted()
+    {
+        var adminConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(adminConnectionString), "Set DARLING_TEST_PG to run the server-log live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var admin = new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false };
+        var target = new NpgsqlConnectionStringBuilder(admin.ConnectionString) { Database = Database };
+        var monitor = new NpgsqlConnectionStringBuilder(target.ConnectionString) { Username = Monitor, Password = null, Pooling = false };
+        var bodySucceeded = false;
+        try
+        {
+            await ResetAsync(admin.ConnectionString, ct);
+            await ExecAsync(admin.ConnectionString, $"CREATE ROLE {Monitor} LOGIN; GRANT pg_monitor TO {Monitor}", ct);
+            await ExecAsync(admin.ConnectionString, $"CREATE DATABASE {Database}", ct);
+            var log = await ServerLog.OpenAsync(admin.ConnectionString, ct);
+
+            /* A hardened or managed server that revokes the function. The grant lives in the target database's own catalog,
+               which the database drop takes away. */
+            await ExecAsync(target.ConnectionString, "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC", ct);
+
+            await using var connection = new NpgsqlConnection(monitor.ConnectionString);
+            await connection.OpenAsync(ct);
+
+            /* The control: the bare call the probe used to make. The server refuses it and writes the refusal down. */
+            var mark = log.Mark();
+            var refused = await Assert.ThrowsAsync<PostgresException>(async () =>
+            {
+                await using var bare = new NpgsqlCommand("SELECT * FROM pg_catalog.pg_control_system()", connection);
+                await bare.ExecuteNonQueryAsync(ct);
+            });
+            Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, refused.SqlState);
+            Assert.Single(log.ErrorLinesSince(mark, "pg_control_system"));
+
+            /* The probe: the same answer as before (no identity, the connection still usable), and nothing in the log. */
+            mark = log.Mark();
+            Assert.Null(await DarlingServerConnector.ProbePostgresIdentityAsync(connection, null, ct));
+            Assert.Empty(log.ErrorLinesSince(mark, "pg_control_system"));
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, "SELECT 1", ct), System.Globalization.CultureInfo.InvariantCulture));
+
+            /* Granted again: the identity is read, and the log is still clean. */
+            await ExecAsync(target.ConnectionString, "GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO PUBLIC", ct);
+            mark = log.Mark();
+            Assert.NotNull(await DarlingServerConnector.ProbePostgresIdentityAsync(connection, null, ct));
+            Assert.Empty(log.ErrorLinesSince(mark, "pg_control_system"));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(admin.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DropAsync(admin.ConnectionString, cleanup, cleanupCt));
+        }
+    }
+
+    private static async Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return await command.ExecuteScalarAsync(ct);
     }
 
     private static CollectorContext NewContext(CollectorTargetInfo target) => new()
