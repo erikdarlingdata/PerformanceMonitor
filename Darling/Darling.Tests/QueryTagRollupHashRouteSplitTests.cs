@@ -290,53 +290,42 @@ public sealed class QueryTagRollupHashRouteSplitTests
         return aligned ? edge : edge.AddSeconds(random.Next(1, 3600)).AddTicks(random.Next(0, 10_000_000));
     }
 
-    /// <summary>#6865: hours 2..5 (unbuilt or stale), 6..11 table hours, then the tail at 12. The fallback starts where the newest backlog range ends.</summary>
+    private static ISet<DateTime> Backlog(params int[] hours) => hours.Select(h => T(h)).ToHashSet();
+
+    /// <summary>#6865: the read starts at the end of the newest backlog hour and counts the backlog hours it leaves out.</summary>
     [Fact]
-    public void NarrowPastBacklog_StartsAtTheEndOfTheNewestWideRangeThatIsNotTheTail_AndCountsTheHoursItLeftOut()
+    public void SpanPastBacklog_StartsAfterTheNewestBacklogHour_AndCountsTheBacklogHoursInTheWindow()
     {
-        var plan = Split(T(2), T(12, 20), [0, 1, 6, 7, 8, 9, 10, 11]);
-        Assert.Equal("[2,6) [12,13)", Ranges(plan));
+        var (starts, waiting) = QueryTagRollupHashRoute.SpanPastBacklog(new Dictionary<int, DateTime> { [1] = T(1, 17) }, T(12, 20), Backlog(2, 3, 5, 9));
+        Assert.Equal(T(10), starts[1]);
+        Assert.Equal(4, waiting);
 
-        var narrowed = QueryTagRollupHashRoute.NarrowPastBacklog(plan, T(12, 20))!.Value;
-        Assert.Equal(4, narrowed.HoursWaiting);
-        Assert.Equal("6,7,8,9,10,11", Hours(narrowed.Plan));
-        Assert.Equal("[12,13)", Ranges(narrowed.Plan));
-        Assert.Equal(T(6), narrowed.Plan.Starts[1]);
-        Assert.Equal(T(6), narrowed.Plan.RequestedStart);
-        Assert.Null(narrowed.Plan.EdgesNote);
-    }
-
-    [Fact]
-    public void NarrowPastBacklog_WithTwoBacklogRanges_CutsAtTheNewestOne_AndCountsBothRanges()
-    {
-        var plan = Split(T(2), T(12, 20), [0, 1, 4, 5, 8, 9, 10, 11]);
-        Assert.Equal("[2,4) [6,8) [12,13)", Ranges(plan));
-
-        var narrowed = QueryTagRollupHashRoute.NarrowPastBacklog(plan, T(12, 20))!.Value;
-        Assert.Equal(4, narrowed.HoursWaiting);
-        Assert.Equal("8,9,10,11", Hours(narrowed.Plan));
-        Assert.Equal("[12,13)", Ranges(narrowed.Plan));
-    }
-
-    [Fact]
-    public void NarrowPastBacklog_WithNothingButTheTailWide_IsNull_SoATimeoutHasAnotherCause()
-    {
-        var plan = Split(T(2), T(12, 20), Enumerable.Range(0, 12));
+        /* The span that results: table hours after the cut, the open tail wide, nothing older read. */
+        var plan = Split(starts[1], T(12, 20), Enumerable.Range(0, 12));
+        Assert.Equal("10,11", Hours(plan));
         Assert.Equal("[12,13)", Ranges(plan));
-        Assert.Null(QueryTagRollupHashRoute.NarrowPastBacklog(plan, T(12, 20)));
     }
 
     [Fact]
-    public void NarrowPastBacklog_MovesEveryServersStartToTheCut_ButKeepsALaterStart()
+    public void SpanPastBacklog_IgnoresBacklogHoursOutsideTheWindow_AndWithNoneInItLeavesTheStartsAlone()
     {
-        var starts = new Dictionary<int, DateTime> { [1] = T(2), [2] = T(9) };
-        var plan = QueryTagRollupHashRoute.Split(starts, T(12, 20), new[] { T(7), T(8), T(9), T(10), T(11) }.ToHashSet(), new HashSet<(DateTime Hour, int ServerId)>());
-        Assert.Equal(T(9), plan.Starts[2]);
+        var starts = new Dictionary<int, DateTime> { [1] = T(4), [2] = T(6, 30) };
+        var (moved, waiting) = QueryTagRollupHashRoute.SpanPastBacklog(starts, T(12, 20), Backlog(1, 2, 12, 13));
+        Assert.Empty(moved);
+        Assert.Equal(0, waiting);
+        var (none, noneWaiting) = QueryTagRollupHashRoute.SpanPastBacklog(starts, T(12, 20), Backlog());
+        Assert.Empty(none);
+        Assert.Equal(0, noneWaiting);
+    }
 
-        var narrowed = QueryTagRollupHashRoute.NarrowPastBacklog(plan, T(12, 20))!.Value;
-        Assert.Equal(T(7), narrowed.Plan.Starts[1]);
-        Assert.Equal(T(9), narrowed.Plan.Starts[2]);
-        Assert.DoesNotContain(narrowed.Plan.TablePairs, p => p.Hour < T(7));
-        Assert.Equal(5, narrowed.HoursWaiting);
+    [Fact]
+    public void SpanPastBacklog_MovesEveryServerToTheCut_ButKeepsALaterStart()
+    {
+        var starts = new Dictionary<int, DateTime> { [1] = T(2), [2] = T(9, 30), [3] = T(7) };
+        var (moved, waiting) = QueryTagRollupHashRoute.SpanPastBacklog(starts, T(12, 20), Backlog(3, 7));
+        Assert.Equal(T(8), moved[1]);
+        Assert.Equal(T(9, 30), moved[2]);
+        Assert.Equal(T(8), moved[3]);
+        Assert.Equal(2, waiting);
     }
 }

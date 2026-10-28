@@ -58,7 +58,7 @@ public static class DarlingQueryTagRollupReader
     /// for them, the servers it refused with why, the facts read for the allowed ones, and whether the interval table itself was missing.
     /// <paramref name="UsedHashHourly"/>: the fleet route read built hours from <c>collect.query_store_hash_hourly</c> (#6800), so the section's source is both tables.
     /// Then <paramref name="RoutedStarts"/> is each server's start rounded up to the hour, the first instant it read (<paramref name="Allowed"/> keeps the gate's
-    /// own starts), and <paramref name="WindowEdgesNote"/> says the partial first hour was not read (null when the start was on the hour). <paramref name="UsedHashDaily"/>: the route also read whole UTC days from <c>collect.query_store_hash_daily</c> (step 3c). <paramref name="StartDroppedFrom"/> (#6831) is the requested start the note names, null when the start was on the hour. <paramref name="BacklogHoursWaiting"/> (#6865) is above 0 when the full routed read hit the statement timeout and the answer is the newest span that needs no hour the hourly builder has not done: the count of hours left out (<paramref name="RoutedStarts"/> is that span's start).</summary>
+    /// own starts), and <paramref name="WindowEdgesNote"/> says the partial first hour was not read (null when the start was on the hour). <paramref name="UsedHashDaily"/>: the route also read whole UTC days from <c>collect.query_store_hash_daily</c> (step 3c). <paramref name="StartDroppedFrom"/> (#6831) is the requested start the note names, null when the start was on the hour. <paramref name="BacklogHoursWaiting"/> (#6865) is above 0 when the route left out the hours still waiting for the hourly builder: the read starts after them (<paramref name="RoutedStarts"/> is the span's start) and the count is how many hours it left out.</summary>
     public readonly record struct QueryStoreRead(
         Dictionary<int, DateTime> Allowed, Dictionary<int, string> Refused, List<QueryTagRollupFact> Facts, bool TableMissing, bool UsedHashHourly = false,
         Dictionary<int, DateTime>? RoutedStarts = null, string? WindowEdgesNote = null, bool UsedHashDaily = false, DateTime? StartDroppedFrom = null, int BacklogHoursWaiting = 0);
@@ -136,50 +136,19 @@ public static class DarlingQueryTagRollupReader
     /// start, and each stale pair, with its own server (#6800 part 2, step 2b).
     /// </summary>
     internal static async Task<QueryStoreRead> ReadAllowedAsync(
-        NpgsqlConnection connection, Dictionary<int, DateTime> allowed, Dictionary<int, string> refused, DateTime windowEnd, int readSeconds, CancellationToken cancellationToken,
-        TimeSpan? firstAttemptStatementTimeout = null)
+        NpgsqlConnection connection, Dictionary<int, DateTime> allowed, Dictionary<int, string> refused, DateTime windowEnd, int readSeconds, CancellationToken cancellationToken)
     {
         var facts = new List<QueryTagRollupFact>();
         /* #6800 part 2: a fleet read takes the hours the hourly builder has done from collect.query_store_hash_hourly and the rest from the
            wide table (QueryTagRollupHashRoute). One server, a store without the table, or no hour the table can answer yet: today's
            statement. The route's two small reads and the statement share this snapshot. */
         var route = await QueryTagRollupHashRoute.TryPlanAsync(connection, allowed, windowEnd, readSeconds, cancellationToken);
-        var backlogWaiting = 0;
         try
         {
-            /* #6865: the routed statement runs behind a savepoint. A fleet read that runs into the store's statement timeout (57014) while hours
-               wait for the hourly builder is answered from the newest span that needs none of them, instead of failing with no answer.
-               firstAttemptStatementTimeout is a test seam: it shortens only the first attempt (SET LOCAL, undone by the rollback to the savepoint). */
-            if (route is not null)
-            {
-                await ExecuteAsync("SAVEPOINT " + RouteSavepoint, connection, readSeconds, cancellationToken);
-            }
-
-            try
-            {
-                if (route is not null && firstAttemptStatementTimeout is { } testTimeout)
-                {
-                    await ExecuteAsync(
-                        "SET LOCAL statement_timeout = '" + ((long)testTimeout.TotalMilliseconds).ToString(System.Globalization.CultureInfo.InvariantCulture) + "ms'",
-                        connection, readSeconds, cancellationToken);
-                }
-
-                await using var command = route is null
-                    ? QueryStoreCommand(connection, allowed, windowEnd, readSeconds)
-                    : QueryTagRollupHashRoute.Command(connection, route, windowEnd, readSeconds);
-                facts.AddRange(await ReadFactsFromAsync(command, QueryTagRollupSection.QueryStore, cancellationToken));
-            }
-            catch (PostgresException ex) when (route is not null && ex.SqlState == QueryStoreComposeStamp.StatementTimeoutSqlState
-                && QueryTagRollupHashRoute.NarrowPastBacklog(route, windowEnd) is not null)
-            {
-                var narrowed = QueryTagRollupHashRoute.NarrowPastBacklog(route, windowEnd)!.Value;
-                await ExecuteAsync("ROLLBACK TO SAVEPOINT " + RouteSavepoint, connection, readSeconds, cancellationToken);
-                route = narrowed.Plan;
-                backlogWaiting = narrowed.HoursWaiting;
-                facts.Clear();
-                await using var command = QueryTagRollupHashRoute.Command(connection, route, windowEnd, readSeconds);
-                facts.AddRange(await ReadFactsFromAsync(command, QueryTagRollupSection.QueryStore, cancellationToken));
-            }
+            await using var command = route is null
+                ? QueryStoreCommand(connection, allowed, windowEnd, readSeconds)
+                : QueryTagRollupHashRoute.Command(connection, route, windowEnd, readSeconds);
+            facts.AddRange(await ReadFactsFromAsync(command, QueryTagRollupSection.QueryStore, cancellationToken));
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
@@ -188,15 +157,7 @@ public static class DarlingQueryTagRollupReader
         }
 
         return new QueryStoreRead(allowed, refused, facts, false, route is not null, route?.Starts, route?.EdgesNote, route?.UsesDays ?? false,
-            route?.EdgesNote is null ? null : route.RequestedStart, backlogWaiting);
-    }
-
-    private const string RouteSavepoint = "query_tag_route_read";
-
-    private static async Task ExecuteAsync(string sql, NpgsqlConnection connection, int readSeconds, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = readSeconds };
-        await command.ExecuteNonQueryAsync(cancellationToken);
+            route?.EdgesNote is null ? null : route.RequestedStart, route?.BacklogHoursWaiting ?? 0);
     }
 
     /// <summary>The batched Query Store statement's command (<see cref="QueryTagRollupSql.QueryStoreSql"/>): the allowed servers and each one's

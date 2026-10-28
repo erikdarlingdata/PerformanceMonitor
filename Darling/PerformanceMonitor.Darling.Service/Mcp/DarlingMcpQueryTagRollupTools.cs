@@ -171,7 +171,7 @@ public sealed class DarlingMcpQueryTagRollupTools
                     {
                         /* #6865: the full window ran into the store's statement timeout while hours wait for the hourly builder, so this is the newest span that needs none of them. */
                         reach["backlog_hours_waiting"] = read.BacklogHoursWaiting;
-                        reach["truncation_note"] = $"The full window timed out because {read.BacklogHoursWaiting} hour(s) are still being built into the hourly Query Store table, so this answer starts at {reach["effective_start"]} instead of the start of the window. The full window answers once they are built.";
+                        reach["backlog_note"] = $"The full window timed out because {read.BacklogHoursWaiting} hour(s) are still being built into the hourly Query Store table, so this answer starts at {reach["effective_start"]} instead of the start of the window. The full window answers once they are built.";
                     }
 
                     if (read.UsedHashHourly)
