@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// <see cref="AgentAlertStatus.Evaluate"/> over the newest fresh capture. These tests drive the evaluator with a controllable clock and a
 /// recording deliverer, and the live ones read a seeded <c>collect.agent_alerts</c> on a throwaway PostgreSQL.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class AgentAlertGapsAlertTests
 {
     private const int ServerId = 424242;

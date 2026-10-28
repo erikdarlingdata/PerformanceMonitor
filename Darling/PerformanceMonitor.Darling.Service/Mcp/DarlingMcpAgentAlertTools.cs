@@ -112,7 +112,7 @@ public sealed class DarlingMcpAgentAlertTools
                     response_job_id = a.ResponseJobId,
                     fired_in_window = a.FiredInWindow,
                 }),
-                note = "captured_at, as_of and oldest_capture_in_window are UTC. last_occurrence, last_response and count_reset are the monitored server's own clock, as msdb stores them. fired_in_window compares occurrence_count between the first and last capture in the window, so a firing before the first capture is not seen. "
+                note = "captured_at, as_of and oldest_capture_in_window are UTC. last_occurrence, last_response and count_reset are the monitored server's own clock, the way msdb stores them. fired_in_window compares occurrence_count between the first and last capture in the window, so a firing before the first capture is not seen. "
                     + "A severity or error with a disabled alert is reported as alert_disabled, not as missing.",
             }, McpHelpers.JsonOptions);
         }

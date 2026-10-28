@@ -68,6 +68,9 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     private const string JobsReason =
         "Fleet-wide Job History tab; an Azure SQL Database server has no SQL Server Agent, so it has no rows and no filter entry.";
 
+    private const string AgentAlertsReason =
+        "The Agent Alerts tab is its own control, not a server-tab surface; its status line says so through ViewerDataService.ReadAgentAlertsAsync (the engine gap answer first, as get_agent_alerts does).";
+
     private const string AvailabilityGroupsReason =
         "Fleet-wide Availability Groups tab, hidden until rows exist; its empty state already says these collectors do not run on Azure SQL Database.";
 
@@ -88,6 +91,7 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         ["default_trace_events"] = Says(OnServerTab("ViewerServerTab.SystemEvents.cs", "DefaultTraceNoDataMessage", Wiring.OwnHelper)),
         ["job_history"] = Needs(JobsReason),
         ["agent_status"] = Needs(JobsReason),
+        ["agent_alerts"] = Needs(AgentAlertsReason),
         ["ag_replica_states"] = Needs(AvailabilityGroupsReason),
         ["ag_database_replica_states"] = Needs(AvailabilityGroupsReason),
     };
@@ -490,8 +494,8 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     }
 
     /// <summary>
-    /// The first-run grace on every surface. Each collector a SQL Server can show, on by default, other than running_jobs (whose
-    /// note is the MCP sentence, pinned above), says it has not run yet one second before it is due. Once it is due and still
+    /// The first-run grace on every surface. Each collector a SQL Server can show, on by default, other than running_jobs and agent_alerts (whose
+    /// notes are the MCP sentences, running_jobs pinned above and agent_alerts in AgentAlertsSurfacesLiveTests), says it has not run yet one second before it is due. Once it is due and still
     /// has no run, the never-ran note comes back.
     /// </summary>
     [Fact]
@@ -499,7 +503,7 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     {
         var collectors = CollectorScheduleDefaults.All
             .Where(entry => entry.Value.DefaultEnabled
-                            && entry.Key != "running_jobs"
+                            && ViewerServerTab.SwitchedOffReasonsFor(entry.Key) is null
                             && ViewerServerTab.EngineGapNote(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, entry.Key) is null)
             .ToList();
 

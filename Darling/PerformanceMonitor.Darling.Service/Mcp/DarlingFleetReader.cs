@@ -1596,17 +1596,21 @@ GROUP BY server_id, collector_name";
     }
 
     /// <summary>The newest Agent alert capture per server in the last two hours (the collector runs every 15 minutes), one statement for the
-    /// fleet (#6874): the latest capture's rows, by the (server_id, collection_time) index. A server whose newest capture is the all-NULL marker
+    /// fleet (#6874): the latest capture's rows. Shaped like the other per-server reads in this file: <c>servers</c> drives a lateral that
+    /// seeks <c>idx_agent_alerts_time</c> (<c>server_id, collection_time</c>) once per server for the newest capture time, then the capture's
+    /// rows are read by the same index, so a fleet load never walks the 30-day table. A server whose newest capture is the all-NULL marker
     /// row has no alert_id, which is "collected, none defined". $1 is the window start.</summary>
     internal const string FleetAgentAlertsSql = @"
-WITH newest AS (
-    SELECT server_id, MAX(collection_time) AS collection_time
-    FROM collect.agent_alerts
-    WHERE collection_time >= $1
-    GROUP BY server_id)
 SELECT a.server_id, a.alert_id, a.alert_name, a.enabled, a.message_id, a.severity, a.has_notification, a.operator_count
-FROM newest AS n
-JOIN collect.agent_alerts AS a ON a.server_id = n.server_id AND a.collection_time = n.collection_time";
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT MAX(x.collection_time) AS collection_time
+    FROM collect.agent_alerts AS x
+    WHERE x.server_id = s.server_id
+    AND   x.collection_time >= $1
+) AS n
+JOIN collect.agent_alerts AS a ON a.server_id = s.server_id AND a.collection_time = n.collection_time";
 
     /// <summary>The Agent alert setup's gaps per server, for the servers that have any (#6874). The status itself is
     /// <see cref="AgentAlertStatus.Evaluate"/>; this only batches the read.</summary>
@@ -2506,16 +2510,16 @@ JOIN collect.agent_alerts AS a ON a.server_id = n.server_id AND a.collection_tim
     }
 }
 
-/// <summary>
-/// One pre-banded Overview card in the fleet roll-up — every band already computed by the shared
-/// <see cref="ServerHealthClassifier"/>, every instant a naive-UTC value the browser localizes. Serialized with
-/// snake_case field names for both <c>/api/fleet</c> and the <c>get_fleet_overview</c> MCP tool.
-/// </summary>
 /// <summary>One gap in a server's SQL Server Agent alert setup, as the fleet card carries it (#6874): the stable <see cref="Code"/> and the sentence.</summary>
 public sealed record FleetAgentAlertGap(
     [property: JsonPropertyName("code")] string Code,
     [property: JsonPropertyName("message")] string Message);
 
+/// <summary>
+/// One pre-banded Overview card in the fleet roll-up — every band already computed by the shared
+/// <see cref="ServerHealthClassifier"/>, every instant a naive-UTC value the browser localizes. Serialized with
+/// snake_case field names for both <c>/api/fleet</c> and the <c>get_fleet_overview</c> MCP tool.
+/// </summary>
 public sealed class FleetServerCard
 {
     [JsonPropertyName("server_id")] public int ServerId { get; init; }

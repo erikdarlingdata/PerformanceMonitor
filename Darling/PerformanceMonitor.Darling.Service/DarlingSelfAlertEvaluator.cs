@@ -1541,6 +1541,7 @@ internal sealed class DarlingSelfAlertEvaluator
             try
             {
                 var read = await ReadAgentAlertSetupAsync(postgres, serverId, cancellationToken);
+                agentAlertReadClock.Restart();
                 await ApplyAgentAlertSetupAsync(serverId, serverName, read, cancellationToken, sweepGeneration: generation);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
