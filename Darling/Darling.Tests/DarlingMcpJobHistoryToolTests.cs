@@ -592,6 +592,45 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         }
     }
 
+    /// <summary>#6860: <c>agents_not_running[].server</c> follows the same naming rule as <c>runs[].server</c>. Two servers share a display
+    /// name and one Agent is stopped: the entry names that server by its key, as its runs do, and that name resolves back as <c>server_name</c>.</summary>
+    [Fact]
+    public async Task TheFleetForm_NamesAStoppedAgentByTheSameNameItsRunsUse_AndThatNameResolves()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            const string shared = "Payroll Agent Box";
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1 WHERE server_id IN ($2, $3)", shared, ServerA, ServerB);
+            await SeedAgentAsync(c, ct, ServerA, NameA, false, "Stopped", TimeSpan.FromMinutes(2));
+            await SeedAgentAsync(c, ct, ServerB, NameB, true, "Running", TimeSpan.FromMinutes(1));
+
+            var fleet = await DarlingMcpJobTools.GetJobHistory(postgres, null, as_of: AsOfText, cancellationToken: ct);
+            using var doc = JsonDocument.Parse(fleet);
+            var runNames = doc.RootElement.GetProperty("runs").EnumerateArray().Select(r => r.GetProperty("server").GetString()).Distinct().Order().ToArray();
+            Assert.Equal(new[] { NameA, NameB }.Order().ToArray(), runNames);
+            var stopped = doc.RootElement.GetProperty("agents_not_running").EnumerateArray().Single();
+            var agentName = stopped.GetProperty("server").GetString();
+            Assert.Equal(NameA, agentName);
+            Assert.Contains(agentName, runNames);
+
+            var back = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, agentName, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            Assert.Equal(NameA, back.GetProperty("server").GetString());
+            Assert.Equal(4, back.GetProperty("runs").GetArrayLength());
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
     [Fact]
     public async Task TheFleetForm_NamesADisabledServersRowsByItsKey_NeverByItsDisplayName()
     {

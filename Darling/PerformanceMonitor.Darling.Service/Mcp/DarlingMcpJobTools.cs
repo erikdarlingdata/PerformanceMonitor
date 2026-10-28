@@ -218,7 +218,7 @@ public sealed class DarlingMcpJobTools
                 var emptyHints = new Dictionary<string, object?>();
                 emptyHints["effective_start"] = McpHelpers.FormatEffectiveStart(effectiveStart);
                 emptyHints["window_truncated"] = windowTruncated;
-                AddAgentState(emptyHints, scope, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));
+                AddAgentState(emptyHints, scope, answerNames, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));
                 return McpHelpers.Status("empty", "No job runs matched in the requested time range.", emptyHints);
             }
 
@@ -245,7 +245,7 @@ public sealed class DarlingMcpJobTools
             envelope["window_truncated"] = windowTruncated;
             envelope["shown"] = runs.Count;
             envelope["truncated"] = truncated;
-            AddAgentState(envelope, scope, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));
+            AddAgentState(envelope, scope, answerNames, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));
             envelope["runs"] = runs;
             return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
         }
@@ -284,7 +284,8 @@ public sealed class DarlingMcpJobTools
     /// as one whose snapshot is stale at that instant. A null <paramref name="states"/> (the read failed) adds nothing.
     /// </summary>
     private static void AddAgentState(
-        Dictionary<string, object?> envelope, (int ServerId, string DisplayName)? scope, List<DarlingJobReader.AgentState>? states)
+        Dictionary<string, object?> envelope, (int ServerId, string DisplayName)? scope,
+        IReadOnlyDictionary<int, string> answerNames, List<DarlingJobReader.AgentState>? states)
     {
         if (states is null) return;
         if (scope is null)
@@ -293,7 +294,7 @@ public sealed class DarlingMcpJobTools
                a few bytes however many servers it has, and a stopped or unknown Agent is named. */
             envelope["agents_total"] = states.Count;
             envelope["agents_running"] = states.Count(a => a.AgentRunning == true);
-            envelope["agents_not_running"] = states.Where(a => a.AgentRunning != true).Select(a => AgentFields(a)).ToList();
+            envelope["agents_not_running"] = states.Where(a => a.AgentRunning != true).Select(a => AgentFields(a, answerNames)).ToList();
             return;
         }
 
@@ -306,9 +307,12 @@ public sealed class DarlingMcpJobTools
         envelope["captured_at"] = states.Count > 0 ? McpHelpers.FormatEffectiveStart(one.CapturedAtUtc) : null;
     }
 
-    private static Dictionary<string, object?> AgentFields(DarlingJobReader.AgentState a) => new()
+    /* #6860: the server is named by the same answer-name rule as runs[] (answerNames, built from AnswerNameOf over the enabled
+       registry, which is the population the Agent read covers), so one payload names a server one way and the name resolves
+       back as server_name. The reader's SQL label is the fallback for a state with no id. */
+    private static Dictionary<string, object?> AgentFields(DarlingJobReader.AgentState a, IReadOnlyDictionary<int, string> answerNames) => new()
     {
-        ["server"] = a.Server,
+        ["server"] = answerNames.GetValueOrDefault(a.ServerId, a.Server),
         ["agent_running"] = a.AgentRunning,
         ["agent_status_desc"] = a.AgentStatusDesc,
         ["captured_at"] = McpHelpers.FormatEffectiveStart(a.CapturedAtUtc)
