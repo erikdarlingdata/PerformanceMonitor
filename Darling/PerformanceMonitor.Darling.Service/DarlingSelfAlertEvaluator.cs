@@ -4372,27 +4372,27 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             await ApplyOverdueMetricAsync(serverId, serverName, BackupOverdueMetric, DatabaseProtectionBands.KindFullBackup, overdue,
                 string.Create(CultureInfo.InvariantCulture, $"{limits.FullBackup.TotalDays} days"), "last full backup",
-                " A database without a recent full backup cannot be restored to a recent point.", cancellationToken, sweepGeneration);
+                " A database without a recent full backup cannot be restored to a recent point.", sweepGeneration, cancellationToken);
         }
 
         if (_logBackupOverdueEnabled())
         {
             await ApplyOverdueMetricAsync(serverId, serverName, LogBackupOverdueMetric, DatabaseProtectionBands.KindLogBackup, overdue,
                 string.Create(CultureInfo.InvariantCulture, $"{limits.LogBackup.TotalMinutes} minutes"), "last log backup",
-                " Point-in-time recovery stops at the last log backup, and the log cannot be reused until one runs.", cancellationToken, sweepGeneration);
+                " Point-in-time recovery stops at the last log backup, and the log cannot be reused until one runs.", sweepGeneration, cancellationToken);
         }
 
         if (_checkDbOverdueEnabled())
         {
             await ApplyOverdueMetricAsync(serverId, serverName, CheckDbOverdueMetric, DatabaseProtectionBands.KindCheckDb, overdue,
                 string.Create(CultureInfo.InvariantCulture, $"{limits.CheckDb.TotalDays} days"), "last good CHECKDB",
-                " Corruption can sit unnoticed and be copied into every backup taken meanwhile.", cancellationToken, sweepGeneration);
+                " Corruption can sit unnoticed and be copied into every backup taken meanwhile.", sweepGeneration, cancellationToken);
         }
     }
 
     private async Task ApplyOverdueMetricAsync(
         int serverId, string serverName, string metric, string kind, IReadOnlyList<DatabaseProtectionOverdue> overdue,
-        string threshold, string factName, string consequence, CancellationToken cancellationToken, int? sweepGeneration)
+        string threshold, string factName, string consequence, int? sweepGeneration, CancellationToken cancellationToken)
     {
         var key = Key(serverId);
         var stateKey = StateRetryKey(metric, key);

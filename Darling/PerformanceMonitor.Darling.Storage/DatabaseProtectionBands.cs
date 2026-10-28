@@ -53,7 +53,7 @@ public sealed record DatabaseProtectionSummary(
 /// state word (<c>overdue</c>, <c>never</c> or <c>none_in_window</c>) and <see cref="Age"/> the age at the capture, null when there is no time to measure.</summary>
 public sealed record DatabaseProtectionOverdue(string Kind, string Database, string State, TimeSpan? Age)
 {
-    /// <summary>The words the alert detail and the fleet chip use for this fact, for example <c>Sales (9 days old)</c> or <c>Sales (never checked)</c>.</summary>
+    /// <summary>The words the alert detail and the fleet chip use for this fact, for example <c>Sales (9 days 4 hours old)</c> or <c>Sales (never checked)</c>.</summary>
     public string Text => DatabaseProtectionBands.DescribeOverdue(this);
 
     /// <summary>The fact in words for a chip: <c>Full backup</c>, <c>Log backup</c> or <c>CHECKDB</c>.</summary>
@@ -150,7 +150,7 @@ public static class DatabaseProtectionBands
         return new(stored ?? Unknown, false, null, threshold);
     }
 
-    /// <summary>"3 days 4 hours", "5 hours 10 minutes" or "42 minutes": the two largest units. The tool and the Viewer say an age this way.</summary>
+    /// <summary>"3 days 4 hours", "5 hours 10 minutes" or "42 minutes": the two largest units. The tool, the web panels, the Viewer and the alert detail say an age this way.</summary>
     public static string Describe(TimeSpan age)
     {
         string Unit(long n, string unit) => string.Create(CultureInfo.InvariantCulture, $"{n} {unit}{(n == 1 ? "" : "s")}");
@@ -197,17 +197,13 @@ public static class DatabaseProtectionBands
         return string.Join(", ", overdue.Select(o => o.Label + ": " + o.Text));
     }
 
-    /// <summary>The words for one overdue fact: the database and how late it is.</summary>
+    /// <summary>The words for one overdue fact: the database and how late it is, the age spelled by <see cref="Describe"/> like everywhere else.</summary>
     public static string DescribeOverdue(DatabaseProtectionOverdue item)
     {
         ArgumentNullException.ThrowIfNull(item);
         string what;
         if (item.Age is { } age)
-            what = age.TotalHours < 2
-                ? string.Create(CultureInfo.InvariantCulture, $"{Math.Floor(age.TotalMinutes)} minutes old")
-                : age.TotalHours < 48
-                    ? string.Create(CultureInfo.InvariantCulture, $"{Math.Floor(age.TotalHours)} hours old")
-                    : string.Create(CultureInfo.InvariantCulture, $"{Math.Floor(age.TotalDays)} days old");
+            what = Describe(age) + " old";
         else if (item.State == Never)
             what = "never checked";
         else

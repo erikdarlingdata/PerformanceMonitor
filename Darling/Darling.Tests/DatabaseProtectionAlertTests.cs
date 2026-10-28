@@ -163,7 +163,7 @@ public sealed class DatabaseProtectionAlertTests
         Assert.Equal(3, byMetric.Count);
         Assert.Contains("FullLate (8 days old)", byMetric["Backup Overdue"].DetailText, StringComparison.Ordinal);
         Assert.DoesNotContain("LogLate", byMetric["Backup Overdue"].DetailText, StringComparison.Ordinal);
-        Assert.Contains("LogLate (61 minutes old)", byMetric["Log Backup Overdue"].DetailText, StringComparison.Ordinal);
+        Assert.Contains("LogLate (1 hour 1 minute old)", byMetric["Log Backup Overdue"].DetailText, StringComparison.Ordinal);
         Assert.Contains("older than 60 minutes", byMetric["Log Backup Overdue"].DetailText, StringComparison.Ordinal);
         Assert.Contains("CheckLate (15 days old)", byMetric["CHECKDB Overdue"].DetailText, StringComparison.Ordinal);
         Assert.Contains("CheckNever (never checked)", byMetric["CHECKDB Overdue"].DetailText, StringComparison.Ordinal);
