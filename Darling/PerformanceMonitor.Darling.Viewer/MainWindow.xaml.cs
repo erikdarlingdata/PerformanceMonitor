@@ -481,6 +481,10 @@ public partial class MainWindow : Window
         FleetSweepsContent.Initialize(_dataService);
         FleetSweepsContent.StatusChanged += OnServerTabStatusChanged;
 
+        /* Identity Capacity (#6875): a self-loading read-only control over the identity column capacity scans. */
+        IdentityCapacityContent.Initialize(_dataService);
+        IdentityCapacityContent.StatusChanged += OnServerTabStatusChanged;
+
         /* Availability Groups (#991): a self-loading fleet-wide control. Its TabItem ships Collapsed and is
            revealed only once a load finds AG rows, so an Always-On-less fleet never carries a dead tab. */
         AvailabilityGroupsContent.Initialize(_dataService);
@@ -1302,6 +1306,10 @@ public partial class MainWindow : Window
                 case TabItem tab when ReferenceEquals(tab, FleetSweepsTabItem):
                     await FleetSweepsContent.RefreshAsync();
                     StampRefreshed("fleet sweeps");
+                    break;
+                case TabItem tab when ReferenceEquals(tab, IdentityCapacityTabItem):
+                    await IdentityCapacityContent.RefreshAsync();
+                    StampRefreshed("identity capacity");
                     break;
                 case TabItem tab when ReferenceEquals(tab, AvailabilityGroupsTabItem):
                     await RefreshAvailabilityGroupsAsync();

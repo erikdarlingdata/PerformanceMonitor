@@ -2315,6 +2315,8 @@ export const SERVER_TABS = [
         "No trace flags are enabled on this server.",
         1
       ),
+      /* #6875: identity column capacity, one read feeding two panels (the columns, then each database's scan state). */
+      ...identityCapacityPanels(server),
     ],
   },
 
@@ -5313,6 +5315,88 @@ const JOB_COLUMNS = [
   { key: "is_running_long", label: "Long", format: "bool" },
   { key: "successful_run_count", label: "Successes", format: "int" },
 ];
+
+/* #6875: the identity column capacity panels on the Configuration tab. The band, the percent, the values left and the days to
+   exhaustion are the service's (IdentityCapacityMath through get_identity_capacity), the same figures the Viewer shows. values_remaining
+   and the other bigint and decimal values arrive as text, so the figure is formatted from the digits and never through a JS number. */
+function identityDigits(value) {
+  if (value == null || value === "") return "—";
+  try {
+    return BigInt(value).toLocaleString();
+  } catch (e) {
+    return String(value);
+  }
+}
+function identityTable(r) {
+  return [r.schema, r.table].filter((x) => x != null && x !== "").join(".");
+}
+function identityType(r) {
+  return (r.data_type === "decimal" || r.data_type === "numeric") && r.type_precision > 0 ? r.data_type + "(" + r.type_precision + ")" : r.data_type || "—";
+}
+function identityScanState(r) {
+  if (!r || r.scanned !== true) return "Not yet scanned";
+  const n = r.columns_above_10_percent;
+  return n > 0 ? "Scanned, " + n + (n === 1 ? " column" : " columns") + " above 10 percent" : "Scanned, clean";
+}
+function identityLastScanned(r) {
+  const at = r.scanned_at || r.last_scanned_at;
+  return at ? localTime(at) : "—";
+}
+const IDENTITY_COLUMNS = [
+  { key: "database", label: "Database" },
+  { key: "table", label: "Table", render: (r) => el("span", { text: identityTable(r) }), sortValue: identityTable },
+  { key: "column", label: "Column" },
+  { key: "data_type", label: "Type", render: (r) => el("span", { text: identityType(r) }), sortValue: identityType },
+  { key: "percent_used", label: "Percent used", format: "num1" },
+  { key: "values_remaining", label: "Values remaining", render: (r) => el("span", { text: identityDigits(r.values_remaining) }), sortValue: (r) => (r.values_remaining == null ? -1 : Number(r.values_remaining)) },
+  { key: "rate_per_day", label: "Rate per day", format: "num1" },
+  { key: "days_to_exhaustion", label: "Days to exhaustion", format: "num1" },
+  { key: "band", label: "Band", format: "text", small: true },
+];
+const IDENTITY_SCAN_COLUMNS = [
+  { key: "database", label: "Database" },
+  { key: "scan_state", label: "Scan state", render: (r) => el("span", { text: identityScanState(r) }), sortValue: identityScanState },
+  /* A database not yet scanned has no scan in the window: its last scan before the window (if any) is shown instead. */
+  { key: "scanned_at", label: "Last scanned", format: "time", small: true, render: (r) => el("span", { text: identityLastScanned(r) }), sortValue: (r) => r.scanned_at || r.last_scanned_at || "" },
+];
+function identityCapacityPanels(server) {
+  const columnsShell = panelShell("Identity Capacity", "identity_capacity collector, every 6 hours", 2, "get_identity_capacity");
+  const scanShell = panelShell("Identity Scan State", "per database, newest scan", 2, "get_identity_capacity");
+  const signal = getPanelSignal();
+  (async () => {
+    const res = await readToolWithinKeptHistory("get_identity_capacity", { server }, signal);
+    if (res.kind === "aborted") return;
+    if (res.kind === "error") {
+      mount(columnsShell.body, readErrorStrip(res.message));
+      mount(scanShell.body, readErrorStrip(res.message));
+      return;
+    }
+    const data = res.data;
+    try {
+      /* "empty" is the one true negative: databases were scanned and none has a column above 10 percent, so the scan list still draws.
+         unavailable, precondition and not_collected carry the read's own sentence in both panels. */
+      if (res.kind === "empty" && res.status !== "empty") {
+        mount(columnsShell.body, [emptyStrip(res.message)]);
+        mount(scanShell.body, [emptyStrip(res.message)]);
+        return;
+      }
+      const spec = { read: "get_identity_capacity" };
+      const truncated = data && data.truncated === true ? noticeStrip("Showing the " + data.columns_returned + " fullest columns. Pick a database to narrow the list.") : null;
+      mount(columnsShell.body, [
+        truncated,
+        res.kind === "empty"
+          ? emptyStrip(res.message)
+          : VIZ.table(data, { ...spec, rowsKey: "columns", columns: IDENTITY_COLUMNS, emptyText: "No identity column is above 10 percent used." }),
+      ]);
+      mount(scanShell.body, [VIZ.table(data, { ...spec, rowsKey: "databases", columns: IDENTITY_SCAN_COLUMNS, emptyText: "No database has been scanned yet." })]);
+    } catch (e) {
+      const message = "Could not render this panel: " + (e && e.message ? e.message : String(e));
+      mount(columnsShell.body, errorStrip(message));
+      mount(scanShell.body, errorStrip(message));
+    }
+  })();
+  return [columnsShell.panel, scanShell.panel];
+}
 
 /* The Job History grid on the Activity tab: the cross-server page's columns less Server, since the tab is one server's. */
 const JOB_HISTORY_COLUMNS = [

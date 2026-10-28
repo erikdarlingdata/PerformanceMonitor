@@ -32,10 +32,12 @@ export const FILTERED = new Set([
   // File I/O, sizes and the persistent version store (#5244 PR5). get_file_io_stats and get_file_io_trend chart one file
   // per line for exactly one chosen database and one line per database otherwise.
   "get_file_io_trend", "get_file_io_stats", "get_database_sizes", "get_table_index_sizes", "get_pvs_stats",
+  // Identity column capacity (#6875): the Configuration tab's panel lists the chosen databases' columns and scan state.
+  "get_identity_capacity",
 ]);
 
 /** Database-scoped reads that cannot take the filter yet, so they show every database and say so (the "All databases"
- *  chip). 36 database-scoped reads in all: this list shrank as FILTERED grew, and what is left is the three
+ *  chip). 37 database-scoped reads in all: this list shrank as FILTERED grew, and what is left is the three
  *  deadlock reads, which stay unfiltered on purpose (as on the desktop): a deadlock spans several databases, and they are
  *  inside each deadlock graph. The groups follow the page that moves each read into FILTERED. */
 export const UNFILTERED = new Set([

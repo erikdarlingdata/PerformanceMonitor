@@ -1221,6 +1221,13 @@
                     <local:FleetSweepsTab x:Name="FleetSweepsContent" Margin="0,8,0,0"/>
                 </TabItem>
 
+                <!-- Identity Capacity (#6875): one server's identity columns above 10 percent used, how long until each runs out
+                     and each database's scan state, read only, the same figures and words as the Identity Capacity panels on the
+                     web Configuration tab. Self-loading (not scoped by the sidebar selection), beside Fleet Sweeps. -->
+                <TabItem x:Name="IdentityCapacityTabItem" Header="Identity Capacity">
+                    <local:IdentityCapacityTab x:Name="IdentityCapacityContent" Margin="0,8,0,0"/>
+                </TabItem>
+
                 <!-- Availability Groups (#991): fleet-wide AG topology, one card per (reporting server, AG).
                      Collapsed until a load actually finds AG rows — Always On is opt-in and most fleets run
                      none, so a permanently visible tab that only ever says "nothing here" is noise. The reveal
