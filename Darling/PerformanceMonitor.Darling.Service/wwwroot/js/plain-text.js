@@ -447,6 +447,10 @@ const SWITCHED_OFF_CAUSES = /(?:never|no longer) permitted to look\.\s*(.*?)\s*T
     that gates them is read once when the service connects (ConnectScopedEpilogue), so fixing a cause is not enough by itself. */
 const RECONNECT_STEP = " After you fix the cause, the service must reconnect to this server before collection starts again. Restart the service, or change this server's settings.";
 
+/** The sentence the DEGRADED answer (a collector that cannot read its source) closes on for an MCP client (#6869): it says what to do with the
+    stored sentence, which a reader of the page cannot use. CollectorRuntimePrecondition.DegradedClientSentence, with the space before it. */
+const DEGRADED_CLIENT_SENTENCE = " Act on that sentence — it is what the monitored server itself answered, and it distinguishes the states this one status carries: a grant the login was refused, a source object that does not exist on this target, and a feature the platform does not implement or has switched off.";
+
 /**
  * A runtime-precondition answer (CollectorRuntimePrecondition.cs) the way the page shows it. The server's text is written for
  * an MCP client: it labels itself a runtime PRECONDITION and says to retry, which a reader of the page cannot use. Without
@@ -461,7 +465,7 @@ function runtimePreconditionText(text) {
   if (never) return "The " + toolWords(never[1]) + " collector has never run for this server, so there is nothing to show." + tail;
   const dark = GONE_DARK_OPENING.exec(text);
   if (dark) return "The " + toolWords(dark[1]) + " collector has not run for this server for over " + dark[2] + " hours, so there is nothing current to show." + tail;
-  return text.slice(0, text.indexOf(RUNTIME_PRECONDITION_MARK)).trimEnd();
+  return text.slice(0, text.indexOf(RUNTIME_PRECONDITION_MARK)).replace(DEGRADED_CLIENT_SENTENCE, "").trimEnd();
 }
 
 /** The one short line the page shows where the server says a collector can never run on this kind of server. The

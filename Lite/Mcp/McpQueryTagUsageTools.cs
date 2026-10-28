@@ -46,8 +46,10 @@ public sealed class McpQueryTagUsageTools
             List<(int Id, string Name)> scope;
             if (allServers)
             {
-                scope = serverManager.GetEnabledServers()
-                    .Select(s => (RemoteCollectorService.GetServerId(s), RemoteCollectorService.GetServerNameForStorage(s))).ToList();
+                /* #6860: every name in the answer is the display name (#6179), the one the caller passes back as server_name, not the storage key. */
+                var enabled = serverManager.GetEnabledServers();
+                scope = enabled
+                    .Select(s => (RemoteCollectorService.GetServerId(s), ServerResolver.AnswerNameOf(enabled, s, RemoteCollectorService.GetServerNameForStorage(s)))).ToList();
                 if (scope.Count == 0)
                 {
                     return McpHelpers.Status("empty", "No servers are registered, so there is no resource use to roll up.");
@@ -57,7 +59,7 @@ public sealed class McpQueryTagUsageTools
             {
                 var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
                 if (error != null) return error;
-                scope = [(resolved.ServerId, resolved.ServerName)];
+                scope = [(resolved.ServerId, resolved.DisplayName)];
             }
 
             var windowStart = windowEnd.AddHours(-hours_back);

@@ -185,6 +185,92 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
+    /// The note a chart shows when its collector's latest run recorded a named skip such as PERMISSIONS, or when the collector
+    /// has no run, and the window has no rows (#6861). The named skip's sentence is
+    /// <see cref="CollectorRuntimePrecondition.CollectionOutcomeReaderMessage"/>: the MCP tools' <c>precondition</c> answer worded
+    /// for a reader, without its closing paragraph for an MCP client, which the Darling viewer and the web page show too. A
+    /// collector with no run takes the same sentences as <see cref="NoRunNote"/>: the shared "not run yet" sentence inside the
+    /// first-run grace, then <see cref="NeverCollectedNote"/>, and only on a server that has collected something. The engine note
+    /// wins, as it does in <see cref="EngineGapState"/>, and a collector with a latest run has run, so a named skip displaces the
+    /// no-run sentences. With rows, or for any other status, the note stays hidden and the chart looks as it always did.
+    /// </summary>
+    internal static (string Text, Visibility Visibility) CollectorOutcomeState(
+        string serverName, bool isAzureSqlDatabase, string collectorName, int rowCount,
+        string? status, string? errorMessage, DateTime? observedUtc,
+        DateTime? collectorLastRunUtc, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc)
+    {
+        string? noRun = null;
+
+        if (CollectorRuntimePrecondition.IsNamedSkip(status))
+        {
+            noRun = CollectorRuntimePrecondition.CollectionOutcomeReaderMessage(serverName, collectorName, status, errorMessage, observedUtc);
+        }
+        else if (collectorLastRunUtc is null && serverLastCollectedUtc is not null)
+        {
+            noRun = CollectorRuntimePrecondition.NotYetRunMessage(serverName, collectorName, serverLastCollectedUtc, serverFirstCollectedUtc)
+                ?? NeverCollectedNote(serverName, collectorName);
+        }
+
+        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, noRun);
+    }
+
+    /// <summary>
+    /// What the tempdb file latency chart's note shows (#6861): the Azure SQL Database sentence from
+    /// <see cref="CollectorEngineCapability.TempDbFileIoNotCollectedMessage"/> while the chart has no points, and nothing on any
+    /// other engine or once points exist. The Darling viewer shows the same sentence.
+    /// </summary>
+    internal static (string Text, Visibility Visibility) TempDbFileIoGapState(string serverName, bool isAzureSqlDatabase, int pointCount)
+    {
+        var note = CollectorEngineCapability.TempDbFileIoNotCollectedMessage(
+            serverName,
+            isAzureSqlDatabase ? CollectorEngineCapability.AzureSqlDatabaseEngineEdition : CollectorEngineCapability.UnknownEngineEdition);
+
+        return (note ?? "", note is not null && pointCount == 0 ? Visibility.Visible : Visibility.Collapsed);
+    }
+
+    /// <summary>
+    /// Fills the tempdb tab's note (#6861). It reads the collector's last run and then its latest tempdb_stats run only when the
+    /// window has no tempdb rows and the engine does not rule the collector out. A collector with no run has no status to read.
+    /// A failed read leaves no note.
+    /// </summary>
+    private async System.Threading.Tasks.Task ShowTempDbOutcomeAsync(int rowCount)
+    {
+        string? status = null;
+        string? errorMessage = null;
+        DateTime? observedUtc = null;
+        DateTime? collectorLastRunUtc = null;
+        DateTime? serverLastCollectedUtc = null;
+        DateTime? serverFirstCollectedUtc = null;
+
+        if (rowCount == 0 && EngineGapNote(_server.DisplayName, _isAzureSqlDatabase, "tempdb_stats") is null)
+        {
+            try
+            {
+                (collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc) =
+                    await System.Threading.Tasks.Task.Run(() => _dataService.GetCollectorLastRunAsync(_serverId, "tempdb_stats"));
+
+                if (collectorLastRunUtc is not null)
+                {
+                    (status, errorMessage, observedUtc) =
+                        await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestCollectorOutcomeAsync(_serverId, "tempdb_stats"));
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Info("ServerTab", $"[{_server.DisplayName}] tempdb_stats outcome read failed: {ex.Message}");
+                status = null;
+                collectorLastRunUtc = serverLastCollectedUtc = serverFirstCollectedUtc = null;
+            }
+        }
+
+        var (text, visibility) = CollectorOutcomeState(
+            _server.DisplayName, _isAzureSqlDatabase, "tempdb_stats", rowCount, status, errorMessage, observedUtc,
+            collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
+        TempDbNoDataMessage.Text = text;
+        TempDbNoDataMessage.Visibility = visibility;
+    }
+
+    /// <summary>
     /// What the Running Jobs tab says in place of "No SQL Agent jobs are running." when the read itself failed: an empty
     /// list from a read that never answered would be a claim nobody checked.
     /// </summary>

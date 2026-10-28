@@ -261,7 +261,16 @@ public static class PgDeadlockLogParser
     /// <paramref name="foreignZoneLines"/> instead of throwing the slab's whole read out. False (the
     /// convenience overload above) keeps today's refusal, for a caller that could not read the setting.
     /// </summary>
-    public static List<ParsedDeadlock> Extract(string? logBody, bool logTimezoneIsUtc, out int foreignZoneLines)
+    public static List<ParsedDeadlock> Extract(string? logBody, bool logTimezoneIsUtc, out int foreignZoneLines) =>
+        Extract(logBody, logTimezoneIsUtc, zones: null, out foreignZoneLines);
+
+    /// <summary>
+    /// <see cref="Extract(string?, bool, out int)"/> for a target whose <c>log_timezone</c> is a named local zone that
+    /// the server has proved the lines of (#6866, <see cref="PgLogNamedZone"/>): a block's lines are kept only where
+    /// <paramref name="zones"/> holds their stamp and zone, with the instant the server proved. Null is the overload above.
+    /// </summary>
+    public static List<ParsedDeadlock> Extract(
+        string? logBody, bool logTimezoneIsUtc, PgLogZoneMap? zones, out int foreignZoneLines)
     {
         var results = new List<ParsedDeadlock>();
         foreignZoneLines = 0;
@@ -273,7 +282,7 @@ public static class PgDeadlockLogParser
 
         foreach (Match match in s_deadlockBlock.Matches(logBody))
         {
-            var parsed = FromReport(match.Value, logTimezoneIsUtc, out var blockForeignZoneLines);
+            var parsed = FromReport(match.Value, logTimezoneIsUtc, zones, out var blockForeignZoneLines);
             foreignZoneLines += blockForeignZoneLines;
 
             if (parsed is not null)
@@ -376,7 +385,16 @@ public static class PgDeadlockLogParser
     /// </summary>
     /// <exception cref="PgLogTimezoneUnsupportedException">Only when <paramref name="logTimezoneIsUtc"/> is false: see
     /// <see cref="FromReport(string?)"/>.</exception>
-    public static ParsedDeadlock? FromReport(string? reportText, bool logTimezoneIsUtc, out int foreignZoneLines)
+    public static ParsedDeadlock? FromReport(string? reportText, bool logTimezoneIsUtc, out int foreignZoneLines) =>
+        FromReport(reportText, logTimezoneIsUtc, zones: null, out foreignZoneLines);
+
+    /// <summary>
+    /// <see cref="FromReport(string?, bool, out int)"/> for a named local zone the server has proved (#6866): see
+    /// <see cref="PgLogEntryAssembler.Assemble(string?, bool, string?, PgLogZoneMap?, out int)"/>. Null
+    /// <paramref name="zones"/> is the overload above, refusal included.
+    /// </summary>
+    public static ParsedDeadlock? FromReport(
+        string? reportText, bool logTimezoneIsUtc, PgLogZoneMap? zones, out int foreignZoneLines)
     {
         foreignZoneLines = 0;
 
@@ -402,7 +420,7 @@ public static class PgDeadlockLogParser
            re-reading transport and NOT cheap on the consume-once one. The check is the assembler's, per
            primary line, through IsZeroOffsetLogZone. Under a UTC log_timezone the assembler skips and counts a
            line in another zone instead (#4046): the setting says the server did not write it. */
-        foreach (var entry in PgLogEntryAssembler.Assemble(reportText, logTimezoneIsUtc, out foreignZoneLines))
+        foreach (var entry in PgLogEntryAssembler.Assemble(reportText, logTimezoneIsUtc, null, zones, out foreignZoneLines))
         {
             if (entry.Severity == "ERROR"
                 && entry.Message.TrimEnd() == "deadlock detected"

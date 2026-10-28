@@ -673,6 +673,20 @@ public static class CollectorEngineCapability
                PermanentGapEpilogue + $" (The collector for it is {collectorName}.)" + CoveredInsteadSuffix(collectorName);
     }
 
+    /// <summary>
+    /// The note for the tempdb file latency chart on an Azure SQL Database, or null anywhere else (#6861). The file_io_stats
+    /// collector does run there, so <see cref="NotCollectedMessage"/> has no gap to report, but it reads
+    /// <c>sys.dm_io_virtual_file_stats(DB_ID(), NULL)</c>, which returns only the current database's files, so tempdb's files are
+    /// never among the rows. The Lite tab and the Darling viewer both show this sentence, in the wording of the engine-edition
+    /// gap above and ending on the same <see cref="PermanentGapEpilogue"/>.
+    /// </summary>
+    public static string? TempDbFileIoNotCollectedMessage(string serverName, int engineEdition) =>
+        engineEdition == AzureSqlDatabaseEngineEdition
+            ? $"{serverName} runs on {DescribeEngineEdition(engineEdition)} (EngineEdition {engineEdition}), which does not expose tempdb file I/O: " +
+              "its file I/O view returns only the current database's files, so this server does not collect tempdb file latency, and never will. " +
+              PermanentGapEpilogue
+            : null;
+
     /// <summary>What a gated-off collector would have captured. No entry is a vaguer sentence, never a wrong
     /// one — whichever axis called this has already decided that a gap exists.</summary>
     private static string CapturePathOf(string collectorName) =>

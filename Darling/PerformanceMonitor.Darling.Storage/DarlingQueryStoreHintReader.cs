@@ -88,18 +88,24 @@ ORDER BY database_name";
 
     /// <summary>
     /// The hints in each database's newest capture. $1 server, $2 start, $3 end, $4 database filter, $5 query_id or NULL. The hints share
-    /// the marker row's collection_time (one pass stamps one time), so the join is on equality.
+    /// the marker row's collection_time (one pass stamps one time), so the join is on equality. First seen (#6876) comes from one grouped pass
+    /// over the hint rows (<c>firsts</c>): the earliest row after the hint's last absence. A correlated per-hint minimum scanned every captured
+    /// row once per hint (345 hints over 24 hours of captures took 2 seconds).
     /// </summary>
     public static string HintsSql(DatabaseFilter databases) => $@"
-WITH {Ctes(databases)}
+WITH {Ctes(databases)},
+firsts AS (
+    SELECT x.database_name, x.query_id, x.query_hint_id, MIN(x.collection_time) AS first_seen
+    FROM hints AS x
+    LEFT JOIN absent AS a ON a.database_name = x.database_name AND a.query_id = x.query_id AND a.query_hint_id = x.query_hint_id
+    WHERE a.last_absent IS NULL OR x.collection_time > a.last_absent
+    GROUP BY x.database_name, x.query_id, x.query_hint_id)
 SELECT h.database_name, h.query_id, h.query_hint_id, h.query_hint_text, h.last_query_hint_failure_reason, h.query_hint_failure_count,
        h.source_desc, h.collection_time,
-       (SELECT MIN(x.collection_time) FROM hints AS x
-         WHERE x.database_name = h.database_name AND x.query_id = h.query_id AND x.query_hint_id = h.query_hint_id
-         AND (a.last_absent IS NULL OR x.collection_time > a.last_absent)) AS first_seen
+       f.first_seen
 FROM hints AS h
 JOIN newest AS n ON n.database_name = h.database_name AND n.newest_capture = h.collection_time
-LEFT JOIN absent AS a ON a.database_name = h.database_name AND a.query_id = h.query_id AND a.query_hint_id = h.query_hint_id
+LEFT JOIN firsts AS f ON f.database_name = h.database_name AND f.query_id = h.query_id AND f.query_hint_id = h.query_hint_id
 ORDER BY CASE WHEN {FailingPredicate} THEN 0 ELSE 1 END, h.database_name, h.query_id, h.query_hint_id
 LIMIT {MaxHints}";
 
@@ -117,7 +123,7 @@ FROM hints AS h
 JOIN newest AS n ON n.database_name = h.database_name AND n.newest_capture = h.collection_time
 GROUP BY h.database_name";
 
-    private static string Ctes(DatabaseFilter databases) => $@"win AS (
+    internal static string Ctes(DatabaseFilter databases) => $@"win AS (
     SELECT database_name, collection_time, query_hint_id, query_id, query_hint_text, last_query_hint_failure_reason,
            query_hint_failure_count, source_desc
     FROM collect.query_store_hints

@@ -97,7 +97,8 @@ public sealed class DarlingMcpQueryTagRollupTools
 
             var windowStart = windowEnd.AddHours(-hours_back);
             var serverIds = scope.Select(s => s.ServerId).ToArray();
-            var names = scope.ToDictionary(s => s.ServerId, s => s.ServerName);
+            /* #6860: answers name a server by its display name (#6179), not the connection key. */
+            var names = scope.ToDictionary(s => s.ServerId, s => DarlingServerResolver.AnswerNameOf(servers, s));
 
             /* Each stats section routes on its own (their rollups and floors are independent) and says how far back it reached: the raw branch
                carries effective_start / window_truncated, the hourly branch the served window_end. The routing lives in the reader, which judges
@@ -244,7 +245,7 @@ public sealed class DarlingMcpQueryTagRollupTools
             {
                 if (!fleet)
                 {
-                    var unmet = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, scope[0].ServerId, scope[0].ServerName, "query_stats", cancellationToken);
+                    var unmet = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, scope[0].ServerId, names[scope[0].ServerId], "query_stats", cancellationToken);
                     if (unmet != null) return unmet;
                 }
 
@@ -266,7 +267,7 @@ public sealed class DarlingMcpQueryTagRollupTools
             }
 
             payload["scope"] = fleet ? "fleet" : "server";
-            payload["server"] = fleet ? null : scope[0].ServerName;
+            payload["server"] = fleet ? null : names[scope[0].ServerId];
             payload["hours_back"] = hours_back;
             payload["window_start"] = windowStart.ToString("o", CultureInfo.InvariantCulture);
             payload["window_end"] = windowEnd.ToString("o", CultureInfo.InvariantCulture);

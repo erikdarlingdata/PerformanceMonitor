@@ -284,9 +284,11 @@ internal static class DarlingJobReader
     }
 
     /// <summary>One server's SQL Agent state as <c>get_job_history</c> reports it. <paramref name="AgentRunning"/> is null
-    /// when the state is not known: no recent snapshot, no Agent service, or a snapshot that did not say.</summary>
+    /// when the state is not known: no recent snapshot, no Agent service, or a snapshot that did not say.
+    /// <paramref name="ServerId"/> is the registry id the row came from (0 when a caller builds a state by hand), so a caller
+    /// can name the server by the answer-name rule instead of this reader's SQL label (#6860).</summary>
     public sealed record AgentState(
-        string Server, bool? AgentRunning, string? AgentStatusDesc, DateTime? NextRunUtc, DateTime CapturedAtUtc);
+        string Server, bool? AgentRunning, string? AgentStatusDesc, DateTime? NextRunUtc, DateTime CapturedAtUtc, int ServerId = 0);
 
     /// <summary>
     /// Turns a stored snapshot into the state served. A snapshot is judged only while it is fresh, against the alert's live
@@ -338,7 +340,7 @@ internal static class DarlingJobReader
                 reader.IsDBNull(4) ? null : DarlingServerClocksReader.ClockFor(clocks, id).ToUtc(reader.GetDateTime(4)),
                 DateTime.SpecifyKind(reader.GetDateTime(5), DateTimeKind.Utc),
                 anchorUtc,
-                staleWindow));
+                staleWindow) with { ServerId = id });
         }
 
         return states;

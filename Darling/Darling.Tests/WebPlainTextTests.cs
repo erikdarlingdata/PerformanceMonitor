@@ -90,6 +90,25 @@ public sealed class WebPlainTextTests
         }
     }
 
+    /* #6869: a collector that cannot read its source (the DEGRADED status) says the same words on the page as in the two desktop apps. */
+    [Theory]
+    [InlineData(CollectorRuntimePrecondition.DegradedStatus)]
+    [InlineData(CollectorRuntimePrecondition.CaptureSessionMissingStatus)]
+    [InlineData(CollectorRuntimePrecondition.ExtensionMissingStatus)]
+    public void ThePagesRuntimePreconditionText_IsTheDesktopReaderMessage_ForACollectorOutcome(string status)
+    {
+        const string refused = "VIEW DATABASE PERFORMANCE STATE permission denied in database 'tempdb'.";
+        var ran = new DateTime(2026, 10, 25, 12, 0, 0, DateTimeKind.Utc);
+        var mcp = CollectorRuntimePrecondition.CollectionOutcomeMessage("srv", "tempdb_stats", status, refused, ran)!;
+        var reader = CollectorRuntimePrecondition.CollectionOutcomeReaderMessage("srv", "tempdb_stats", status, refused, ran)!;
+
+        var page = Run([mcp], out _)[0];
+
+        /* The page also turns the collector's key into its display name, which the desktop text does not. */
+        Assert.Equal(reader.Replace("tempdb_stats", "Tempdb Stats", StringComparison.Ordinal), page);
+        Assert.DoesNotContain("Act on that sentence", page, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheHintsPointer_AndHoursBack_AreDroppedOrSaidInWords()
     {

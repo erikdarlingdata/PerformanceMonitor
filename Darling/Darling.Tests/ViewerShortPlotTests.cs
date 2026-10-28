@@ -68,6 +68,17 @@ public sealed class ViewerShortPlotTests
         Assert.StartsWith("Blocking", text);
     }
 
+    /// <summary>#6878: the Blocking Trends chart's axis title is kept whole on the shortest row ("Blocking event..." before), and the
+    /// collector that answered is named in the legend entry, which has the width for it.</summary>
+    [Fact]
+    public void BlockingTrendAxisTitle_FitsTheMinimumRowWhole_AndTheSourceMovesToTheLegend()
+    {
+        var (text, size) = ChartAxisTitle.Fit(PerformanceMonitor.Darling.Viewer.ViewerServerTab.BlockingTrendAxisTitle, MinRowTitleSpace);
+        Assert.Equal("Blocking events", text);
+        Assert.InRange(size, ChartAxisTitle.MinFontSize, ChartAxisTitle.BaseFontSize);
+        Assert.Equal("Blocking Incidents (blocked-process-report)", BlockingSourceLabel.For("Blocking Incidents", new string?[] { "blocked-process-report" }));
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(-5)]

@@ -265,24 +265,48 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
             Pick(4, OnPremEngineEdition, MonitoredEngineKind.SqlServer),
         };
 
-        var postgres = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 1, 0);
+        var postgres = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, NoOutcome, 1, 0);
         Assert.NotNull(postgres);
         Assert.Contains("database_states", postgres, StringComparison.Ordinal);
 
-        var azure = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 2, 0);
+        var azure = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, NoOutcome, 2, 0);
         Assert.NotNull(azure);
         Assert.Contains("database_states", azure, StringComparison.Ordinal);
 
         Assert.Equal(0, reader.Calls);
 
-        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 3, 0));
-        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 4, 0));
-        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 4, 3));
-        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 99, 0));
+        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, NoOutcome, 3, 0));
+        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, NoOutcome, 4, 0));
+        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, NoOutcome, 4, 3));
+        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, NoOutcome, 99, 0));
 
         var never = new LastRunReader(null);
-        var neverRan = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, never.ReadAsync, 4, 0);
+        var neverRan = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, never.ReadAsync, NoOutcome, 4, 0);
         Assert.Equal(ViewerServerTab.NeverRanNote(ServerName, "database_states"), neverRan);
+    }
+
+    /// <summary>
+    /// #6861: the database-state editor explains a database_states run that recorded a named skip such as PERMISSIONS, in the
+    /// reader's wording (no closing paragraph for an MCP client), like every other surface.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseStateEditor_GapNote_ExplainsANamedSkip()
+    {
+        const string refused = "The SELECT permission was denied on the object 'databases'.";
+        var ran = ServerLastCollected.AddMinutes(-1);
+        var reader = new LastRunReader(ran);
+        var picks = new[] { Pick(4, OnPremEngineEdition, MonitoredEngineKind.SqlServer) };
+
+        var note = await DatabaseStateOverridesWindow.GapNoteForAsync(
+            picks, reader.ReadAsync,
+            (_, _) => Task.FromResult<(string? Status, string? ErrorMessage, DateTime? ObservedUtc)>(
+                (CollectorRuntimePrecondition.DegradedStatus, refused, ran)),
+            4, 0);
+
+        Assert.NotNull(note);
+        Assert.Contains("database_states", note, StringComparison.Ordinal);
+        Assert.Contains(refused, note, StringComparison.Ordinal);
+        Assert.DoesNotContain("This is a runtime PRECONDITION", note, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -511,7 +535,7 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         var reader = new LastRunReader(null) { ServerFirstCollected = ServerLastCollected.AddMinutes(-2) };
         var picks = new[] { Pick(4, OnPremEngineEdition, MonitoredEngineKind.SqlServer) };
 
-        var editor = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 4, 0);
+        var editor = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, NoOutcome, 4, 0);
         Assert.Equal(
             CollectorRuntimePrecondition.NotYetRunMessage(ServerName, "database_states", ServerLastCollected, reader.ServerFirstCollected),
             editor);
@@ -561,13 +585,17 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         }
     }
 
+    /// <summary>A latest-run read that finds no run, for the tests that are about the engine and never-ran rules.</summary>
+    private static Task<(string? Status, string? ErrorMessage, DateTime? ObservedUtc)> NoOutcome(int serverId, string collector) =>
+        Task.FromResult<(string? Status, string? ErrorMessage, DateTime? ObservedUtc)>((null, null, null));
+
     private static DatabaseStateOverridesWindow.ServerPick Pick(int serverId, int engineEdition, string? engineKind) =>
         new() { ServerId = serverId, ServerName = ServerName, EngineEdition = engineEdition, EngineKind = engineKind };
 
     private static Task<(string Text, Visibility Visibility)> ReadGapAsync(
         LastRunReader reader, ISet<string>? seenToRun, string collector, int rowCount,
         int engineEdition = OnPremEngineEdition, string? engineKind = MonitoredEngineKind.SqlServer) =>
-        ViewerServerTab.ReadEngineGapStateAsync(reader.ReadAsync, seenToRun, 7, ServerName, engineEdition, engineKind, collector, rowCount);
+        ViewerServerTab.ReadEngineGapStateAsync(reader.ReadAsync, seenToRun, 7, ServerName, engineEdition, engineKind, collector, rowCount, NoOutcome);
 
     /// <summary>
     /// <c>collection_log</c> only gains rows, so once a read has seen a collector run, the refresh after it makes no read for that
