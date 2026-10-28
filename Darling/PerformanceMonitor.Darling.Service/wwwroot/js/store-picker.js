@@ -17,12 +17,13 @@
  * Every store name and server name reaches the page through el() (text and attributes, never markup).
  */
 
-import { el, mount, apiGet, currentStore, setStore, setFrontDoor, storeHash, splitStoreHash } from "./util.js";
+import { el, mount, apiGet, currentStore, setStore, setFrontDoor, frontDoor, storeHash, splitStoreHash } from "./util.js";
 import { setStoreScope } from "./viewer-local.js";
+import { peekSession } from "./views-api.js";
 
 const REMEMBER_KEY = "darling.frontDoor.store";
 
-/* [{ name, health, server_count, last_ok_utc }] from the last /api/front-door read. */
+/* [{ name, health, server_count, last_ok_utc, admin_writes_off, managed_store }] from the last /api/front-door read. */
 let stores = [];
 let pickerHost = null;
 
@@ -51,6 +52,7 @@ export function healthBandClass(health) {
   return "band-Critical";
 }
 
+/** The store this browser used last, or null (nothing stored, or storage is not available). */
 function remembered() {
   try {
     return localStorage.getItem(REMEMBER_KEY);
@@ -59,8 +61,9 @@ function remembered() {
   }
 }
 
-/** The store to work in when the address names none: the one this browser used last, else the first the front door lists. */
-function rememberStore(name) {
+/** Remembers `name` as the store to start in next time. The one place that key is written, and a storage that refuses the write
+ *  (private mode) only means the choice lasts until the page closes. */
+export function rememberStore(name) {
   try {
     localStorage.setItem(REMEMBER_KEY, name);
   } catch {
@@ -79,8 +82,24 @@ export async function refreshStores() {
       health: typeof s.health === "string" ? s.health : "ok",
       server_count: Number.isFinite(s.server_count) ? s.server_count : null,
       last_ok_utc: typeof s.last_ok_utc === "string" ? s.last_ok_utc : null,
+      admin_writes_off: s.admin_writes_off === true,
+      managed_store: s.managed_store === true,
     }));
+  applyStoreSession(peekSession());
   return true;
+}
+
+/**
+ * The front door has no admin_writes_off or managed_store of its own: each store reports them in the store list. The page draws
+ * Admin write controls and the notes that name the switch from the session's flags, so it takes the flags of the store in use, which
+ * is what the same page reads from the store's own /api/session when it is not behind a front door. Does nothing outside a front door.
+ */
+export function applyStoreSession(session) {
+  if (!session || !frontDoor()) return;
+  const mine = stores.find((s) => s.name === currentStore());
+  if (!mine) return;
+  session.admin_writes_off = mine.admin_writes_off === true;
+  session.managed_store = mine.managed_store === true;
 }
 
 /**
@@ -97,6 +116,7 @@ export async function initFrontDoor(host, hash) {
   setStore(pick);
   setStoreScope(pick);
   if (pick) rememberStore(pick);
+  applyStoreSession(peekSession());
   paintPicker();
 }
 

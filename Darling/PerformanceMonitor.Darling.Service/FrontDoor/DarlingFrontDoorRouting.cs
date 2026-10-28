@@ -13,6 +13,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -291,7 +292,7 @@ internal sealed class DarlingFrontDoorRouter
 
             case DarlingFrontDoorRouting.Plan.ToStore single:
             {
-                var outcome = await CallOneAsync(single.Store, tool, forwarded, agentRole, ct).ConfigureAwait(false);
+                var outcome = await CallOneAsync(single.Store, tool, forwarded, agentRole, passProtocolErrors: true, ct).ConfigureAwait(false);
                 return outcome.Result ?? TextResult(Unavailable(outcome.Store, outcome.Message!), isError: true);
             }
 
@@ -305,7 +306,7 @@ internal sealed class DarlingFrontDoorRouter
                 StoreOutcome? last = null;
                 foreach (var store in candidates)
                 {
-                    last = await CallOneAsync(store, tool, forwarded, agentRole, ct).ConfigureAwait(false);
+                    last = await CallOneAsync(store, tool, forwarded, agentRole, passProtocolErrors: false, ct).ConfigureAwait(false);
                     if (last.Result is not null)
                     {
                         return last.Result;
@@ -321,7 +322,7 @@ internal sealed class DarlingFrontDoorRouter
 
             default:
                 return await DarlingFrontDoorFanOut.RunAsync(
-                    tool, _directory.Stores, store => CallOneAsync(store, tool, forwarded, agentRole, ct), ct).ConfigureAwait(false);
+                    tool, _directory.Stores, store => CallOneAsync(store, tool, forwarded, agentRole, passProtocolErrors: false, ct), ct).ConfigureAwait(false);
         }
     }
 
@@ -344,8 +345,12 @@ internal sealed class DarlingFrontDoorRouter
     }
 
     /// <summary>One call to one store. The store's own result comes back as it is (<c>busy</c> and an error result included, with no
-    /// retry), and a store that cannot be asked comes back as an unavailable message. The caller's cancel is the one thing that throws.</summary>
-    private async Task<StoreOutcome> CallOneAsync(string store, string tool, Dictionary<string, JsonElement> arguments, bool agentRole, CancellationToken ct)
+    /// retry), and a store that cannot be asked comes back as an unavailable message. The caller's cancel is the one thing that throws,
+    /// except on the single-store path (<paramref name="passProtocolErrors"/>), where a store's JSON-RPC error passes through as the SDK's
+    /// <see cref="McpProtocolException"/>. On the any-one and fan-out paths every other failure of one store is that store's own entry,
+    /// so one store that cannot answer a tool (an older build, say) never costs the other stores' answers.</summary>
+    private async Task<StoreOutcome> CallOneAsync(
+        string store, string tool, Dictionary<string, JsonElement> arguments, bool agentRole, bool passProtocolErrors, CancellationToken ct)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
         linked.CancelAfter(_peerTimeout);
@@ -363,6 +368,15 @@ internal sealed class DarlingFrontDoorRouter
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             return new StoreOutcome(store, null, $"Store '{store}' did not answer within {_peerTimeout.TotalSeconds:0} seconds.");
+        }
+        catch (McpProtocolException) when (passProtocolErrors)
+        {
+            throw;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger?.LogDebug(ex, "Front door: store {Store} failed {Tool}: {Type}", store, tool, ex.GetType().Name);
+            return new StoreOutcome(store, null, $"Store '{store}' could not answer {tool}: {ex.Message}");
         }
     }
 

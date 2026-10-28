@@ -60,6 +60,8 @@ The service checks the block when it starts, together with the rest of `darling.
 
 - `refreshSeconds` must be from 30 to 3600.
 - `peerTimeoutSeconds` must be from 30 to 600.
+
+The MCP host and the web host do not run these checks when they load the file, so each also holds both numbers to the same limits where it uses them. A `refreshSeconds` of 0 or less reads as 30, and a `peerTimeoutSeconds` of 0 or less reads as 30. A value above the top limit reads as the top limit.
 - `stores` must hold at least one store.
 - Each store must have a valid, unique `name`.
 - Each store must have a valid `mcpUrl` and an MCP token.
@@ -152,12 +154,14 @@ A fan-out answer is one JSON text block:
 ```
 
 - Each store's own answer sits under `result`, so a store's `status` words (`empty`, `not_collected`, `busy`) stay what that store said.
-- A store that could not be asked has `status` `unavailable` and a `message`. The other stores still answer. The reasons are: the store is down, it did not answer in time, it is held, or it has no token for the role.
+- A store that could not be asked has `status` `unavailable` and a `message`. The other stores still answer. The reasons are: the store is down, it did not answer in time, it is held, it has no token for the role, or it answered with an error of its own (an older build that does not have the tool, for example). The `message` then carries the store's error text.
 - `is_error` on the call is set only when every store failed.
 
 ### A store that is down
 
-A store that is down never fails the whole call. In a fan-out, that store gets an `unavailable` entry and the rest answer. In a call to one store, the answer is a single `unavailable` message that names the store, and the call is marked as an error. A call that is not answered within `peerTimeoutSeconds` is reported the same way.
+A store that is down never fails the whole call. In a fan-out, that store gets an `unavailable` entry and the rest answer. An any-one-store tool goes to the next store when one cannot answer it. In a call to one store, the answer is a single `unavailable` message that names the store, and the call is marked as an error. A call that is not answered within `peerTimeoutSeconds` is reported the same way.
+
+A call that names one store passes that store's JSON-RPC error through unchanged (an unknown tool or bad arguments), because the caller asked that store and nobody else. In a fan-out or a call to any store, the same error only makes that one store `unavailable`.
 
 ### Busy stores and 429
 
@@ -203,10 +207,12 @@ The front door answers four routes itself. They need a signed-in browser like ev
 |---|---|
 | `GET /api/ping` | `{"status":"ok","front_door":true}`. |
 | `GET /api/session` | The front door's own role, with `front_door` `true` and `can_own` `false`. |
-| `GET /api/front-door` | Each store's `name`, `health`, `server_count` and `last_ok_utc`. |
+| `GET /api/front-door` | Each store's `name`, `health`, `server_count`, `last_ok_utc` and, when the store said so, `admin_writes_off` and `managed_store`. |
 | `GET /api/front-door/locate?server=NAME` | 200 with the `store` and the matched `server_name`. 409 with `ambiguous` and the `stores` that match. 404 with `not_found`. |
 
 These routes accept `GET` only.
+
+`admin_writes_off` and `managed_store` are the flags that a store's own `/api/session` reports. A store runs with Admin writes off when `web.allowAdminWrites` is off on a managed store. The front door reads both from each store through the sign-in it already holds, keeps the answer for 30 seconds, and leaves them out for a store that is down, has no `webUrl`, or runs a build that does not report them. The front door's own `/api/session` always says `false` for both, because one flag cannot speak for several stores. The page takes the flags of the store in use, so a store with Admin writes off shows no Admin write controls, the same as when you open that store directly.
 
 ### Which store gets a forwarded call
 

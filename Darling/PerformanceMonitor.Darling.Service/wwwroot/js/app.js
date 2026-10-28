@@ -38,7 +38,7 @@
  */
 
 import { el, mount, apiGet, apiGetFleet, readTool, localTime, hasInFlightReads, beginPageScope, readErrorCount, isSessionExpired, onSessionExpired, frontDoor, currentStore, routeHash, splitStoreHash, storeHash, storeHeaders, loadingStrip } from "./util.js";
-import { initFrontDoor, refreshPicker, frontDoorStores, isKnownStore, locateServer, ambiguousStrip, locateFailureStrip } from "./store-picker.js";
+import { initFrontDoor, refreshPicker, rememberStore, frontDoorStores, isKnownStore, locateServer, ambiguousStrip, locateFailureStrip } from "./store-picker.js";
 import { makeScrollReset } from "./scroll-reset.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
@@ -166,7 +166,7 @@ function gateStore(opts) {
   if (split.store) {
     if (split.store === currentStore()) return false;
     if (isKnownStore(split.store)) {
-      localStorage.setItem("darling.frontDoor.store", split.store);
+      rememberStore(split.store);
       location.reload();
       return true;
     }
@@ -209,7 +209,7 @@ function applyLocatedStore(store, bare, opts) {
     route(opts);
     return;
   }
-  localStorage.setItem("darling.frontDoor.store", store);
+  rememberStore(store);
   location.reload();
 }
 

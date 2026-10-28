@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Protocol;
@@ -163,5 +164,94 @@ public class DarlingFrontDoorMcpPeersTests
 
         await Assert.ThrowsAsync<FrontDoorPeerException>(
             () => rig.Peers.CallAsync("use9", Call("whoami"), agentRole: false, Ct));
+    }
+
+    /// <summary>Stands between the front door's HTTP client and the fake store, and fails requests on demand: before the request
+    /// reaches the store (a refused connection), or after it did (the store got it and the answer never came back).</summary>
+    private sealed class FaultingHandler : DelegatingHandler
+    {
+        private int _failBeforeSend;
+        private int _failAfterSend;
+        private int _requests;
+
+        public FaultingHandler()
+            : base(new SocketsHttpHandler())
+        {
+        }
+
+        /// <summary>Every request that came through, failed ones included.</summary>
+        public int Requests => Volatile.Read(ref _requests);
+
+        public void FailBeforeSend(int times) => Volatile.Write(ref _failBeforeSend, times);
+
+        public void FailAfterSend(int times) => Volatile.Write(ref _failAfterSend, times);
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _requests);
+            if (Volatile.Read(ref _failBeforeSend) > 0)
+            {
+                Interlocked.Decrement(ref _failBeforeSend);
+                throw new HttpRequestException(HttpRequestError.ConnectionError, "Connection refused.");
+            }
+
+            var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if (Volatile.Read(ref _failAfterSend) > 0)
+            {
+                Interlocked.Decrement(ref _failAfterSend);
+                response.Dispose();
+                throw new HttpRequestException(HttpRequestError.ResponseEnded, "The response ended prematurely.");
+            }
+
+            return response;
+        }
+    }
+
+    [Fact]
+    public async Task A_connection_that_could_not_be_made_is_retried_once_and_the_call_then_succeeds()
+    {
+        await using var use1 = await FakeMcpPeer.StartAsync(new[] { "SQL01" });
+        var faults = new FaultingHandler();
+        faults.FailBeforeSend(1);
+        await using var rig = new FrontDoorRig(new[] { ("use1", use1) }, innerHandler: _ => faults);
+
+        var result = await rig.Peers.CallAsync("use1", Call("whoami"), agentRole: false, Ct);
+
+        Assert.Equal("operator", Text(result));
+        Assert.Equal(1, use1.ToolCalls("whoami"));
+    }
+
+    [Fact]
+    public async Task A_connection_that_can_never_be_made_is_tried_twice_and_then_the_store_is_unreachable()
+    {
+        await using var use1 = await FakeMcpPeer.StartAsync(new[] { "SQL01" });
+        var faults = new FaultingHandler();
+        faults.FailBeforeSend(int.MaxValue);
+        await using var rig = new FrontDoorRig(new[] { ("use1", use1) }, innerHandler: _ => faults);
+
+        var failure = await Assert.ThrowsAsync<FrontDoorPeerException>(
+            () => rig.Peers.CallAsync("use1", Call("whoami"), agentRole: false, Ct));
+
+        Assert.Equal(FrontDoorPeerFailure.Unreachable, failure.Kind);
+        Assert.Equal(2, faults.Requests);
+        Assert.Equal(0, use1.ToolCalls("whoami"));
+    }
+
+    [Fact]
+    public async Task A_call_that_reached_the_store_is_not_sent_again_when_the_answer_does_not_come_back()
+    {
+        await using var use1 = await FakeMcpPeer.StartAsync(new[] { "SQL01" });
+        var faults = new FaultingHandler();
+        await using var rig = new FrontDoorRig(new[] { ("use1", use1) }, innerHandler: _ => faults);
+        Assert.Equal("operator", Text(await rig.Peers.CallAsync("use1", Call("whoami"), agentRole: false, Ct)));
+        Assert.Equal(1, use1.ToolCalls("whoami"));
+
+        faults.FailAfterSend(1);
+        var failure = await Assert.ThrowsAsync<FrontDoorPeerException>(
+            () => rig.Peers.CallAsync("use1", Call("whoami"), agentRole: false, Ct));
+
+        Assert.Equal(FrontDoorPeerFailure.Unreachable, failure.Kind);
+        Assert.Equal(2, use1.ToolCalls("whoami"));
+        Assert.Equal("operator", Text(await rig.Peers.CallAsync("use1", Call("whoami"), agentRole: false, Ct)));
     }
 }

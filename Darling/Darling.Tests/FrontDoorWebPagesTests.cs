@@ -274,4 +274,50 @@ public sealed class FrontDoorWebPagesTests
         // the favourite star belongs to the store in use: one row has it, the other store's row does not
         Assert.Equal(1, r.GetProperty("stars").GetInt32());
     }
+
+    [Fact]
+    public void TheFleetPage_WithNoStoresListed_SaysSoAndDrawsOnce()
+    {
+        var r = Run("fleetNoStores");
+        Assert.Contains("lists no stores", r.GetProperty("text").GetString());
+        Assert.Equal(0, r.GetProperty("sections").GetInt32());
+        Assert.Equal(0, r.GetProperty("fleetCalls").GetInt32());
+        Assert.Equal(0, r.GetProperty("removed").GetInt32());
+    }
+
+    [Fact]
+    public void TheSidebarSearch_DoesNotSayNoServersMatchUnderAStoreWhoseReadFailed()
+    {
+        var r = Run("sidebarSearchWithAFailedStore");
+        var onlyFailed = r.GetProperty("onlyFailed");
+        Assert.Equal(new[] { "use1 is not answering" }, onlyFailed.GetProperty("errors").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Equal(0, onlyFailed.GetProperty("noMatch").GetInt32());
+
+        // a store that did read and matched nothing still says so, even beside a store that failed
+        Assert.Equal(1, r.GetProperty("failedAndReadable").GetProperty("noMatch").GetInt32());
+        Assert.Equal(1, r.GetProperty("readableOnly").GetProperty("noMatch").GetInt32());
+    }
+
+    [Fact]
+    public void TheRememberedStore_IsWrittenInOnePlace_AndAStorageThatRefusesTheWriteBreaksNothing()
+    {
+        var r = Run("rememberStore");
+        var written = r.GetProperty("written").EnumerateArray().Select(e => (e[0].GetString(), e[1].GetString())).ToArray();
+        Assert.Equal(new (string?, string?)[] { ("darling.frontDoor.store", "use2") }, written);
+        Assert.Equal("use2", r.GetProperty("fromMemory").GetString());
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("threw").ValueKind);
+        Assert.Equal("use1", r.GetProperty("storeAfter").GetString());
+    }
+
+    [Fact]
+    public void ThePage_TakesAdminWritesOffFromTheStoreInUse()
+    {
+        var r = Run("adminWrites");
+        Assert.False(r.GetProperty("use1").GetProperty("off").GetBoolean());
+        Assert.False(r.GetProperty("use1").GetProperty("managed").GetBoolean());
+        Assert.True(r.GetProperty("use2").GetProperty("off").GetBoolean());
+        Assert.True(r.GetProperty("use2").GetProperty("managed").GetBoolean());
+        Assert.False(r.GetProperty("use3").GetProperty("off").GetBoolean());
+        Assert.True(r.GetProperty("sameObject").GetBoolean());
+    }
 }

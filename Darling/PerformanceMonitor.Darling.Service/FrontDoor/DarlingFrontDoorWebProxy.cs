@@ -14,6 +14,7 @@ using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -76,6 +77,15 @@ internal sealed class DarlingFrontDoorWebProxy
     private readonly TimeProvider _time;
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastLogged = new();
 
+    /* Each store's own admin_writes_off and managed_store, as its /api/session last said (null: it did not say), and when. */
+    private readonly ConcurrentDictionary<string, (DateTimeOffset At, StoreFlags Flags)> _storeFlags = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>How long a store's answer about admin writes is kept. The flags change only when the store restarts with new settings.</summary>
+    private static readonly TimeSpan StoreFlagsKeep = TimeSpan.FromSeconds(30);
+
+    /// <summary>What a store's <c>/api/session</c> said about how it takes changes. A null is a flag the store did not report.</summary>
+    private readonly record struct StoreFlags(bool? AdminWritesOff, bool? ManagedStore);
+
     internal DarlingFrontDoorWebProxy(
         IFrontDoorDirectory directory, DarlingFrontDoorWebSession session, TimeSpan peerTimeout, ILogger logger, TimeProvider? time = null)
     {
@@ -92,7 +102,7 @@ internal sealed class DarlingFrontDoorWebProxy
         => new(
             directory,
             new DarlingFrontDoorWebSession(secrets),
-            TimeSpan.FromSeconds(Math.Clamp(config.PeerTimeoutSeconds, FrontDoorConfig.MinPeerTimeoutSeconds, FrontDoorConfig.MaxPeerTimeoutSeconds)),
+            config.EffectivePeerTimeout(),
             logger);
 
     /// <summary>Maps every <c>/api/*</c> route. It runs where the dashboard's own endpoints would, after the sign-in and role gates.</summary>
@@ -167,12 +177,19 @@ internal sealed class DarlingFrontDoorWebProxy
         });
     }
 
-    private Task StoresAsync(HttpContext context)
+    /// <summary>The store list with each store's health, and, where the store said so, its <c>admin_writes_off</c> and <c>managed_store</c>: the
+    /// page takes both from the store in use, as it does from the store's own <c>/api/session</c> when it is not behind a front door, so a
+    /// store running with Admin writes off draws no Admin write controls and names the right switch. A store that is down or did not say has
+    /// no such key.</summary>
+    private async Task StoresAsync(HttpContext context)
     {
+        var states = _directory.Stores;
+        var flags = await Task.WhenAll(states.Select(state => StoreFlagsAsync(state, context.RequestAborted))).ConfigureAwait(false);
         var stores = new JsonArray();
-        foreach (var state in _directory.Stores)
+        for (var i = 0; i < states.Count; i++)
         {
-            stores.Add(new JsonObject
+            var state = states[i];
+            var entry = new JsonObject
             {
                 ["name"] = state.Store.Name,
                 ["health"] = HealthWord(state.Health),
@@ -180,11 +197,81 @@ internal sealed class DarlingFrontDoorWebProxy
                 ["last_ok_utc"] = state.LastOkUtc is { } last
                     ? DateTime.SpecifyKind(last, DateTimeKind.Utc).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture)
                     : null,
-            });
+            };
+            if (flags[i].AdminWritesOff is { } off)
+            {
+                entry["admin_writes_off"] = off;
+            }
+
+            if (flags[i].ManagedStore is { } managed)
+            {
+                entry["managed_store"] = managed;
+            }
+
+            stores.Add(entry);
         }
 
-        return WriteJsonAsync(context, StatusCodes.Status200OK, new JsonObject { ["front_door"] = true, ["stores"] = stores });
+        await WriteJsonAsync(context, StatusCodes.Status200OK, new JsonObject { ["front_door"] = true, ["stores"] = stores }).ConfigureAwait(false);
     }
+
+    /// <summary>One store's <c>admin_writes_off</c> and <c>managed_store</c>, read from its own <c>/api/session</c> through the front door's session
+    /// with it and kept for <see cref="StoreFlagsKeep"/>. Each is null when the store is not up, has no web address, or did not report it (an
+    /// older build, say).</summary>
+    private async Task<StoreFlags> StoreFlagsAsync(FrontDoorStoreState state, CancellationToken requestAborted)
+    {
+        var store = state.Store;
+        if (store.WebUrl is null || state.Health is FrontDoorStoreHealth.AuthFailed or FrontDoorStoreHealth.Unreachable)
+        {
+            return default;
+        }
+
+        var now = _time.GetUtcNow();
+        if (_storeFlags.TryGetValue(store.Name, out var kept) && now - kept.At < StoreFlagsKeep)
+        {
+            return kept.Flags;
+        }
+
+        var flags = default(StoreFlags);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);
+        linked.CancelAfter(_peerTimeout);
+        try
+        {
+            for (var signedInAgain = false; ; signedInAgain = true)
+            {
+                var cookie = await _session.GetCookieAsync(store, linked.Token).ConfigureAwait(false);
+                using var peerRequest = new HttpRequestMessage(HttpMethod.Get, PeerUri(store.WebUrl, "/api/session", null));
+                peerRequest.Headers.TryAddWithoutValidation("Cookie", cookie);
+                using var response = await _session.ClientFor(store).SendAsync(peerRequest, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
+                if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized && !signedInAgain)
+                {
+                    _session.Discard(store, cookie);
+                    continue;
+                }
+
+                if (response.IsSuccessStatusCode)
+                {
+                    using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(linked.Token).ConfigureAwait(false));
+                    if (document.RootElement.ValueKind == JsonValueKind.Object)
+                    {
+                        flags = new StoreFlags(BoolOf(document.RootElement, "admin_writes_off"), BoolOf(document.RootElement, "managed_store"));
+                    }
+                }
+
+                break;
+            }
+        }
+        catch (Exception ex) when (ex is FrontDoorPeerUnavailableException or HttpRequestException or JsonException or IOException
+            || (ex is OperationCanceledException && !requestAborted.IsCancellationRequested))
+        {
+            _logger.LogDebug("Front door web: store {Store} did not report admin writes ({Type}).", store.Name, ex.GetType().Name);
+        }
+
+        _storeFlags[store.Name] = (now, flags);
+        return flags;
+    }
+
+    private static bool? BoolOf(JsonElement root, string name)
+        => root.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False ? value.GetBoolean() : null;
 
     private static string HealthWord(FrontDoorStoreHealth health) => health switch
     {

@@ -3226,6 +3226,16 @@ public sealed class FrontDoorConfig
     [JsonPropertyName("peerTimeoutSeconds")]
     public int PeerTimeoutSeconds { get; set; } = DefaultPeerTimeoutSeconds;
 
+    /// <summary>The directory refresh interval a caller uses: <see cref="RefreshSeconds"/> held between the limits. <c>Validate</c> does
+    /// not run in the processes that host the front door's directory and MCP router, so a 0 here would refresh without a pause and a
+    /// negative value would stop the host (#6840).</summary>
+    internal TimeSpan EffectiveRefreshInterval() =>
+        TimeSpan.FromSeconds(Math.Clamp(RefreshSeconds, MinRefreshSeconds, MaxRefreshSeconds));
+
+    /// <summary>The per-call deadline a caller uses: <see cref="PeerTimeoutSeconds"/> held between the limits, for the same reason.</summary>
+    internal TimeSpan EffectivePeerTimeout() =>
+        TimeSpan.FromSeconds(Math.Clamp(PeerTimeoutSeconds, MinPeerTimeoutSeconds, MaxPeerTimeoutSeconds));
+
     /// <summary>The Darling stores this front door routes to.</summary>
     [JsonPropertyName("stores")]
     public List<FrontDoorStoreConfig> Stores { get; set; } = new();

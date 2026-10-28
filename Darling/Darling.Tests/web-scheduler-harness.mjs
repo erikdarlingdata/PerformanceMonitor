@@ -132,6 +132,7 @@ const sandbox = {
   loadingStrip: () => ({}),
   initFrontDoor: async () => {},
   refreshPicker() {},
+  rememberStore() {},
   frontDoorStores: () => [],
   isKnownStore: () => false,
   locateServer: async () => ({ kind: "error", message: "" }),

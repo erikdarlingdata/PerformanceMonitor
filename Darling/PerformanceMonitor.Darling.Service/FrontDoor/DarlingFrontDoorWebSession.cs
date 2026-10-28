@@ -95,7 +95,11 @@ internal sealed class DarlingFrontDoorWebSession : IDisposable
 
         internal string? HeldWhy;
 
-        public void Dispose() => Client.Dispose();
+        public void Dispose()
+        {
+            Client.Dispose();
+            SignInGate.Dispose();
+        }
     }
 
     private PeerState StateFor(FrontDoorStore store)

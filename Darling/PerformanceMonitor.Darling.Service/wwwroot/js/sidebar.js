@@ -135,6 +135,7 @@ export function paintStoreServerLists(container, groups, activeParam, current) {
   const refocus = focusedGroupId(container);
   const nodes = [];
   let anyRow = false;
+  let anyRead = false;
   for (const g of groups) {
     const name = g.store.name;
     const header = el("div", { class: "sidebar-store-header", dataset: { store: name } }, [
@@ -146,6 +147,7 @@ export function paintStoreServerLists(container, groups, activeParam, current) {
       nodes.push(header, el("div", { class: "muted sidebar-store-error", style: "padding:0.25rem 1.25rem", text: g.res.message || "Fleet unavailable" }));
       continue;
     }
+    anyRead = true;
     if (name === current) rememberFleet(g.res.data.cards);
     const rows = serverNodes(g.res.data, name === current ? activeParam : null, name, name === current, true);
     nodes.push(header);
@@ -153,7 +155,8 @@ export function paintStoreServerLists(container, groups, activeParam, current) {
     anyRow = true;
     nodes.push(...rows.nodes);
   }
-  if (!anyRow && searchTerm.trim()) nodes.push(el("div", { class: "muted sidebar-no-match", text: "No servers match" }));
+  /* A store whose read failed has already said so on its own line, and says nothing about whether a search matched. */
+  if (anyRead && !anyRow && searchTerm.trim()) nodes.push(el("div", { class: "muted sidebar-no-match", text: "No servers match" }));
   mount(container, nodes);
   restoreGroupFocus(container, refocus);
 }

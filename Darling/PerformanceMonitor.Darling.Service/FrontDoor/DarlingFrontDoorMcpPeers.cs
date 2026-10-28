@@ -79,13 +79,14 @@ internal sealed class DarlingFrontDoorMcpPeers : IFrontDoorMcpPeers, IAsyncDispo
 
     public DarlingFrontDoorMcpPeers(
         FrontDoorConfig config, IFrontDoorSecrets secrets, Func<IFrontDoorDirectory> directory,
-        ILogger<DarlingFrontDoorMcpPeers>? logger = null)
+        ILogger<DarlingFrontDoorMcpPeers>? logger = null,
+        Func<FrontDoorStore, HttpMessageHandler>? innerHandler = null)
     {
         _secrets = secrets;
         _directory = directory;
         _logger = (ILogger?)logger ?? NullLogger.Instance;
-        _callTimeout = TimeSpan.FromSeconds(config.PeerTimeoutSeconds);
-        _links = config.ToStores().ToDictionary(s => s.Name, s => new Link(s), StringComparer.OrdinalIgnoreCase);
+        _callTimeout = config.EffectivePeerTimeout();
+        _links = config.ToStores().ToDictionary(s => s.Name, s => new Link(s, innerHandler), StringComparer.OrdinalIgnoreCase);
     }
 
     public async Task<CallToolResult> CallAsync(string store, CallToolRequestParams call, bool agentRole, CancellationToken ct)
@@ -198,10 +199,10 @@ internal sealed class DarlingFrontDoorMcpPeers : IFrontDoorMcpPeers, IAsyncDispo
         private readonly Dictionary<bool, McpClient> _clients = new();
         private readonly SemaphoreSlim _gate = new(1, 1);
 
-        public Link(FrontDoorStore store)
+        public Link(FrontDoorStore store, Func<FrontDoorStore, HttpMessageHandler>? innerHandler)
         {
             Store = store;
-            Recorder = new RefusalRecorder(DarlingFrontDoorHttp.CreateHandler(store, TimeSpan.FromSeconds(10)));
+            Recorder = new RefusalRecorder(innerHandler?.Invoke(store) ?? DarlingFrontDoorHttp.CreateHandler(store, TimeSpan.FromSeconds(10)));
             /* No overall HttpClient timeout: the SSE reply of a long read has no fixed length, and each call carries its own deadline. */
             _http = new HttpClient(Recorder, disposeHandler: true) { Timeout = Timeout.InfiniteTimeSpan };
         }

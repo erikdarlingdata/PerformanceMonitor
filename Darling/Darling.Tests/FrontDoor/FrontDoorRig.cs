@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net.Http;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.FrontDoor;
@@ -31,7 +32,8 @@ internal sealed class ManualClock : TimeProvider
 /// </summary>
 internal sealed class FrontDoorRig : IAsyncDisposable
 {
-    public FrontDoorRig(IReadOnlyList<(string Name, FakeMcpPeer Peer)> stores, Func<string, bool>? hasAgentToken = null)
+    public FrontDoorRig(IReadOnlyList<(string Name, FakeMcpPeer Peer)> stores, Func<string, bool>? hasAgentToken = null,
+        Func<FrontDoorStore, HttpMessageHandler>? innerHandler = null)
     {
         Config = new FrontDoorConfig
         {
@@ -46,7 +48,7 @@ internal sealed class FrontDoorRig : IAsyncDisposable
         };
         var secrets = new DarlingFrontDoorSecrets(Config);
         DarlingFrontDoorDirectory? directory = null;
-        Peers = new DarlingFrontDoorMcpPeers(Config, secrets, () => directory!);
+        Peers = new DarlingFrontDoorMcpPeers(Config, secrets, () => directory!, innerHandler: innerHandler);
         directory = new DarlingFrontDoorDirectory(Config, Peers, clock: Clock);
         Directory = directory;
     }

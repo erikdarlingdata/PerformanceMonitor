@@ -123,6 +123,10 @@ internal sealed class FakeWebPeer : IAsyncDisposable
         return peer;
     }
 
+    /// <summary>What this store's <c>/api/session</c> says about <c>admin_writes_off</c> (a store running with admin writes off, which is
+    /// always a managed store).</summary>
+    internal bool AdminWritesOff;
+
     /// <summary>Forgets every session, as a restart would.</summary>
     internal void ForgetSessions()
     {
@@ -235,6 +239,13 @@ internal sealed class FakeWebPeer : IAsyncDisposable
         }
 
         context.Response.ContentType = AnswerContentType ?? "application/json; charset=utf-8";
+        if (context.Request.Path.Value == "/api/session")
+        {
+            await context.Response.WriteAsync(
+                "{\"can_edit\":true,\"managed_store\":" + (AdminWritesOff ? "true" : "false") + ",\"admin_writes_off\":" + (AdminWritesOff ? "true" : "false") + "}");
+            return;
+        }
+
         await context.Response.WriteAsync("{\"peer\":\"" + Name + "\",\"path\":\"" + context.Request.Path.Value + "\"}");
     }
 

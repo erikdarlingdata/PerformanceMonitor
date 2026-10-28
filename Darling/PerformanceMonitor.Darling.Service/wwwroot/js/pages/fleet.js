@@ -265,7 +265,12 @@ async function renderStoreFleets(main) {
   silenceNotice = null;
   canEditSilence = false;
   const current = currentStore();
-  const parts = frontDoorStores().map((st) => {
+  const listed = frontDoorStores();
+  if (!listed.length) {
+    mount(main, [pageHead(null), emptyStrip("The front door lists no stores.")]);
+    return;
+  }
+  const parts = listed.map((st) => {
     const body = el("div", { class: "fleet-store-body" }, [loadingStrip("Loading " + st.name + "…")]);
     const head = el("h3", { class: "section-title fleet-store-head" }, [
       el("span", { class: "dot " + healthBandClass(st.health) }),
@@ -276,10 +281,6 @@ async function renderStoreFleets(main) {
     return { st, body, section: el("section", { class: "fleet-store", dataset: { store: st.name } }, [head, body]) };
   });
   mount(main, [pageHead(null), ...parts.map((x) => x.section)]);
-  if (!parts.length) {
-    mount(main, [pageHead(null), emptyStrip("The front door lists no stores.")]);
-    return;
-  }
 
   await Promise.all(
     parts.map(async (x) => {

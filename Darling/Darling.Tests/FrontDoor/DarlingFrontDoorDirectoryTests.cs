@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.FrontDoor;
 using Xunit;
 
@@ -219,5 +221,63 @@ public class DarlingFrontDoorDirectoryTests
         Assert.Equal(new[] { "use2", "use1" }, rig.Directory.Stores.Select(s => s.Store.Name));
         Assert.Equal("use1", rig.Directory.Find("USE1")?.Name);
         Assert.Null(rig.Directory.Find("use3"));
+    }
+
+    private static FrontDoorConfig ConfigWith(int refreshSeconds, int peerTimeoutSeconds = FrontDoorConfig.DefaultPeerTimeoutSeconds) => new()
+    {
+        Enabled = true,
+        RefreshSeconds = refreshSeconds,
+        PeerTimeoutSeconds = peerTimeoutSeconds,
+        Stores = new List<FrontDoorStoreConfig> { new() { Name = "use1", McpUrl = "http://127.0.0.1:1/mcp", McpToken = "t" } },
+    };
+
+    [Theory]
+    [InlineData(0, FrontDoorConfig.MinRefreshSeconds)]
+    [InlineData(-1, FrontDoorConfig.MinRefreshSeconds)]
+    [InlineData(int.MinValue, FrontDoorConfig.MinRefreshSeconds)]
+    [InlineData(90, 90)]
+    [InlineData(int.MaxValue, FrontDoorConfig.MaxRefreshSeconds)]
+    public void The_refresh_interval_is_held_between_the_config_limits_even_when_the_file_was_never_validated(int configured, int expectedSeconds)
+    {
+        using var directory = new DarlingFrontDoorDirectory(ConfigWith(configured), new FakeFrontDoorPeers());
+
+        Assert.Equal(TimeSpan.FromSeconds(expectedSeconds), directory.RefreshInterval);
+    }
+
+    [Theory]
+    [InlineData(0, FrontDoorConfig.MinPeerTimeoutSeconds)]
+    [InlineData(-1, FrontDoorConfig.MinPeerTimeoutSeconds)]
+    [InlineData(int.MaxValue, FrontDoorConfig.MaxPeerTimeoutSeconds)]
+    public void The_peer_timeout_is_held_between_the_config_limits_even_when_the_file_was_never_validated(int configured, int expectedSeconds)
+    {
+        Assert.Equal(TimeSpan.FromSeconds(expectedSeconds), ConfigWith(30, configured).EffectivePeerTimeout());
+    }
+
+    [Fact]
+    public async Task The_refresh_service_with_a_negative_refresh_interval_keeps_running_and_waits_between_reads()
+    {
+        var peers = new FakeFrontDoorPeers();
+        using var directory = new DarlingFrontDoorDirectory(ConfigWith(-1), peers);
+        using var service = new DarlingFrontDoorDirectoryService(directory);
+
+        await service.StartAsync(Ct);
+        try
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (peers.Calls.Count == 0 && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(20, Ct);
+            }
+
+            Assert.NotEmpty(peers.Calls);
+            await Task.Delay(300, Ct);
+
+            Assert.False(service.ExecuteTask!.IsCompleted);
+            Assert.Equal(1, peers.Calls.Count(c => c.Params.Name == "list_servers"));
+        }
+        finally
+        {
+            await service.StopAsync(CancellationToken.None);
+        }
     }
 }

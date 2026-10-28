@@ -667,7 +667,7 @@ public sealed class FrontDoorWebProxyTests
     }
 
     [Fact(Timeout = 60_000)]
-    public async Task TheLocalRoutes_AnswerTheirShapes_WithoutCallingAStore()
+    public async Task TheLocalRoutes_AnswerTheirShapes_AndOnlyReadEachStoresOwnSession()
     {
         var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
         await using var _a = a;
@@ -709,9 +709,51 @@ public sealed class FrontDoorWebProxyTests
         Assert.Equal(HttpStatusCode.MethodNotAllowed, post.StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, under.StatusCode);
 
-        Assert.Empty(a.Api);
-        Assert.Empty(b.Api);
-        Assert.Empty(a.Logins);
+        /* The only thing a local route asks a store is its own /api/session, for admin_writes_off. */
+        Assert.All(a.Api, seen => Assert.Equal("/api/session", seen.Path));
+        Assert.All(b.Api, seen => Assert.Equal("/api/session", seen.Path));
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task AStoreRunningWithAdminWritesOff_IsReportedSoInTheStoreList_AndAStoreWithThemOnIsNot()
+    {
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
+        await using var _a = a;
+        await using var _b = b;
+        await using var _door = door;
+        b.AdminWritesOff = true;
+
+        var (response, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/front-door"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var list = Json(body)["stores"]!.AsArray();
+        Assert.False((bool)list[0]!["admin_writes_off"]!);
+        Assert.True((bool)list[1]!["admin_writes_off"]!);
+        Assert.False((bool)list[0]!["managed_store"]!);
+        Assert.True((bool)list[1]!["managed_store"]!);
+        /* The front door's own /api/session still carries no store's flag: the page takes it from the store in use. */
+        var (_, sessionBody) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/session"));
+        Assert.False((bool)Json(sessionBody)["admin_writes_off"]!);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task AStoreThatCannotBeReadForItsSession_HasNoFlagInTheStoreList_AndTheOthersStillDo()
+    {
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
+        await using var _a = a;
+        await using var _b = b;
+        await using var _door = door;
+        a.AnswerStatus = 500;
+        b.AdminWritesOff = true;
+
+        var (response, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/front-door"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var list = Json(body)["stores"]!.AsArray();
+        Assert.Equal("use1", (string?)list[0]!["name"]);
+        Assert.Null(list[0]!["admin_writes_off"]);
+        Assert.Null(list[0]!["managed_store"]);
+        Assert.True((bool)list[1]!["admin_writes_off"]!);
     }
 
     [Fact(Timeout = 60_000)]

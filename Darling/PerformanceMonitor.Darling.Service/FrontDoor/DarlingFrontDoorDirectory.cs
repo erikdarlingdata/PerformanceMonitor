@@ -59,7 +59,7 @@ internal sealed class DarlingFrontDoorDirectory : IFrontDoorDirectory, IDisposab
         _peers = peers;
         _logger = (ILogger?)logger ?? NullLogger.Instance;
         _clock = clock ?? TimeProvider.System;
-        RefreshInterval = TimeSpan.FromSeconds(config.RefreshSeconds);
+        RefreshInterval = config.EffectiveRefreshInterval();
         Active = config.Enabled && _configured.Count > 0;
         foreach (var store in _configured)
         {

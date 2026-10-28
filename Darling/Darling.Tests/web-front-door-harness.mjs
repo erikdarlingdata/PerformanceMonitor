@@ -312,6 +312,92 @@ try {
       for (const fn of itemOf("alpha").handlers.click || []) fn({});
       return { headers, items, errors, otherHash, ownHash: location.hash, stars: all(container, (n) => String(n.className).includes("fav")).length };
     },
+    /* A front door that lists no stores: the page says so, drawn once and with nothing drawn first and thrown away. */
+    fleetNoStores: async () => {
+      util.setFrontDoor(true);
+      handler = (url) => (url === "/api/front-door" ? reply(200, { front_door: true, stores: [] }) : reply(200, {}));
+      await picker.refreshStores();
+      calls.length = 0;
+      const page = await load("pages/fleet.js");
+      const main = new FakeNode("main");
+      let removed = 0;
+      const removeChild = main.removeChild.bind(main);
+      main.removeChild = (child) => { removed++; return removeChild(child); };
+      await page.renderFleet(main);
+      await settle();
+      return { removed, text: main.textContent, sections: all(main, (n) => n.tag === "section").length, fleetCalls: calls.filter((c) => c.url === "/api/fleet").length };
+    },
+    /* A search that matches nothing: a store whose read failed has already said so on its own line, and is not also "no match". */
+    sidebarSearchWithAFailedStore: async () => {
+      util.setFrontDoor(true);
+      util.setStore("use1");
+      const sidebar = await load("sidebar.js");
+      const host = new FakeNode("div");
+      sidebar.initSidebarSearch(host, () => {});
+      const input = all(host, (n) => n.tag === "input")[0];
+      input.value = "zzz";
+      for (const fn of input.handlers.input || []) fn();
+      const failed = { store: { name: "use1", health: "unreachable" }, res: { kind: "error", message: "use1 is not answering" } };
+      const readable = { store: { name: "use2", health: "ok" }, res: { kind: "data", data: fleetBody(["alpha"]) } };
+      const paint = (groups) => {
+        const container = new FakeNode("div");
+        sidebar.paintStoreServerLists(container, groups, null, "use1");
+        return {
+          noMatch: all(container, (n) => String(n.className).includes("sidebar-no-match")).length,
+          errors: all(container, (n) => String(n.className).includes("sidebar-store-error")).map((n) => n.textContent),
+        };
+      };
+      return { onlyFailed: paint([failed]), failedAndReadable: paint([failed, readable]), readableOnly: paint([readable]) };
+    },
+    /* The remembered store is written through store-picker.js alone, and a storage that refuses the write changes nothing else. */
+    rememberStore: async () => {
+      handler = (url) => (url === "/api/front-door"
+        ? reply(200, { front_door: true, stores: [
+            { name: "use1", health: "ok", server_count: 1, last_ok_utc: null },
+            { name: "use2", health: "ok", server_count: 1, last_ok_utc: null }] })
+        : reply(200, {}));
+      mem.clear();
+      picker.rememberStore("use2");
+      const written = [...mem.entries()];
+      util.setStore(null);
+      await picker.initFrontDoor(new FakeNode("div"), "#/fleet");
+      const fromMemory = util.currentStore();
+      globalThis.localStorage = { getItem: () => null, setItem: () => { throw new Error("QuotaExceededError"); }, removeItem() {} };
+      let threw = null;
+      try {
+        picker.rememberStore("use1");
+        picker.chooseStore("use2");
+        util.setStore(null);
+        await picker.initFrontDoor(new FakeNode("div"), "#/fleet");
+      } catch (e) {
+        threw = String(e);
+      }
+      return { written, fromMemory, threw, storeAfter: util.currentStore() };
+    },
+    /* A store running with Admin writes off: the page takes its flag from the store in use, not from the front door's own session. */
+    adminWrites: async () => {
+      handler = (url) => {
+        if (url === "/api/session") return reply(200, { can_edit: true, front_door: true, admin_writes_off: false });
+        if (url === "/api/front-door") {
+          return reply(200, { front_door: true, stores: [
+            { name: "use1", health: "ok", server_count: 1, last_ok_utc: null, admin_writes_off: false, managed_store: false },
+            { name: "use2", health: "ok", server_count: 1, last_ok_utc: null, admin_writes_off: true, managed_store: true },
+            { name: "use3", health: "unreachable", server_count: 0, last_ok_utc: null }] });
+        }
+        return reply(200, {});
+      };
+      const views = await load("views-api.js");
+      const session = await views.getSession();
+      mem.clear();
+      const flagIn = async (hash) => {
+        util.setStore(null);
+        await picker.initFrontDoor(new FakeNode("div"), hash);
+        return { off: session.admin_writes_off, managed: session.managed_store };
+      };
+      const out = { use1: await flagIn("#/s/use1/fleet"), use2: await flagIn("#/s/use2/fleet"), use3: await flagIn("#/s/use3/fleet") };
+      out.sameObject = views.peekSession() === session;
+      return out;
+    },
   };
   if (!scenarios[scenario]) throw new Error("unknown scenario " + scenario);
   Object.assign(out, await scenarios[scenario]());

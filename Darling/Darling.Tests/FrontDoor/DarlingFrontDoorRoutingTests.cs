@@ -8,10 +8,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using PerformanceMonitor.Darling.Service.FrontDoor;
 using Xunit;
@@ -372,6 +375,64 @@ public sealed class DarlingFrontDoorRoutingTests
         Assert.Equal("Store use2: use2 could not be reached", stores[1].GetProperty("message").GetString());
         Assert.Equal("ok", stores[0].GetProperty("result").GetProperty("status").GetString());
         Assert.Equal("ok", stores[2].GetProperty("result").GetProperty("status").GetString());
+    }
+
+    private static Exception StoreFailure(string kind) => kind switch
+    {
+        "protocol" => new McpProtocolException("Request failed (remote): Unknown tool 'get_finops_inventory'", McpErrorCode.MethodNotFound),
+        "http" => new HttpRequestException("The response ended prematurely."),
+        _ => new IOException("The connection was closed."),
+    };
+
+    [Theory]
+    [InlineData("protocol")]
+    [InlineData("http")]
+    [InlineData("io")]
+    public async Task AFanOut_WithOnePeerThrowingAnythingButAPeerFailure_KeepsTheOthersAnswers_AndIsNotAnError(string kind)
+    {
+        var directory = new FakeFrontDoorDirectory("use1", "use2", "use3");
+        var peers = new FakeFrontDoorPeers
+        {
+            Handler = call => call.Store == "use2" ? throw StoreFailure(kind) : Task.FromResult(Text("{\"status\":\"ok\"}")),
+        };
+
+        var result = await RouterOf(directory, peers).CallAsync("list_servers", Args(), agentRole: false, CancellationToken.None);
+
+        Assert.False(result.IsError);
+        var stores = Parse(TextOf(result)).GetProperty("stores").EnumerateArray().ToList();
+        Assert.Equal(3, stores.Count);
+        Assert.Equal("unavailable", stores[1].GetProperty("status").GetString());
+        Assert.Contains(StoreFailure(kind).Message, stores[1].GetProperty("message").GetString());
+        Assert.Equal("ok", stores[0].GetProperty("result").GetProperty("status").GetString());
+        Assert.Equal("ok", stores[2].GetProperty("result").GetProperty("status").GetString());
+    }
+
+    [Theory]
+    [InlineData("protocol")]
+    [InlineData("http")]
+    [InlineData("io")]
+    public async Task APureTool_WhoseFirstStoreThrowsAnythingButAPeerFailure_GoesToTheNextOne(string kind)
+    {
+        var directory = new FakeFrontDoorDirectory("use1", "use2");
+        var peers = new FakeFrontDoorPeers
+        {
+            Handler = call => call.Store == "use1" ? throw StoreFailure(kind) : Task.FromResult(Text("{\"status\":\"ok\"}")),
+        };
+
+        var result = await RouterOf(directory, peers).CallAsync("get_tool_guide", Args(), agentRole: false, CancellationToken.None);
+
+        Assert.Equal(new[] { "use1", "use2" }, peers.Calls.Select(c => c.Store).ToArray());
+        Assert.Equal("{\"status\":\"ok\"}", TextOf(result));
+    }
+
+    [Fact]
+    public async Task ASingleStoreThatAnswersAJsonRpcError_PassesItThroughAsTheSdksProtocolException()
+    {
+        var directory = new FakeFrontDoorDirectory("use1", "use2");
+        var peers = new FakeFrontDoorPeers { Handler = _ => throw StoreFailure("protocol") };
+
+        await Assert.ThrowsAsync<McpProtocolException>(
+            () => RouterOf(directory, peers).CallAsync("get_wait_stats", Args(("store", "\"use1\"")), agentRole: false, CancellationToken.None));
     }
 
     [Fact]
