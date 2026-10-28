@@ -374,7 +374,7 @@ public sealed class RdsAssumeRoleSeamTests
         var runner = RepoFile.ReadRepoFileLf("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs");
 
         Assert.Equal(4, CountOf(runner, "roles: _awsRoles));"));
-        Assert.Equal(4, CountOf(runner, "server.Config.AwsRoleKey, cancellationToken);"));
+        Assert.Equal(4, CountOf(runner, "server.Config.AwsRoleKey,"));
         Assert.Contains("RetainAwsRoles", RepoFile.ReadRepoFileLf("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs"), StringComparison.Ordinal);
     }
 

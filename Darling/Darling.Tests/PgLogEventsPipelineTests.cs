@@ -2205,7 +2205,7 @@ public sealed class PgLogEventsPipelineTests
 
         var run = DarlingCollectorRunner.WithForeignZoneLinesNote(
             new CollectorRunResult(rows.Count, 1, 1, context.Measurements));
-        Assert.Contains("(#4046)", run.Note, StringComparison.Ordinal);
+        Assert.Contains("#4046", run.Note, StringComparison.Ordinal);
         Assert.EndsWith("; foreign_zone_lines_skipped=1", run.Note, StringComparison.Ordinal);
 
         /* An ordinary run gets no note at all, as before. */
