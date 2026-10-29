@@ -477,6 +477,10 @@ public partial class MainWindow : Window
         JobHistoryContent.Initialize(_dataService);
         JobHistoryContent.StatusChanged += OnServerTabStatusChanged;
 
+        /* Database Protection (#6873): a self-loading read-only control over the last backups and CHECKDB of one server. */
+        DatabaseProtectionContent.Initialize(_dataService);
+        DatabaseProtectionContent.StatusChanged += OnServerTabStatusChanged;
+
         /* Fleet Sweeps (#6390): a self-loading read-only control over the fleet sweep engine's record. */
         FleetSweepsContent.Initialize(_dataService);
         FleetSweepsContent.StatusChanged += OnServerTabStatusChanged;
@@ -666,6 +670,7 @@ public partial class MainWindow : Window
            otherwise double-refresh the same grid). Every other aggregate tab still auto-refreshes. */
         if (ReferenceEquals(MainTabs.SelectedItem, RecommendationsTab)
             || ReferenceEquals(MainTabs.SelectedItem, JobHistoryTabItem)
+            || ReferenceEquals(MainTabs.SelectedItem, DatabaseProtectionTabItem)
             || ReferenceEquals(MainTabs.SelectedItem, AgentAlertsTabItem)
             || ReferenceEquals(MainTabs.SelectedItem, FinOpsTab)
             || ReferenceEquals(MainTabs.SelectedItem, OverviewTab))
@@ -1306,6 +1311,10 @@ public partial class MainWindow : Window
                 case TabItem tab when ReferenceEquals(tab, JobHistoryTabItem):
                     await JobHistoryContent.RefreshJobsAsync();
                     StampRefreshed("job history");
+                    break;
+                case TabItem tab when ReferenceEquals(tab, DatabaseProtectionTabItem):
+                    await DatabaseProtectionContent.RefreshAsync();
+                    StampRefreshed("database protection");
                     break;
                 case TabItem tab when ReferenceEquals(tab, AgentAlertsTabItem):
                     await AgentAlertsContent.RefreshAsync();

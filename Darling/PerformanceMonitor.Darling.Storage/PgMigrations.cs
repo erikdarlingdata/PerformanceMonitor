@@ -2492,7 +2492,47 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
         "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.HashHourlyCreateSql;
 
     /// <summary>
-    /// V223 (#6875) - <c>collect.identity_capacity</c>: how full the identity columns are, read from <c>sys.identity_columns</c> by
+    /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
+    /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
+    /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
+    /// word for each of the three facts (never, unknown, none_in_window, not_expected, unavailable), so a reader can tell "no backup in 60
+    /// days" from "the platform owns this". The overdue judgment is the reader's. A PLAIN table on every store (<c>StaysPlainTable</c>),
+    /// 90-day time-sliced DELETE. Columns and the (server_id, collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a
+    /// fresh store (V1's catalog walk) and an upgraded one agree. New table, no data moves, no grant (the <c>collect</c> schema carries
+    /// blanket SELECT). Every statement is idempotent.
+    /// The same rung adds three <c>config.config_alert_settings</c> columns (<c>boolean NOT NULL DEFAULT FALSE</c>, catalog-only):
+    /// <c>backup_overdue_enabled</c>, <c>log_backup_overdue_enabled</c> and <c>checkdb_overdue_enabled</c>. The three overdue alerts ship OFF.
+    /// An older build never reads the columns.
+    /// </summary>
+    private const string V223Sql = @"
+CREATE TABLE IF NOT EXISTS collect.database_protection (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    state_desc text,
+    recovery_model_desc text,
+    create_date timestamp,
+    replica_role text,
+    platform text,
+    last_good_checkdb_time timestamp,
+    checkdb_state text,
+    last_full_backup_time timestamp,
+    full_backup_state text,
+    last_log_backup_time timestamp,
+    log_backup_state text
+);
+
+CREATE INDEX IF NOT EXISTS idx_database_protection_time ON collect.database_protection(server_id, collection_time);
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS backup_overdue_enabled boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS log_backup_overdue_enabled boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS checkdb_overdue_enabled boolean NOT NULL DEFAULT FALSE;";
+
+    /// <summary>
+    /// V224 (#6875) - <c>collect.identity_capacity</c>: how full the identity columns are, read from <c>sys.identity_columns</c> by
     /// <c>IdentityCapacityCollector</c> every six hours, per database: the top 20 columns above 10 percent used (value, seed, increment,
     /// type, precision and the percent) plus ONE all-NULL marker row (<c>column_name</c> NULL) per scanned database, so a database with no
     /// high column reads as scanned and clean, and one that was not scanned has no marker. A PLAIN table on every store
@@ -2505,7 +2545,7 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
     /// <c>identity_capacity_critical_percent</c> (90), the global values a per-server or per-database threshold override replaces. An older build never
     /// reads the columns.
     /// </summary>
-    private const string V223Sql = @"
+    private const string V224Sql = @"
 CREATE TABLE IF NOT EXISTS collect.identity_capacity (
     collection_id bigint NOT NULL,
     collection_time timestamp NOT NULL,
@@ -2931,7 +2971,8 @@ $rung$;";
         new Migration(220, "job-history-success-index", V220Sql),
         new Migration(221, "query-store-hash-hourly", V221Sql),
         new Migration(222, "agent-alerts", V222Sql),
-        new Migration(223, "identity-capacity", V223Sql),
+        new Migration(223, "database-protection", V223Sql),
+        new Migration(224, "identity-capacity", V224Sql),
     };
 
     /// <summary>

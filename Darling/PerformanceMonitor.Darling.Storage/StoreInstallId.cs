@@ -62,13 +62,25 @@ public static class StoreInstallId
     /// <summary>The store this connection is on: the cluster's <c>system_identifier</c>, the database's OID, the OID of the
     /// install id table and the server's major version (<c>server_version_num / 10000</c>). A login without superuser
     /// rights may call <c>pg_control_system()</c> by default, and a server that revokes it refuses with SQLSTATE 42501,
-    /// which <see cref="EnsureAsync"/> answers with <see cref="DatabaseOidSql"/>.</summary>
+    /// which <see cref="EnsureAsync"/> answers with <see cref="DatabaseOidSql"/>. The call is schema-qualified, and it is
+    /// only sent once <see cref="ClusterIdPrivilegeSql"/> has said this login may make it (#6888).</summary>
     public const string BindingSql = @"
 SELECT s.system_identifier, d.oid::bigint, 'config.config_install_id'::regclass::oid::bigint,
        current_setting('server_version_num')::int / 10000
-FROM pg_control_system() AS s
+FROM pg_catalog.pg_control_system() AS s
 CROSS JOIN pg_database AS d
 WHERE d.datname = current_database()";
+
+    /// <summary>#6888: asked first, in its own statement, whether this login may call <c>pg_control_system()</c>. PostgreSQL
+    /// checks a function's privilege when the statement starts, so a refused login's <see cref="BindingSql"/> raises 42501 and
+    /// the server writes <c>permission denied for function pg_control_system</c> into its own log. When the store's server is
+    /// also a server Darling monitors, that line lands in a log Darling reads. <c>has_function_privilege</c> is callable by
+    /// any login and <c>to_regprocedure</c> makes a missing function read as NULL, so the answer is false either way.
+    /// (<c>DarlingServerConnector.PostgresIdentityPrivilegeQueryText</c> asks the same of a monitored target. The two are
+    /// kept apart because they live in different projects and a shared string would need a third home.)</summary>
+    public const string ClusterIdPrivilegeSql =
+        "SELECT COALESCE(pg_catalog.has_function_privilege(current_user, "
+        + "pg_catalog.to_regprocedure('pg_catalog.pg_control_system()'), 'EXECUTE'), false)";
 
     /// <summary>The two OIDs and the major version, for a store whose server refuses this login the cluster id. Every
     /// login can read them, so a refusal of this statement is not answered with a fallback.</summary>
@@ -369,9 +381,18 @@ WHERE id = 1 AND install_id = $4
         return new Binding(null, reader.GetInt64(0), reader.GetInt64(1), reader.GetInt32(2));
     }
 
-    /// <summary>The cluster and the database in one statement, or null when the server refused the cluster id.</summary>
+    /// <summary>The cluster and the database in one statement, or null when the server refuses this login the cluster id.
+    /// A refusal is found out by asking first (#6888), so the usual refused login never makes the server raise and log it.</summary>
     private static async Task<Binding?> TryReadClusterAndDatabaseAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
+        await using (var privilege = new NpgsqlCommand(ClusterIdPrivilegeSql, connection) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            if (await privilege.ExecuteScalarAsync(cancellationToken) is not true)
+            {
+                return null;
+            }
+        }
+
         try
         {
             await using var command = new NpgsqlCommand(BindingSql, connection) { CommandTimeout = CommandTimeoutSeconds };

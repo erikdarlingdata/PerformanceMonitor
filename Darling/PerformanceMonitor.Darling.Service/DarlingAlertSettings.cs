@@ -197,6 +197,10 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public int IdentityCapacityCriticalPercent => Math.Clamp(_config.Alerts.IdentityCapacityCriticalPercent, IdentityCapacityWarningPercent, 100);
     /// <summary>#6874: the Agent Alert Gaps alert's switch. Off by default; not on <see cref="IAlertEngineSettings"/> because Lite has no such alert.</summary>
     public bool AgentAlertGapsEnabled => _config.Alerts.AgentAlertGapsEnabled;
+    /// <summary>#6873: the three database protection alerts' switches. Off by default; not on <see cref="IAlertEngineSettings"/> because Lite has no such alerts.</summary>
+    public bool BackupOverdueEnabled => _config.Alerts.BackupOverdueEnabled;
+    public bool LogBackupOverdueEnabled => _config.Alerts.LogBackupOverdueEnabled;
+    public bool CheckDbOverdueEnabled => _config.Alerts.CheckDbOverdueEnabled;
     public int LongRunningQueryThresholdMinutes => _config.Alerts.LongRunningQueryThresholdMinutes;
     public int TempDbSpaceThresholdPercent => _config.Alerts.TempDbSpaceThresholdPercent;
     public int LowDiskThresholdPercent => Math.Clamp(_config.Alerts.LowDiskThresholdPercent, 0, 100);

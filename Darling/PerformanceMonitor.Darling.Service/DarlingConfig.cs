@@ -898,16 +898,16 @@ public sealed class AlertsConfig
     public int ClientTimeoutsCriticalMultiple { get; set; } = AttentionBaselineMath.DefaultCriticalMultiple;
 
     /// <summary>The "Identity Capacity" alert (#6875): fires when an identity column is at or past the warning bar (or the critical bar) of
-    /// its type's capacity. Ships OFF, like the other alerts that start firing on upgrade. Store column <c>identity_capacity_enabled</c> (V223).</summary>
+    /// its type's capacity. Ships OFF, like the other alerts that start firing on upgrade. Store column <c>identity_capacity_enabled</c> (V224).</summary>
     [JsonPropertyName("identityCapacityEnabled")]
     public bool IdentityCapacityEnabled { get; set; }
 
-    /// <summary>Percent used at which an identity column warns (default 70). Store column <c>identity_capacity_warning_percent</c> (V223). A per-server or
+    /// <summary>Percent used at which an identity column warns (default 70). Store column <c>identity_capacity_warning_percent</c> (V224). A per-server or
     /// per-database threshold override (<c>identity_capacity.warning_percent</c>) replaces it.</summary>
     [JsonPropertyName("identityCapacityWarningPercent")]
     public int IdentityCapacityWarningPercent { get; set; } = 70;
 
-    /// <summary>Percent used at which an identity column is critical (default 90). Store column <c>identity_capacity_critical_percent</c> (V223).</summary>
+    /// <summary>Percent used at which an identity column is critical (default 90). Store column <c>identity_capacity_critical_percent</c> (V224).</summary>
     [JsonPropertyName("identityCapacityCriticalPercent")]
     public int IdentityCapacityCriticalPercent { get; set; } = 90;
     /// <summary>The "Agent Alert Gaps" alert (#6874): fires when a server's SQL Server Agent alert setup has a gap (no alert for severities 19 to
@@ -915,6 +915,18 @@ public sealed class AlertsConfig
     /// start firing on upgrade. Store column <c>agent_alert_gaps_enabled</c> (V222).</summary>
     [JsonPropertyName("agentAlertGapsEnabled")]
     public bool AgentAlertGapsEnabled { get; set; }
+    /// <summary>The "Backup Overdue", "Log Backup Overdue" and "CHECKDB Overdue" alerts (#6873): each fires when a database's last full backup (7 days),
+    /// last log backup (60 minutes) or last good CHECKDB (14 days) is older than its threshold, judged by <c>DatabaseProtectionBands</c>. All three ship
+    /// OFF, like the other alerts that start firing on upgrade. Store columns <c>backup_overdue_enabled</c>, <c>log_backup_overdue_enabled</c> and
+    /// <c>checkdb_overdue_enabled</c> (V223).</summary>
+    [JsonPropertyName("backupOverdueEnabled")]
+    public bool BackupOverdueEnabled { get; set; }
+
+    [JsonPropertyName("logBackupOverdueEnabled")]
+    public bool LogBackupOverdueEnabled { get; set; }
+
+    [JsonPropertyName("checkDbOverdueEnabled")]
+    public bool CheckDbOverdueEnabled { get; set; }
 
     [JsonPropertyName("longRunningQueryEnabled")]
     public bool LongRunningQueryEnabled { get; set; } = true;

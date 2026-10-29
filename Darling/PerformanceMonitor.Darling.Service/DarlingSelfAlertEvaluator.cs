@@ -169,6 +169,12 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, bool> _activeAgentAlertGaps = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastAgentAlertGapAlert = new();
     private readonly Func<bool> _agentAlertSetupEnabled;
+    /* #6873: the database protection alerts' standing state, keyed by StateRetryKey(metric, server key) so the three alerts of one server stand and clear on their own. */
+    private readonly ConcurrentDictionary<string, bool> _activeDatabaseProtection = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastDatabaseProtectionAlert = new();
+    private readonly Func<bool> _backupOverdueEnabled;
+    private readonly Func<bool> _logBackupOverdueEnabled;
+    private readonly Func<bool> _checkDbOverdueEnabled;
 
     /// <summary>The failed-send streaks behind <see cref="AfterSelfFire"/> (#4795): per (alert metric, key), how
     /// many sends in a row reached no channel. In memory only, like the stamps it back-dates; a restart starts
@@ -1290,6 +1296,9 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<TimeSpan, CancellationToken, Task>? retryDelay = null,
         Func<IReadOnlyList<WebhookChannelFailureCount>>? webhookChannelFailures = null,
         Func<bool>? agentAlertSetupEnabled = null,
+        Func<bool>? backupOverdueEnabled = null,
+        Func<bool>? logBackupOverdueEnabled = null,
+        Func<bool>? checkDbOverdueEnabled = null,
         Func<bool>? identityCapacityEnabled = null,
         Func<int>? identityCapacityWarningPercent = null,
         Func<int>? identityCapacityCriticalPercent = null,
@@ -1310,6 +1319,10 @@ internal sealed class DarlingSelfAlertEvaluator
         _notifyAgHealth = notifyAgHealth ?? (() => true);
         /* #6874: an evaluator built without the seam behaves like a store at its shipped default: the Agent alert setup alert is off. */
         _agentAlertSetupEnabled = agentAlertSetupEnabled ?? (() => false);
+        /* #6873: an evaluator built without the seams behaves like a store at its shipped default: the three database protection alerts are off. */
+        _backupOverdueEnabled = backupOverdueEnabled ?? (() => false);
+        _logBackupOverdueEnabled = logBackupOverdueEnabled ?? (() => false);
+        _checkDbOverdueEnabled = checkDbOverdueEnabled ?? (() => false);
         /* #6875: an evaluator built without these seams behaves like a store at its shipped defaults: the Identity Capacity alert is off, its bars are 70 and
            90 percent, and no override applies. */
         _identityCapacityEnabled = identityCapacityEnabled ?? (() => false);
@@ -1569,6 +1582,28 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 _logger?.LogError("[{Server}] Agent-alert-setup self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentAlertReadClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(Key(serverId), AgentAlertSetupReadName, agentAlertReadClock.ElapsedMilliseconds);
+            }
+        }
+
+        /* Backup Overdue, Log Backup Overdue and CHECKDB Overdue (#6873): off by default, so a fleet that never turned one on pays no read here.
+           One read of the newest database_protection capture serves all three. */
+        if (_backupOverdueEnabled() || _logBackupOverdueEnabled() || _checkDbOverdueEnabled())
+        {
+            var protectionReadClock = Stopwatch.StartNew();
+            try
+            {
+                var read = await ReadDatabaseProtectionAsync(postgres, serverId, cancellationToken);
+                protectionReadClock.Restart();
+                await ApplyDatabaseProtectionAsync(serverId, serverName, read, cancellationToken, sweepGeneration: generation);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("[{Server}] Database-protection self-alert failed after {ElapsedMs} ms: {Message}", serverName, protectionReadClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(Key(serverId), DatabaseProtectionReadName, protectionReadClock.ElapsedMilliseconds);
             }
         }
 
@@ -4442,6 +4477,104 @@ internal sealed class DarlingSelfAlertEvaluator
             await RecordResolutionAsync(new AlertResolution(
                 key, serverName, AgentAlertSetupMetric,
                 "Agent Alert Gaps Cleared", $"{serverName}: the SQL Server Agent alerts have no gaps"), cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// The server's newest database protection capture (#6873), or null when there is no FRESH one: none within
+    /// <see cref="DatabaseProtectionBands.CaptureFreshness"/>. A lagging feed is the collection-stopped alert's to report, so it
+    /// neither fires nor clears these alerts.
+    /// </summary>
+    internal async Task<DatabaseProtectionRead?> ReadDatabaseProtectionAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var now = _utcNow();
+        var read = await ReadWithOneRetryAsync(
+            token => DarlingDatabaseProtectionReader.ReadAsync(
+                postgres, serverId, now - DatabaseProtectionBands.CaptureFreshness, now, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, token),
+            serverId, DatabaseProtectionReadName, cancellationToken);
+        return read.HasCapture ? read : null;
+    }
+
+    /// <summary>
+    /// Edge-applies "Backup Overdue", "Log Backup Overdue" and "CHECKDB Overdue" (#6873) from the newest capture, judged by
+    /// <see cref="DatabaseProtectionBands.OverdueFacts"/> (the one judgment: a platform-managed database, a database that is not online and a
+    /// SIMPLE-recovery log are never overdue). One alert per server and metric names every overdue database in its detail. Shaped like
+    /// <see cref="ApplyAgentNotRunningAsync"/>: fires once when something becomes overdue, re-fires after the cooldown while it stands, and
+    /// writes one "Cleared" history row when nothing is. A null <paramref name="read"/> (no fresh capture) judges nothing and leaves the
+    /// standing state alone. Each alert is off unless its own setting is on, and all are gated on the master alerts switch.
+    /// </summary>
+    internal async Task ApplyDatabaseProtectionAsync(
+        int serverId, string serverName, DatabaseProtectionRead? read, CancellationToken cancellationToken, int? sweepGeneration = null)
+    {
+        if (IsStaleSweep(serverId, sweepGeneration) || !_settings.AlertsEnabled || read is null || read.NewestCapture is null)
+        {
+            return;
+        }
+
+        var capturedAt = DateTime.SpecifyKind(read.NewestCapture.Value, DateTimeKind.Utc);
+        var overdue = DatabaseProtectionBands.OverdueFacts(read.Databases, capturedAt);
+        var limits = DatabaseProtectionThresholds.Default;
+        if (_backupOverdueEnabled())
+        {
+            await ApplyOverdueMetricAsync(serverId, serverName, BackupOverdueMetric, DatabaseProtectionBands.KindFullBackup, overdue,
+                string.Create(CultureInfo.InvariantCulture, $"{limits.FullBackup.TotalDays} days"), "last full backup",
+                " A database without a recent full backup cannot be restored to a recent point.", sweepGeneration, cancellationToken);
+        }
+
+        if (_logBackupOverdueEnabled())
+        {
+            await ApplyOverdueMetricAsync(serverId, serverName, LogBackupOverdueMetric, DatabaseProtectionBands.KindLogBackup, overdue,
+                string.Create(CultureInfo.InvariantCulture, $"{limits.LogBackup.TotalMinutes} minutes"), "last log backup",
+                " Point-in-time recovery stops at the last log backup, and the log cannot be reused until one runs.", sweepGeneration, cancellationToken);
+        }
+
+        if (_checkDbOverdueEnabled())
+        {
+            await ApplyOverdueMetricAsync(serverId, serverName, CheckDbOverdueMetric, DatabaseProtectionBands.KindCheckDb, overdue,
+                string.Create(CultureInfo.InvariantCulture, $"{limits.CheckDb.TotalDays} days"), "last good CHECKDB",
+                " Corruption can sit unnoticed and be copied into every backup taken meanwhile.", sweepGeneration, cancellationToken);
+        }
+    }
+
+    private async Task ApplyOverdueMetricAsync(
+        int serverId, string serverName, string metric, string kind, IReadOnlyList<DatabaseProtectionOverdue> overdue,
+        string threshold, string factName, string consequence, int? sweepGeneration, CancellationToken cancellationToken)
+    {
+        var key = Key(serverId);
+        var stateKey = StateRetryKey(metric, key);
+        var now = _utcNow();
+        var items = overdue.Where(o => o.Kind == kind).ToList();
+        if (items.Count > 0)
+        {
+            _activeDatabaseProtection[stateKey] = true;
+            var decision = DecideStateAlert(_lastDatabaseProtectionAlert, stateKey, metric, key, now, out var refire);
+            if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
+            {
+                _lastDatabaseProtectionAlert[stateKey] = now;
+                var names = string.Join(", ", items.Select(i => i.Text));
+                var delivery = await FireAsync(
+                    key, serverName, metric, string.Create(CultureInfo.InvariantCulture, $"{items.Count} overdue"), $"older than {threshold}",
+                    detail: StateRepeatNote(decision, refire) + $"The {factName} is older than {threshold} on {items.Count} database(s): {names}." + consequence,
+                    severity: AlertSeverityLevel.Warning,
+                    shortMessage: string.Create(CultureInfo.InvariantCulture, $"{metric}: {items.Count} database(s)") + " - " + string.Join(", ", items.Take(5).Select(i => i.Database)) +
+                        (items.Count > 5 ? ", ..." : string.Empty),
+                    numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                    cancellationToken);
+                if (IsStaleSweep(serverId, sweepGeneration))
+                {
+                    return;
+                }
+
+                NoteStateSend(metric, key, delivery);
+            }
+        }
+        else if (_activeDatabaseProtection.TryRemove(stateKey, out var was) && was)
+        {
+            EndStateAlert(_lastDatabaseProtectionAlert, stateKey, metric, key);
+            await RecordResolutionAsync(new AlertResolution(
+                key, serverName, metric,
+                metric + " Cleared", $"{serverName}: no database has an overdue {factName}"), cancellationToken);
         }
     }
 
@@ -8671,6 +8804,13 @@ WHERE c.is_enabled";
         _stateRetries.Clear(StateRetryKey(CaptureDownMetric, key));
         _stateRetries.Clear(StateRetryKey(AgentDownMetric, key));
         _stateRetries.Clear(StateRetryKey(AgentAlertSetupMetric, key));
+        foreach (var protectionMetric in new[] { BackupOverdueMetric, LogBackupOverdueMetric, CheckDbOverdueMetric })
+        {
+            var protectionKey = StateRetryKey(protectionMetric, key);
+            _activeDatabaseProtection.TryRemove(protectionKey, out _);
+            _lastDatabaseProtectionAlert.TryRemove(protectionKey, out _);
+            _stateRetries.Clear(protectionKey);
+        }
         _connectionState.TryRemove(key, out _);
         _hasBeenOnline.TryRemove(key, out _);
         _collectionWatchStart[key] = Unstamped;
@@ -9332,6 +9472,10 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     internal const string AgentDownMetric = "Agent Not Running";
     internal const string AgentAlertSetupMetric = "Agent Alert Gaps";
     internal const string AgentAlertSetupReadName = "agent-alert-setup self-alert";
+    internal const string BackupOverdueMetric = "Backup Overdue";
+    internal const string LogBackupOverdueMetric = "Log Backup Overdue";
+    internal const string CheckDbOverdueMetric = "CHECKDB Overdue";
+    internal const string DatabaseProtectionReadName = "database-protection self-alert";
     internal const string IdentityCapacityMetric = "Identity Capacity";
     internal const string IdentityCapacityReadName = "identity-capacity self-alert";
 

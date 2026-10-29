@@ -169,6 +169,7 @@ internal static class WebReadReach
         ["get_job_history"] = List("job_history"),
         ["get_identity_capacity"] = List("identity_capacity"),
         ["get_agent_alerts"] = List("agent_alerts"),
+        ["get_database_protection"] = List("database_protection"),
         ["get_default_trace_events"] = List("default_trace_events"),
         ["get_health_parser_cpu_tasks"] = List("system_health_events"),
         ["get_health_parser_io_issues"] = List("system_health_events"),

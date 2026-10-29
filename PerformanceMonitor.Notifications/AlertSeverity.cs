@@ -108,6 +108,8 @@ internal static class AlertSeverity
             "Store Disk Pressure" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Store Runtime Upgrade" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Compression Job Stuck" => ("#DC2626", "CRITICAL", "\U0001F534"),
+            /* #6873: the three database protection alerts fire Warning at their one site. */
+            "Backup Overdue" or "Log Backup Overdue" or "CHECKDB Overdue" => ("#D97706", "WARNING", "\U0001F7E0"),
             /* #5450: fires Warning at its one site. */
             "Collection Gap At Start" => ("#D97706", "WARNING", "\U0001F7E0"),
             /* #6874: fires Warning at its one site. */

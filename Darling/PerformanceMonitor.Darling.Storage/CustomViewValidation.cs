@@ -164,6 +164,7 @@ public static partial class CustomViewValidation
         "get_memory_pressure_events",
         "get_resource_semaphore",
         "get_database_sizes",
+        "get_database_protection",
         "get_pvs_stats",
         "get_index_usage",
         "get_object_locking",

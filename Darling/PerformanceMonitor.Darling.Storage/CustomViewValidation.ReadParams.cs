@@ -156,6 +156,7 @@ public static partial class CustomViewValidation
             ["get_memory_pressure_events"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false) },
             ["get_resource_semaphore"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false) },
             ["get_database_sizes"] = new ReadPanelParam[] { new("server", false), new("database_name", false) },
+            ["get_database_protection"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false), new("overdue_only", false) },
             ["get_pvs_stats"] = new ReadPanelParam[] { new("server", false), new("trend_hours_back", false), new("database_name", false) },
             ["get_index_usage"] = new ReadPanelParam[] { new("server", false), new("database_name", false), new("limit", false) },
             ["get_object_locking"] = new ReadPanelParam[] { new("server", false), new("limit", false), new("database_name", false), new("detail_database", false), new("detail_schema", false), new("detail_table", false), new("detail_index", false) },

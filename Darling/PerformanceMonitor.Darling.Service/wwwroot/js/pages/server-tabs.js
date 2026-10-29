@@ -2315,11 +2315,15 @@ export const SERVER_TABS = [
         "No trace flags are enabled on this server.",
         1
       ),
-      /* #6875: identity column capacity, one read feeding two panels (the columns, then each database's scan state). */
-      ...identityCapacityPanels(server),
+      /* #6873: the last full backup, log backup and CHECKDB per database, one read feeding two panels. The state words, the age text and
+         the platform label are the service's (DatabaseProtectionBands), the same ones the Viewer shows. A server with no capture, a
+         refused collector or an engine that is not collected answers with its own sentence in each panel. */
+      ...fanout("get_database_protection", { server }, DATABASE_PROTECTION_SPECS),
       /* #6874: the SQL Server Agent alerts and the gaps in them, one read feeding three panels. A server with no Agent alerts at all
          (Azure SQL Database, Managed Instance) or whose collector is refused answers with its own sentence in every panel. */
       ...fanout("get_agent_alerts", { server }, AGENT_ALERT_SPECS),
+      /* #6875: identity column capacity, one read feeding two panels (the columns, then each database's scan state). */
+      ...identityCapacityPanels(server),
     ],
   },
 
@@ -5453,6 +5457,62 @@ const AGENT_ALERT_SPECS = [
     rowsKey: "alerts",
     columns: AGENT_ALERT_COLUMNS,
     emptyText: "No SQL Server Agent alert is defined on this instance.",
+  },
+];
+
+/* #6873: the Health Checks panels on the Configuration tab. One fact is the age and the state word the service gives it. A platform-managed
+   or native-only target shows the platform's label beside the age and is never overdue. Overdue databases sort first. */
+function protectionFactText(f) {
+  if (!f) return "-";
+  const state = f.state === "overdue" || f.state === "ok" ? "" : String(f.state).replace(/_/g, " ");
+  const overdue = f.overdue ? " - overdue" : "";
+  if (f.age) return f.age + (state ? " (" + state + ")" : "") + overdue;
+  return (state || "-") + overdue;
+}
+function protectionFact(key, label) {
+  return {
+    key,
+    label,
+    display: (r) => protectionFactText(r[key]),
+    sortValue: (r) => (r[key] && r[key].overdue ? 0 : 1),
+    cellClass: (r) => (r[key] && r[key].overdue ? "sev-High" : null),
+  };
+}
+const DATABASE_PROTECTION_COLUMNS = [
+  { key: "database", label: "Database" },
+  { key: "state", label: "State", small: true },
+  protectionFact("full_backup", "Last full backup"),
+  protectionFact("log_backup", "Last log backup"),
+  protectionFact("checkdb", "Last good CHECKDB"),
+  { key: "platform", label: "Platform", display: (r) => (r.platform && r.platform !== "native" ? String(r.platform).replace(/_/g, " ") : ""), small: true },
+  { key: "excluded_reason", label: "Not judged because", small: true },
+];
+const DATABASE_PROTECTION_STATS = [
+  { key: "summary.text", label: "Overdue", format: "text", small: true },
+  { key: "captured_at", label: "Captured", format: "time", small: true },
+];
+const overdueFirst = (rows) => [...rows].sort((a, b) => {
+  const score = (r) => ["full_backup", "log_backup", "checkdb"].filter((k) => r[k] && r[k].overdue).length;
+  return score(b) - score(a);
+});
+const DATABASE_PROTECTION_SPECS = [
+  {
+    title: "Health Checks",
+    subtitle: "full backup 7 days, log backup 60 minutes, CHECKDB 14 days, collected hourly",
+    span: 2,
+    viz: "stat",
+    stats: DATABASE_PROTECTION_STATS,
+    emptyText: "No database protection capture yet.",
+  },
+  {
+    title: "Backups and CHECKDB by Database",
+    subtitle: "newest capture, overdue first",
+    span: 2,
+    viz: "table",
+    rowsKey: "databases",
+    columns: DATABASE_PROTECTION_COLUMNS,
+    orderRows: overdueFirst,
+    emptyText: "No databases in the newest capture.",
   },
 ];
 

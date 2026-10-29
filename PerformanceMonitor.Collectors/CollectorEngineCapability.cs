@@ -160,6 +160,7 @@ public static class CollectorEngineCapability
             ["database_size_stats"] = "the per-database file size and space usage",
             ["index_object_stats"] = "the per-index usage, size and contention statistics",
             ["server_properties"] = "the SERVERPROPERTY instance properties",
+            ["database_protection"] = "the per-database CHECKDB and backup history",
             /* The PostgreSQL side of the same table (#2532). The first two read an Aurora-only surface, so
                they are permanent gaps on stock PostgreSQL — the mirror of the twelve above, which are
                permanent gaps on Azure SQL Database. The other six are here because their reads ask the

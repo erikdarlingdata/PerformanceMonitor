@@ -923,6 +923,7 @@ GROUP BY server_id, collector_name";
             cancellationToken);
         var tags = await ReadTagsAsync(postgres, cancellationToken);
         var agentAlertGaps = await ReadAgentAlertGapsAsync(postgres, now, cancellationToken);
+        var databaseProtection = await ReadDatabaseProtectionOverdueAsync(postgres, now, cancellationToken);
         var tagForest = await ReadTagForestAsync(postgres, cancellationToken);
         /* #3368: the deadlock band's tiers, read ONCE per roll-up rather than per card. A store reload can
            hot-swap the settings row mid-read, and re-reading per server would let one roll-up band some
@@ -962,9 +963,11 @@ GROUP BY server_id, collector_name";
             agentAlertGaps.TryGetValue(server.ServerId, out var serverAgentAlertGaps);
             identityCapacity.TryGetValue(server.ServerId, out var serverIdentityCapacity);
 
+            databaseProtection.TryGetValue(server.ServerId, out var serverDatabaseProtection);
+
             cards.Add(BuildCard(
                 server, c, pg, m, mp, t, b, deadlock, pgDeadlock, collected.LastCollection, collectors, serverTags, now,
-                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection, serverAgentAlertGaps, serverIdentityCapacity));
+                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection, serverAgentAlertGaps, serverDatabaseProtection, serverIdentityCapacity));
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest, collectionHealthAgeSeconds,
@@ -1089,6 +1092,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         DateTime? registeredAt = null,
         DateTime? olderCollection = null,
         IReadOnlyList<FleetAgentAlertGap>? agentAlertGaps = null,
+        IReadOnlyList<FleetDatabaseProtectionOverdue>? databaseProtectionOverdue = null,
         FleetIdentityCapacity? identityCapacity = null)
     {
 
@@ -1290,6 +1294,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             ThreadsSeverity = ServerHealthClassifier.ThreadsSeverity(threads.TotalThreads, availableThreads, threads.RunnableTasks, threads.WorkQueue),
             /* #6874: set only when the Agent alert setup has a gap. The Band below is not read from it. */
             AgentAlertGaps = agentAlertGaps is { Count: > 0 } ? agentAlertGaps : null,
+            /* #6873: set only when something is overdue. The Band below is not read from it. */
+            DatabaseProtectionOverdue = databaseProtectionOverdue is { Count: > 0 } ? databaseProtectionOverdue : null,
             HealthyCollectorCount = collectors.Healthy,
             WarningCollectorCount = collectors.Warning,
             NotCollectedCollectorCount = collectors.NotCollected,
@@ -1743,6 +1749,74 @@ AND   {SqlServerCollectedTargetSql}";
 
     /// <summary>How old the newest Agent alert capture may be and still count (#6874): eight passes of the 15-minute collector.</summary>
     internal static readonly TimeSpan AgentAlertCaptureFreshness = DarlingAgentAlertReader.FreshCaptureWindow;
+
+    /// <summary>The newest database protection capture per server inside <see cref="DatabaseProtectionBands.CaptureFreshness"/>, one statement for the
+    /// fleet (#6873). Shaped like the other per-server reads in this file: <c>servers</c> drives a lateral that seeks
+    /// <c>idx_database_protection_time</c> (<c>server_id, collection_time</c>) once per server for the newest capture time, then the capture's
+    /// rows are read by the same index. The table is a plain table with <c>server_id</c> leading its index, so a predicate on <c>collection_time</c>
+    /// alone has no range seek on it and, on a runtime without index skip scan, walks every retained row on each fleet roll-up. Measured on
+    /// PostgreSQL 18 over 3.24M rows (50 servers, 30 databases, hourly for 90 days): 50 index-only seeks for the newest times plus 50 seeks for the
+    /// capture rows, about 1.0 to 1.4 ms and 1,516 buffer hits. The time-only shape was 1.9 to 2.7 ms there, and only that fast because PostgreSQL 18
+    /// skips ahead through the leading column. The <c>WHERE</c> after the lateral is the one the other per-server laterals carry
+    /// (<see cref="SqlServerCollectedTargetSql"/>, #3895): it skips PostgreSQL and Aurora targets, which never write this SQL Server-only table,
+    /// and disabled servers, so neither pays a lateral probe on each fleet read. $1 is the window start.</summary>
+    internal const string FleetDatabaseProtectionSql = $@"
+SELECT d.server_id, d.collection_time, d.database_name, d.state_desc, d.recovery_model_desc, d.create_date, d.replica_role, d.platform,
+       d.last_good_checkdb_time, d.checkdb_state, d.last_full_backup_time, d.full_backup_state, d.last_log_backup_time, d.log_backup_state
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT MAX(x.collection_time) AS collection_time
+    FROM collect.database_protection AS x
+    WHERE x.server_id = s.server_id
+    AND   x.collection_time >= $1
+) AS n
+JOIN collect.database_protection AS d ON d.server_id = s.server_id AND d.collection_time = n.collection_time
+WHERE s.is_enabled
+AND   {SqlServerCollectedTargetSql}";
+
+    /// <summary>The overdue facts per server, for the servers that have any (#6873). The judgment is
+    /// <see cref="DatabaseProtectionBands.OverdueFacts"/>, the one the alerts, the tool and the Viewer use; this only batches the read.
+    /// A platform-managed server has none, by that judgment.</summary>
+    internal static async Task<Dictionary<int, IReadOnlyList<FleetDatabaseProtectionOverdue>>> ReadDatabaseProtectionOverdueAsync(
+        NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var captures = new Dictionary<int, (DateTime At, List<DatabaseProtectionFact> Facts)>();
+        await using var command = postgres.CreateCommand(FleetDatabaseProtectionSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp,
+            DateTime.SpecifyKind(nowUtc - DatabaseProtectionBands.CaptureFreshness, DateTimeKind.Unspecified));
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var serverId = reader.GetInt32(0);
+                if (!captures.TryGetValue(serverId, out var capture))
+                {
+                    captures[serverId] = capture = (DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc), new List<DatabaseProtectionFact>());
+                }
+
+                string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+                DateTime? Time(int i) => reader.IsDBNull(i) ? null : reader.GetDateTime(i);
+                capture.Facts.Add(new DatabaseProtectionFact(
+                    Text(2) ?? string.Empty, Text(3), Text(4), Time(5), Text(6), Text(7),
+                    Time(8), Text(9), Time(10), Text(11), Time(12), Text(13)));
+            }
+        }
+
+        var map = new Dictionary<int, IReadOnlyList<FleetDatabaseProtectionOverdue>>();
+        foreach (var (serverId, (at, facts)) in captures)
+        {
+            var overdue = DatabaseProtectionBands.OverdueFacts(facts, at);
+            if (overdue.Count > 0)
+            {
+                map[serverId] = overdue.Select(o => new FleetDatabaseProtectionOverdue(
+                    o.Kind, o.Database, o.State, o.Age is { } age ? (long)age.TotalSeconds : null, o.Label + ": " + o.Text)).ToList();
+            }
+        }
+
+        return map;
+    }
 
     private static async Task<Dictionary<int, CpuRow>> ReadCpuAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
@@ -2605,6 +2679,15 @@ public sealed record FleetAgentAlertGap(
 /// <see cref="ServerHealthClassifier"/>, every instant a naive-UTC value the browser localizes. Serialized with
 /// snake_case field names for both <c>/api/fleet</c> and the <c>get_fleet_overview</c> MCP tool.
 /// </summary>
+/// <summary>One overdue CHECKDB, full backup or log backup on a server's fleet card (#6873): the stable <see cref="Kind"/> (full_backup, log_backup,
+/// checkdb), the database, its banded <see cref="State"/>, the age in seconds at the capture (null when nothing is recorded) and the <see cref="Text"/> to show.</summary>
+public sealed record FleetDatabaseProtectionOverdue(
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("database")] string Database,
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("age_seconds")] long? AgeSeconds,
+    [property: JsonPropertyName("text")] string Text);
+
 public sealed class FleetServerCard
 {
     /// <summary>The identity columns at the warning bar or past it (#6875), from each database's newest scan in the last seven days: the worst band
@@ -2919,6 +3002,11 @@ public sealed class FleetServerCard
     /// Managed Instance, Amazon RDS, PostgreSQL). A chip on the card and nothing more: no band reads it. A firing that told no operator is not
     /// here, because it needs two captures; <c>get_agent_alerts</c> reports that one.</summary>
     [JsonPropertyName("agent_alert_gaps")] public IReadOnlyList<FleetAgentAlertGap>? AgentAlertGaps { get; init; }
+    /// <summary>The overdue full backups, log backups and CHECKDBs on this server (#6873), from the newest <c>database_protection</c> capture in the
+    /// last three hours through <see cref="DatabaseProtectionBands.OverdueFacts"/> (the one judgment, so the page, the Viewer, the alerts and
+    /// <c>get_database_protection</c> agree). Null when nothing is overdue, when no capture is that fresh, and on a platform-managed server (Azure SQL Database,
+    /// Managed Instance, Amazon RDS), where the age is shown and never judged. A chip on the card and nothing more: no band reads it.</summary>
+    [JsonPropertyName("database_protection_overdue")] public IReadOnlyList<FleetDatabaseProtectionOverdue>? DatabaseProtectionOverdue { get; init; }
     [JsonPropertyName("collector_severity")] public HealthSeverity CollectorSeverity { get; init; }
 
     /// <summary>The worst per-metric band, or Unknown when NOT ONE metric on the card was measured (#3539

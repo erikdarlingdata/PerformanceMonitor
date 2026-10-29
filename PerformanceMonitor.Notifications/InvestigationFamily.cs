@@ -80,6 +80,10 @@ public static class InvestigationFamily
         ["Identity Capacity"] = Resources,
 
         ["Database State"] = Availability,
+        /* Not in the draft: a missing backup or CHECKDB is a restorability gap, which sits beside Database State. */
+        ["Backup Overdue"] = Availability,
+        ["Log Backup Overdue"] = Availability,
+        ["CHECKDB Overdue"] = Availability,
         ["AG Failover"] = Availability,
         ["AG Replica Disconnected"] = Availability,
         ["AG Sync Fell Behind"] = Availability,

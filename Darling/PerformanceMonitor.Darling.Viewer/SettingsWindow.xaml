@@ -411,6 +411,15 @@
                                     <CheckBox x:Name="AlertAgentAlertGapsCheckBox" Content="SQL Server Agent alert setup has a gap (off by default)"
                                               VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
+                                <!-- #6873: the three database protection alerts. Off by default. -->
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertBackupOverdueCheckBox" Content="Full backup overdue (older than 7 days)"
+                                              VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <CheckBox x:Name="AlertLogBackupOverdueCheckBox" Content="Log backup overdue (older than 60 minutes)" Margin="12,0,0,0"
+                                              VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <CheckBox x:Name="AlertCheckDbOverdueCheckBox" Content="CHECKDB overdue (older than 14 days)" Margin="12,0,0,0"
+                                              VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
                                 <!-- #6875: off by default. Alerts when an identity column is at or past the warning bar (70 percent used) or the
                                      critical bar (90 percent) of its type's capacity. The bars are set with update_alert_settings or a threshold override. -->
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">

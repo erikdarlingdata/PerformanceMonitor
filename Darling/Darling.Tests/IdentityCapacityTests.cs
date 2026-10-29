@@ -127,7 +127,7 @@ public sealed class IdentityCapacityMathTests
 
 /// <summary>
 /// #6875 part 1: the identity capacity collector. Its SQL guards, its database list, the rows it keeps (top 20 above 10 percent plus one
-/// marker per scanned database), a database it did not scan, a budget stop, and its V223 table.
+/// marker per scanned database), a database it did not scan, a budget stop, and its V224 table.
 /// </summary>
 public sealed class IdentityCapacityCollectorTests
 {
@@ -562,9 +562,9 @@ public sealed class IdentityCapacityCollectorTests
     }
 
     [Fact]
-    public void TheV223Table_IsTheGeneratorsOutputForTheCatalogEntry_AndAddsTheMarkerIndex()
+    public void TheV224Table_IsTheGeneratorsOutputForTheCatalogEntry_AndAddsTheMarkerIndex()
     {
-        var rung = PgMigrations.Scripts.Single(m => m.Version == 223).Sql.Replace("collect.", "", StringComparison.Ordinal);
+        var rung = PgMigrations.Scripts.Single(m => m.Version == 224).Sql.Replace("collect.", "", StringComparison.Ordinal);
         var generated = PgSchemaGenerator.CreateTable(IdentityCapacityCollector.Instance) + "\n\n" + PgSchemaGenerator.CreateIndex(IdentityCapacityCollector.Instance);
 
         static string Norm(string s) => string.Join(' ', s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
