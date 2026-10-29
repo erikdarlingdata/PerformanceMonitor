@@ -4498,7 +4498,7 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>
     /// Edge-applies "Backup Overdue", "Log Backup Overdue" and "CHECKDB Overdue" (#6873) from the newest capture, judged by
-    /// <see cref="DatabaseProtectionBands.OverdueFacts"/> (the one judgment: a platform-managed database, a database that is not online and a
+    /// <see cref="DatabaseProtectionBands.OverdueFacts"/> (the one judgment: a platform-managed database, a native-only database's backups, a database that is not online and a
     /// SIMPLE-recovery log are never overdue). One alert per server and metric names every overdue database in its detail. Shaped like
     /// <see cref="ApplyAgentNotRunningAsync"/>: fires once when something becomes overdue, re-fires after the cooldown while it stands, and
     /// writes one "Cleared" history row when nothing is. A null <paramref name="read"/> (no fresh capture) judges nothing and leaves the

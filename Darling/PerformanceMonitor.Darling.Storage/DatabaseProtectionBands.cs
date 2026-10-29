@@ -69,7 +69,7 @@ public sealed record DatabaseProtectionOverdue(string Kind, string Database, str
 /// #6873: the pure banding over one capture's stored facts. No I/O, so the MCP tool and the Viewer call it with the same facts and say the
 /// same words. Order of the rules, first match wins: a database that is not online (or is a secondary) is excluded and judged on nothing;
 /// a SIMPLE-recovery log reads <c>not_expected</c>; the collector's <c>unknown</c> and <c>unavailable</c> pass through as their own words;
-/// a platform-managed or native-only target shows the age under the platform's word and is never overdue; a CHECKDB or backup that never
+/// a platform-managed target shows the age under the platform's word and is never overdue, and a native-only target does the same for its two backup facts while its CHECKDB is judged as on SQL Server (#6902); a CHECKDB or backup that never
 /// happened is overdue unless the database is newer than the threshold (<c>new_database</c>); a recorded time is overdue when its age at
 /// the capture is above the threshold.
 /// </summary>
@@ -111,16 +111,16 @@ public static class DatabaseProtectionBands
         }
 
         return new DatabaseProtectionBand(null,
-            Band(fact, fact.CheckDbState, fact.LastGoodCheckDbTime, thresholds.CheckDb, capturedAt),
-            Band(fact, fact.FullBackupState, fact.LastFullBackupTime, thresholds.FullBackup, capturedAt),
-            Band(fact, fact.LogBackupState, fact.LastLogBackupTime, thresholds.LogBackup, capturedAt));
+            Band(fact, fact.CheckDbState, fact.LastGoodCheckDbTime, thresholds.CheckDb, capturedAt, isCheckDb: true),
+            Band(fact, fact.FullBackupState, fact.LastFullBackupTime, thresholds.FullBackup, capturedAt, isCheckDb: false),
+            Band(fact, fact.LogBackupState, fact.LastLogBackupTime, thresholds.LogBackup, capturedAt, isCheckDb: false));
     }
 
     private static TimeSpan? AgeOf(DateTime? time, DateTime capturedAt) =>
         time is { } t ? (capturedAt > t ? capturedAt - t : TimeSpan.Zero) : null;
 
     private static DatabaseProtectionFactBand Band(
-        DatabaseProtectionFact fact, string? stored, DateTime? time, TimeSpan threshold, DateTime capturedAt)
+        DatabaseProtectionFact fact, string? stored, DateTime? time, TimeSpan threshold, DateTime capturedAt, bool isCheckDb)
     {
         var age = AgeOf(time, capturedAt);
         if (stored == DatabaseProtectionCollector.BackupNotExpected)
@@ -132,7 +132,10 @@ public static class DatabaseProtectionBands
 
         if (fact.Platform == DatabaseProtectionCollector.PlatformManaged)
             return new(PlatformManaged, false, age, threshold);
-        if (fact.Platform == DatabaseProtectionCollector.PlatformNativeOnly)
+        /* #6902: native_only (Amazon RDS) is about the two backup facts only, because backupset holds native backups only and the
+           automated snapshots are not per database. RDS runs no CHECKDB for the owner and the last good CHECKDB time is read as on
+           SQL Server, so the CHECKDB fact falls through to be judged. */
+        if (fact.Platform == DatabaseProtectionCollector.PlatformNativeOnly && !isCheckDb)
             return new(NativeOnly, false, age, threshold);
 
         if (stored is DatabaseProtectionCollector.CheckDbNever or DatabaseProtectionCollector.BackupNoneInWindow)

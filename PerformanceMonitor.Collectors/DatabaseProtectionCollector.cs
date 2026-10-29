@@ -33,7 +33,8 @@ namespace PerformanceMonitor.Collectors;
 ///
 /// <para><b>Platform label.</b> <c>native</c> (SQL Server), <c>platform_managed</c> (Azure SQL Database and Managed Instance: the
 /// platform takes the backups and owns integrity), <c>native_only</c> (Amazon RDS: backupset holds native backups only, the
-/// automated snapshots are not per database).</para>
+/// automated snapshots are not per database, so the two backup facts are not judged. CHECKDB is: RDS does not run it for the owner and the
+/// last good time is read as on SQL Server, #6902).</para>
 ///
 /// <para><b>Azure SQL Database.</b> A target is one database, so the pass reads the current database only, with no msdb: CHECKDB
 /// from <c>DATABASEPROPERTYEX(DB_NAME(), ...)</c> and backups from <c>sys.dm_database_backups</c> (needs VIEW DATABASE PERFORMANCE STATE,
