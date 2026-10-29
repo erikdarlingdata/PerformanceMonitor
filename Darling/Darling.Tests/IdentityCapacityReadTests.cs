@@ -519,8 +519,9 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
 
             /* The tool agrees: Gamma is in neither list. */
             var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, ct));
-            Assert.Equal(2, root.GetProperty("summary").GetProperty("databases_not_yet_scanned").GetInt32());
-            Assert.DoesNotContain(root.GetProperty("databases").EnumerateArray(), d => d.GetProperty("database").GetString() == "Gamma");
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            Assert.Contains("2 database(s) not yet scanned (Alpha, Beta)", root.GetProperty("message").GetString());
+            Assert.DoesNotContain("Gamma", root.GetProperty("message").GetString());
 
             /* An empty list on the server's row is "no scope at this level" and stops the fall-through to a fleet scope. */
             await SetScopeAsync(postgres, null, new[] { "Gamma" }, ct);

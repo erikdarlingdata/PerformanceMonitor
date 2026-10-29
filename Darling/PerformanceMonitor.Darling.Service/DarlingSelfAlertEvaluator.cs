@@ -1551,6 +1551,7 @@ internal sealed class DarlingSelfAlertEvaluator
             try
             {
                 var read = await ReadIdentityCapacityAsync(postgres, serverId, cancellationToken);
+                identityReadClock.Restart();
                 await ApplyIdentityCapacityAsync(serverId, serverName, read, cancellationToken, sweepGeneration: generation);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
