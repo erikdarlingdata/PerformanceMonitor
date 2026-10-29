@@ -58,7 +58,7 @@ export function entriesFromRoute(r) {
   if (!r) {
     return {
       id: null, match: "", scope: "", enabled: true, level: "", perHour: AGENT_LIMIT_DEFAULTS.perHour, perDay: AGENT_LIMIT_DEFAULTS.perDay,
-      lease: AGENT_LIMIT_DEFAULTS.lease, expiry: AGENT_LIMIT_DEFAULTS.expiry, resolutions: "", fallback: "",
+      lease: AGENT_LIMIT_DEFAULTS.lease, expiry: AGENT_LIMIT_DEFAULTS.expiry, resolutions: "", fallback: "", severities: "both",
       saved: [], hooks: {}, removes: {}, recipients: "", recipientsWas: "", modifiedAt: null,
     };
   }
@@ -76,6 +76,8 @@ export function entriesFromRoute(r) {
     expiry: String(r.agent_expiry_minutes ?? AGENT_LIMIT_DEFAULTS.expiry),
     resolutions: r.send_resolutions === true ? "true" : r.send_resolutions === false ? "false" : "",
     fallback: r.fallback_route_id != null ? String(r.fallback_route_id) : "",
+    /* #6928: a route read without the field, or with a word this page does not know, edits as Both. */
+    severities: r.severities === "critical" || r.severities === "warning" ? r.severities : "both",
     saved: Array.isArray(r.configured_channels) ? r.configured_channels : [],
     hooks: {},
     removes: {},
@@ -138,6 +140,7 @@ export function routePayload(entries) {
       agent_expiry_minutes: nums[3],
       send_resolutions: entries.resolutions === "" ? null : entries.resolutions === "true",
       fallback_route_id: fallback,
+      severities: entries.severities === "critical" || entries.severities === "warning" ? entries.severities : "both",
       ...(entries.id != null ? { expected_modified_at: entries.modifiedAt } : {}),
     },
   };
@@ -206,6 +209,7 @@ function routeForm(options) {
   const controls = {
     match: text("match", entries.match, { placeholder: "family, 'Analysis: <category>', exact metric or *" }),
     scope: select("scope", scopeChoices, entries.scope),
+    severities: select("severities", [{ value: "both", label: "Both (Warning and Critical)" }, { value: "critical", label: "Critical only" }, { value: "warning", label: "Warning only" }], entries.severities || "both"),
     level: select("level", AGENT_LEVEL_CHOICES, entries.level),
     perHour: text("perHour", entries.perHour, { inputmode: "numeric" }),
     perDay: text("perDay", entries.perDay, { inputmode: "numeric" }),
@@ -256,7 +260,7 @@ function routeForm(options) {
     onClick: () => sendRoute("save", read(), options.repaint),
   });
   const parts = [
-    field("Match:", controls.match), field("Applies to:", controls.scope), field("Agent:", controls.level),
+    field("Match:", controls.match), field("Applies to:", controls.scope), field("Severity:", controls.severities), field("Agent:", controls.level),
     field("Requests per hour:", controls.perHour), field("Requests per day:", controls.perDay),
     field("Lease minutes:", controls.lease), field("Expiry minutes:", controls.expiry),
     field("Send resolutions:", controls.resolutions), field("Fallback route:", controls.fallback),

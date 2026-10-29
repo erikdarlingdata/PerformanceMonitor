@@ -320,6 +320,17 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
             draft.SendResolutions = kind == JsonValueKind.Null ? null : body["send_resolutions"]!.GetValue<bool>();
         }
 
+        /* #6928: the severity filter. A word other than both, critical or warning is refused by the writer's validation with its sentence. */
+        if (body.ContainsKey("severities"))
+        {
+            if (body["severities"] is not JsonValue severities || severities.GetValueKind() != JsonValueKind.String)
+            {
+                return "severities must be text.";
+            }
+
+            draft.Severities = severities.GetValue<string>();
+        }
+
         if (!TryInt(body, "scope_server_id", out var hasServer, out var server, out var error)
             || !TryInt(body, "scope_tag_id", out var hasTag, out var tag, out error)
             || !TryInt(body, "agent_level", out var hasLevel, out var level, out error)
