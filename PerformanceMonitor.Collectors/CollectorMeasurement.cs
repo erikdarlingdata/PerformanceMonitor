@@ -272,6 +272,50 @@ public static class CollectorMeasurementNote
         return false;
     }
 
+    /// <summary>
+    /// Whether the WHOLE <paramref name="note"/> is <see cref="Render"/>'s output and nothing else (#6903): one or more
+    /// <c>label=digits</c> pairs separated by single spaces, each label legal by <see cref="IsValidLabel"/>. A
+    /// <see cref="Compose"/>d note with a host sentence in front of the counts is not measurement-only. Neither is a
+    /// note a store cut inside a label or right after the <c>=</c>. A cut inside a value
+    /// (<c>plan_fetch_ms=3</c> from <c>plan_fetch_ms=31</c>) still reads as digits and passes, and it is a benign count either way.
+    /// Blank is false here, because blank is "no note" and the caller already handles it.
+    ///
+    /// <para>Counts are benign except one: the ring-buffer truncation counts
+    /// (<see cref="PerformanceMonitor.Common.RingBufferTruncationNote"/>, <c>ring_buffer_truncated=1
+    /// ring_buffer_events_hidden=773 newest_visible_event_age_s=19380</c>) have the same shape but mean the read was blind
+    /// to the newest events. <c>CollectorHealthClassifier.Classify</c> bands that note WARNING, so it is a fault record and
+    /// this returns false for it. Any other note of this shape is what a healthy run leaves (the deferred plan fetch writes
+    /// <c>plans_rendered=0 plans_rendered_bytes=0 plan_fetch_ms=31</c> on every query_stats run). Values are the ASCII
+    /// digits <see cref="Render"/> writes. Nothing emits a negative count, so a leading <c>-</c> is not accepted, as in
+    /// <c>CollectorHealthClassifier.HasMeasurements</c>.</para>
+    /// </summary>
+    public static bool IsMeasurementsOnly(string? note)
+    {
+        if (string.IsNullOrEmpty(note) || PerformanceMonitor.Common.RingBufferTruncationNote.TryParse(note, out _, out _))
+        {
+            return false;
+        }
+
+        foreach (var token in note.Split(' '))
+        {
+            var eq = token.IndexOf('=', StringComparison.Ordinal);
+            if (eq <= 0 || eq == token.Length - 1 || !IsValidLabel(token[..eq]))
+            {
+                return false;
+            }
+
+            for (var i = eq + 1; i < token.Length; i++)
+            {
+                if (!char.IsAsciiDigit(token[i]))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
     /* The two characters a rendered pair can sit beside: the space Render puts between pairs, and the
        semicolon MergeNotes puts after the host note (its separator is "; ", so the token after it is
        preceded by a space, but the token BEFORE a second MergeNotes join is followed by the semicolon). */
