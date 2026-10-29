@@ -407,8 +407,8 @@ public sealed class PgTargetIoTests
         anomaly.Metadata["peak_ms_per_read"] = 25.0;
         anomaly.Metadata["baseline_samples"] = 120;
         var block = FactAdvice.Compose(PgTargetFactKeys.AnomalyIoLatency, Lookup(anomaly))!;
-        Assert.Equal("Data-file read latency spiked to 25.0 ms per read — 12σ above its baseline for this time of week", block.Headline);
-        Assert.Contains("12σ above its 1.3 ms per read baseline median for this hour-of-week (over 120 baseline samples)", block.Investigation, StringComparison.Ordinal);
+        Assert.Equal("Data-file read latency spiked to 25.0 ms per read — 12 times its usual variation above its normal level for this time of week", block.Headline);
+        Assert.Contains("12 times its usual variation above its 1.3 ms per read normal level for this hour-of-week (over 120 baseline samples)", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("pg_stat_io", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("get_pg_io_trend", block.Remediation, StringComparison.Ordinal);
         Assert.Equal(block, PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyIoLatency, Lookup(anomaly)));
@@ -622,7 +622,7 @@ FROM generate_series(0, $5) AS n", windowStart, 240, UntimedServerId, UntimedSer
                 Assert.Equal(latency.GetProperty("incident_id").GetString(), anomalyCard.GetProperty("incident_id").GetString());
                 var anomalyAdvice = anomalyCard.GetProperty("advice");
                 Assert.Contains("ms per read", anomalyAdvice.GetProperty("headline").GetString(), StringComparison.Ordinal);
-                Assert.Contains("σ above its", anomalyAdvice.GetProperty("headline").GetString(), StringComparison.Ordinal);
+                Assert.Contains("times its usual variation above its", anomalyAdvice.GetProperty("headline").GetString(), StringComparison.Ordinal);
                 Assert.DoesNotContain("Anomalous spike", anomalyAdvice.GetProperty("headline").GetString(), StringComparison.Ordinal);
                 var anomalyTools = anomalyCard.GetProperty("next_tools").EnumerateArray().Select(t => t.GetProperty("tool").GetString()!).ToList();
                 Assert.All(anomalyTools, t => Assert.StartsWith("get_pg_", t, StringComparison.Ordinal));

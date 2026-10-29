@@ -355,7 +355,7 @@ public sealed class PgTargetSampledWaitTests
         var composed = PgTargetAdvice.Compose(key, new[] { fact }.ToFactLookup())!;
         var text = composed.Headline + "\n" + composed.Investigation + "\n" + composed.Remediation;
         Assert.Contains("1200 ms/sec", composed.Headline, StringComparison.Ordinal);
-        Assert.Contains("22.4σ above its baseline", composed.Headline, StringComparison.Ordinal);
+        Assert.Contains("22.4 times its usual variation above its normal level", composed.Headline, StringComparison.Ordinal);
         Assert.Contains("(estimated from sampling)", composed.Headline, StringComparison.Ordinal);
         Assert.Contains("mean 1100 ms/sec, also above the bar", composed.Investigation, StringComparison.Ordinal);
         Assert.Contains("led by Lock:relation, IO:DataFileRead, LWLock:WALWrite", composed.Investigation, StringComparison.Ordinal);

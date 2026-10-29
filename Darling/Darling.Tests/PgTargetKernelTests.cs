@@ -380,7 +380,7 @@ public sealed class PgTargetKernelTests
         var anomaly = FiredBurnAnomaly(sigma: 8.0);
         var anomalyBlock = FactAdvice.Compose(PgTargetFactKeys.AnomalyCpuBurn, Lookup(anomaly, facts[0]))!;
         Assert.Contains("CPU burn spiked to 5.2 cores busy", anomalyBlock.Headline, StringComparison.Ordinal);
-        Assert.Contains("8σ above its", anomalyBlock.Investigation, StringComparison.Ordinal);
+        Assert.Contains("8 times its usual variation above its", anomalyBlock.Investigation, StringComparison.Ordinal);
         Assert.Contains("this server routinely keeps busy at this hour of the week", anomalyBlock.Investigation, StringComparison.Ordinal);
         Assert.Contains("Statement 7001 in app burned 75.9 % of it", anomalyBlock.Investigation, StringComparison.Ordinal);
         Assert.Contains("How many cores this server has is not known from this reading", anomalyBlock.Investigation, StringComparison.Ordinal);
@@ -593,7 +593,7 @@ public sealed class PgTargetKernelTests
                 var text = advice.GetProperty("headline").GetString() + advice.GetProperty("investigation").GetString();
                 Assert.Contains("CPU burn spiked to", text, StringComparison.Ordinal);
                 Assert.Contains("cores busy", text, StringComparison.Ordinal);
-                Assert.Contains("σ above its", text, StringComparison.Ordinal);
+                Assert.Contains("times its usual variation above its", text, StringComparison.Ordinal);
                 Assert.Contains("this server routinely keeps busy", text, StringComparison.Ordinal);
                 Assert.Contains("Statement 7001 in app burned", text, StringComparison.Ordinal);
                 Assert.Contains("How many cores this server has is not known", text, StringComparison.Ordinal);

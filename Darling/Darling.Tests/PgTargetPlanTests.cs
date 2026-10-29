@@ -461,7 +461,7 @@ public sealed class PgTargetPlanTests
     {
         var trusted = FactAdvice.Compose(PgTargetFactKeys.AnomalyPlanRegression, new List<Fact> { Anomaly(sigma: 8, peak: 55) }.ToFactLookup())!;
         Assert.StartsWith("The server-wide mean execution time per statement call spiked to 55 ms — ", trusted.Headline, StringComparison.Ordinal);
-        Assert.Contains("55 ms this window, 8σ above its", trusted.Investigation, StringComparison.Ordinal);
+        Assert.Contains("55 ms this window, 8 times its usual variation above its", trusted.Investigation, StringComparison.Ordinal);
         /* Lane 39: the un-stamped fact IS the server-wide series (series absent = 0 = the cold fallback), and the
            advice now says so in those words — a pointer, not a verdict — instead of claiming a dimension it lacks. */
         Assert.Contains("This is the FALLBACK reading", trusted.Investigation, StringComparison.Ordinal);

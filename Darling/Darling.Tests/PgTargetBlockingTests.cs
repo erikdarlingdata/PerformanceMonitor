@@ -535,8 +535,8 @@ public sealed class PgTargetBlockingTests
     {
         var trusted = Anomaly(sigma: 6.2, peak: 3, lowQuality: false);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBlocking, Lookup(trusted))!;
-        Assert.Equal("Blocked sessions per capture spiked to 3 sessions — 6.2σ above its baseline for this time of week", block.Headline);
-        Assert.Contains("baseline mean for this hour-of-week", block.Investigation, StringComparison.Ordinal);
+        Assert.Equal("Blocked sessions per capture spiked to 3 sessions — 6.2 times its usual variation above its normal level for this time of week", block.Headline);
+        Assert.Contains("normal level for this hour-of-week", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("Anomalous spike", block.Headline, StringComparison.Ordinal);
 
         var young = Anomaly(sigma: 0, peak: 12, lowQuality: true);
@@ -1005,11 +1005,11 @@ public sealed class PgTargetBlockingTests
                 Assert.Contains("it is a measured ZERO", investigation, StringComparison.Ordinal);
                 Assert.Contains("not one of them above zero", investigation, StringComparison.Ordinal);
                 Assert.Contains("distinct day", investigation, StringComparison.Ordinal);
-                Assert.Contains("Beyond any σ", investigation, StringComparison.Ordinal);
+                Assert.Contains("far outside its normal range", investigation, StringComparison.Ordinal);
                 /* The two older shapes must not leak into this one. */
                 Assert.DoesNotContain("first occurrence", investigation, StringComparison.Ordinal);
                 Assert.DoesNotContain("too thin", investigation, StringComparison.Ordinal);
-                Assert.DoesNotContain("σ above", investigation, StringComparison.Ordinal);
+                Assert.DoesNotContain("times its usual variation above", investigation, StringComparison.Ordinal);
             }
 
             bodySucceeded = true;
