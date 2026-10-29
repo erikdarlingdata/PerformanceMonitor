@@ -106,11 +106,15 @@ public static class ViewerIdentityCapacityText
     private static string LocalTime(DateTime utc) =>
         DateTime.SpecifyKind(utc, DateTimeKind.Utc).ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
 
-    /// <summary>The sentence under the scan list when it has no row.</summary>
+    /// <summary>
+    /// The sentence under the scan list when it has no row. The list has a row for every scanned, unscanned and skipped database, so
+    /// it is empty only when no database was scanned in the window (<c>HasScan</c> false). That is the case where the status line
+    /// carries the read's own sentence (#6907), so this note is always <see cref="NoData"/>.
+    /// </summary>
     public static string ScanEmptyText(ViewerIdentityCapacityRead read)
     {
         ArgumentNullException.ThrowIfNull(read);
-        return read.Read is { HasScan: true } ? NoScan : NoData;
+        return NoData;
     }
 
     /// <summary>The scan state of a scanned database that has <paramref name="columnsAbove10"/> columns above 10 percent.</summary>

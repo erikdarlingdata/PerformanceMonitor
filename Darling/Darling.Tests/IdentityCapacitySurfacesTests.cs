@@ -162,6 +162,8 @@ public sealed class ViewerIdentityCapacityTextTests
         Assert.Empty(ViewerIdentityCapacityText.ColumnRows(read));
         Assert.Equal("No identity column is above 10 percent used.", ViewerIdentityCapacityText.ColumnsEmptyText(read));
         Assert.Equal("Scanned, clean", ViewerIdentityCapacityText.ScanRows(read).Single().State);
+        /* #6907: a scanned database always has a scan row, so the scan note never shows a scan sentence over a filled grid. */
+        Assert.Equal(ViewerIdentityCapacityText.NoData, ViewerIdentityCapacityText.ScanEmptyText(read));
     }
 
     [Theory]
