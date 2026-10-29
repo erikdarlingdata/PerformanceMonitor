@@ -5461,7 +5461,7 @@ const AGENT_ALERT_SPECS = [
 ];
 
 /* #6873: the Health Checks panels on the Configuration tab. One fact is the age and the state word the service gives it. A platform-managed
-   or native-only target shows the platform's label beside the age and is never overdue. Overdue databases sort first. */
+   target (and a native-only target's two backup facts) shows the platform's label beside the age and is never overdue. Overdue databases sort first. */
 function protectionFactText(f) {
   if (!f) return "-";
   const state = f.state === "overdue" || f.state === "ok" ? "" : String(f.state).replace(/_/g, " ");

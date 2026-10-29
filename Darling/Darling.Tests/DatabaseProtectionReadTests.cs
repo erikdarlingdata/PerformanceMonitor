@@ -77,7 +77,17 @@ public sealed class DatabaseProtectionBandsTests
         { "platform managed, CHECKDB never and no backups",
             Healthy() with { Platform = "platform_managed", LastGoodCheckDbTime = null, CheckDbState = "never", LastFullBackupTime = null, FullBackupState = "none_in_window", CreateDate = Now.AddDays(-200) },
             "platform_managed", "platform_managed", "platform_managed" },
-        { "Amazon RDS, old backups", Healthy() with { Platform = "native_only", LastFullBackupTime = Now.AddDays(-30) }, "native_only", "native_only", "native_only" },
+        // #6902: native_only (Amazon RDS) leaves the two backup facts unjudged and judges CHECKDB as on SQL Server.
+        { "Amazon RDS, old backups, CHECKDB 1 day old", Healthy() with { Platform = "native_only", LastFullBackupTime = Now.AddDays(-30) }, "ok", "native_only", "native_only" },
+        { "Amazon RDS, CHECKDB 20 days old", Healthy() with { Platform = "native_only", LastGoodCheckDbTime = Now.AddDays(-20) }, "overdue", "native_only", "native_only" },
+        { "Amazon RDS, CHECKDB never on an old database",
+            Healthy() with { Platform = "native_only", LastGoodCheckDbTime = null, CheckDbState = "never", CreateDate = Now.AddDays(-200) }, "never", "native_only", "native_only" },
+        { "Amazon RDS, CHECKDB never on a database created 5 days ago",
+            Healthy() with { Platform = "native_only", LastGoodCheckDbTime = null, CheckDbState = "never", CreateDate = Now.AddDays(-5) }, "new_database", "native_only", "native_only" },
+        { "Amazon RDS, no backups in the window stay native_only",
+            Healthy() with { Platform = "native_only", LastFullBackupTime = null, FullBackupState = "none_in_window", LastLogBackupTime = null, LogBackupState = "none_in_window", CreateDate = Now.AddDays(-200) },
+            "ok", "native_only", "native_only" },
+        { "Amazon RDS, CHECKDB unknown passes through", Healthy() with { Platform = "native_only", LastGoodCheckDbTime = null, CheckDbState = "unknown" }, "unknown", "native_only", "native_only" },
 
         // The collector's own words pass through.
         { "CHECKDB unknown (2017 before CU9)", Healthy() with { LastGoodCheckDbTime = null, CheckDbState = "unknown" }, "unknown", "ok", "ok" },
@@ -342,6 +352,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
             var day = TimeSpan.FromDays(1);
             await InsertAsync(connection, ct, at, new Seed("managed_db", Platform: "platform_managed", CheckDbState: "never", FullAgo: 20 * day, LogAgo: 3 * day));
             await InsertAsync(connection, ct, at, new Seed("rds_db", Platform: "native_only", CheckDbAgo: 60 * day, FullAgo: 20 * day, LogAgo: 3 * day));
+            await InsertAsync(connection, ct, at, new Seed("rds_fresh_db", Platform: "native_only", CheckDbAgo: 1 * day, FullAgo: 20 * day, LogAgo: 3 * day));
             await InsertAsync(connection, ct, at, new Seed("hyperscale_db", Platform: "platform_managed", CheckDbState: "never", FullState: "unavailable", LogState: "unavailable"));
         }, async (postgres, ct) =>
         {
@@ -351,11 +362,14 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
             Assert.Equal("platform_managed", dbs["managed_db"].GetProperty("full_backup").GetProperty("state").GetString());
             Assert.Equal(20 * 1440, dbs["managed_db"].GetProperty("full_backup").GetProperty("age_minutes").GetInt64());
             Assert.Equal("platform_managed", dbs["managed_db"].GetProperty("checkdb").GetProperty("state").GetString());
-            Assert.Equal("native_only", dbs["rds_db"].GetProperty("checkdb").GetProperty("state").GetString());
+            // #6902: RDS backups are not judged, its CHECKDB is: 60 days old is overdue, 1 day old is ok.
+            Assert.Equal("overdue", dbs["rds_db"].GetProperty("checkdb").GetProperty("state").GetString());
+            Assert.Equal("native_only", dbs["rds_db"].GetProperty("full_backup").GetProperty("state").GetString());
             Assert.Equal("native_only", dbs["rds_db"].GetProperty("log_backup").GetProperty("state").GetString());
+            Assert.Equal("ok", dbs["rds_fresh_db"].GetProperty("checkdb").GetProperty("state").GetString());
             Assert.Equal("unavailable", dbs["hyperscale_db"].GetProperty("full_backup").GetProperty("state").GetString());
             Assert.Equal(JsonValueKind.Null, dbs["hyperscale_db"].GetProperty("full_backup").GetProperty("age_minutes").ValueKind);
-            Assert.Equal(0, root.GetProperty("summary").GetProperty("overdue_databases").GetInt32());
+            Assert.Equal(1, root.GetProperty("summary").GetProperty("overdue_databases").GetInt32());
             return 0;
         });
     }

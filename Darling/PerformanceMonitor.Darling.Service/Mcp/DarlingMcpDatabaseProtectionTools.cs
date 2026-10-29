@@ -54,7 +54,7 @@ public sealed class DarlingMcpDatabaseProtectionTools
         "Thresholds: full backup 7 days, log backup 60 minutes, CHECKDB 14 days (shown in the answer). " +
         "Each fact's state: ok, overdue (older than the threshold), never (CHECKDB never passed) or none_in_window (no backup in the last 60 days), both of which count as overdue, " +
         "new_database (created less than the threshold ago, so not late yet), not_expected (a SIMPLE-recovery database expects no log backup), " +
-        "platform_managed (Azure SQL Database and Managed Instance) or native_only (Amazon RDS): the age shows and is never overdue, " +
+        "platform_managed (Azure SQL Database and Managed Instance, all three facts) or native_only (Amazon RDS, the full and log backup facts only): the age shows and is never overdue. An Amazon RDS database's CHECKDB is judged like any other, " +
         "unknown (SQL Server 2017 before CU9 cannot answer CHECKDB) or unavailable (the backup read was refused, for example no VIEW DATABASE PERFORMANCE STATE on Azure SQL Database, which VIEW DATABASE STATE grants): both pass through and are never overdue, " +
         "excluded (the database is offline, restoring, a secondary or otherwise not online; excluded_reason says which). " +
         "summary.text, overdue_full_backup, overdue_log_backup and overdue_checkdb name the overdue databases. overdue_only lists just the databases overdue on something. " +
@@ -136,7 +136,7 @@ public sealed class DarlingMcpDatabaseProtectionTools
                 }),
                 note = "All times are UTC. last_time is null when there is no time to show (never, none_in_window, unknown, unavailable). " +
                     "Backups are read from the last 60 days of msdb, so none_in_window means none in 60 days, not never. " +
-                    "An excluded database and a platform-managed or native-only target are never overdue.",
+                    "An excluded database and a platform-managed target are never overdue. A native-only (Amazon RDS) target's backups are not judged, but its CHECKDB is.",
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

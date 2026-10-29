@@ -194,7 +194,8 @@ public sealed class DatabaseProtectionAlertTests
             /* Azure SQL Database and Managed Instance rows: ancient ages and a CHECKDB that never ran are shown, never judged. */
             Db("AzureDb", c, TimeSpan.FromDays(400), TimeSpan.FromDays(400), null, DatabaseProtectionCollector.PlatformManaged,
                 checkDbState: DatabaseProtectionCollector.CheckDbNever),
-            Db("NativeOnly", c, TimeSpan.FromDays(400), TimeSpan.FromDays(400), TimeSpan.FromDays(400), DatabaseProtectionCollector.PlatformNativeOnly),
+            /* Amazon RDS: ancient backups are shown, never judged (#6902: its CHECKDB is, so this one was checked yesterday). */
+            Db("NativeOnly", c, TimeSpan.FromDays(400), TimeSpan.FromDays(400), TimeSpan.FromDays(1), DatabaseProtectionCollector.PlatformNativeOnly),
             /* Offline and a SIMPLE-recovery log are not judged either. */
             Db("Offline", c, TimeSpan.FromDays(400), TimeSpan.FromDays(400), TimeSpan.FromDays(400), state: "OFFLINE"),
             Db("Simple", c, TimeSpan.FromDays(1), null, TimeSpan.FromDays(1), recovery: "SIMPLE", logState: DatabaseProtectionCollector.BackupNotExpected),
@@ -204,6 +205,26 @@ public sealed class DatabaseProtectionAlertTests
 
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task AnAmazonRdsTarget_FiresCheckDbOverdue_ButNeverTheBackupAlerts()
+    {
+        var h = AllOn();
+        var e = h.Build();
+        var read = ReadAt(h.Now, c => new[]
+        {
+            Db("RdsLate", c, TimeSpan.FromDays(400), TimeSpan.FromDays(400), TimeSpan.FromDays(20), DatabaseProtectionCollector.PlatformNativeOnly),
+            Db("RdsNever", c, TimeSpan.FromDays(400), TimeSpan.FromDays(400), null, DatabaseProtectionCollector.PlatformNativeOnly,
+                checkDbState: DatabaseProtectionCollector.CheckDbNever),
+        });
+
+        await e.ApplyDatabaseProtectionAsync(ServerId, Name, read, Ct);
+
+        var only = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("CHECKDB Overdue", only.MetricName);
+        Assert.Contains("RdsLate (20 days old)", only.DetailText, StringComparison.Ordinal);
+        Assert.Contains("RdsNever (never checked)", only.DetailText, StringComparison.Ordinal);
     }
 
     [Fact]
