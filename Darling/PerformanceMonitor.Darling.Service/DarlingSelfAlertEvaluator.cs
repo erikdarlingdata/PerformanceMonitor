@@ -1506,6 +1506,7 @@ internal sealed class DarlingSelfAlertEvaluator
             var missing = engine == CollectorTargetEngine.PostgreSql
                 ? (IReadOnlyList<string>)Array.Empty<string>()
                 : await (CaptureDownReadOverride ?? ReadMissingCaptureSessionsAsync)(postgres, serverId, cancellationToken);
+            captureReadClock.Restart();
             /* #6912: a capture whose collector does not run on this server's engine writes no new row, so its last
                SESSION_MISSING row stays the newest forever. Drop those. The engine facts are read only when the
                read named a capture, so the common empty answer costs nothing. */

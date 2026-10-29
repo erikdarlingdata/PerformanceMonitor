@@ -379,7 +379,7 @@ public sealed class ProductiveZeroBandingTests
 
         /* ONE count over both classes, off the predicate rather than the band - so a collector that
            stopped PRODUCING reaches the same number an install countersign already reads. */
-        Assert.Contains("existing.Regressed + (health.AnyRegression ? 1 : 0)", fleet, StringComparison.Ordinal);
+        Assert.Contains("existing.Regressed + (health.AnyRegression && !engineGated ? 1 : 0)", fleet, StringComparison.Ordinal);
 
         /* And the rollup has to READ the instant the estimate is built from, or the arm is asked of a
            default and answers false for the whole fleet - silently, and in the reassuring direction. */
