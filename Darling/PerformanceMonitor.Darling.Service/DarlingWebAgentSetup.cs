@@ -56,7 +56,7 @@ internal static class DarlingWebAgentSetup
     private static readonly string[] s_routeKeys =
     [
         "metric_match", "enabled", "scope_server_id", "scope_tag_id", "agent_level", "agent_max_per_hour", "agent_max_per_day",
-        "agent_lease_minutes", "agent_expiry_minutes", "send_resolutions", "fallback_route_id",
+        "agent_lease_minutes", "agent_expiry_minutes", "send_resolutions", "fallback_route_id", "severities",
         "teams_webhook_url", "slack_webhook_url", "generic_webhook_url", "pagerduty_routing_key", "email_recipients",
         "expected_modified_at",
     ];

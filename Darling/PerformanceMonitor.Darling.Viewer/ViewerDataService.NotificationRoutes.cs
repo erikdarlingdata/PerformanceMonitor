@@ -524,7 +524,7 @@ public sealed class NotificationRouteRow
         AgentExpiryMinutes = AgentExpiryMinutes,
         SendResolutions = SendResolutions,
         FallbackRouteId = FallbackRouteId,
-        Severities = NotificationRouteKinds.NormalizeSeverities(Severities),
+        Severities = Severities,
         ModifiedAtUtc = ModifiedAtUtc == default ? null : ModifiedAtUtc,
     };
 
