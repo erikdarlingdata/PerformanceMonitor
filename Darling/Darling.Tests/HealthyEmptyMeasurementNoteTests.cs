@@ -115,6 +115,41 @@ public sealed class HealthyEmptyMeasurementNoteTests
         Assert.Null(CollectorRuntimePrecondition.HealthyEmptyMessage("srv", "query_stats", "query statistics", "SUCCESS", note, null));
     }
 
+    /* The ring-buffer truncation counts have the same label=digits shape but mean the read was blind to the newest
+       events, so they are not a healthy run's note. Built through RingBufferXml.MeasureTruncation, the producer. */
+    private static string TruncationNote(long hidden, long ageSeconds)
+    {
+        var table = new System.Data.DataTable();
+        table.Columns.Add("truncated", typeof(bool));
+        table.Columns.Add("hidden", typeof(long));
+        table.Columns.Add("age", typeof(long));
+        table.Rows.Add(true, hidden, ageSeconds);
+        using var reader = table.CreateDataReader();
+        Assert.True(reader.Read());
+        var context = new CollectorContext { ServerId = 1, ServerName = "s", CollectionTime = At, Deltas = new NoDeltas() };
+        RingBufferXml.MeasureTruncation(reader, 0, context);
+        return Assert.IsType<string>(CollectorMeasurementNote.Render(context.Measurements));
+    }
+
+    [Fact]
+    public void TheRingBufferTruncationNote_IsNotMeasurementOnly_AndGivesNoEmptyAnswer()
+    {
+        var note = TruncationNote(773, 19380);
+
+        Assert.Equal("ring_buffer_truncated=1 ring_buffer_events_hidden=773 newest_visible_event_age_s=19380", note);
+        Assert.False(CollectorMeasurementNote.IsMeasurementsOnly(note));
+        Assert.Null(Answer("SUCCESS", note));
+    }
+
+    [Fact]
+    public void TheRingBufferTruncationNote_BesideThePlanFetchCounts_IsStillNotMeasurementOnly()
+    {
+        var note = PlanFetchNote() + " " + TruncationNote(5, 60);
+
+        Assert.False(CollectorMeasurementNote.IsMeasurementsOnly(note));
+        Assert.Null(Answer("SUCCESS", note));
+    }
+
     private sealed class NoDeltas : ICollectorDeltaCalculator
     {
         public long CalculateDelta(int serverId, string collectorName, string key, long currentValue,

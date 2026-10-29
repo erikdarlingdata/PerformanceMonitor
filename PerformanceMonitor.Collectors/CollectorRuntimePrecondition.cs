@@ -514,7 +514,7 @@ public static class CollectorRuntimePrecondition
     /// #6453: the sentence for a read that found no stored rows while the collector serving it is HEALTHY, or null when it is
     /// not. Healthy here is the newest <c>collection_log</c> run being <c>SUCCESS</c> with no note, or a note that is only measurement counts
     /// (<see cref="CollectorMeasurementNote.IsMeasurementsOnly"/>, #6903: every query_stats run on SQL Server writes
-    /// <c>plans_rendered=0 plans_rendered_bytes=0 plan_fetch_ms=31</c>, a fact about the run and never a reason for zero rows): the monitored server
+    /// <c>plans_rendered=0 plans_rendered_bytes=0 plan_fetch_ms=31</c>, a fact about the run and never a reason for zero rows). Counts-only notes are benign except the ring-buffer truncation counts, which mean the read was blind, so those do not qualify: the monitored server
     /// answered and had nothing for the collector, which <c>get_collection_health</c> reports as "every run completed and its
     /// source returned no rows". The caller answers it with <c>empty</c>, a true negative; a read that said <c>unavailable</c>
     /// beside that health verdict sent the reader in a circle. Null for no run, a fault, a denial, a missing session, or a
