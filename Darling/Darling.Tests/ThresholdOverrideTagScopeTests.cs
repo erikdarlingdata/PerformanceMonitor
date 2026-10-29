@@ -219,6 +219,59 @@ public sealed class ThresholdOverrideTagScopeTests
     }
 
     [Fact]
+    public async Task AFailedTagTableRead_KeepsTheSnapshotInForce_NotAGlobalOne()
+    {
+        await RunAsync(async (ds, connection, store, ct) =>
+        {
+            Assert.Equal("ok", Status(await Set(ds, store, WritesArm, null, "cpu.threshold_percent", 92, tag: "Production")));
+            Assert.Equal("ok", Status(await Set(ds, store, WritesArm, "srv-9", "cpu.threshold_percent", 70)));
+
+            var loader = new DarlingThresholdOverrides();
+            await loader.LoadAsync(ds, ct);
+            Assert.Equal(92, loader.Resolve(AlertThresholdKey.CpuThresholdPercent, "8", null, 80));
+            Assert.Equal(3, loader.Count);   /* srv-9's own row, and the Production override for srv-7 and srv-8 */
+
+            /* The server-to-tag map cannot be read (a reset or a timeout stands in as a missing table), and a server override changes. */
+            await ExecAsync(connection, "ALTER TABLE config.server_tag_map RENAME TO server_tag_map_away", ct);
+            await ExecAsync(connection, "UPDATE config.config_threshold_overrides SET value = 71 WHERE server_id = 9", ct);
+            await Assert.ThrowsAnyAsync<Exception>(() => loader.LoadAsync(ds, ct));
+
+            /* Nothing was replaced: the tag override still applies and the changed server row is not half-loaded. */
+            Assert.Equal(92, loader.Resolve(AlertThresholdKey.CpuThresholdPercent, "8", null, 80));
+            Assert.Equal(70, loader.Resolve(AlertThresholdKey.CpuThresholdPercent, "9", null, 80));
+            Assert.Equal(3, loader.Count);   /* srv-9's own row, and the Production override for srv-7 and srv-8 */
+
+            await ExecAsync(connection, "ALTER TABLE config.server_tag_map_away RENAME TO server_tag_map", ct);
+            await loader.LoadAsync(ds, ct);
+            Assert.Equal(71, loader.Resolve(AlertThresholdKey.CpuThresholdPercent, "9", null, 80));
+            Assert.Equal(92, loader.Resolve(AlertThresholdKey.CpuThresholdPercent, "8", null, 80));
+        });
+    }
+
+    [Fact]
+    public async Task TheServerView_SkipsATagRowOutsideTheBounds_AsTheLoaderDoes()
+    {
+        await RunAsync(async (ds, connection, store, ct) =>
+        {
+            /* srv-7 is under east (2) under Production (1). The deeper tag holds a value outside a percent's bounds (written by direct SQL). */
+            await ExecAsync(connection, "INSERT INTO config.config_threshold_overrides (scope_tag_id, threshold_key, value, set_by) VALUES "
+                + "(1, 'cpu.threshold_percent', 85, 'erik'), (2, 'cpu.threshold_percent', 5000, 'erik')", ct);
+            await ExecAsync(connection, "INSERT INTO config.config_alert_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING", ct);
+            await ExecAsync(connection, "INSERT INTO config.config_notification (id) VALUES (1) ON CONFLICT (id) DO NOTHING", ct);
+
+            var loader = new DarlingThresholdOverrides();
+            await loader.LoadAsync(ds, ct);
+            Assert.Equal(85, loader.Resolve(AlertThresholdKey.CpuThresholdPercent, "7", null, 80));
+
+            var view = JsonNode.Parse(await DarlingMcpAlertTools.GetAlertSettings(ds, "srv-7", ct))!["server_view"]!;
+            var cpu = view["thresholds"]!.AsArray().First(n => n!["key"]!.GetValue<string>() == "cpu.threshold_percent")!;
+            Assert.Equal("tag_override", cpu["source"]!.GetValue<string>());
+            Assert.Equal("Production", cpu["tag"]!.GetValue<string>());
+            Assert.Equal(85, cpu["effective_value"]!.GetValue<int>());
+        });
+    }
+
+    [Fact]
     public async Task ListShowsTagRowsWithTheirTagName()
     {
         await RunAsync(async (ds, connection, store, ct) =>

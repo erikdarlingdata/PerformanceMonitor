@@ -369,7 +369,8 @@ public sealed class DarlingMcpThresholdOverrideTools
                 {
                     var key = reader.GetString(2);
                     var raw = reader.GetDouble(3);
-                    if (!DarlingThresholdKeys.TryGet(key, out _) || raw != Math.Floor(raw) || raw < int.MinValue || raw > int.MaxValue)
+                    /* The loader's own accept rule (known key, integer, inside the key's bounds), so a row the engine skips never names a tag here. */
+                    if (DarlingThresholdOverrides.Accept(key, raw, string.Empty, out _) is not null)
                         continue;
                     candidates.Add(new TagOverrideCandidate(reader.GetInt64(0), reader.GetInt32(1), key, raw));
                     meta[(reader.GetInt32(1), key)] = (reader.GetString(4), reader.GetDateTime(5));

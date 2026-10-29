@@ -46,7 +46,7 @@ internal sealed class DarlingThresholdOverrides : IAlertThresholdOverrides
     /// read that throws leaves the overrides already in force. A row whose key is not a tunable threshold, whose value is
     /// not an integer inside the key's bounds, or whose database name sits on a server-only key is skipped and logged,
     /// never applied: the engine uses the value as-is. Tag overrides (#6926) are resolved with the tag tree and the server-to-tag
-    /// map, read only when the table holds a tag row; a tag-table read that fails leaves them matching nothing, as a tag-scoped route does.
+    /// map, read only when the table holds a tag row; a tag-table read that fails throws, so the whole snapshot already in force stays (it is not replaced by one with no tag overrides).
     /// </summary>
     internal async Task LoadAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
@@ -72,6 +72,10 @@ internal sealed class DarlingThresholdOverrides : IAlertThresholdOverrides
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             inputs = await StoreConfigProvider.ReadRouteScopeInputsAsync(connection, _logger, cancellationToken);
+            /* ReadRouteScopeInputsAsync swallows a failed tag read, and installing a snapshot with no tag winners would drop every
+               tag override to the global value until the next config change. Throw so the worker keeps the snapshot in force. */
+            if (!inputs.TagsReadable)
+                throw new InvalidOperationException("The server tag tables could not be read, so the tag overrides cannot be resolved.");
         }
 
         Replace(direct, tag, inputs);
@@ -125,7 +129,8 @@ internal sealed class DarlingThresholdOverrides : IAlertThresholdOverrides
         _snapshot = new Snapshot(direct, tagWinners);
     }
 
-    private static string? Accept(string key, double raw, string database, out int value)
+    /// <summary>Why a stored value cannot be applied (null: it can). The MCP server view filters tag rows through this too, so it never names a tag the engine skips.</summary>
+    internal static string? Accept(string key, double raw, string database, out int value)
     {
         value = 0;
         if (!DarlingThresholdKeys.TryGet(key, out var entry))
