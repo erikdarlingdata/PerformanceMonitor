@@ -19,9 +19,8 @@ namespace PerformanceMonitor.Analysis;
 ///
 /// The negative-vs-non-negative monitor_loop split (DMV synthesizes a negative loop, BPR loops are always
 /// non-negative) already keeps the two sources in separate <see cref="SessionKey"/> spaces for the viewer's
-/// per-episode (scopeByMonitorLoop:true) reconstruction, so this dedup only changes the cumulative
-/// (scopeByMonitorLoop:false) fact/drill-down paths, where an overlapping edge would otherwise be counted
-/// twice. The minute bucket is intentionally coarse: a BPR event_time and a DMV collection_time for the
+/// per-episode (scopeByMonitorLoop:true) reconstruction, so this dedup keeps an overlapping edge from being
+/// counted twice in the fact and drill-down paths. The minute bucket is intentionally coarse: a BPR event_time and a DMV collection_time for the
 /// same physical block won't align to the second.
 /// </summary>
 internal static class BlockingPairRowMerge

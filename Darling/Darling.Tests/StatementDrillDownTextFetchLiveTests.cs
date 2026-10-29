@@ -99,7 +99,7 @@ VALUES ($1, $2, $3, $4, $2, 'FetchDb', $5, $6, $7, 'sleeping', $8, $9, 0, 0)",
         Assert.Contains(rows, r => r.BlockedSqlText.Length > 0);
 
         var reconstruction = BlockingChainReconstructor.Reconstruct(
-            rows, maxDepth: 50, maxPairs: 5000, stepBudget: 100_000, scopeByMonitorLoop: false);
+            rows, maxDepth: 50, maxPairs: 5000, stepBudget: 100_000, scopeByMonitorLoop: true);
         return Json(reconstruction.Chains.Take(3).Select(chain => (object)new
         {
             apex_spid = chain.ApexSpid,

@@ -39,10 +39,52 @@ internal static class BlockingChainFactBuilder
     /// chain the fact describes is always among the ones listed.
     /// </summary>
     internal static List<ReconstructedChain> DrillDownChains(BlockingReconstruction reconstruction, int count) =>
-        reconstruction.Chains.OrderByDescending(c => c.Grade).Take(count).ToList();
+        DrillDownChains(reconstruction.Chains, count);
+
+    private static List<ReconstructedChain> DrillDownChains(IReadOnlyList<ReconstructedChain> chains, int count)
+    {
+        // One episode re-fires in every scan: list it once, at its worst scan (#6931).
+        var episodes = EpisodeNumbers(chains);
+        return chains.OrderByDescending(c => c.Grade).DistinctBy(c => episodes[c]).Take(count).ToList();
+    }
 
     /// <summary>
-    /// The chain the fact describes: the one with the highest BLOCKING_CHAIN grade, ties going to the structurally
+    /// A chain headed by the same apex session that appears again after more than this has passed with no scan showing
+    /// it as an apex is a new episode, not the same one re-firing (#6931). Longer than the blocked-process report's
+    /// re-fire interval, so one long block stays one episode. The rows carry no reliable transaction identity for the
+    /// blocker (the blocking-process node omits it), so the gap is what separates a reused spid from a long block.
+    /// </summary>
+    internal static readonly TimeSpan EpisodeGap = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// Numbers the per-scan chains by episode: consecutive chains of one apex spid:ecid, no more than
+    /// <see cref="EpisodeGap"/> apart, share a number. Keyed by chain instance.
+    /// </summary>
+    internal static Dictionary<ReconstructedChain, int> EpisodeNumbers(IReadOnlyList<ReconstructedChain> chains)
+    {
+        var numbers = new Dictionary<ReconstructedChain, int>(ReferenceEqualityComparer.Instance);
+        var next = 0;
+        foreach (var apex in chains.GroupBy(c => (c.ApexSpid, c.ApexEcid)))
+        {
+            DateTime? last = null;
+            var current = 0;
+            foreach (var (chain, at) in apex.Select(c => (Chain: c, At: ChainTime(c))).OrderBy(x => x.At))
+            {
+                if (last is null || at - last.Value > EpisodeGap)
+                    current = next++;
+                numbers[chain] = current;
+                last = at;
+            }
+        }
+
+        return numbers;
+    }
+
+    private static DateTime ChainTime(ReconstructedChain chain) =>
+        chain.Levels.Count == 0 ? default : chain.Levels.Min(l => l.EventTime);
+
+    /// <summary>
+    /// The chain the fact describes: the worst single scan's chain (the reconstruction is per scan, #6931), the one with the highest BLOCKING_CHAIN grade, ties going to the structurally
     /// larger chain (the reconstruction's own order). A long wait behind two sessions can outgrade a short
     /// pile-up of twenty, and the fact has to describe the chain the grade came from.
     /// </summary>
@@ -68,7 +110,9 @@ internal static class BlockingChainFactBuilder
             ["worst_apex_spid"] = worst.ApexSpid,
             ["worst_apex_sleeping"] = worst.ApexSleeping ? 1 : 0,
             ["worst_chain_max_wait_ms"] = worst.MaxWaitMs,
-            ["total_reconstructed_chains"] = reconstruction.Chains.Count,
+            // #6931: chains are per scan and one episode re-fires in every scan, so the count is of episodes: an apex
+            // that keeps showing up within EpisodeGap of its last scan counts once, however many scans caught it.
+            ["total_reconstructed_chains"] = EpisodeNumbers(reconstruction.Chains).Values.Distinct().Count(),
             ["deepest_chain_overall"] = reconstruction.Chains.Max(c => c.Depth),
             ["max_victim_count_overall"] = reconstruction.Chains.Max(c => c.VictimCount),
             ["depth_capped"] = reconstruction.DepthCapped ? 1 : 0,
