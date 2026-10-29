@@ -483,11 +483,12 @@ public static class CollectorRuntimePrecondition
         string gateCandidates,
         DateTime? collectorLastRunUtc,
         DateTime? serverLastCollectedUtc,
-        DateTime? serverFirstCollectedUtc)
+        DateTime? serverFirstCollectedUtc,
+        DateTime? serviceStartedUtc = null)
     {
         var causes = gateCandidates.Trim();
         var tail = (causes.Length == 0 ? "" : " " + causes) + ReconnectStep;
-        switch (ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, null))
+        switch (ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc))
         {
             case GatedOffCase.GoneDark:
                 return $"The {CollectorWords(collectorName)} collector has not run for this server for over " +
@@ -500,7 +501,7 @@ public static class CollectorRuntimePrecondition
 
             default:
                 return GatedOffMessage(
-                    serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
+                    serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc);
         }
     }
 

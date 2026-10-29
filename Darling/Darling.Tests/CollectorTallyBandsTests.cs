@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Threading.Tasks;
+using PerformanceMonitor.Darling.Viewer;
 using System.Linq;
 using System.Text.Json;
 using PerformanceMonitor.Collectors;
@@ -180,5 +182,57 @@ public sealed class CollectorTallyBandsTests
 
         Assert.NotNull(message);
         Assert.Contains("has never run", message, StringComparison.Ordinal);
+    }
+
+    private static Task<(string Text, System.Windows.Visibility Visibility)> ViewerNote(
+        string collector, DateTime? serviceStarted, DateTime serverFirst, DateTime serverLast, Func<Task<DateTime?>>? serviceStartReader = null) =>
+        ViewerServerTab.ReadEngineGapStateAsync(
+            (_, _) => Task.FromResult<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc, DateTime? ServerFirstCollectedUtc)>((null, serverLast, serverFirst)),
+            null, 7, "sql-01", 3, MonitoredEngineKind.SqlServer, collector, 0,
+            (_, _) => Task.FromResult<(string? Status, string? ErrorMessage, DateTime? ObservedUtc)>((null, null, null)),
+            AwsRdsKind.None,
+            () => serviceStartReader is null ? Task.FromResult(serviceStarted) : serviceStartReader());
+
+    [Theory]
+    [InlineData("agent_alerts")]
+    [InlineData("running_jobs")]
+    [InlineData("query_store_health")]
+    public async Task TheViewerNote_ForACollectorNeverRun_InsideItsFirstIntervalAfterTheServiceStarted_SaysItIsNotDueYet(string collector)
+    {
+        var now = DateTime.UtcNow;
+        var serviceStarted = now.AddMinutes(-2);
+
+        var (text, visibility) = await ViewerNote(collector, serviceStarted, now.AddDays(-30), now.AddSeconds(-20));
+
+        Assert.Equal(System.Windows.Visibility.Visible, visibility);
+        Assert.Contains("has not had its first run", text, StringComparison.Ordinal);
+        Assert.Contains("is due at about", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("switched off", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("AWS RDS", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("never run", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("agent_alerts")]
+    [InlineData("running_jobs")]
+    public async Task TheViewerNote_ForACollectorNeverRun_ALongTimeAfterTheServiceStarted_StillSaysItNeverRan(string collector)
+    {
+        var now = DateTime.UtcNow;
+
+        var (text, _) = await ViewerNote(collector, now.AddHours(-3), now.AddDays(-30), now.AddSeconds(-20));
+
+        Assert.DoesNotContain("has not had its first run", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheViewerNote_WhenTheServiceStartCannotBeRead_FallsBackToTheServersOwnTimes()
+    {
+        var now = DateTime.UtcNow;
+
+        var (text, visibility) = await ViewerNote(
+            "agent_alerts", null, now.AddDays(-30), now.AddSeconds(-20), () => throw new InvalidOperationException("config.service_version unreadable"));
+
+        Assert.Equal(System.Windows.Visibility.Visible, visibility);
+        Assert.DoesNotContain("has not had its first run", text, StringComparison.Ordinal);
     }
 }

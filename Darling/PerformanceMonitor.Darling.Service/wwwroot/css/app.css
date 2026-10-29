@@ -461,6 +461,7 @@ a:hover { text-decoration: underline; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.metric-chip .detail.wrap { white-space: normal; overflow-wrap: anywhere; }
 .metric-chip .sev-badge {
   font-size: 0.58rem;
   font-weight: 700;
