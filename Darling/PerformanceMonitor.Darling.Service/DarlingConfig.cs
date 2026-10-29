@@ -1105,6 +1105,27 @@ public sealed class AlertsConfig
     [JsonPropertyName("deadlockCriticalPerHour")]
     public double DeadlockCriticalPerHour { get; set; } = ServerHealthThresholds.DeadlockCriticalPerHourDefault;
 
+    /// <summary>#6927 (V228): the blocking health band's WARNING tier, blocked-process reports per hour over the window a card
+    /// counted them in. Seeded from <see cref="ServerHealthThresholds.BlockingWarnPerHour"/>, named rather than restated, so a store
+    /// that never sets it bands as every earlier build did. <c>BlockingBandThresholds</c> clamps it on read.</summary>
+    [JsonPropertyName("blockingWarnPerHour")]
+    public double BlockingWarnPerHour { get; set; } = ServerHealthThresholds.BlockingWarnPerHour;
+
+    /// <summary>#6927 (V228): the blocking health band's CRITICAL tier, reports per hour, seeded from
+    /// <see cref="ServerHealthThresholds.BlockingCriticalPerHour"/>.</summary>
+    [JsonPropertyName("blockingCriticalPerHour")]
+    public double BlockingCriticalPerHour { get; set; } = ServerHealthThresholds.BlockingCriticalPerHour;
+
+    /// <summary>#6927 (V228): the blocking band's WARNING bar on the longest single block, seconds, seeded from
+    /// <see cref="ServerHealthThresholds.BlockingWarnWaitSeconds"/>.</summary>
+    [JsonPropertyName("blockingWarnWaitSeconds")]
+    public double BlockingWarnWaitSeconds { get; set; } = ServerHealthThresholds.BlockingWarnWaitSeconds;
+
+    /// <summary>#6927 (V228): the blocking band's CRITICAL bar on the longest single block, seconds, seeded from
+    /// <see cref="ServerHealthThresholds.BlockingCriticalWaitSeconds"/>.</summary>
+    [JsonPropertyName("blockingCriticalWaitSeconds")]
+    public double BlockingCriticalWaitSeconds { get; set; } = ServerHealthThresholds.BlockingCriticalWaitSeconds;
+
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;
 

@@ -296,6 +296,15 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
         _config.Alerts.DeadlockWarnPerHour,
         _config.Alerts.DeadlockCriticalPerHour);
 
+    /// <summary>#6927 (V228): the blocking health band's four tiers as ONE value, for the reason
+    /// <see cref="DeadlockRateThresholds"/> is one. The clamp lives on
+    /// <see cref="PerformanceMonitor.Common.BlockingBandThresholds"/>, so the viewer's card and the service's read clamp alike.</summary>
+    public BlockingBandThresholds BlockingBandThresholds => new(
+        _config.Alerts.BlockingWarnPerHour,
+        _config.Alerts.BlockingCriticalPerHour,
+        _config.Alerts.BlockingWarnWaitSeconds,
+        _config.Alerts.BlockingCriticalWaitSeconds);
+
     public int CollectionFailureThreshold => Math.Clamp(_config.Alerts.CollectionFailureThreshold, 1, 1000);
 
     /* #1984: percent clamped like low-disk's (0 = off); the GB floor merely floored at 0 — unlike

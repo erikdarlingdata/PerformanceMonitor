@@ -923,6 +923,10 @@ public partial class SettingsWindow : Window
            card agree about what the number looks like. */
         BandDeadlockWarnPerHourBox.Text = r.DeadlockWarnPerHour.ToString("0.0", CultureInfo.InvariantCulture);
         BandDeadlockCriticalPerHourBox.Text = r.DeadlockCriticalPerHour.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingWarnPerHourBox.Text = r.BlockingWarnPerHour.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingCriticalPerHourBox.Text = r.BlockingCriticalPerHour.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingWarnWaitSecondsBox.Text = r.BlockingWarnWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingCriticalWaitSecondsBox.Text = r.BlockingCriticalWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
         AlertPvsCheckBox.IsChecked = r.PvsEnabled;
         AlertPvsThresholdPercentBox.Text = r.PvsThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertPvsFloorGbBox.Text = r.PvsFloorGb.ToString(CultureInfo.InvariantCulture);
@@ -965,6 +969,23 @@ public partial class SettingsWindow : Window
         AlertDeliveryModeBox.SelectedIndex = r.DeliveryMode == "PerEvent" ? 1 : 0;
         AlertPerEventMaxBox.Text = r.PerEventMax.ToString(CultureInfo.InvariantCulture);
         UpdateAlertControlStates();
+    }
+
+    /// <summary>Parses one blocking band box (#6927): InvariantCulture, within the named bounds the classifier clamps to and the MCP writer
+    /// accepts. A bad value adds an error naming the box and the range, and leaves <paramref name="value"/> null.</summary>
+    private static void BlockingBandBox(
+        System.Windows.Controls.TextBox box, double min, double max, string label, SettingsValidationErrors errors, out double? value)
+    {
+        if (double.TryParse(box.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) && parsed >= min && parsed <= max)
+        {
+            value = parsed;
+            return;
+        }
+
+        value = null;
+        errors.Add(
+            $"{label} must be a number between {min.ToString("0.0", CultureInfo.InvariantCulture)} and {max.ToString("0.0", CultureInfo.InvariantCulture)}.",
+            box);
     }
 
     /// <summary>Builds the store row from the alert + analysis controls, validating the numeric fields. Adds
@@ -1162,6 +1183,37 @@ public partial class SettingsWindow : Window
             && dlCritical >= ServerHealthThresholds.DeadlockRatePerHourFloor
             && dlCritical <= ServerHealthThresholds.DeadlockRatePerHourCeiling)
             row.DeadlockCriticalPerHour = dlCritical;
+        /* #6927: the blocking band, validated against the SAME named bounds BlockingBandThresholds clamps to and the MCP writer accepts,
+           InvariantCulture on the parse. Unlike the deadlock pair, a pair with critical below warn is refused, the rule update_alert_settings
+           applies, so the window cannot save a pair the tool would refuse. */
+        BlockingBandBox(BandBlockingWarnPerHourBox, ServerHealthThresholds.BlockingRatePerHourFloor, ServerHealthThresholds.BlockingRatePerHourCeiling,
+            "Blocking warn per hour", errors, out var blWarnRate);
+        BlockingBandBox(BandBlockingCriticalPerHourBox, ServerHealthThresholds.BlockingRatePerHourFloor, ServerHealthThresholds.BlockingRatePerHourCeiling,
+            "Blocking critical per hour", errors, out var blCriticalRate);
+        BlockingBandBox(BandBlockingWarnWaitSecondsBox, ServerHealthThresholds.BlockingWaitSecondsFloor, ServerHealthThresholds.BlockingWaitSecondsCeiling,
+            "Blocking warn seconds", errors, out var blWarnWait);
+        BlockingBandBox(BandBlockingCriticalWaitSecondsBox, ServerHealthThresholds.BlockingWaitSecondsFloor, ServerHealthThresholds.BlockingWaitSecondsCeiling,
+            "Blocking critical seconds", errors, out var blCriticalWait);
+        if (blWarnRate.HasValue && blCriticalRate.HasValue)
+        {
+            if (blCriticalRate.Value < blWarnRate.Value)
+                errors.Add("Blocking critical per hour must not be lower than blocking warn per hour.", BandBlockingCriticalPerHourBox);
+            else
+            {
+                row.BlockingWarnPerHour = blWarnRate.Value;
+                row.BlockingCriticalPerHour = blCriticalRate.Value;
+            }
+        }
+        if (blWarnWait.HasValue && blCriticalWait.HasValue)
+        {
+            if (blCriticalWait.Value < blWarnWait.Value)
+                errors.Add("Blocking critical seconds must not be lower than blocking warn seconds.", BandBlockingCriticalWaitSecondsBox);
+            else
+            {
+                row.BlockingWarnWaitSeconds = blWarnWait.Value;
+                row.BlockingCriticalWaitSeconds = blCriticalWait.Value;
+            }
+        }
         if (int.TryParse(AlertPvsThresholdPercentBox.Text, out var pvsPct) && pvsPct is >= 0 and <= 100)
             row.PvsThresholdPercent = pvsPct;
         if (int.TryParse(AlertPvsFloorGbBox.Text, out var pvsFloor) && pvsFloor >= 0)
@@ -1292,6 +1344,14 @@ public partial class SettingsWindow : Window
             ServerHealthThresholds.DeadlockWarnPerHourDefault.ToString("0.0", CultureInfo.InvariantCulture);
         BandDeadlockCriticalPerHourBox.Text =
             ServerHealthThresholds.DeadlockCriticalPerHourDefault.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingWarnPerHourBox.Text =
+            ServerHealthThresholds.BlockingWarnPerHour.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingCriticalPerHourBox.Text =
+            ServerHealthThresholds.BlockingCriticalPerHour.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingWarnWaitSecondsBox.Text =
+            ServerHealthThresholds.BlockingWarnWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingCriticalWaitSecondsBox.Text =
+            ServerHealthThresholds.BlockingCriticalWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
         AnalysisNotifyCooldownBox.Text = "360";
         AlertPvsThresholdPercentBox.Text = "40";
         AlertPvsFloorGbBox.Text = "1";

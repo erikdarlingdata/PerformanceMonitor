@@ -577,6 +577,14 @@ ALTER TABLE config.config_alert_settings
         // so a re-run of V226 does everything again. Safe on a store that never had it.
         new(226, "hasServerAwsRdsWebOrExpress",
             @"ALTER TABLE collect.servers DROP COLUMN IF EXISTS is_aws_rds_web_or_express;"),
+        // V228 (#6927): the four blocking band columns on the alert settings row. The warn per hour column is the probe's newest sentinel. The
+        // rewind drops all four, so a re-run of V228 adds them again. Safe on a store that never had them.
+        new(228, "hasBlockingBands",
+            @"ALTER TABLE config.config_alert_settings
+    DROP COLUMN IF EXISTS blocking_warn_per_hour,
+    DROP COLUMN IF EXISTS blocking_critical_per_hour,
+    DROP COLUMN IF EXISTS blocking_warn_wait_seconds,
+    DROP COLUMN IF EXISTS blocking_critical_wait_seconds;"),
     ];
 
     /// <summary>
