@@ -58,10 +58,10 @@ public static class DarlingQueryTagRollupReader
     /// for them, the servers it refused with why, the facts read for the allowed ones, and whether the interval table itself was missing.
     /// <paramref name="UsedHashHourly"/>: the fleet route read built hours from <c>collect.query_store_hash_hourly</c> (#6800), so the section's source is both tables.
     /// Then <paramref name="RoutedStarts"/> is each server's start rounded up to the hour, the first instant it read (<paramref name="Allowed"/> keeps the gate's
-    /// own starts), and <paramref name="WindowEdgesNote"/> says the partial first hour was not read (null when the start was on the hour). <paramref name="UsedHashDaily"/>: the route also read whole UTC days from <c>collect.query_store_hash_daily</c> (step 3c). <paramref name="StartDroppedFrom"/> (#6831) is the requested start the note names, null when the start was on the hour.</summary>
+    /// own starts), and <paramref name="WindowEdgesNote"/> says the partial first hour was not read (null when the start was on the hour). <paramref name="UsedHashDaily"/>: the route also read whole UTC days from <c>collect.query_store_hash_daily</c> (step 3c). <paramref name="StartDroppedFrom"/> (#6831) is the requested start the note names, null when the start was on the hour. <paramref name="BacklogHoursWaiting"/> (#6865) is above 0 when the route left out the hours still waiting for the hourly builder: the read starts after them (<paramref name="RoutedStarts"/> is the span's start) and the count is how many of those hours are backlog. <paramref name="BacklogHoursLeftOut"/> is how many whole hours the read leaves out, from the window's first whole hour to where it starts. When only backlog hours let the route answer, <paramref name="UsedHashHourly"/> is false: the wide table's tail served it alone.</summary>
     public readonly record struct QueryStoreRead(
         Dictionary<int, DateTime> Allowed, Dictionary<int, string> Refused, List<QueryTagRollupFact> Facts, bool TableMissing, bool UsedHashHourly = false,
-        Dictionary<int, DateTime>? RoutedStarts = null, string? WindowEdgesNote = null, bool UsedHashDaily = false, DateTime? StartDroppedFrom = null);
+        Dictionary<int, DateTime>? RoutedStarts = null, string? WindowEdgesNote = null, bool UsedHashDaily = false, DateTime? StartDroppedFrom = null, int BacklogHoursWaiting = 0, int BacklogHoursLeftOut = 0);
 
     /// <summary>
     /// The Query Store gate and the read it authorizes, per server: the interval table is read only where the same gate every other reader of
@@ -126,7 +126,7 @@ public static class DarlingQueryTagRollupReader
             return new QueryStoreRead(allowed, refused, facts, false);
         }
 
-        return await ReadAllowedAsync(connection, allowed, refused, windowEnd, readSeconds, cancellationToken);
+        return await ReadAllowedAsync(connection, allowed, refused, windowStart, windowEnd, readSeconds, cancellationToken);
     }
 
     /// <summary>
@@ -136,13 +136,13 @@ public static class DarlingQueryTagRollupReader
     /// start, and each stale pair, with its own server (#6800 part 2, step 2b).
     /// </summary>
     internal static async Task<QueryStoreRead> ReadAllowedAsync(
-        NpgsqlConnection connection, Dictionary<int, DateTime> allowed, Dictionary<int, string> refused, DateTime windowEnd, int readSeconds, CancellationToken cancellationToken)
+        NpgsqlConnection connection, Dictionary<int, DateTime> allowed, Dictionary<int, string> refused, DateTime windowStart, DateTime windowEnd, int readSeconds, CancellationToken cancellationToken)
     {
         var facts = new List<QueryTagRollupFact>();
         /* #6800 part 2: a fleet read takes the hours the hourly builder has done from collect.query_store_hash_hourly and the rest from the
            wide table (QueryTagRollupHashRoute). One server, a store without the table, or no hour the table can answer yet: today's
            statement. The route's two small reads and the statement share this snapshot. */
-        var route = await QueryTagRollupHashRoute.TryPlanAsync(connection, allowed, windowEnd, readSeconds, cancellationToken);
+        var route = await QueryTagRollupHashRoute.TryPlanAsync(connection, allowed, windowStart, windowEnd, readSeconds, cancellationToken);
         try
         {
             await using var command = route is null
@@ -156,8 +156,10 @@ public static class DarlingQueryTagRollupReader
             return new QueryStoreRead(allowed, refused, [], true);
         }
 
-        return new QueryStoreRead(allowed, refused, facts, false, route is not null, route?.Starts, route?.EdgesNote, route?.UsesDays ?? false,
-            route?.EdgesNote is null ? null : route.RequestedStart);
+        /* #6865: UsedHashHourly is whether a hash table served the answer. A route that answers only because backlog hours were left out reads the wide
+           table's tail alone, so the section's tier and source must not name the hash tables. */
+        return new QueryStoreRead(allowed, refused, facts, false, route?.ReadsHashTables ?? false, route?.Starts, route?.EdgesNote, route?.UsesDays ?? false,
+            route?.EdgesNote is null ? null : route.RequestedStart, route?.BacklogHoursWaiting ?? 0, route?.BacklogHoursLeftOut ?? 0);
     }
 
     /// <summary>The batched Query Store statement's command (<see cref="QueryTagRollupSql.QueryStoreSql"/>): the allowed servers and each one's

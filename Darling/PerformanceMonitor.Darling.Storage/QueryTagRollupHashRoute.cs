@@ -53,21 +53,37 @@ public static class QueryTagRollupHashRoute
     /// <summary>
     /// The window's validity facts in one result: a row with a NULL <c>server_id</c> is an hour the builder has done, a row with a server is a
     /// pair of the allowed servers whose table rows are not valid (<c>hash_built_seq</c> NULL or different from <c>late_seq</c>). $1 first hour,
-    /// $2 end of the last whole hour (exclusive), $3 the allowed server ids.
+    /// $2 end of the last whole hour (exclusive), $3 the allowed server ids. <c>late_write</c> (#6865) is true for a pair whose rollup rows are
+    /// stale too (<c>built_seq</c> differs from <c>late_seq</c>: a late writer touched the hour), false for a pair stale only for the hash table.
+    /// <c>failing</c> (#6865) marks a third kind of row: a NULL <c>server_id</c> with <c>failing</c> true is an hour with a record in
+    /// <c>collect.query_store_compose_stamp_failures</c>, an hour the builder does not build in its backlog pass (in back-off or being retried).
+    /// <c>blocked</c> (#6865) is true on a built-hour row an open writer of the wide table would defer: the planner drops such an hour before it
+    /// picks a build, so it never builds and never gets a failure record, and the read must not wait for it either. It is the planner's own
+    /// predicate (<see cref="QueryStoreComposeStamp.WriterCutoffSql"/> and <see cref="QueryStoreComposeStamp.BlockedByWriterTail"/>).
     /// </summary>
-    internal const string LedgerSql = """
-        SELECT h.hour, NULL::integer AS server_id
-        FROM collect.query_store_compose_stamp_hours AS h
-        WHERE h.hour >= $1
-        AND   h.hour < $2
-        UNION ALL
-        SELECT b.hour, b.server_id
-        FROM collect.query_store_compose_stamp_built AS b
-        WHERE b.hour >= $1
-        AND   b.hour < $2
-        AND   b.server_id = ANY($3)
-        AND   b.hash_built_seq IS DISTINCT FROM b.late_seq
-        """;
+    internal const string LedgerSql = @"
+WITH cutoff AS
+(
+    " + QueryStoreComposeStamp.WriterCutoffSql + @"
+)
+SELECT h.hour, NULL::integer AS server_id, false AS late_write, false AS failing,
+       (h.hour" + QueryStoreComposeStamp.BlockedByWriterTail + @") AS blocked
+FROM collect.query_store_compose_stamp_hours AS h
+CROSS JOIN cutoff
+WHERE h.hour >= $1
+AND   h.hour < $2
+UNION ALL
+SELECT b.hour, b.server_id, b.built_seq IS DISTINCT FROM b.late_seq AS late_write, false AS failing, false AS blocked
+FROM collect.query_store_compose_stamp_built AS b
+WHERE b.hour >= $1
+AND   b.hour < $2
+AND   b.server_id = ANY($3)
+AND   b.hash_built_seq IS DISTINCT FROM b.late_seq
+UNION ALL
+SELECT f.hour, NULL::integer AS server_id, false AS late_write, true AS failing, false AS blocked
+FROM collect.query_store_compose_stamp_failures AS f
+WHERE f.hour >= $1
+AND   f.hour < $2";
 
     /// <summary>Which source answers what: the (day, server) pairs read from the day table, the (hour, server) pairs read from the hourly table and the (server, from, to) ranges read from the wide table, each range <c>[from, to)</c> with the statement's window-end bound applied on top.
     /// <paramref name="Starts"/> is each server's snapped start (the first instant it reads) and <paramref name="RequestedStart"/> the latest read start before snapping, the start the section's note names.</summary>
@@ -76,10 +92,18 @@ public static class QueryTagRollupHashRoute
         List<(int ServerId, DateTime From, DateTime To)> WideRanges,
         Dictionary<int, DateTime> Starts,
         DateTime RequestedStart,
-        List<(DateTime Day, int ServerId)> DayPairs)
+        List<(DateTime Day, int ServerId)> DayPairs,
+        int BacklogHoursWaiting = 0,
+        int BacklogHoursLeftOut = 0)
     {
         /// <summary>Whether any whole day is read from the day table (the section's source and tier then say so).</summary>
         public bool UsesDays => DayPairs.Count > 0;
+
+        /// <summary>
+        /// Whether the plan reads any hour or day from the hash tables. False when the route answers only because backlog hours waiting for the builder
+        /// were left out (#6865): the wide table's tail served it alone, so the section must not name the hash tables as a source.
+        /// </summary>
+        public bool ReadsHashTables => TablePairs.Count > 0 || DayPairs.Count > 0;
 
         /// <summary>The section's start-edge note: null when no server's start moved.</summary>
         public string? EdgesNote => HourlyWindowEdges.StartNote(RequestedStart, CeilHour(RequestedStart));
@@ -166,6 +190,62 @@ public static class QueryTagRollupHashRoute
     }
 
     /// <summary>
+    /// #6865: the span a read answers when whole hours the builder has done wait for the hash table. A BACKLOG hour is a built hour whose stale
+    /// pairs are stale only for the hash table (<c>built_seq</c> equals <c>late_seq</c>, <c>hash_built_seq</c> NULL or different), which is every
+    /// hour built before V221 until the builder reaches it. Reading such an hour from the wide table costs the wide table's rows for the hour (on a
+    /// large store a 7-day read spent minutes of disk on them), so the read does not: it starts after the newest backlog hour. The hours after it
+    /// are read exactly as without a backlog (table hours, day rows, the tail, and real late-write stale pairs from the wide table).
+    /// Pure. <paramref name="backlogHours"/> are the backlog hours of the ledger. Returns each server's start moved to the end of the newest backlog hour
+    /// when that is later than its own start (the starts are the snapped ones), and how many distinct backlog hours lie in the span the read would
+    /// otherwise have covered (<c>HoursWaiting</c>), and how many whole hours the read leaves out, from the first whole hour of the REQUESTED window
+    /// (<paramref name="windowStart"/>, not the earliest read start: the interval table's floor may already have cut the starts) to where the figures
+    /// start (<c>HoursLeftOut</c>: the latest server's start after the move, which is the cut unless a server's own start is already past it,
+    /// so the count and the start the notes name are the same instant; it holds the backlog hours plus every other hour before that start, among them
+    /// the hours the table's floor cut);
+    /// an empty dictionary and 0, 0 when no backlog hour is in the span.
+    /// </summary>
+    public static (Dictionary<int, DateTime> Starts, int HoursWaiting, int HoursLeftOut) SpanPastBacklog(
+        IReadOnlyDictionary<int, DateTime> readStarts, DateTime windowStart, DateTime windowEnd, ISet<DateTime> backlogHours)
+    {
+        ArgumentNullException.ThrowIfNull(readStarts);
+        ArgumentNullException.ThrowIfNull(backlogHours);
+        var moved = new Dictionary<int, DateTime>();
+        if (readStarts.Count == 0)
+        {
+            return (moved, 0, 0);
+        }
+
+        var wholeEnd = FloorHour(windowEnd);
+        var first = CeilHour(readStarts.Values.Min());
+        var inSpan = backlogHours.Where(h => h >= first && h < wholeEnd).ToList();
+        if (inSpan.Count == 0)
+        {
+            return (moved, 0, 0);
+        }
+
+        var cut = inSpan.Max().Add(Hour);
+        foreach (var (serverId, readStart) in readStarts)
+        {
+            moved[serverId] = CeilHour(readStart) < cut ? cut : readStart;
+        }
+
+        /* The count runs to the instant every surface names as the start of the figures: the latest server's snapped start, which is the cut
+           unless a server's own start (a server added later) is already past it. */
+        var figuresStart = moved.Values.Select(CeilHour).Max();
+        return (moved, inSpan.Count, (int)((figuresStart - CeilHour(windowStart)).TotalHours));
+    }
+
+    /// <summary>
+    /// #6865: the one sentence the MCP section, the Viewer and (as a copy in query-tag-usage.js) the web page give when the read leaves out the first
+    /// hours of the window. <paramref name="hoursLeftOut"/> is the size of the gap, counted from the window's first whole hour (it holds every hour before
+    /// the start, among them the hours the interval table's floor cut), and <paramref name="hoursWaiting"/> the backlog hours inside it that are the reason. The two are different numbers, and the text never gives the second as the first.
+    /// </summary>
+    public static string BacklogNote(string startText, int hoursLeftOut, int hoursWaiting) =>
+        $"The figures start at {startText}, which leaves out the first {hoursLeftOut} {(hoursLeftOut == 1 ? "hour" : "hours")} of the window, because "
+        + $"{hoursWaiting} {(hoursWaiting == 1 ? "hour" : "hours")} in that part {(hoursWaiting == 1 ? "is" : "are")} still being built into the hourly Query Store table. "
+        + "The full window answers once they are built.";
+
+    /// <summary>
     /// Decides whether the fleet read is routed and, if so, how: null means today's statement (one allowed server, a store below
     /// <see cref="MinSchemaVersion"/> or without the table, or no hour the table can answer yet, for example right after the upgrade before the
     /// builder has rebuilt any hour). Runs on the read's own connection and transaction, so the facts are the snapshot's. That includes the
@@ -173,7 +253,7 @@ public static class QueryTagRollupHashRoute
     /// could return no rows for that server (#6800 step 3c). Do not move the day read out of this transaction.
     /// </summary>
     public static async Task<Plan?> TryPlanAsync(
-        NpgsqlConnection connection, IReadOnlyDictionary<int, DateTime> allowed, DateTime windowEnd, int readSeconds, CancellationToken cancellationToken)
+        NpgsqlConnection connection, IReadOnlyDictionary<int, DateTime> allowed, DateTime windowStart, DateTime windowEnd, int readSeconds, CancellationToken cancellationToken)
     {
         if (allowed.Count < 2 || StorageVersion.SchemaVersion < MinSchemaVersion)
         {
@@ -192,6 +272,9 @@ public static class QueryTagRollupHashRoute
         var wholeEnd = FloorHour(windowEnd);
         var built = new HashSet<DateTime>();
         var stale = new HashSet<(DateTime Hour, int ServerId)>();
+        var lateWriteHours = new HashSet<DateTime>();
+        var failingHours = new HashSet<DateTime>();
+        var blockedHours = new HashSet<DateTime>();
         await using (var ledger = new NpgsqlCommand(LedgerSql, connection) { CommandTimeout = readSeconds })
         {
             ledger.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = first });
@@ -203,11 +286,26 @@ public static class QueryTagRollupHashRoute
                 var hour = reader.GetDateTime(0);
                 if (reader.IsDBNull(1))
                 {
-                    built.Add(hour);
+                    if (reader.GetBoolean(3))
+                    {
+                        failingHours.Add(hour);
+                    }
+                    else
+                    {
+                        built.Add(hour);
+                        if (reader.GetBoolean(4))
+                        {
+                            blockedHours.Add(hour);
+                        }
+                    }
                 }
                 else
                 {
                     stale.Add((hour, reader.GetInt32(1)));
+                    if (reader.GetBoolean(2))
+                    {
+                        lateWriteHours.Add(hour);
+                    }
                 }
             }
         }
@@ -220,8 +318,19 @@ public static class QueryTagRollupHashRoute
             validDays = days.ToHashSet();
         }
 
-        var plan = Split(allowed, windowEnd, built, stale, validDays);
-        return plan.TablePairs.Count == 0 && plan.DayPairs.Count == 0 ? null : plan;
+        /* #6865: a built hour whose pairs are stale only for the hash table (and no pair of it is a late write) is backlog: the read starts after the
+           newest one instead of reading it from the wide table. An hour the builder will not build soon is not: one with a failure record (in
+           back-off, or retried by the normal selection, so it may not build for a day or more) and one an open writer of the wide table would
+           defer (the planner drops it before it picks a build, so it never builds and never gets a failure record; with a writer whose start
+           reads NULL that is every hour). An hour that stays stale must not pin the cut and take every older hour with it. Such an hour is read
+           wide, as before, unless a backlog hour newer than it puts it before the cut. */
+        var backlog = stale.Select(p => p.Hour)
+            .Where(h => built.Contains(h) && !lateWriteHours.Contains(h) && !failingHours.Contains(h) && !blockedHours.Contains(h))
+            .ToHashSet();
+        var (moved, waiting, leftOut) = SpanPastBacklog(allowed, windowStart, windowEnd, backlog);
+        var plan = Split(waiting == 0 ? allowed : moved, windowEnd, built, stale, validDays) with { BacklogHoursWaiting = waiting, BacklogHoursLeftOut = leftOut };
+        /* With hours left out the route answers even with no table hour in the span: today's statement would read the whole window wide. */
+        return waiting == 0 && plan.TablePairs.Count == 0 && plan.DayPairs.Count == 0 ? null : plan;
     }
 
     /// <summary>
