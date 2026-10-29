@@ -928,7 +928,8 @@ public sealed class AlertReadFailureSurfaceTests
            catch - the delivery self-alert's report is a parameter, with the count read counted in DarlingWorker. 20th exempt since
            #5867: EvaluateComposeHoursStuckAsync's wrapper catch - the compose rollup self-alert's failure record is a parameter,
            with the read exempt in DarlingWorker (it holds the alert on a failed read). */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 14, 20),
+        /* 15th counted since #6875: the identity-capacity self-alert read in the per-server sweep, counted as "identity-capacity self-alert". */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 15, 20),
     };
 
     /// <summary>
