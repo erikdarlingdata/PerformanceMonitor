@@ -165,7 +165,7 @@ public sealed class ThresholdOverrideTagScopeTests
             Assert.Equal("Production", cpu["tag"]!.GetValue<string>());
             Assert.Equal(92, cpu["effective_value"]!.GetValue<int>());
             Assert.Equal("global", Row(eight, "blocking.count_threshold")!["source"]!.GetValue<string>());
-            Assert.Equal(1, eight["tag_overrides"]!.AsArray().Count);
+            Assert.Single(eight["tag_overrides"]!.AsArray());
 
             var nine = JsonNode.Parse(await DarlingMcpAlertTools.GetAlertSettings(ds, "srv-9", ct))!["server_view"]!;
             Assert.Equal("global", Row(nine, "cpu.threshold_percent")!["source"]!.GetValue<string>());

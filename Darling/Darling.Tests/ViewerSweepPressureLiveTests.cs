@@ -77,7 +77,7 @@ public sealed class ViewerSweepPressureLiveTests
             var web = doc.RootElement.GetProperty("sweep_pressure");
 
             await using var viewer = new ViewerDataService(scratch.ConnectionString);
-            var report = await viewer.GetSweepPressureAsync(ServerId, ct);
+            var report = await viewer.GetSweepPressureAsync(ServerId, cancellationToken: ct);
             Assert.NotNull(report);
 
             var pressure = report.Pressure;
@@ -113,7 +113,7 @@ public sealed class ViewerSweepPressureLiveTests
                 SweepPressurePanel.StatRows(pressure).Select(r => r.Label));
 
             /* A server with no collection log rows has no report, as the tool answers it "unavailable". */
-            Assert.Null(await viewer.GetSweepPressureAsync(EmptyServerId, ct));
+            Assert.Null(await viewer.GetSweepPressureAsync(EmptyServerId, cancellationToken: ct));
 
             bodySucceeded = true;
         }
