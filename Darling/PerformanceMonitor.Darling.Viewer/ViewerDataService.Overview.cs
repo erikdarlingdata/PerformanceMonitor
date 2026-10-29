@@ -290,8 +290,7 @@ LIMIT 1";
         int serverId,
         string displayName,
         DeadlockRateThresholds? deadlockTiers = null,
-        CancellationToken cancellationToken = default,
-        BlockingBandThresholds? blockingTiers = null)
+        CancellationToken cancellationToken = default)
     {
         var nowUtc = DateTime.UtcNow;
         /* #3368: the window's LENGTH is named once and the start derived from it, so the card's deadlock
@@ -587,8 +586,6 @@ LIMIT 1";
             DeadlockWindow = window,
             BlockingWindow = window,
             DeadlockRateThresholds = deadlockTiers,
-            /* #6927: the store's blocking tiers, or null for today's constants. */
-            BlockingBandThresholds = blockingTiers,
             TotalThreads = totalThreads,
             CurrentWorkers = currentWorkers,
             ThreadsWaitingForCpu = threadsWaitingForCpu,

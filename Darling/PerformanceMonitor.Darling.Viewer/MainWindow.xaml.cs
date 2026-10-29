@@ -1689,7 +1689,9 @@ public partial class MainWindow : Window
                 try
                 {
                     var summary = await service.GetServerSummaryAsync(
-                        server.ServerId, server.DisplayName, deadlockTiers, blockingTiers: blockingTiers);
+                        server.ServerId, server.DisplayName, deadlockTiers);
+                    /* #6927: the store's blocking tiers; the card's blocking band and its re-band read them from the item. */
+                    summary.BlockingBandThresholds = blockingTiers;
                     summary.ServerName = server.ServerName;
                     /* #3029: the engine discriminator comes from the REGISTRY row, which already carries it
                        (servers.engine_kind, via ManagedServersSql / ServersSql) — the per-server summary
