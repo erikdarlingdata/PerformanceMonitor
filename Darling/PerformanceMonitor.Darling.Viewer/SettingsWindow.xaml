@@ -411,6 +411,15 @@
                                     <CheckBox x:Name="AlertAgentAlertGapsCheckBox" Content="SQL Server Agent alert setup has a gap (off by default)"
                                               VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
+                                <!-- #6873: the three database protection alerts. Off by default. -->
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertBackupOverdueCheckBox" Content="Full backup overdue (older than 7 days)"
+                                              VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <CheckBox x:Name="AlertLogBackupOverdueCheckBox" Content="Log backup overdue (older than 60 minutes)" Margin="12,0,0,0"
+                                              VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <CheckBox x:Name="AlertCheckDbOverdueCheckBox" Content="CHECKDB overdue (older than 14 days)" Margin="12,0,0,0"
+                                              VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
                                 <!-- #3368: Server Health Bands. Its own section, and NOT an alert section — these two tiers
                                      decide what colour a server's Overview card and the fleet roll-up read, not whether
                                      anything is delivered. They are deliberately absent from SetAlertControlsEnabled for

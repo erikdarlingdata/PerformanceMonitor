@@ -307,6 +307,10 @@ public sealed class DarlingSelfAlertTests
         /// Purge Over Horizon read-failure count.</summary>
         public AlertReadFailureCounter? ReadFailures { get; set; }
 
+        /// <summary>#6873: the three database protection switches, read live. Default off, the shipped default.</summary>
+        public bool BackupOverdueEnabled { get; set; }
+        public bool LogBackupOverdueEnabled { get; set; }
+        public bool CheckDbOverdueEnabled { get; set; }
         /// <summary>#6874: the Agent Alert Gaps switch, read live. Default off, the shipped default.</summary>
         public bool AgentAlertSetupEnabled { get; set; }
 
@@ -332,7 +336,10 @@ public sealed class DarlingSelfAlertTests
             retentionHoldCriticalRatio: WireRetentionHoldKnobs ? () => RetentionHoldCriticalRatio : null,
             readFailures: ReadFailures,
             storeName: StoreName,
-            agentAlertSetupEnabled: () => AgentAlertSetupEnabled);
+            agentAlertSetupEnabled: () => AgentAlertSetupEnabled,
+            backupOverdueEnabled: () => BackupOverdueEnabled,
+            logBackupOverdueEnabled: () => LogBackupOverdueEnabled,
+            checkDbOverdueEnabled: () => CheckDbOverdueEnabled);
     }
 
     /* ---------------- #991 Availability Group fixtures ---------------- */

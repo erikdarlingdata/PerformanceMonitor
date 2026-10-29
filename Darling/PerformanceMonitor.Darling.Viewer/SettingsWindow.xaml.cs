@@ -932,6 +932,9 @@ public partial class SettingsWindow : Window
         AlertFailedJobLookbackBox.Text = r.FailedJobLookbackMinutes.ToString(CultureInfo.InvariantCulture);
         AlertDatabaseStateCheckBox.IsChecked = r.DatabaseStateEnabled;
         AlertAgentAlertGapsCheckBox.IsChecked = r.AgentAlertGapsEnabled;
+        AlertBackupOverdueCheckBox.IsChecked = r.BackupOverdueEnabled;
+        AlertLogBackupOverdueCheckBox.IsChecked = r.LogBackupOverdueEnabled;
+        AlertCheckDbOverdueCheckBox.IsChecked = r.CheckDbOverdueEnabled;
         AlertCooldownBox.Text = r.CooldownMinutes.ToString(CultureInfo.InvariantCulture);
         AnalysisEnabledCheckBox.IsChecked = r.AnalysisEnabled;
         AnalysisIntervalBox.Text = r.AnalysisIntervalMinutes.ToString(CultureInfo.InvariantCulture);
@@ -1002,6 +1005,9 @@ public partial class SettingsWindow : Window
             FailedJobEnabled = AlertFailedJobCheckBox.IsChecked == true,
             DatabaseStateEnabled = AlertDatabaseStateCheckBox.IsChecked == true,
             AgentAlertGapsEnabled = AlertAgentAlertGapsCheckBox.IsChecked == true,
+            BackupOverdueEnabled = AlertBackupOverdueCheckBox.IsChecked == true,
+            LogBackupOverdueEnabled = AlertLogBackupOverdueCheckBox.IsChecked == true,
+            CheckDbOverdueEnabled = AlertCheckDbOverdueCheckBox.IsChecked == true,
             AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true,
             AnalysisNotificationsEnabled = AnalysisNotificationsCheckBox.IsChecked == true,
             /* #3712 (V137): the combo's Tag IS the stored value -- 'digest' / 'page', or empty for NULL ("the file
@@ -1398,6 +1404,12 @@ public partial class SettingsWindow : Window
             parts.Add($"PVS >= {AlertPvsThresholdPercentBox.Text}% of database");
         if (AlertAgentAlertGapsCheckBox.IsChecked == true)
             parts.Add("Agent alert setup gaps");
+        if (AlertBackupOverdueCheckBox.IsChecked == true)
+            parts.Add("full backup overdue");
+        if (AlertLogBackupOverdueCheckBox.IsChecked == true)
+            parts.Add("log backup overdue");
+        if (AlertCheckDbOverdueCheckBox.IsChecked == true)
+            parts.Add("CHECKDB overdue");
         if (AlertFileGrowthCheckBox.IsChecked == true)
             /* #3539 A8c: the rise is a RATE (MB per hour) averaged over the lookback, in the same unit phrase the
                row's label, the alert's threshold line and the MCP payload description use. It used to read
@@ -1492,6 +1504,9 @@ public partial class SettingsWindow : Window
         AlertLowDiskThresholdPercentBox.IsEnabled = enabled;
         AlertPvsCheckBox.IsEnabled = enabled;
         AlertAgentAlertGapsCheckBox.IsEnabled = enabled;
+        AlertBackupOverdueCheckBox.IsEnabled = enabled;
+        AlertLogBackupOverdueCheckBox.IsEnabled = enabled;
+        AlertCheckDbOverdueCheckBox.IsEnabled = enabled;
         AlertPvsThresholdPercentBox.IsEnabled = enabled;
         AlertPvsFloorGbBox.IsEnabled = enabled;
         AlertLowDiskThresholdGbBox.IsEnabled = enabled;

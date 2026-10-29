@@ -928,7 +928,7 @@ public sealed class AlertReadFailureSurfaceTests
            catch - the delivery self-alert's report is a parameter, with the count read counted in DarlingWorker. 20th exempt since
            #5867: EvaluateComposeHoursStuckAsync's wrapper catch - the compose rollup self-alert's failure record is a parameter,
            with the read exempt in DarlingWorker (it holds the alert on a failed read). */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 14, 20),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 15, 20),
     };
 
     /// <summary>
@@ -1043,8 +1043,9 @@ public sealed class AlertReadFailureSurfaceTests
     /// swallowed read leaves the standing alert unjudged (the worker holds it rather than resolving it). And a FORTY-THIRD since #5715 part B: the escalation-tier seed read ("escalation tier seed"), counted because a swallowed read leaves a Warning delivered before a restart unknown to the engine, so the Critical that follows waits out the cooldown instead of escalating; it seeds nothing, never blocks a fire, and is retried on the next sweep.</para>
     /// And a FORTY-FOURTH since #5916: the threshold-override reload ("threshold-override reload"), counted because a swallowed read keeps the overrides already in force, so a nonzero count says a changed override has not yet taken effect.
     /// And a FORTY-FIFTH since #6874: the Agent Alert Gaps read ("agent-alert-setup self-alert"), counted because a swallowed read leaves the standing alert unjudged and a nonzero count says the setup check is not running.
+    /// And a FORTY-SIXTH since #6873: the database-protection read ("database-protection self-alert"), counted because a swallowed read leaves the Backup Overdue, Log Backup Overdue and CHECKDB Overdue alerts unjudged.
     /// </summary>
-    private const int CountedSites = 45;
+    private const int CountedSites = 46;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the

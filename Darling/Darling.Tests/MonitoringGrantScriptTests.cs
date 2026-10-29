@@ -306,7 +306,7 @@ public sealed class MonitoringGrantScriptTests
         Assert.Null(MonitoringGrantScript.DescribeMissingGrants(Array.Empty<(GrantEntry, string)>()));
     }
 
-    /* #6889: Amazon RDS for SQL Server has no sysadmin and refuses CONNECT ANY DATABASE, ALTER SETTINGS and seven msdb grants to its
+    /* #6889: Amazon RDS for SQL Server has no sysadmin and refuses CONNECT ANY DATABASE, ALTER SETTINGS and eight msdb grants to its
        master user. The RDS form leaves those out and gives the login a user in each user database instead. */
     private static string RdsScript(bool finOps = false) => MonitoringGrantScript.Build(
         MonitoringGrantScript.ChoosePrincipal(Inputs("sql", "pm_monitor")), finOps, azureSqlDatabase: false, serverLabel: "db1.abc.us-east-1.rds.amazonaws.com", awsRds: true);
@@ -352,7 +352,10 @@ public sealed class MonitoringGrantScriptTests
                 "GRANT SELECT ON dbo.sysjobhistory TO [pm_monitor];",
             },
             StatementLines(msdb));
-        Assert.DoesNotContain("backupset", msdb.Replace("msdb.dbo.backupset needs no grant, public already reads it", "", StringComparison.Ordinal));
+        /* #6882: the backup history grant is the eighth RDS refuses, so no GRANT names backupset (the list above has none) and the
+           comment says the backups and CHECKDB view still fills without it. */
+        Assert.DoesNotContain("GRANT SELECT ON dbo.backupset", msdb);
+        Assert.Contains("can read msdb.dbo.backupset without it", msdb);
         Assert.Contains("Running Jobs and Agent Status do not collect on RDS", msdb);
     }
 

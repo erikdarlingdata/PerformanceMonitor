@@ -1508,6 +1508,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpForcedPlanTools>()
             /* #6874: get_agent_alerts, the SQL Server Agent alerts and what they lack. */
             .WithGeminiCompatibleTools<DarlingMcpAgentAlertTools>()
+            /* #6873: get_database_protection, the last good CHECKDB and the last full and log backup per database. */
+            .WithGeminiCompatibleTools<DarlingMcpDatabaseProtectionTools>()
             /* #6073: get_query_store_aborts, the queries ranked by aborted and failed Query Store runs. */
             .WithGeminiCompatibleTools<DarlingMcpQueryStoreAbortsTools>()
             /* #6072: get_cpu_by_database, get_load_by_caller and get_query_pileups, who drove the load. */

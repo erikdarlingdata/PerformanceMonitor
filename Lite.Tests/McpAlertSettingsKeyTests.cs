@@ -194,6 +194,15 @@ public sealed class McpAlertSettingsKeyTests
     /// <c>agent_alert_gaps.enabled</c> would advertise a switch this product cannot act on, the placeholder failure
     /// <see cref="GetAlertSettings_OmitsSelfAlerts_WhichLiteHasNoEquivalentFor"/>'s history rejected. Omission is the honest answer.</summary>
     private const string AgentAlertGapsGroup = "agent_alert_gaps";
+    /// <summary>#6873 (V223): the three groups Darling reports for the database-protection alerts (Backup Overdue,
+    /// Log Backup Overdue, CHECKDB Overdue) and Lite does not. Each switch governs an alert judged over the
+    /// <c>database_protection</c> collector's last good CHECKDB and last full and log backup, and Lite has no such
+    /// collector: nothing in this SKU reads msdb's backup history or the DBCC CHECKDB fact. The payload is held to that by
+    /// <see cref="GetAlertSettings_OmitsDatabaseProtectionAlerts_BecauseLiteHasNoDatabaseProtectionCollector"/>: Darling
+    /// emits all three groups and Lite none.
+    /// Emitting the switches here would advertise knobs this product cannot act on, the placeholder failure this
+    /// file's history rejected for <c>ag.disconnect_refire_minutes</c>.</summary>
+    private static readonly string[] DatabaseProtectionGroups = { "backup_overdue", "log_backup_overdue", "checkdb_overdue" };
 
     /// <summary>#2417: the MEMBER-level counterpart to <see cref="SelfAlertsGroup"/> — Darling keys Lite
     /// genuinely has no equivalent for, exempted BY NAME so the hole is a decision someone justified here
@@ -336,7 +345,8 @@ public sealed class McpAlertSettingsKeyTests
 
         foreach (var (group, darlingKeys) in darling)
         {
-            if (group == SelfAlertsGroup || group == HealthBandsGroup || group == FleetSweepGroup || group == AgentAlertGapsGroup) continue;
+            if (group == SelfAlertsGroup || group == HealthBandsGroup || group == FleetSweepGroup || group == AgentAlertGapsGroup
+                || DatabaseProtectionGroups.Contains(group, StringComparer.Ordinal)) continue;
 
             if (!root.TryGetProperty(group, out var element))
             {
@@ -455,6 +465,21 @@ public sealed class McpAlertSettingsKeyTests
             .ToArray();
 
         Assert.Empty(bandCallers);
+    }
+
+    /// <summary>
+    /// #6873 (V223): the group-level omission's paying test for the three database-protection alert switches, in the
+    /// health-bands shape's halves. Darling must still emit all three groups (or the exemption is dead weight hiding a
+    /// Darling regression), and Lite must still emit none.
+    /// </summary>
+    [Fact]
+    public void GetAlertSettings_OmitsDatabaseProtectionAlerts_BecauseLiteHasNoDatabaseProtectionCollector()
+    {
+        foreach (var group in DatabaseProtectionGroups)
+        {
+            Assert.Contains(group, DarlingPayloadShape().Select(g => g.Key));
+            Assert.DoesNotContain(group, KeysOf(Settings()));
+        }
     }
 
     /// <summary>
