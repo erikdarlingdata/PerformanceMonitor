@@ -27,8 +27,8 @@ namespace Darling.Tests;
 /// <summary>The scratch store behind <see cref="StoreInstallIdRefusedClusterLiveTests"/>: a database of its own,
 /// migrated once through the real ladder, and a login that has no more than the store's runtime role has on the
 /// install id table (it is not a superuser, so a REVOKE on <c>pg_control_system()</c> reaches it). A second
-/// connection string puts a function that always fails ahead of the real one on the login's search path, to make a
-/// failure that is not a refusal. The login is dropped with the database.</summary>
+/// connection string puts a view whose read always fails ahead of <c>pg_database</c> on the login's search path, to make
+/// a failure of the binding statement that is not a refusal. The login is dropped with the database.</summary>
 public sealed class RefusedClusterScratchStore : IAsyncLifetime
 {
     private const string LoginPassword = "install-id-login-pw";
@@ -44,7 +44,9 @@ public sealed class RefusedClusterScratchStore : IAsyncLifetime
     /// <summary>The same store as the login without superuser rights.</summary>
     public string? LoginConnectionString => _scratch is null ? null : LoginBuilder().ConnectionString;
 
-    /// <summary>The login's connection with a failing <c>pg_control_system()</c> found before the real one.</summary>
+    /// <summary>The login's connection with a failing <c>pg_database</c> found before the real one. The binding statement
+    /// reads <c>pg_database</c> unqualified (its cluster id call is qualified since #6888, so a shadow of that function no
+    /// longer reaches it), and the cluster id privilege check passes for this login.</summary>
     public string? FailingFunctionConnectionString
     {
         get
@@ -84,10 +86,12 @@ CREATE ROLE {_loginName} LOGIN NOSUPERUSER PASSWORD '{LoginPassword}';
 GRANT USAGE ON SCHEMA config TO {_loginName};
 GRANT SELECT, INSERT, UPDATE, DELETE ON config.config_install_id TO {_loginName};
 CREATE SCHEMA shadow;
-CREATE FUNCTION shadow.pg_control_system() RETURNS TABLE(system_identifier bigint) LANGUAGE plpgsql
-AS $body$ BEGIN RAISE EXCEPTION 'the cluster id read failed' USING ERRCODE = '55000'; END $body$;
+CREATE FUNCTION shadow.fail_the_read() RETURNS boolean LANGUAGE plpgsql
+AS $body$ BEGIN RAISE EXCEPTION 'the database read failed' USING ERRCODE = '55000'; END $body$;
+CREATE VIEW shadow.pg_database AS SELECT d.oid, d.datname FROM pg_catalog.pg_database AS d WHERE shadow.fail_the_read();
 GRANT USAGE ON SCHEMA shadow TO {_loginName};
-GRANT EXECUTE ON FUNCTION shadow.pg_control_system() TO {_loginName};";
+GRANT EXECUTE ON FUNCTION shadow.fail_the_read() TO {_loginName};
+GRANT SELECT ON shadow.pg_database TO {_loginName};";
         await using var command = new NpgsqlCommand(sql, connection);
         await command.ExecuteNonQueryAsync(CancellationToken.None);
     }
@@ -432,6 +436,37 @@ public sealed class StoreInstallIdRefusedClusterLiveTests : IClassFixture<Refuse
         var after = new CapturingTestLogger();
         Assert.Equal(newId, await StoreInstallId.EnsureAsync(login, after, ct));
         Assert.Equal(0, after.CountAtLevel(LogLevel.Warning));
+    }
+
+    /// <summary>#6888: the store may share a server with a target Darling monitors, whose log Darling reads. A login that is
+    /// refused <c>pg_control_system()</c> is told apart by asking first, so the start leaves no ERROR line behind. The bare
+    /// call the binding statement used to make is the control and adds one.</summary>
+    [Fact]
+    public async Task Ensure_WhenTheLoginMayNotReadTheClusterId_LeavesNoErrorInTheServerLog_WhereTheBareCallLeavesOne()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var owner = await OwnerAsync(ct);
+        var log = await PgOwnErrorsNotInTargetLogLiveTests.ServerLog.OpenAsync(OwnerConnectionString, ct);
+        await RefuseClusterIdAsync(owner, ct);
+        await using var login = await OpenAsync(_store.LoginConnectionString!, ct);
+
+        var mark = log.Mark();
+        var refused = await Assert.ThrowsAsync<PostgresException>(async () =>
+        {
+            await using var bare = new NpgsqlCommand("SELECT * FROM pg_catalog.pg_control_system()", login);
+            await bare.ExecuteNonQueryAsync(ct);
+        });
+        Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, refused.SqlState);
+        Assert.Single(log.ErrorLinesSince(mark, "pg_control_system"));
+
+        mark = log.Mark();
+        var logger = new CapturingTestLogger();
+        var id = await StoreInstallId.EnsureAsync(login, logger, ct);
+
+        Assert.Empty(log.ErrorLinesSince(mark, "pg_control_system"));
+        Assert.True(InstallId.IsValid(id), $"'{id}' is not eight lowercase hex digits");
+        Assert.Null((await ReadRowAsync(owner, ct)).SystemIdentifier);
+        Assert.Single(logger.Lines, IsTheDatabaseAloneLine);
     }
 
     /// <summary>Only a refusal (permission denied) falls back. A read that fails for any other reason is a store that

@@ -330,6 +330,13 @@ LIMIT 500";
     };
 
     /// <summary>
+    /// #6888: only the extension arm reads pg_wait_sampling. The sampler arm (connect probe found the extension absent)
+    /// runs without it, so a missing extension must not stop that run.
+    /// </summary>
+    public override bool ReadsPgExtension(PgExtensionDependency extension, CollectorContext context)
+        => context.Target.HasPgWaitSamplingExtension;
+
+    /// <summary>
     /// The arm (#3604): the extension's profile when the connect probe found <c>pg_wait_sampling</c> created in
     /// this database, the service sampler's batch when it did not. Decided off <see cref="CollectorContext.Target"/>
     /// rather than probed here so the choice is the connect-time one every other tier fact is.

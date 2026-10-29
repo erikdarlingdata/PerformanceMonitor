@@ -447,6 +447,11 @@ WHERE calls > 0";
         },
     };
 
+    /* #6888: Aurora reads aurora_stat_statements(), which needs no extension, so a missing pg_stat_statements row there
+       is not a reason to skip the run (the declaration's AuroraNativeAlternative says the same). */
+    public override bool ReadsPgExtension(PgExtensionDependency extension, CollectorContext context)
+        => !(context.Target.IsAurora && extension.AuroraNativeAlternative is not null);
+
     /* #6143: the stock view named by the schema pg_stat_statements was created in, which need not be public; the
        monitoring connection's search_path is pg_catalog. Aurora's aurora_stat_statements() is named by the schema
        the host found it in, pg_catalog or the extension's own. */
