@@ -679,7 +679,8 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .chart .hover-dot { stroke: var(--bg-dark); stroke-width: 1.5; }
 .chart .series-dot { stroke: var(--bg-dark); stroke-width: 1.5; } /* a single-bucket series' resting marker (no segment to stroke) */
 /* #6291: the Overview's stacked strips: a title and the crosshair's readout over each strip; the baseline band sits behind a line. */
-.chart .overview-strips { display: block; max-width: 100%; user-select: none; }
+/* #6929: the strips draw 482 px tall, so the generic 300 px cap above would shrink and letterbox the drawing and put the crosshair off the pointer. */
+.chart .overview-strips { display: block; max-width: 100%; max-height: none; user-select: none; }
 .chart .overview-strips .strip-title { fill: var(--fg); font-size: 12px; font-weight: 600; }
 .chart .overview-strips .strip-readout { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .chart .overview-strips .strip-none { fill: var(--dim); font-size: 11px; }
@@ -1556,7 +1557,7 @@ table.data td.rec-text { min-width: 16rem; }
 .daycal-btn { background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 0.2rem 0.6rem; font: inherit; cursor: pointer; }
 .daycal-btn:hover:not([disabled]) { border-color: var(--accent); }
 .daycal-btn[disabled] { opacity: 0.45; cursor: default; }
-.daycal-grid { display: flex; flex-direction: column; gap: 3px; max-width: 46rem; }
+.daycal-grid { display: flex; flex-direction: column; gap: 3px; }
 .daycal-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
 .daycal-name { text-align: center; color: var(--muted); font-size: 0.72rem; }
 .daycal-cell { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 2.8rem; min-width: 0; overflow: hidden; padding: 0.15rem; border: 1px solid var(--border); border-radius: 4px; background: var(--card); color: var(--fg); font: inherit; cursor: pointer; }
