@@ -539,7 +539,7 @@ public sealed class WebPlainTextTests
     {
         var o = Run(
         [
-            "example-pg-01 runs PostgreSQL. The pg_cpu_utilization collector does not run on that engine — its own AppliesTo gate excludes it — so this server does not collect the data, and never will. This is a permanent engine capability gap, not a collection outage.",
+            "example-pg-01 runs PostgreSQL. The pg_cpu_utilization collector does not run on this engine, so this server does not collect the data, and never will. This is a permanent engine capability gap, not a collection outage.",
             "No stored plan for this query. pg_stat_statements has none.",
         ], out var line);
         Assert.Equal(line, o[0]);

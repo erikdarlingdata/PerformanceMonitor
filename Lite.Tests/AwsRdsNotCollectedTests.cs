@@ -136,6 +136,9 @@ public sealed class AwsRdsNotCollectedTabNoteTests
             text);
         Assert.Contains("Amazon RDS", text, StringComparison.Ordinal);
         Assert.DoesNotContain("Possible cause", text, StringComparison.Ordinal);
+        Assert.Contains("collector does not run on Amazon RDS", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("AppliesTo", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("—", text, StringComparison.Ordinal);
     }
 
     [Fact]
