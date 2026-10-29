@@ -76,11 +76,11 @@ public sealed class ViewerDatabaseProtectionTextTests
     }
 
     [Fact]
-    public void APlatformManagedTarget_ShowsTheAgeAndTheLabel_AndIsNeverOverdue()
+    public void APlatformManagedTarget_ShowsTheAgeAndTheLabel_AndIsNotOverdueWhenRdsCheckDbIsRecent()
     {
         var read = Read(
             Fact("azure_db", platform: "platform_managed", checkDbAgo: 40 * Day, fullAgo: 30 * Day, logAgo: 5 * Day),
-            Fact("rds_db", platform: "native_only", fullAgo: 30 * Day, logState: "unavailable", checkDbState: "unknown"));
+            Fact("rds_db", platform: "native_only", checkDbAgo: Day, fullAgo: 30 * Day, logState: "unavailable"));
 
         var rows = ViewerDatabaseProtectionText.Rows(read);
 
@@ -90,6 +90,9 @@ public sealed class ViewerDatabaseProtectionTextTests
         Assert.Equal(("30 days (native only)", "native only"), (rows[1].FullBackup, rows[1].Platform));
         Assert.Equal("ok", read.Status);
         Assert.DoesNotContain(rows, r => r.Overdue);
+        // #6902: the RDS row is not overdue because its CHECKDB passed a day ago, not because it is skipped.
+        var rds = read.Databases.Single(d => d.Fact.DatabaseName == "rds_db").Band;
+        Assert.Equal(("native_only", "ok"), (rds.FullBackup.State, rds.CheckDb.State));
     }
 
     [Fact]
