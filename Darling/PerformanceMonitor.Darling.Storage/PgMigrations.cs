@@ -2973,7 +2973,20 @@ $rung$;";
         new Migration(222, "agent-alerts", V222Sql),
         new Migration(223, "database-protection", V223Sql),
         new Migration(224, "identity-capacity", V224Sql),
+        new Migration(225, "server-aws-rds", V225Sql),
     };
+
+    /// <summary>
+    /// V225 (#6894): <c>collect.servers.is_aws_rds</c>, whether the target is an Amazon RDS for SQL Server instance (the connect query's
+    /// <c>DB_ID('rdsadmin') IS NOT NULL</c>), written on every connect. The collectors that RDS gates off (running jobs, Agent status, Agent alerts)
+    /// never run there, so nothing in the store could tell the read side why they have no data, and an RDS target was answered as if a setup
+    /// step on the server could fix it. NULL means no connect has stamped it yet (and a PostgreSQL target, where it is not a SQL Server fact),
+    /// which makes no claim. No backfill: a registration fills its own on its next connect. No view refresh: <c>collect.servers</c> is a
+    /// registry, not a hypertable.
+    /// </summary>
+    private const string V225Sql = @"
+ALTER TABLE collect.servers
+    ADD COLUMN IF NOT EXISTS is_aws_rds boolean;";
 
     /// <summary>
     /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c>, the failure record of the Query Store compose builder: one row

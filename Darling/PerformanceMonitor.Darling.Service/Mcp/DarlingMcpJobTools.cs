@@ -64,7 +64,9 @@ public sealed class DarlingMcpJobTools
                        remove, surviving in the one case that records nothing to read.
 
                        The gate is !IsAzureSqlDb && !IsAwsRds. The engine half is already answered above,
-                       so AWS RDS is the only remaining candidate (#2559 removed HasMsdbAccess from this gate).
+                       so AWS RDS is the only remaining candidate (#2559 removed HasMsdbAccess from this gate). Since #6894 the registry records the RDS fact on
+                       every connect and the capability read above answers not_collected for it, so this route is reached only by a server no
+                       connect has stamped yet (or a read that failed).
                        The message still names it as a possible cause: a run that is merely late looks the same
                        from here. The text is shared with Lite, so the two tools cannot drift. */
                     ?? await DarlingRuntimePrecondition.GatedOffStatusAsync(

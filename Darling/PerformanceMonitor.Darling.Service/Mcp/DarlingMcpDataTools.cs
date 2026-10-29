@@ -1838,9 +1838,9 @@ public sealed class DarlingMcpDataTools
             : GetCollectionHealthCoreAsync(postgres, server_name, full_detail, uncutText: false, logger, cancellationToken);
 
     /// <summary>The enabled servers and the engine facts the fleet liveness read needs to say which servers a collector does not apply to
-    /// (the same two columns <see cref="DarlingEngineCapability.ServerEngineSql"/> reads, for every enabled server at once).</summary>
+    /// (the same two columns <see cref="DarlingEngineCapability.ServerEngineSql"/> reads, plus the Amazon RDS fact of V225, for every enabled server at once).</summary>
     internal const string FleetServersSql = @"
-SELECT server_id, server_name, display_name, sql_engine_edition, engine_kind
+SELECT server_id, server_name, display_name, sql_engine_edition, engine_kind, is_aws_rds
 FROM servers
 WHERE is_enabled
 ORDER BY server_name";
@@ -1874,7 +1874,8 @@ ORDER BY server_name";
                     servers.Add(new CollectorFleetLiveness.ServerFacts(
                         reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2),
                         reader.IsDBNull(3) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(3),
-                        reader.IsDBNull(4) ? null : reader.GetString(4)));
+                        reader.IsDBNull(4) ? null : reader.GetString(4),
+                        !reader.IsDBNull(5) && reader.GetBoolean(5)));
                 }
             }
 

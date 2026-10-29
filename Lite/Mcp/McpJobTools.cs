@@ -35,7 +35,7 @@ public sealed class McpJobTools
             var rows = read.Jobs;
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "running_jobs")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "running_jobs")
                     /* #2546: the msdb case. "No running SQL Agent jobs found" is an affirmative claim about
                        the server's Agent, and it is the wrong one when the monitoring login was refused the
                        job tables — the collector runs, is denied, and records that denial with the GRANT to
