@@ -55,7 +55,7 @@ public class ServerManager
     /// DB monitoring login often lacks, and coupling edition detection to it made the whole probe
     /// throw and silently mis-detect Azure SQL DB (EngineEdition 5) as on-prem (#1535). Must
     /// succeed for any connected login. Columns: 0 sql_version, 1 major_version, 2 utc_offset,
-    /// 3 engine_edition, 4 is_aws_rds, 5 has_msdb_access.
+    /// 3 engine_edition, 4 is_aws_rds, 5 has_msdb_access, 6 edition_name (#6893).
     /// </summary>
     internal const string DetectionQueryText = @"
         SELECT /* PerformanceMonitorLite */
@@ -64,7 +64,8 @@ public class ServerManager
             DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) AS utc_offset_minutes,
             CONVERT(integer, SERVERPROPERTY('EngineEdition')) AS engine_edition,
             CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds,
-            HAS_DBACCESS(N'msdb') AS has_msdb_access";
+            HAS_DBACCESS(N'msdb') AS has_msdb_access,
+            CONVERT(nvarchar(128), SERVERPROPERTY('Edition')) AS edition_name";
 
     /// <summary>
     /// Best-effort start-time read - <c>sqlserver_start_time</c> is the ONLY probe fact that
@@ -851,6 +852,9 @@ public class ServerManager
                         status.IsAwsRds = Convert.ToInt32(reader.GetValue(4)) == 1;
                     if (!reader.IsDBNull(5))
                         status.HasMsdbAccess = Convert.ToInt32(reader.GetValue(5)) == 1;
+                    /* #6893: RDS refuses every Extended Events session create on Web and Express, and EngineEdition is 2 for Web and Standard alike. */
+                    status.IsAwsRdsWebOrExpress = status.IsAwsRds && !reader.IsDBNull(6)
+                        && PerformanceMonitor.Collectors.CollectorEngineCapability.IsWebOrExpressEditionName(reader.GetString(6));
                 }
             }
             catch (SqlException metaEx)

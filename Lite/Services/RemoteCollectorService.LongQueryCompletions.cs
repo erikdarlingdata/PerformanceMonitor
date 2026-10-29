@@ -123,6 +123,13 @@ public partial class RemoteCollectorService
             return;
         }
 
+        /* #6893: Amazon RDS Web and Express refuse every Extended Events session create and write each refusal into the instance's own
+           error log. The collector does not apply there (CollectorTargetInfo.XeSessionSupported), so neither the create nor the drop is sent. */
+        if (_serverManager.GetConnectionStatus(server.Id).IsAwsRdsWebOrExpress)
+        {
+            return;
+        }
+
         var schedule = _scheduleManager.GetScheduleForServer(server.Id, "long_query_completions");
         var enabled = schedule?.Enabled ?? false;
 

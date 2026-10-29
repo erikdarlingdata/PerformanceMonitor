@@ -380,6 +380,121 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.Contains("throw new DarlingXeSessionDeniedException(attentionFault);", source, StringComparison.Ordinal);
     }
 
+    /* ── #6893: a refused deadlock or blocked-process create is carried to the run, never read as a quiet server ── */
+
+    private static readonly Exception Denial = LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(15247, 14, "User does not have permission to perform this action.");
+
+    [Fact]
+    public async Task Deadlock_AndBlockedProcess_CreateDeniedInEveryDatabase_RecordPermissions_AndNoReadHappens()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Alpha.CreateFailure = Denial;
+        rig.Beta.CreateFailure = Denial;
+
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(rig.State, rig.Runner, DateTime.UtcNow, NullLogger.Instance, CancellationToken.None);
+
+        var deadlock = DarlingWorker.CaptureEnsureFaultFor("deadlocks", rig.State);
+        var blocked = DarlingWorker.CaptureEnsureFaultFor("blocked_process_report", rig.State);
+        Assert.NotNull(deadlock);
+        Assert.NotNull(blocked);
+        Assert.True(deadlock!.IsPermission);
+        Assert.True(blocked!.IsPermission);
+        Assert.Contains("ALTER ANY EVENT SESSION", deadlock.Message, StringComparison.Ordinal);
+        Assert.Null(DarlingWorker.CaptureEnsureFaultFor("wait_stats", rig.State));
+        Assert.Null(DarlingWorker.CaptureEnsurePartialNoteFor("deadlocks", rig.State));
+    }
+
+    [Fact]
+    public async Task Deadlock_AndBlockedProcess_AnyOtherCreateFailureInEveryDatabase_RecordsSessionMissing()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Alpha.CreateFailure = new InvalidOperationException("The create was refused.");
+        rig.Beta.CreateFailure = rig.Alpha.CreateFailure;
+        var logger = new CapturingLogger();
+
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(rig.State, rig.Runner, DateTime.UtcNow, logger, CancellationToken.None);
+
+        var deadlock = DarlingWorker.CaptureEnsureFaultFor("deadlocks", rig.State);
+        Assert.NotNull(deadlock);
+        Assert.False(deadlock!.IsPermission);
+        Assert.Contains("The create was refused.", deadlock.Message, StringComparison.Ordinal);
+        Assert.False(DarlingWorker.CaptureEnsureFaultFor("blocked_process_report", rig.State)!.IsPermission);
+        Assert.DoesNotContain(logger.Lines, l => l.Contains("zero rows", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Deadlock_CreateRefusedInSomeDatabases_IsAPartialNote_NotAFault_AndALaterSuccessClearsBoth()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Alpha.CreateFailure = new InvalidOperationException("The create was refused.");
+
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(rig.State, rig.Runner, DateTime.UtcNow, NullLogger.Instance, CancellationToken.None);
+
+        Assert.Null(DarlingWorker.CaptureEnsureFaultFor("deadlocks", rig.State));
+        var note = DarlingWorker.CaptureEnsurePartialNoteFor("deadlocks", rig.State);
+        Assert.NotNull(note);
+        Assert.Contains("alpha", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("beta", note, StringComparison.Ordinal);
+
+        /* The login is granted: the next ensure replaces what the last one left. */
+        rig.Alpha.CreateFailure = null;
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(rig.State, rig.Runner, DateTime.UtcNow.AddHours(2), NullLogger.Instance, CancellationToken.None);
+        Assert.Null(DarlingWorker.CaptureEnsureFaultFor("deadlocks", rig.State));
+        Assert.Null(DarlingWorker.CaptureEnsurePartialNoteFor("deadlocks", rig.State));
+    }
+
+    [Fact]
+    public async Task Deadlock_CreateDenied_ThenGranted_ClearsTheFault()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Alpha.CreateFailure = Denial;
+        rig.Beta.CreateFailure = Denial;
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(rig.State, rig.Runner, DateTime.UtcNow, NullLogger.Instance, CancellationToken.None);
+        Assert.NotNull(DarlingWorker.CaptureEnsureFaultFor("deadlocks", rig.State));
+
+        rig.Alpha.CreateFailure = null;
+        rig.Beta.CreateFailure = null;
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(rig.State, rig.Runner, DateTime.UtcNow.AddHours(2), NullLogger.Instance, CancellationToken.None);
+        Assert.Null(DarlingWorker.CaptureEnsureFaultFor("deadlocks", rig.State));
+        Assert.Null(DarlingWorker.CaptureEnsureFaultFor("blocked_process_report", rig.State));
+    }
+
+    [Fact]
+    public void CaptureFaultFor_ClassifiesByThePermissionNumbers()
+    {
+        Assert.True(DarlingXeSessions.CaptureFaultFor(Denial, "deadlock").IsPermission);
+        Assert.True(DarlingXeSessions.CaptureFaultFor(LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(262, 14, "denied"), "deadlock").IsPermission);
+        Assert.False(DarlingXeSessions.CaptureFaultFor(LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(1105, 17, "The filegroup is full."), "deadlock").IsPermission);
+    }
+
+    [Theory]
+    [InlineData(true, true, false)]
+    [InlineData(true, false, true)]
+    [InlineData(false, true, true)]
+    [InlineData(false, false, true)]
+    public async Task AnRdsWebOrExpressInstance_GetsNoEnsure_AndNoSessionIsTried(bool isAwsRds, bool webOrExpress, bool ensureRuns)
+    {
+        var rig = BuildRig(azureSqlDatabase: false);
+        var runtime = new ServerRuntime
+        {
+            Config = rig.Runtime.Config,
+            ConnectionString = rig.Runtime.ConnectionString,
+            Target = new CollectorTargetInfo { IsAwsRds = isAwsRds, IsAwsRdsWebOrExpress = webOrExpress },
+            StorageName = rig.Runtime.StorageName,
+            ServerId = rig.Runtime.ServerId,
+        };
+
+        var attention = await DarlingXeSessions.EnsureAllAsync(runtime, rig.Runner, NullLogger.Instance, CancellationToken.None);
+
+        Assert.Null(attention);
+        Assert.Equal(ensureRuns ? 1 : 0, rig.ServerScopedEnsures);
+        Assert.Empty(rig.Alpha.Statements);
+    }
+
     [Fact]
     public async Task L5_ADisabledCollector_GetsNoSession_AndNothingIsDropped_AndEnablingItEnsuresAtOnce()
     {

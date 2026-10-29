@@ -86,6 +86,13 @@ public class ServerConnectionStatus
     public bool IsAwsRds { get; set; }
 
     /// <summary>
+    /// Whether this server is an AWS RDS instance on the Web or Express edition (#6893), where RDS refuses every Extended Events
+    /// session create. Set by the connection check from <c>SERVERPROPERTY('Edition')</c> together with <see cref="IsAwsRds"/>,
+    /// because EngineEdition is 2 for both Web and Standard.
+    /// </summary>
+    public bool IsAwsRdsWebOrExpress { get; set; }
+
+    /// <summary>
     /// Whether the connected login has access to msdb. (Lite)
     /// Used for gating collectors that query msdb system tables (e.g., running jobs).
     /// </summary>

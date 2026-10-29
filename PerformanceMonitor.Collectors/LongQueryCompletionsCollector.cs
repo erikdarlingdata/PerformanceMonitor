@@ -221,6 +221,9 @@ public sealed class LongQueryCompletionsCollector : CollectorDefinitionBase<Long
     /// ensures the session per database and this read then runs per database, exactly like the
     /// blocked-process and deadlock collectors.
     /// </summary>
+    /// <summary>#6893: not dispatched on an Amazon RDS Web or Express instance, where RDS refuses every Extended Events session create.</summary>
+    public override bool AppliesTo(CollectorTargetInfo target) => CollectorTargetInfo.XeSessionSupported(target);
+
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
 
     /// <summary>

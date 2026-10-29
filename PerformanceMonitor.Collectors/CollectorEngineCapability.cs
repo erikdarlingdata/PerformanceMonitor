@@ -216,12 +216,39 @@ public static class CollectorEngineCapability
         };
 
     /// <summary>
+    /// The engine edition the registry records for an Amazon RDS for SQL Server instance on the Web or Express edition (#6893). Not a
+    /// <c>SERVERPROPERTY('EngineEdition')</c> value: that is 2 for both Web and Standard and 4 for Express, so it cannot tell a target
+    /// whose RDS refuses every Extended Events session from one that allows them. The probe's <c>SERVERPROPERTY('Edition')</c> and the
+    /// RDS flag decide it (<see cref="EffectiveEngineEdition"/>), and the capability sweep treats it as an edition of its own, so the
+    /// four XE-session collectors derive a permanent <c>not_collected</c> gap on it exactly as they would on any engine that lacks the feature.
+    /// </summary>
+    public const int AwsRdsWebOrExpressEngineEdition = 1002;
+
+    /// <summary>
+    /// True when <c>SERVERPROPERTY('Edition')</c> names the Web or Express edition (<c>Web Edition (64-bit)</c>,
+    /// <c>Express Edition (64-bit)</c>, <c>Express Edition with Advanced Services (64-bit)</c>). Whether that blocks Extended Events
+    /// also needs the RDS flag: a box-product Web or Express can create XE sessions.
+    /// </summary>
+    public static bool IsWebOrExpressEditionName(string? edition) =>
+        !string.IsNullOrWhiteSpace(edition) &&
+        (edition.TrimStart().StartsWith("Web Edition", StringComparison.OrdinalIgnoreCase) ||
+         edition.TrimStart().StartsWith("Express Edition", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// The engine edition the registry stores: the probed value, except that an RDS Web or Express instance is
+    /// <see cref="AwsRdsWebOrExpressEngineEdition"/> (#6893).
+    /// </summary>
+    public static int EffectiveEngineEdition(int probedEngineEdition, CollectorTargetInfo target) =>
+        target.IsAwsRds && target.IsAwsRdsWebOrExpress ? AwsRdsWebOrExpressEngineEdition : probedEngineEdition;
+
+    /// <summary>
     /// Human-readable <c>SERVERPROPERTY('EngineEdition')</c> description. The single copy: Darling's
     /// connector delegates here rather than keeping a second switch, because two edition tables in one repo
     /// drift and the one that drifts is never the one being read.
     /// </summary>
     public static string DescribeEngineEdition(int engineEdition) => engineEdition switch
     {
+        AwsRdsWebOrExpressEngineEdition => "Amazon RDS for SQL Server Web or Express edition",
         1 => "Personal/Desktop",
         2 => "Standard",
         3 => "Enterprise",
@@ -257,15 +284,26 @@ public static class CollectorEngineCapability
             {
                 foreach (var isAwsRds in new[] { false, true })
                 {
-                    yield return new CollectorTargetInfo
+                    foreach (var isAwsRdsWebOrExpress in new[] { false, true })
                     {
-                        Engine = CollectorTargetEngine.SqlServer,
-                        IsAzureSqlDb = engineEdition == AzureSqlDatabaseEngineEdition,
-                        IsAzureManagedInstance = engineEdition == AzureManagedInstanceEngineEdition,
-                        IsAwsRds = isAwsRds,
-                        HasMsdbAccess = hasMsdbAccess,
-                        SqlMajorVersion = major,
-                    };
+                        /* #6893: the RDS Web or Express edition is an edition of its own here, and it is RDS by definition. Every other
+                           edition leaves the fact free, so a gate on it never reads as a permanent gap. */
+                        if (engineEdition == AwsRdsWebOrExpressEngineEdition && !(isAwsRds && isAwsRdsWebOrExpress))
+                        {
+                            continue;
+                        }
+
+                        yield return new CollectorTargetInfo
+                        {
+                            Engine = CollectorTargetEngine.SqlServer,
+                            IsAzureSqlDb = engineEdition == AzureSqlDatabaseEngineEdition,
+                            IsAzureManagedInstance = engineEdition == AzureManagedInstanceEngineEdition,
+                            IsAwsRds = isAwsRds,
+                            IsAwsRdsWebOrExpress = isAwsRdsWebOrExpress,
+                            HasMsdbAccess = hasMsdbAccess,
+                            SqlMajorVersion = major,
+                        };
+                    }
                 }
             }
         }
@@ -377,15 +415,19 @@ public static class CollectorEngineCapability
                             {
                                 foreach (var isAzureManagedInstance in new[] { false, true })
                                 {
-                                    yield return new CollectorTargetInfo
+                                    foreach (var isAwsRdsWebOrExpress in new[] { false, true })
                                     {
-                                        Engine = CollectorTargetEngine.SqlServer,
-                                        IsAzureSqlDb = isAzureSqlDb,
-                                        IsAzureManagedInstance = isAzureManagedInstance,
-                                        IsAwsRds = isAwsRds,
-                                        HasMsdbAccess = hasMsdbAccess,
-                                        SqlMajorVersion = major,
-                                    };
+                                        yield return new CollectorTargetInfo
+                                        {
+                                            Engine = CollectorTargetEngine.SqlServer,
+                                            IsAzureSqlDb = isAzureSqlDb,
+                                            IsAzureManagedInstance = isAzureManagedInstance,
+                                            IsAwsRds = isAwsRds,
+                                            IsAwsRdsWebOrExpress = isAwsRdsWebOrExpress,
+                                            HasMsdbAccess = hasMsdbAccess,
+                                            SqlMajorVersion = major,
+                                        };
+                                    }
                                 }
                             }
                         }
@@ -670,6 +712,17 @@ public static class CollectorEngineCapability
            axis only: a SQL Server edition's gap is a feature the engine does not ship. The PostgreSQL kind
            axis above keeps its own wording, because its gaps are Aurora-only surfaces and extensions, not an
            engine that lacks the feature outright. */
+        /* #6893: RDS refuses every Extended Events session on its Web and Express editions, so the deadlock, blocked-process, client-timeout
+           and long-query captures cannot exist there. Said in the words of the edition limit, because "EngineEdition 1002" is not a number
+           SERVERPROPERTY ever returns. */
+        if (engineEdition == AwsRdsWebOrExpressEngineEdition)
+        {
+            return $"{serverName} runs on {DescribeEngineEdition(engineEdition)}. Amazon RDS for SQL Server supports Extended Events only on the " +
+                   $"Enterprise and Standard editions and refuses every Extended Events session create on Web and Express, so this server does not collect " +
+                   $"{CapturePathOf(collectorName)}, and never will unless the instance moves to the Standard or Enterprise edition. " +
+                   PermanentGapEpilogue + $" (The collector for it is {collectorName}.)" + CoveredInsteadSuffix(collectorName);
+        }
+
         return $"{serverName} runs on {DescribeEngineEdition(engineEdition)} (EngineEdition {engineEdition}), " +
                $"which does not have {CapturePathOf(collectorName)} that this server can read, so this server does not collect {CapturePathOf(collectorName)}, and never will. " +
                PermanentGapEpilogue + $" (The collector for it is {collectorName}.)" + CoveredInsteadSuffix(collectorName);

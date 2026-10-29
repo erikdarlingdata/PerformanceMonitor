@@ -83,6 +83,10 @@ public sealed class ServerRuntime
     /// </summary>
     public int EngineEdition { get; init; }
 
+    /// <summary>#6893: <c>SERVERPROPERTY('Edition')</c> (for example <c>Web Edition (64-bit)</c>), or null when the probe did not read it. Web and Standard
+    /// share EngineEdition 2, so the add-server result line names the edition from this text.</summary>
+    public string? EditionName { get; init; }
+
     /// <summary>
     /// What the PostgreSQL detection query saw in <c>pg_extension</c> for <c>pg_stat_statements</c>, in the
     /// database this connection landed in (#3830) - the ROW, not a verdict drawn from it. Default
@@ -119,7 +123,7 @@ public static class DarlingServerConnector
        depend on it (#1535). sqlserver_start_time - the one column that needs the DMV - is not read
        here (the service never surfaces a start time), so unlike Lite/Dashboard no best-effort
        start-time read is needed. Columns: 0 sql_version, 1 major_version, 2 utc_offset,
-       3 engine_edition, 4 is_aws_rds, 5 has_msdb_access, 6 connected_database (#2228), 7 server_name (#6285).
+       3 engine_edition, 4 is_aws_rds, 5 has_msdb_access, 6 connected_database (#2228), 7 server_name (#6285), 8 edition_name (#6893).
 
        #2228 — connected_database is DB_NAME(): the database this connection ACTUALLY reached, which is not
        necessarily the one the registration names. An Initial Catalog that is absent, misspelled or overridden
@@ -141,7 +145,9 @@ SELECT /* PerformanceMonitorLite */
     /* #2228: which database this connection actually landed in. Appended; see the comment above. */
     DB_NAME() AS connected_database,
     /* #6285: the machine and instance the server calls itself, appended like the column above. */
-    CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')) AS server_name";
+    CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')) AS server_name,
+    /* #6893: Web and Standard share EngineEdition 2, so RDS Web and Express is told apart by the edition name. */
+    CONVERT(nvarchar(128), SERVERPROPERTY('Edition')) AS edition_name";
 
     /// <summary>
     /// The tripwire's verdict: the message to raise when a registration is connected to a database it does not
@@ -551,7 +557,7 @@ SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
 
         int majorVersion = 0, engineEdition = 0;
         bool isAwsRds = false, hasMsdbAccess = true;
-        string? connectedDatabase = null, machineIdentity = null;
+        string? connectedDatabase = null, machineIdentity = null, editionName = null;
         if (await reader.ReadAsync(cancellationToken))
         {
             // Column indices per DetectionQueryText: 1 major_version, 3 engine_edition,
@@ -564,7 +570,11 @@ SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
             /* #6285: the server's own name, for the add and edit tools' same-machine check. An Azure SQL Database has no
                machine of its own to name, so it reports none. */
             machineIdentity = reader.IsDBNull(7) || engineEdition == 5 ? null : reader.GetString(7);
+            editionName = reader.IsDBNull(8) ? null : reader.GetString(8);   /* #6893 */
         }
+
+        /* #6893: Amazon RDS refuses every Extended Events session create on the Web and Express editions. */
+        var isAwsRdsWebOrExpress = isAwsRds && CollectorEngineCapability.IsWebOrExpressEditionName(editionName);
 
         return new ServerRuntime
         {
@@ -576,6 +586,7 @@ SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
                 IsAzureSqlDb = engineEdition == 5,
                 IsAzureManagedInstance = engineEdition == 8,
                 IsAwsRds = isAwsRds,
+                IsAwsRdsWebOrExpress = isAwsRdsWebOrExpress,
                 SqlMajorVersion = majorVersion,
                 /* Already probed above via HAS_DBACCESS(N'msdb'); wiring it into the gate is the fix —
                    before this it rode only on ServerRuntime and never reached the collectors' AppliesTo,
@@ -590,7 +601,9 @@ SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
             ServerId = config.ServerId,
             HasMsdbAccess = hasMsdbAccess,
             IsAwsRds = isAwsRds,
-            EngineEdition = engineEdition,
+            /* #6893: the registry records an RDS Web or Express instance as its own edition, so the capability reads can say why. */
+            EngineEdition = isAwsRdsWebOrExpress ? CollectorEngineCapability.AwsRdsWebOrExpressEngineEdition : engineEdition,
+            EditionName = editionName,
             ConnectedDatabase = connectedDatabase,
             MachineIdentity = machineIdentity,
         };
@@ -841,7 +854,7 @@ FROM pg_catalog.pg_control_system() AS s";
                 /* No edition on a PostgreSQL target, and DescribeEngineEdition(0) would say
                    "Unknown (0)" — which reads as a probe that half-failed rather than one that
                    succeeded against a different engine. */
-                EngineEditionDescription: isPostgres ? null : DescribeEngineEdition(runtime.EngineEdition),
+                EngineEditionDescription: isPostgres ? null : DescribeEditionForProbe(runtime.EngineEdition, runtime.EditionName),
                 IsAzureSqlDb: runtime.Target.IsAzureSqlDb,
                 IsAzureManagedInstance: runtime.Target.IsAzureManagedInstance,
                 IsAwsRds: runtime.IsAwsRds,
@@ -1084,6 +1097,29 @@ FROM pg_catalog.pg_control_system() AS s";
     /// </summary>
     public static string DescribeEngineEdition(int engineEdition) =>
         CollectorEngineCapability.DescribeEngineEdition(engineEdition);
+
+    /// <summary>
+    /// #6893: the edition the add-server result line names. EngineEdition 2 is Standard AND Web, so a box that says <c>Web Edition</c> or
+    /// <c>Express Edition</c> in <c>SERVERPROPERTY('Edition')</c> is named from that text. Anything else keeps the engine edition's description.
+    /// </summary>
+    public static string DescribeEditionForProbe(int engineEdition, string? editionName)
+    {
+        if (!string.IsNullOrWhiteSpace(editionName))
+        {
+            var trimmed = editionName.TrimStart();
+            if (trimmed.StartsWith("Web Edition", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Web";
+            }
+
+            if (trimmed.StartsWith("Express Edition", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Express";
+            }
+        }
+
+        return DescribeEngineEdition(engineEdition);
+    }
 }
 
 /// <summary>
