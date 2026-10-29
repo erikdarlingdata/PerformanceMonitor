@@ -215,9 +215,9 @@ public static partial class PgTargetAdvice
                 Investigation =
                     $"{noun} reached {fmt(observed)} this window. This server's baseline for this hour-of-week is not thin — it " +
                     $"is a measured ZERO: {restsOn}, not one of them above zero. So this is not a deviation to be counted in " +
-                    "sigmas, it is an extremity: the quantity went from never-happens to this, and there is no dispersion to " +
+                    "its usual variation, it is an extremity: the quantity went from never-happens to this, and there is no dispersion to " +
                     "divide by precisely because there was nothing to divide. " + SourceSentence(fallback) +
-                    " Beyond any σ — no figure is printed for the deviation because none would be honest against a history of " +
+                    " That is far outside its normal range, so no figure is printed for the deviation: none would be honest against a history of " +
                     "zeros." + s_anomalyHedge,
             };
         }
@@ -238,15 +238,14 @@ public static partial class PgTargetAdvice
         var mean = fact.Metadata.GetValueOrDefault("baseline_mean");
         var median = fact.Metadata.GetValueOrDefault("baseline_median");
         var centre = median > 0 ? median : mean;
-        var centreWord = median > 0 ? "median" : "mean";
         var inv = new StringBuilder(
-            $"{noun} reached {fmt(observed)} this window, {Sigma(sigma)}σ above its {fmt(centre)} baseline {centreWord} for this hour-of-week{samplesClause}.");
+            $"{noun} reached {fmt(observed)} this window, {Sigma(sigma)} times its usual variation above its {fmt(centre)} normal level for this hour-of-week{samplesClause}.");
         inv.Append(' ').Append(SourceSentence(fallback));
         inv.Append(s_anomalyHedge);
 
         return fallback with
         {
-            Headline = $"{noun} spiked to {fmt(observed)} — {Sigma(sigma)}σ above its baseline for this time of week",
+            Headline = $"{noun} spiked to {fmt(observed)} — {Sigma(sigma)} times its usual variation above its normal level for this time of week",
             Investigation = inv.ToString(),
         };
     }
@@ -380,7 +379,7 @@ public static partial class PgTargetAdvice
                     $"The all-types wait rate the engine measured peaked at about {currentText} ms of waiting per second of observed " +
                     $"time this window (CPU excluded{plainMean}), led by {led}. This cluster's {s_baselineSpan} wait baseline for this " +
                     $"hour-of-week is not thin — it is a measured ZERO: {ZeroHistoryRestsOn(fact)}, not one of them above zero. That makes " +
-                    "this an extremity rather than a deviation to count in sigmas or a multiple of a normal rate: the wait rate went from " +
+                    "this an extremity rather than a deviation to count against its usual variation or a multiple of a normal rate: the wait rate went from " +
                     "never-happens to this, and a rate that is zero has no multiple to print. It fired because the peak reached the " +
                     "wait-profile bar on its absolute level, so the change itself is the lead — the named contributors are where to look." + s_anomalyHedge,
             };
@@ -410,17 +409,17 @@ public static partial class PgTargetAdvice
         var meanSentence = windowMean is not { } meanValue
             ? string.Empty
             : meanModifiedZ > 0
-                ? $" The window's mean rate was {meanValue.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec against a routine of {mean.ToString("0.#", CultureInfo.InvariantCulture)} — {Sigma(meanModifiedZ)} robust sigmas above it — so the whole window sat high, not one delta; the detector fires only when the mean clears its bar as well as the peak."
+                ? $" The window's mean rate was {meanValue.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec against a routine of {mean.ToString("0.#", CultureInfo.InvariantCulture)} — {Sigma(meanModifiedZ)} times its usual variation above it — so the whole window sat high, not one delta; the detector fires only when the mean clears its bar as well as the peak."
                 : meanRatio > 0 || mean > 0
                     ? $" The window's mean rate was {meanValue.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec against a routine of {mean.ToString("0.#", CultureInfo.InvariantCulture)} — about {(meanRatio > 0 ? meanRatio : meanValue / mean).ToString("0.#", CultureInfo.InvariantCulture)}× it — so the whole window sat high, not one delta; the detector fires only when the mean clears its bar as well as the peak."
                     : string.Empty;
         var deviation = modifiedZ > 0
-            ? $"{Sigma(modifiedZ)} robust sigmas above its {mean.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec baseline"
+            ? $"{Sigma(modifiedZ)} times its usual variation above its {mean.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec baseline"
             : $"about {ratio.ToString("0.#", CultureInfo.InvariantCulture)}× its {mean.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec baseline";
         return s_waitProfileStatic with
         {
             Headline = modifiedZ > 0
-                ? $"The cluster's wait profile shifted to {currentText} ms/sec — {Sigma(modifiedZ)}σ above its baseline for this time of week"
+                ? $"The cluster's wait profile shifted to {currentText} ms/sec — {Sigma(modifiedZ)} times its usual variation above its normal level for this time of week"
                 : $"The cluster's wait profile shifted to about {ratio.ToString("0.#", CultureInfo.InvariantCulture)}× its baseline for this time of week",
             Investigation =
                 $"The all-types wait rate the engine measured peaked at about {currentText} ms of waiting per second of observed " +

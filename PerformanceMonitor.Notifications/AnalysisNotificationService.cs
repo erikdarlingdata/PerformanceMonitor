@@ -762,7 +762,7 @@ internal static class FindingMessageFormatter
 
         if (finding.RootFactMetadata is { Count: > 0 })
         {
-            var baseline = BaselineContextFormatter.FormatBaselineContext(finding.RootFactMetadata);
+            var baseline = BaselineContextFormatter.FormatBaselineContext(finding.RootFactMetadata, plainWording: true);
             if (baseline is { Count: > 0 })
             {
                 var parts = baseline.Select(kv => $"{Humanize(kv.Key)} {kv.Value}");

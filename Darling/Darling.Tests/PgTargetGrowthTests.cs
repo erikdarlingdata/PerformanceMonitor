@@ -357,7 +357,7 @@ public sealed class PgTargetGrowthTests
         var growth = Growth(("appdb", 10 * GiB, 15 * GiB), total: null);
         new FactScorer().ScoreAll([growth, anomaly]);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyDatabaseGrowth, Lookup(anomaly, growth))!;
-        Assert.Equal("Instance growth spiked to 3 GB a day — 6σ above its baseline for this time of week", block.Headline);
+        Assert.Equal("Instance growth spiked to 3 GB a day — 6 times its usual variation above its normal level for this time of week", block.Headline);
         Assert.Contains("The window's mean rate was 2.5 GB a day, over 3 hourly samples.", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("this baseline is thin by construction (about four samples per hour-of-week bucket over 30 days) and will lean on its magnitude floor of 256 MB a day for months — it graded at tier 1 (0 = full hour-of-week, 1 = hour only, 2 = flat).", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("PG_DATABASE_GROWTH names appdb at 5 GB over the fortnight — over the line, so this rate is a trend accelerating.", block.Investigation, StringComparison.Ordinal);
