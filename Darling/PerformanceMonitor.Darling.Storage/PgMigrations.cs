@@ -2975,6 +2975,7 @@ $rung$;";
         new Migration(224, "identity-capacity", V224Sql),
         new Migration(225, "server-aws-rds", V225Sql),
         new Migration(226, "server-aws-rds-web-or-express", V226Sql),
+        new Migration(229, "notification-route-severities", V229Sql),
     };
 
     /// <summary>
@@ -3001,6 +3002,27 @@ ALTER TABLE collect.servers
     private const string V226Sql = @"
 ALTER TABLE collect.servers
     ADD COLUMN IF NOT EXISTS is_aws_rds_web_or_express boolean;";
+
+    /// <summary>
+    /// V229 (#6928): <c>config.config_notification_routes.severities</c>, the severity filter of a notification route: <c>both</c> (the
+    /// default, Warning and Critical alerts alike, which is what every route did before), <c>critical</c> or <c>warning</c>. NOT NULL with
+    /// the default, so every stored route reads <c>both</c> and keeps its effect, and a CHECK holds the three words. An alert that is not
+    /// Critical counts as Warning. A route whose filter excludes an alert does not match it, and matching goes on to the next route.
+    /// Idempotent: the column and the constraint are each added only when absent. No backfill and no view refresh: a registry table.
+    /// </summary>
+    private const string V229Sql = @"
+ALTER TABLE config.config_notification_routes
+    ADD COLUMN IF NOT EXISTS severities text NOT NULL DEFAULT 'both';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_config_notification_routes_severities'
+                   AND conrelid = 'config.config_notification_routes'::regclass) THEN
+        ALTER TABLE config.config_notification_routes
+            ADD CONSTRAINT ck_config_notification_routes_severities
+            CHECK (severities IN ('both', 'critical', 'warning'));
+    END IF;
+END
+$$;";
 
     /// <summary>
     /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c>, the failure record of the Query Store compose builder: one row

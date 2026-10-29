@@ -131,9 +131,9 @@ public sealed class InvestigationDispatchCore
     /// #5821: whether the generic webhook this alert posts to has <c>{{investigation_json}}</c> in its body template, resolved
     /// through the same router the send uses. Only then is the request read back: the token is in no shipped template.
     /// </summary>
-    public bool GenericPostCarriesToken(string serverId, string metricName) =>
+    public bool GenericPostCarriesToken(string serverId, string metricName, AlertSeverityLevel? severity = null) =>
         WebhookAlertService.TemplateCarriesInvestigationToken(_settings.GenericWebhookBodyTemplate)
-        && NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings, NotificationRouter.ParseServerId(serverId))
+        && NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings, NotificationRouter.ParseServerId(serverId), severity)
             .Generic.Destination is not null;
 
     /// <summary>
@@ -165,7 +165,8 @@ public sealed class InvestigationDispatchCore
             }
 
             var routeServerId = NotificationRouter.ParseServerId(serverId);
-            var route = NotificationRouter.ResolveAgent(metricName, _settings.NotificationRoutes, routeServerId);
+            var route = NotificationRouter.ResolveAgent(metricName, _settings.NotificationRoutes, routeServerId,
+                AlertSeverity.RouteLevelOf(metricName, context?.SeverityOverride));
             if (route is null)
             {
                 return null;
@@ -303,7 +304,7 @@ public sealed class InvestigationDispatchCore
         try
         {
             (InvestigationRequestRow Row, string? Brief)? read = null;
-            if (readRequest is not null && GenericPostCarriesToken(serverId, metricName))
+            if (readRequest is not null && GenericPostCarriesToken(serverId, metricName, AlertSeverity.RouteLevelOf(metricName, context?.SeverityOverride)))
             {
                 try
                 {

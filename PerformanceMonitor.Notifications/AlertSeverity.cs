@@ -28,6 +28,11 @@ public enum AlertSeverityLevel
 /// </summary>
 internal static class AlertSeverity
 {
+    /// <summary>The tier a notification route's severity filter sees for an alert (#6928): the tier graded at the fire site
+    /// when it carries one, else the metric's own badge (red is Critical, every other badge is Warning).</summary>
+    public static AlertSeverityLevel RouteLevelOf(string metricName, AlertSeverityLevel? overrideLevel) =>
+        overrideLevel ?? (ForMetric(metricName).HexColor == "#DC2626" ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning);
+
     /// <param name="overrideLevel">
     /// When non-null, forces the tier regardless of <paramref name="metricName"/> — for metrics
     /// graded at runtime (#1136). <c>null</c> uses the per-metric map below.

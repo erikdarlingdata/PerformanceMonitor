@@ -512,7 +512,7 @@ public sealed class ExternalAlertDrainLifecycleLiveTests
 
                     return delivery;
                 },
-                (_, _, _, _, _) => Task.FromResult(PagerDutyAnswer),
+                (_, _, _, _, _, _) => Task.FromResult(PagerDutyAnswer),
                 History,
                 context => IsMuted(context),
                 name => string.Equals(name, "SQL01", StringComparison.OrdinalIgnoreCase) ? new ExternalAlertServer(7, Sql01DisplayName) : null,

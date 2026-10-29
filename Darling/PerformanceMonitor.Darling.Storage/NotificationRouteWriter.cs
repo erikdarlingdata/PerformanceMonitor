@@ -62,6 +62,9 @@ public sealed class NotificationRouteDraft
     public bool? SendResolutions { get; set; }
     public int? FallbackRouteId { get; set; }
 
+    /// <summary>The severity filter (V229, #6928): <c>both</c>, <c>critical</c> or <c>warning</c>.</summary>
+    public string Severities { get; set; } = NotificationRouteKinds.SeveritiesBoth;
+
     /// <summary>When the route was last saved, as the writer's screen read it (the store's <c>modified_at</c>, UTC). On a <c>stored</c> draft
     /// handed to <see cref="NotificationRouteWriter.SaveAsync"/> it is the version the save expects: a route saved by anyone since is refused
     /// as a conflict instead of overwritten (#6274). Null or <c>default</c> skips the check.</summary>
@@ -93,8 +96,8 @@ public static class NotificationRouteWriter
     /// <summary>Inserts one route. <c>route_id</c> is <c>GENERATED ALWAYS AS IDENTITY</c>, so it is never in the column list.</summary>
     public const string InsertSql = @"
 INSERT INTO config_notification_routes
-    (metric_match, " + DestinationColumns + @", enabled, scope_server_id, scope_tag_id, " + AgentColumns + @", send_resolutions, fallback_route_id, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, (now() AT TIME ZONE 'UTC'))
+    (metric_match, " + DestinationColumns + @", enabled, scope_server_id, scope_tag_id, " + AgentColumns + @", send_resolutions, fallback_route_id, severities, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, (now() AT TIME ZONE 'UTC'))
 RETURNING route_id";
 
     public const string UpdateSql = @"
@@ -115,6 +118,7 @@ UPDATE config_notification_routes SET
     agent_expiry_minutes = $15,
     send_resolutions = $16,
     fallback_route_id = $17,
+    severities = $18,
     modified_at = (now() AT TIME ZONE 'UTC')
 WHERE route_id = $1";
 
@@ -215,7 +219,7 @@ WHERE route_id = $1";
     /// plaintext) and the address list. Only a writer with the service's login reads them.</summary>
     public const string SelectStoredSql =
         "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, "
-        + "scope_server_id, scope_tag_id, " + AgentColumns + ", send_resolutions, fallback_route_id, modified_at "
+        + "scope_server_id, scope_tag_id, " + AgentColumns + ", send_resolutions, fallback_route_id, modified_at, severities "
         + "FROM config_notification_routes WHERE route_id = $1";
 
     /// <summary>The proxy of each webhook channel on the settings row (the row id 1 the Viewer reads).</summary>
@@ -270,6 +274,11 @@ WHERE route_id = $1";
         if (row.FallbackRouteId.HasValue && row.RouteId != 0 && row.FallbackRouteId == row.RouteId)
         {
             return "A route cannot be its own fallback route.";
+        }
+
+        if (SeveritiesRefusal(row.Severities) is { } severities)
+        {
+            return severities;
         }
 
         if (row.AgentLevel is { } level && level is not (NotificationRoute.AgentLevelOff or NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct or NotificationRoute.AgentLevelServerAct))
@@ -392,6 +401,12 @@ WHERE route_id = $1";
         return await command.ExecuteScalarAsync(cancellationToken) is null ? $"Fallback route {fallbackId} does not exist." : null;
     }
 
+    /// <summary>The sentence for a severity filter that is not <c>both</c>, <c>critical</c> or <c>warning</c> (case-insensitive), else null (#6928).</summary>
+    public static string? SeveritiesRefusal(string? severities) =>
+        severities is not null && NotificationRouteKinds.NormalizeSeverities(severities) != severities.Trim().ToLowerInvariant()
+            ? "severities is critical, warning or both."
+            : null;
+
     /// <summary>Binds the agent columns, the resolution override and the fallback, in the order every insert and update takes them.</summary>
     public static void AddAgentColumns(NpgsqlCommand command, NotificationRouteDraft row)
     {
@@ -410,6 +425,8 @@ WHERE route_id = $1";
             : new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean });
         /* #6036: the fallback route, bound last. NULL is none. */
         AddNullableInt(command, row.FallbackRouteId);
+        /* #6928 (V229): the severity filter, bound after the fallback. */
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = NotificationRouteKinds.NormalizeSeverities(row.Severities) });
     }
 
     /// <summary>Binds an <c>integer</c> that may be SQL NULL.</summary>
@@ -633,6 +650,7 @@ WHERE route_id = $1";
             SendResolutions = reader.IsDBNull(15) ? null : reader.GetBoolean(15),
             FallbackRouteId = reader.IsDBNull(16) ? null : reader.GetInt32(16),
             ModifiedAtUtc = reader.IsDBNull(17) ? null : DateTime.SpecifyKind(reader.GetDateTime(17), DateTimeKind.Utc),
+            Severities = reader.GetString(18),
         };
     }
 
@@ -727,7 +745,7 @@ WHERE route_id = $1";
         update.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = resolved.Enabled });                 // $8
         AddNullableInt(update, resolved.ScopeServerId);                                                      // $9
         AddNullableInt(update, resolved.ScopeTagId);                                                         // $10
-        AddAgentColumns(update, resolved);                                                                   // $11-$17
+        AddAgentColumns(update, resolved);                                                                   // $11-$18
         await update.ExecuteNonQueryAsync(cancellationToken);
         if (login is not null && AgentChange(before, resolved) is { } change)
         {

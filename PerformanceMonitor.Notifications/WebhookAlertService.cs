@@ -240,7 +240,8 @@ public class WebhookAlertService
                comes from this one snapshot. With an adapter that does not override SnapshotForDelivery (Lite)
                it is the live settings. */
             var delivery = _settings.SnapshotForDelivery();
-            var route = NotificationRouter.Resolve(metricName, delivery.NotificationRoutes, delivery, NotificationRouter.ParseServerId(serverId));
+            var route = NotificationRouter.Resolve(metricName, delivery.NotificationRoutes, delivery, NotificationRouter.ParseServerId(serverId),
+                AlertSeverity.RouteLevelOf(metricName, context?.SeverityOverride));
 
             /* #5469: the PagerDuty auto-resolve behaviour reaches the cooldown only when PagerDuty will
                actually be sent this alert: the flag on AND a destination for this metric. The flag is read
@@ -2905,7 +2906,7 @@ public class WebhookAlertService
     /// </summary>
     public async Task<AlertChannelOutcome> TrySendPagerDutyResolveAsync(
         string firingMetric, string serverName, string serverId, string? detailText,
-        CancellationToken cancellationToken = default)
+        AlertSeverityLevel? firedSeverity = null, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -2915,7 +2916,9 @@ public class WebhookAlertService
                 return AlertChannelOutcome.NotAttempted;
             }
 
-            var route = NotificationRouter.Resolve(firingMetric, delivery.NotificationRoutes, delivery, NotificationRouter.ParseServerId(serverId));
+            /* #6928: routed at the severity the fire went out at, so the close lands on the key the fire's route carried, not on a
+               route the severity filter would send another tier to. */
+            var route = NotificationRouter.Resolve(firingMetric, delivery.NotificationRoutes, delivery, NotificationRouter.ParseServerId(serverId), firedSeverity);
             if (route.PagerDuty.Destination is not { } pagerDutyKey)
             {
                 return AlertChannelOutcome.NotAttempted;

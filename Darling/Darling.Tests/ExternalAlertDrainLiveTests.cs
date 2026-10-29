@@ -577,7 +577,7 @@ public sealed class ExternalAlertDrainLiveTests
                         AlertContextSerializer.Serialize(outcome.Context!)));
                     return delivery;
                 },
-                (metric, serverName, serverKey, _, _) =>
+                (metric, serverName, serverKey, _, _, _) =>
                 {
                     PagerDutyResolves.Add(metric.Split(':')[2]);
                     PagerDutyIdentities.Add(serverName + "|" + serverKey);

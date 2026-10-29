@@ -112,8 +112,8 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
     /// </summary>
     public Task<AlertChannelOutcome> TryResolvePagerDutyAsync(
         string firingMetric, string serverName, string serverKey, string? detailText,
-        CancellationToken cancellationToken = default) =>
-        _webhooks.TrySendPagerDutyResolveAsync(firingMetric, serverName, serverKey, detailText, cancellationToken);
+        AlertSeverityLevel? firedSeverity = null, CancellationToken cancellationToken = default) =>
+        _webhooks.TrySendPagerDutyResolveAsync(firingMetric, serverName, serverKey, detailText, firedSeverity, cancellationToken);
 
     public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default) =>
         DeliverAndReportAsync(outcome, cancellationToken);
