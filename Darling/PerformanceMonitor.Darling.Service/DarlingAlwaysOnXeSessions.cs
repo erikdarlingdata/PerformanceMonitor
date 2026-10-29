@@ -90,10 +90,10 @@ internal static class DarlingAlwaysOnXeSessions
             logger?.Log(first ? LogLevel.Warning : LogLevel.Debug, "[{Server}] [{Database}] {Message}",
                 server.Config.DisplayName, databaseName, AlwaysOnXeSessions.ReadOnlyDatabaseMessage(kind));
 
-            /* #6893: the deadlock and blocked-process runs carry it. The client-timeout capture keeps its permission-only rule (#5640). */
-            return kind == AlwaysOnXeSessionKind.Attention
-                ? null
-                : new DarlingXeSessions.XeEnsureFailure(AlwaysOnXeSessions.ReadOnlyDatabaseMessage(kind), IsPermission: false);
+            /* #4961: the database counts as ensured, for every capture. No grant can fix a read-only database, so carrying the refusal
+               to the run (#6893) would record SESSION_MISSING every sweep and fire Capture Down for good on a registration whose
+               databases are all geo-secondaries. The one message above is the whole report. */
+            return null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

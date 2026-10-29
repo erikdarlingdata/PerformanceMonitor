@@ -358,15 +358,15 @@ OUTER APPLY
     /// </summary>
     public override string? WatermarkColumn => "deadlock_time";
 
+    /// <summary>#6893: not dispatched on an Amazon RDS Web or Express instance, where RDS refuses every Extended Events session create.</summary>
+    public override bool AppliesTo(CollectorTargetInfo target) => CollectorTargetInfo.XeSessionSupported(target);
+
     /// <summary>
     /// Azure SQL DB capture is a database-scoped session per monitored database (#1535 — a single
     /// session only ever saw the connection's own database, so deadlocks in the other databases of
     /// the logical server never appeared). The host ensures the session per database and this read
     /// then runs per database, exactly like the other Azure per-database collectors.
     /// </summary>
-    /// <summary>#6893: not dispatched on an Amazon RDS Web or Express instance, where RDS refuses every Extended Events session create.</summary>
-    public override bool AppliesTo(CollectorTargetInfo target) => CollectorTargetInfo.XeSessionSupported(target);
-
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
 
     /// <summary>
