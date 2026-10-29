@@ -471,6 +471,23 @@ VALUES ($1, $2, $3, $4, $2, 'RankDb', $5, $6, $7, 'X', 'SELECT 1', 'SELECT 2', 0
     }
 
     [Fact]
+    public void Build_TheWorstChainIsNotKeptOpenByAnUnrelatedEpisodeThatReusesItsSpids()
+    {
+        // #6931: the 13:23 block on 132/133 ended at 13:25 and is the worst chain. An unrelated block on the same
+        // spids at 16:08 is another episode: it is not a later sighting of the worst chain.
+        var end = new DateTime(2026, 10, 27, 17, 0, 0);
+        var at = new DateTime(2026, 10, 27, 13, 23, 0);
+        var rows = Enumerable.Range(0, 29).Select(i => Pair(at.AddSeconds(5 * i), 133, 132, 5_000 * (i + 1) - 3_000)).ToList();
+        rows.Add(Pair(new DateTime(2026, 10, 27, 16, 8, 0), 133, 132, 20_000));
+
+        var fact = Build(rows, end);
+
+        Assert.Equal(142_000, fact.Metadata["worst_chain_max_wait_ms"]);
+        Assert.Equal(0, fact.Metadata["worst_chain_open_at_end"]);
+        Assert.Equal((end - at.AddSeconds(140)).TotalMilliseconds, fact.Metadata["worst_chain_last_seen_age_ms"]);
+    }
+
+    [Fact]
     public void Build_TheSameApexSpidAnHourLater_CountsAsASecondEpisode()
     {
         // The issue's spid 132: it heads one block early on and an unrelated one much later.

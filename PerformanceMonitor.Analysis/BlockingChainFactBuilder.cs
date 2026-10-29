@@ -102,6 +102,7 @@ internal static class BlockingChainFactBuilder
         IReadOnlyCollection<BlockingPairRow> rows, int collectionIntervalMinutes)
     {
         var worst = PickWorst(reconstruction.Chains);
+        var episodes = EpisodeNumbers(reconstruction.Chains);
 
         var metadata = new Dictionary<string, double>
         {
@@ -112,7 +113,7 @@ internal static class BlockingChainFactBuilder
             ["worst_chain_max_wait_ms"] = worst.MaxWaitMs,
             // #6931: chains are per scan and one episode re-fires in every scan, so the count is of episodes: an apex
             // that keeps showing up within EpisodeGap of its last scan counts once, however many scans caught it.
-            ["total_reconstructed_chains"] = EpisodeNumbers(reconstruction.Chains).Values.Distinct().Count(),
+            ["total_reconstructed_chains"] = episodes.Values.Distinct().Count(),
             ["deepest_chain_overall"] = reconstruction.Chains.Max(c => c.Depth),
             ["max_victim_count_overall"] = reconstruction.Chains.Max(c => c.VictimCount),
             ["depth_capped"] = reconstruction.DepthCapped ? 1 : 0,
@@ -125,7 +126,7 @@ internal static class BlockingChainFactBuilder
         if (context.AsOfUtc is not null)
             metadata["worst_chain_window_anchored"] = 1;
 
-        if (NewestObservation(worst, rows) is DateTime newest)
+        if (NewestObservation(worst, reconstruction.Chains, episodes, rows) is DateTime newest)
         {
             var age = context.TimeRangeEnd - newest;
             metadata["worst_chain_last_seen_age_ms"] = Math.Max(0, age.TotalMilliseconds);
@@ -151,21 +152,36 @@ internal static class BlockingChainFactBuilder
         };
     }
 
-    /// <summary>The newest sample time among rows where one of the chain's sessions blocks another of them.</summary>
-    private static DateTime? NewestObservation(ReconstructedChain chain, IEnumerable<BlockingPairRow> rows)
+    /// <summary>
+    /// The newest sample time among rows where one of the worst chain's sessions blocks another of them, within the
+    /// chain's own episode (#6931): from the episode's first scan to its last scan plus <see cref="EpisodeGap"/>. A
+    /// later, unrelated episode that reuses the same spids is therefore not a sighting of this chain.
+    /// </summary>
+    private static DateTime? NewestObservation(
+        ReconstructedChain chain, IReadOnlyList<ReconstructedChain> chains,
+        Dictionary<ReconstructedChain, int> episodes, IEnumerable<BlockingPairRow> rows)
     {
         // The reconstruction's own session key, spid plus ecid: two parallel workers of one spid are two sessions.
-        var members = new HashSet<(int Spid, int Ecid)> { (chain.ApexSpid, chain.ApexEcid) };
-        foreach (var level in chain.Levels)
+        var members = new HashSet<(int Spid, int Ecid)>();
+        DateTime? first = null, last = null;
+        foreach (var c in chains.Where(c => episodes[c] == episodes[chain]))
         {
-            members.Add((level.BlockingSpid, level.BlockingEcid));
-            members.Add((level.BlockedSpid, level.BlockedEcid));
+            members.Add((c.ApexSpid, c.ApexEcid));
+            foreach (var level in c.Levels)
+            {
+                members.Add((level.BlockingSpid, level.BlockingEcid));
+                members.Add((level.BlockedSpid, level.BlockedEcid));
+                if (first is null || level.EventTime < first) first = level.EventTime;
+                if (last is null || level.EventTime > last) last = level.EventTime;
+            }
         }
 
+        var until = last + EpisodeGap;
         DateTime? newest = null;
         foreach (var row in rows)
         {
             if (members.Contains((row.BlockingSpid, row.BlockingEcid)) && members.Contains((row.BlockedSpid, row.BlockedEcid))
+                && row.EventTime >= first && row.EventTime <= until
                 && (newest is null || row.EventTime > newest))
                 newest = row.EventTime;
         }
