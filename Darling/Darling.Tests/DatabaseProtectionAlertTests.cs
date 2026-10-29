@@ -456,9 +456,18 @@ VALUES (515152, 'PROTECTION-PG', 'PROTECTION-PG', TRUE, 0, $1), (515153, 'PROTEC
             Assert.Equal("2 overdue", value);
             Assert.Equal("Full backup: Sales (30 days old), CHECKDB: Sales (never checked)", detail);
 
+            /* The Overview card itself carries the chip: the summary read fills both strings the XAML binds, so a chip read that is never
+               copied onto the card (a lost initializer line) fails here rather than showing nothing. */
+            var card = await viewer.GetServerSummaryAsync(ServerId, "Protection card", null, ct);
+            Assert.Equal(value, card.DatabaseProtectionChipValue);
+            Assert.Equal(detail, card.DatabaseProtectionChipDetail);
+
             var later = DateTime.UtcNow.AddMinutes(-1);
             await InsertCaptureAsync(connection, ct, later, Healthy("Sales", later));
             Assert.Equal((null, null), await viewer.GetDatabaseProtectionChipAsync(ServerId, DateTime.UtcNow, ct));
+            var clearCard = await viewer.GetServerSummaryAsync(ServerId, "Protection card", null, ct);
+            Assert.Null(clearCard.DatabaseProtectionChipValue);
+            Assert.False(clearCard.HasDatabaseProtectionOverdue);
             return 0;
         });
     }

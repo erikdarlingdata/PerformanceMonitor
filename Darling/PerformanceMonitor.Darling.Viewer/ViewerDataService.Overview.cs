@@ -581,6 +581,8 @@ LIMIT 1";
             PgDeadlockCollectorBand = pgDeadlockBand,
             LastCollectionTime = lastCollection,
             AgentAlertGaps = await GetAgentAlertGapsAsync(serverId, nowUtc, cancellationToken),
+            DatabaseProtectionChipValue = protectionChip.Value,
+            DatabaseProtectionChipDetail = protectionChip.Detail,
         };
     }
 

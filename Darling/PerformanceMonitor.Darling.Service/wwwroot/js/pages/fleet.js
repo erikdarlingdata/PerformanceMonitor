@@ -879,6 +879,8 @@ export function metricBands(c) {
     /* #6874: a chip only when the server's Agent alert setup has a gap. It is not a band: nothing above reads it, and a
        server without a gap shows no extra chip. */
     ...agentAlertChip(c),
+    /* #6873: a chip only when a full backup, a log backup or a CHECKDB is overdue. It is not a band: nothing above reads it, and a
+       server with nothing overdue (or a platform-managed one) shows no extra chip. The words come from the server. */
     ...databaseProtectionChip(c),
   ]);
 }

@@ -5377,6 +5377,62 @@ const AGENT_ALERT_SPECS = [
   },
 ];
 
+/* #6873: the Health Checks panels on the Configuration tab. One fact is the age and the state word the service gives it. A platform-managed
+   or native-only target shows the platform's label beside the age and is never overdue. Overdue databases sort first. */
+function protectionFactText(f) {
+  if (!f) return "-";
+  const state = f.state === "overdue" || f.state === "ok" ? "" : String(f.state).replace(/_/g, " ");
+  const overdue = f.overdue ? " - overdue" : "";
+  if (f.age) return f.age + (state ? " (" + state + ")" : "") + overdue;
+  return (state || "-") + overdue;
+}
+function protectionFact(key, label) {
+  return {
+    key,
+    label,
+    display: (r) => protectionFactText(r[key]),
+    sortValue: (r) => (r[key] && r[key].overdue ? 0 : 1),
+    cellClass: (r) => (r[key] && r[key].overdue ? "sev-High" : null),
+  };
+}
+const DATABASE_PROTECTION_COLUMNS = [
+  { key: "database", label: "Database" },
+  { key: "state", label: "State", small: true },
+  protectionFact("full_backup", "Last full backup"),
+  protectionFact("log_backup", "Last log backup"),
+  protectionFact("checkdb", "Last good CHECKDB"),
+  { key: "platform", label: "Platform", display: (r) => (r.platform && r.platform !== "native" ? String(r.platform).replace(/_/g, " ") : ""), small: true },
+  { key: "excluded_reason", label: "Not judged because", small: true },
+];
+const DATABASE_PROTECTION_STATS = [
+  { key: "summary.text", label: "Overdue", format: "text", small: true },
+  { key: "captured_at", label: "Captured", format: "time", small: true },
+];
+const overdueFirst = (rows) => [...rows].sort((a, b) => {
+  const score = (r) => ["full_backup", "log_backup", "checkdb"].filter((k) => r[k] && r[k].overdue).length;
+  return score(b) - score(a);
+});
+const DATABASE_PROTECTION_SPECS = [
+  {
+    title: "Health Checks",
+    subtitle: "full backup 7 days, log backup 60 minutes, CHECKDB 14 days, collected hourly",
+    span: 2,
+    viz: "stat",
+    stats: DATABASE_PROTECTION_STATS,
+    emptyText: "No database protection capture yet.",
+  },
+  {
+    title: "Backups and CHECKDB by Database",
+    subtitle: "newest capture, overdue first",
+    span: 2,
+    viz: "table",
+    rowsKey: "databases",
+    columns: DATABASE_PROTECTION_COLUMNS,
+    orderRows: overdueFirst,
+    emptyText: "No databases in the newest capture.",
+  },
+];
+
 /* The Job History grid on the Activity tab: the cross-server page's columns less Server, since the tab is one server's. */
 const JOB_HISTORY_COLUMNS = [
   { key: "run_time", label: "Run Time", format: "time" },
