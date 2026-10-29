@@ -67,16 +67,40 @@ public sealed class BlockingBandTiersTests
         Assert.Equal(ServerHealthThresholds.BlockingRatePerHourFloor, default(BlockingBandThresholds).WarnPerHour);
     }
 
+    private static FleetServerCard CardAt(int id, HealthSeverity blocking, HealthSeverity deadlock) => new()
+    {
+        ServerId = id,
+        DisplayName = "s" + id,
+        ServerName = "s" + id,
+        BlockingCount = 3,
+        BlockingSeverity = blocking,
+        DeadlockSeverity = deadlock,
+    };
+
     [Fact]
-    public void TheFleetTotalsTiles_AreBandedByTheClassifier_NotOnAnyNonZeroCount()
+    public void TheFleetTotalsTiles_TakeTheWorstCardBand_SoTenServersAtThreeAnHourAreNotCritical()
     {
         var now = new DateTime(2026, 10, 29, 12, 0, 0, DateTimeKind.Utc);
         var empty = DarlingFleetReader.BuildRollup(Array.Empty<FleetServerCard>(), now, now.AddHours(-1), now);
+        Assert.Equal(HealthSeverity.Healthy, empty.TotalBlockingSeverity);
         Assert.Equal(HealthSeverity.Healthy, empty.TotalDeadlockSeverity);
 
-        var tuned = DarlingFleetReader.BuildRollup(
-            new List<FleetServerCard>(), now, now.AddHours(-1), now,
-            deadlockTiers: new DeadlockRateThresholds(50.0, 100.0), blockingTiers: new BlockingBandThresholds(50.0, 100.0, 60.0, 180.0));
-        Assert.Equal(HealthSeverity.Healthy, tuned.TotalDeadlockSeverity);
+        /* Ten servers each at 3 reports an hour: no card is even Warning at the default 5 an hour, and the fleet sum of 30 an hour
+           must not band as one server's rate. */
+        var window = TimeSpan.FromHours(1);
+        var cards = new List<FleetServerCard>();
+        for (var i = 1; i <= 10; i++)
+        {
+            var sev = ServerHealthClassifier.BlockingSeverity(3, 0.0, window, BlockingBandThresholds.Default);
+            Assert.Equal(HealthSeverity.Healthy, sev);
+            cards.Add(CardAt(i, sev, HealthSeverity.Healthy));
+        }
+        Assert.Equal(30, DarlingFleetReader.BuildRollup(cards, now, now.AddHours(-1), now).TotalBlockingEvents);
+        Assert.Equal(HealthSeverity.Healthy, DarlingFleetReader.BuildRollup(cards, now, now.AddHours(-1), now).TotalBlockingSeverity);
+
+        cards[4] = CardAt(5, HealthSeverity.Critical, HealthSeverity.Warning);
+        var one = DarlingFleetReader.BuildRollup(cards, now, now.AddHours(-1), now);
+        Assert.Equal(HealthSeverity.Critical, one.TotalBlockingSeverity);
+        Assert.Equal(HealthSeverity.Warning, one.TotalDeadlockSeverity);
     }
 }

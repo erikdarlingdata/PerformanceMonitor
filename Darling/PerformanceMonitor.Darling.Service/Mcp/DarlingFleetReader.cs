@@ -973,7 +973,7 @@ GROUP BY server_id, collector_name";
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest, collectionHealthAgeSeconds,
-            await ReadCollectionStateAsync(postgres, logger, cancellationToken), deadlockTiers, blockingTiers);
+            await ReadCollectionStateAsync(postgres, logger, cancellationToken));
     }
 
     /// <summary>Builds one pre-banded card from a server's raw cross-server reads (pure — the reduction the WPF
@@ -1329,9 +1329,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         int worstCount = DefaultWorstCount,
         IReadOnlyList<FleetTagNode>? tags = null,
         int collectionHealthAgeSeconds = 0,
-        FleetCollectionState? collection = null,
-        DeadlockRateThresholds? deadlockTiers = null,
-        BlockingBandThresholds? blockingTiers = null)
+        FleetCollectionState? collection = null)
     {
         var healthy = 0;
         var warning = 0;
@@ -1340,8 +1338,11 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         var failures = 0;
         long totalBlocking = 0;
         long totalDeadlocks = 0;
-        long? totalBlockingReports = null;
-        var maxBlockedSeconds = 0.0;
+        /* #6927: each totals tile takes the worst band among the cards for that signal, the classification the cards already show.
+           A fleet total is not a per-server rate: ten servers at 3 an hour each would otherwise band the sum of 30 against the
+           per-server tiers and turn Critical with no card even Warning. */
+        var blockingTileSeverity = HealthSeverity.Healthy;
+        var deadlockTileSeverity = HealthSeverity.Healthy;
         var deadlockSourcesRead = 0;
         var deadlockPostgresTargets = 0;
         var deadlockCollectorsSilent = 0;
@@ -1385,14 +1386,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
 
             totalBlocking += card.BlockingCount;
             totalDeadlocks += card.DeadlockCount;
-            /* #6927: the blocking tile bands on the reports the cards band on, and the longest block anywhere. A PostgreSQL card
-               has no blocking source, so it adds nothing and does not make the tile measured. */
-            var cardMetrics = card.ToHealthMetrics();
-            if (cardMetrics.BlockingCount.HasValue)
-            {
-                totalBlockingReports = (totalBlockingReports ?? 0) + cardMetrics.BlockingCount.Value;
-                maxBlockedSeconds = Math.Max(maxBlockedSeconds, cardMetrics.MaxBlockedSeconds);
-            }
+            if (card.BlockingSeverity > blockingTileSeverity) blockingTileSeverity = card.BlockingSeverity;
+            if (card.DeadlockSeverity > deadlockTileSeverity) deadlockTileSeverity = card.DeadlockSeverity;
         }
 
         var problems = cards
@@ -1428,12 +1423,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             ServersWithCollectionFailures = failures,
             TotalBlockingEvents = totalBlocking,
             TotalDeadlocks = totalDeadlocks,
-            /* #6927: the two totals tiles band through the same classifier and the store's tiers as the cards, over the window the totals
-               were read in, instead of the page colouring them on any non-zero count. */
-            TotalBlockingSeverity = ServerHealthClassifier.BlockingSeverity(
-                totalBlockingReports, maxBlockedSeconds, windowEndUtc - windowStartUtc, blockingTiers),
-            TotalDeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(
-                totalDeadlocks, windowEndUtc - windowStartUtc, deadlockTiers ?? DeadlockRateThresholds.Default),
+            TotalBlockingSeverity = blockingTileSeverity,
+            TotalDeadlockSeverity = deadlockTileSeverity,
             DeadlockCoverage = new FleetDeadlockCoverage
             {
                 ServersRead = deadlockSourcesRead,
