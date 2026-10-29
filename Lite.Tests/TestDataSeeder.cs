@@ -357,7 +357,9 @@ public class TestDataSeeder : IDisposable
 
         await SeedWaitStatsAsync(waits);
         // 200 blocking events (~50/hr) — heavy, at critical threshold
-        await SeedBlockingEventsAsync(200, avgWaitTimeMs: 60_000, sleepingBlockerCount: 40, distinctBlockers: 8);
+        // Thread exhaustion is the one pile-up where a single monitor scan lists every blocked session, so all 200
+        // events share one scan: 8 head blockers with 25 victims each.
+        await SeedBlockingEventsAsync(200, avgWaitTimeMs: 60_000, sleepingBlockerCount: 40, distinctBlockers: 8, eventsPerScan: 200);
         // 15 deadlocks (~3.75/hr) — escalating
         await SeedDeadlocksAsync(15);
     }
@@ -970,7 +972,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     /// Seeds blocked_process_reports with synthetic blocking events.
     /// </summary>
     internal async Task SeedBlockingEventsAsync(int count, long avgWaitTimeMs,
-        int sleepingBlockerCount = 0, int distinctBlockers = 3, int coveredMinutes = 240)
+        int sleepingBlockerCount = 0, int distinctBlockers = 3, int coveredMinutes = 240, int? eventsPerScan = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -980,6 +982,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
            coveredMinutes when the scenario's collector died mid-window (#3538 A2), because a collector
            that is down records no blocking either. */
         var intervalMinutes = (double)coveredMinutes / count;
+        var scanSize = Math.Max(1, eventsPerScan ?? distinctBlockers * 3);
 
         for (var i = 0; i < count; i++)
         {
@@ -994,8 +997,8 @@ INSERT INTO blocked_process_reports
     (blocked_report_id, collection_time, server_id, server_name,
      event_time, blocked_spid, blocked_last_tran_started,
      blocking_spid, blocking_last_tran_started, wait_time_ms,
-     lock_mode, blocked_status, blocking_status)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
+     lock_mode, blocked_status, blocking_status, monitor_loop)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = id });
             cmd.Parameters.Add(new DuckDBParameter { Value = eventTime });
@@ -1012,6 +1015,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
             cmd.Parameters.Add(new DuckDBParameter { Value = "X" });
             cmd.Parameters.Add(new DuckDBParameter { Value = "suspended" });
             cmd.Parameters.Add(new DuckDBParameter { Value = isSleeping ? "sleeping" : "running" });
+            // The blocked-process-report collector stores the report's monitorLoop on every row, and one scan's
+            // reports share it (#6931). Group the events into scans the way the monitor would see them.
+            cmd.Parameters.Add(new DuckDBParameter { Value = 1 + i / scanSize });
 
             await cmd.ExecuteNonQueryAsync();
         }
@@ -1032,25 +1038,27 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
         var baseTran = TestPeriodStart;
         DateTime Tran(int spid) => baseTran.AddSeconds(spid);
 
-        // blocked spid, blocked tran, blocking spid, blocking tran, blocking status, blocked ecid
-        var pairs = new (int BlockedSpid, DateTime BlockedTran, int BlockingSpid, DateTime BlockingTran, string BlockingStatus, int BlockedEcid)[]
+        // blocked spid, blocked tran, blocking spid, blocking tran, blocking status, blocked ecid, monitor_loop.
+        // The collector stores the report's monitorLoop on every row and one scan shares it (#6931): chain A and the
+        // spid-reuse row are one scan, chain B and the sentinel row are one scan each.
+        var pairs = new (int BlockedSpid, DateTime BlockedTran, int BlockingSpid, DateTime BlockingTran, string BlockingStatus, int BlockedEcid, int MonitorLoop)[]
         {
             // Chain A — depth 4, apex 200 sleeping
-            (201, Tran(201), 200, Tran(200), "sleeping", 0),
-            (202, Tran(202), 201, Tran(201), "running", 0),
-            (203, Tran(203), 202, Tran(202), "running", 0),
-            (204, Tran(204), 203, Tran(203), "running", 0),
+            (201, Tran(201), 200, Tran(200), "sleeping", 0, 1),
+            (202, Tran(202), 201, Tran(201), "running", 0, 1),
+            (203, Tran(203), 202, Tran(202), "running", 0, 1),
+            (204, Tran(204), 203, Tran(203), "running", 0, 1),
             // Chain B — depth 1, apex 300, five victims
-            (301, Tran(301), 300, Tran(300), "running", 0),
-            (302, Tran(302), 300, Tran(300), "running", 0),
-            (303, Tran(303), 300, Tran(300), "running", 0),
-            (304, Tran(304), 300, Tran(300), "running", 0),
-            (305, Tran(305), 300, Tran(300), "running", 0),
+            (301, Tran(301), 300, Tran(300), "running", 0, 2),
+            (302, Tran(302), 300, Tran(300), "running", 0, 2),
+            (303, Tran(303), 300, Tran(300), "running", 0, 2),
+            (304, Tran(304), 300, Tran(300), "running", 0, 2),
+            (305, Tran(305), 300, Tran(300), "running", 0, 2),
             // SPID reuse — spid 201 again on a DIFFERENT execution context (ecid 1); the (spid, ecid) key
             // keeps this distinct session off Chain A (transaction start is no longer the disambiguator).
-            (201, Tran(201).AddHours(2), 210, Tran(210), "running", 1),
+            (201, Tran(201).AddHours(2), 210, Tran(210), "running", 1, 1),
             // 1900-01-01 sentinel transaction start on the blocked session
-            (220, new DateTime(1900, 1, 1), 221, Tran(221), "running", 0),
+            (220, new DateTime(1900, 1, 1), 221, Tran(221), "running", 0, 3),
         };
 
         for (var i = 0; i < pairs.Length; i++)
@@ -1065,8 +1073,8 @@ INSERT INTO blocked_process_reports
      event_time, database_name, blocked_spid, blocked_last_tran_started,
      blocking_spid, blocking_last_tran_started, wait_time_ms,
      lock_mode, blocked_status, blocking_status, blocked_sql_text, blocking_sql_text,
-     blocked_ecid)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)";
+     blocked_ecid, monitor_loop)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
             cmd.Parameters.Add(new DuckDBParameter { Value = eventTime });
@@ -1085,6 +1093,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             cmd.Parameters.Add(new DuckDBParameter { Value = $"SELECT * FROM dbo.T WHERE id = {p.BlockedSpid}" });
             cmd.Parameters.Add(new DuckDBParameter { Value = $"UPDATE dbo.T SET v = 1 WHERE id = {p.BlockingSpid}" });
             cmd.Parameters.Add(new DuckDBParameter { Value = p.BlockedEcid });
+            cmd.Parameters.Add(new DuckDBParameter { Value = p.MonitorLoop });
             await cmd.ExecuteNonQueryAsync();
         }
     }
@@ -1115,8 +1124,8 @@ INSERT INTO blocked_process_reports
      event_time, database_name, blocked_spid, blocked_last_tran_started,
      blocking_spid, blocking_last_tran_started, wait_time_ms,
      lock_mode, blocked_status, blocking_status, blocked_sql_text, blocking_sql_text,
-     blocked_ecid)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)";
+     blocked_ecid, monitor_loop)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)";
 
                 cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
                 cmd.Parameters.Add(new DuckDBParameter { Value = eventTime });
@@ -1135,6 +1144,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
                 cmd.Parameters.Add(new DuckDBParameter { Value = victim == 501 ? "UPDATE dbo.T SET v = 2" : "SELECT * FROM dbo.T" });
                 cmd.Parameters.Add(new DuckDBParameter { Value = "WAITFOR DELAY '00:30:00'" });
                 cmd.Parameters.Add(new DuckDBParameter { Value = 0 });
+                cmd.Parameters.Add(new DuckDBParameter { Value = i + 1 }); // one monitor scan per sample, both victims in it
                 await cmd.ExecuteNonQueryAsync();
             }
         }
