@@ -169,7 +169,7 @@ public sealed class NotificationRoutesRungTests
         }
 
         /* Every column in the DDL is in exactly one list. */
-        var ddlColumns = new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "signing_key", "previous_signing_key", "previous_signing_key_until", "fallback_route_id" }).ToList();
+        var ddlColumns = new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "signing_key", "previous_signing_key", "previous_signing_key_until", "fallback_route_id", "severities" }).ToList();
         var classified = acl.SecretColumns.Concat(acl.NonSecretColumns).ToList();
         Assert.Equal(ddlColumns.OrderBy(c => c, StringComparer.Ordinal), classified.OrderBy(c => c, StringComparer.Ordinal));
         Assert.Equal(classified.Count, classified.Distinct(StringComparer.Ordinal).Count());
