@@ -2249,7 +2249,7 @@ namespace PerformanceMonitor.Common
             /// <summary>This tally plus one collector row, banded by the caller through the shared ladder.</summary>
             /// <param name="engineGated">#6912: the collector does not run on this server's engine. Whatever band the logged runs left it, it is
             /// not collected and counts as neither healthy, warning nor failing.</param>
-            public BandTally Add(string? collectorName, string band, bool alwaysOnOff, bool engineGated = false)
+            public BandTally Add(string? collectorName, string band, bool alwaysOnOff, bool engineGated)
             {
                 var notCollected = engineGated || IsNotCollectedWhenAlwaysOnOff(collectorName, band, alwaysOnOff);
                 return new BandTally(

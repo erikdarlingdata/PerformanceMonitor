@@ -1512,12 +1512,30 @@ internal sealed class DarlingSelfAlertEvaluator
             IReadOnlyList<string> notRunOnEngine = Array.Empty<string>();
             if (missing.Count > 0)
             {
-                var facts = await ReadCaptureDownEngineFactsAsync(postgres, serverId, cancellationToken);
+                /* A failed engine read makes no claim, as DarlingGatedCollectorRows.ReadEngineGateAsync and
+                   FleetEngineGatedCollectors.ReadAsync do: the unknown edition gates nothing, so the pre-#6912 answer
+                   stands. Letting it reach the catch below would silence Capture Down for the pass, in the very store
+                   episode where the alert matters. The adapter has already recorded the failure. */
+                (int EngineEdition, string? EngineKind, AwsRdsKind AwsRdsKind) facts;
+                try
+                {
+                    facts = await ReadCaptureDownEngineFactsAsync(postgres, serverId, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning("[{Server}] Capture-down engine facts read failed, so no capture is dropped as not run on the engine: {Message}", serverName, ex.Message);
+                    facts = (CollectorEngineCapability.UnknownEngineEdition, null, AwsRdsKind.None);
+                }
+
                 (missing, notRunOnEngine) = SplitCapturesByEngine(serverName, missing, facts.EngineEdition, facts.EngineKind, facts.AwsRdsKind);
             }
 
             captureReadClock.Restart();
-            await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken, sweepGeneration: generation, notRunOnEngine: notRunOnEngine);
+            await ApplyCaptureDownAsync(serverId, serverName, missing, notRunOnEngine, cancellationToken, sweepGeneration: generation);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1910,8 +1928,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <param name="sweepGeneration">#4795: as on <see cref="ApplyCollectionStoppedAsync"/>: given and out of date,
     /// this judges nothing, sends nothing and leaves no standing-alert flag or cooldown stamp behind.</param>
     internal async Task ApplyCaptureDownAsync(
-        int serverId, string serverName, IReadOnlyList<string> missing, CancellationToken cancellationToken,
-        int? sweepGeneration = null, IReadOnlyList<string>? notRunOnEngine = null)
+        int serverId, string serverName, IReadOnlyList<string> missing, IReadOnlyList<string> notRunOnEngine, CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
         /* #4795: before any state is read or written and before any send. */
         if (IsStaleSweep(serverId, sweepGeneration))

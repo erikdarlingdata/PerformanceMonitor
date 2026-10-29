@@ -112,7 +112,7 @@ VALUES (6828001, $1, $2, $3, 'Edition', '15.0.2000.5', 'RTM', 3, $4::boolean)", 
             var viewerFleet = new CollectorHealthClassifier.BandTally();
             foreach (var row in fleetRows)
             {
-                viewerFleet = viewerFleet.Add(row.CollectorName, row.HealthStatus, row.ServerAlwaysOnOff);
+                viewerFleet = viewerFleet.Add(row.CollectorName, row.HealthStatus, row.ServerAlwaysOnOff, engineGated: false);
             }
 
             Assert.Equal(mcp, viewerFleet);

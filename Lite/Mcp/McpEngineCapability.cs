@@ -124,7 +124,7 @@ internal static class McpEngineCapability
             }
             else
             {
-                notCollected.Add(new { collector = row.CollectorName, status = "not_collected", message });
+                notCollected.Add(new { collector = row.CollectorName, status = CollectorRuntimePrecondition.NotCollectedStatusWord, message });
             }
         }
 

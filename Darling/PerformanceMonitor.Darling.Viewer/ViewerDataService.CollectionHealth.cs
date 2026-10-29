@@ -514,7 +514,11 @@ public sealed partial class ViewerDataService
     /// shipped default, as <see cref="ApplyScheduledFrequencies"/> resolves it), to <see cref="SweepPressureReport"/>, the arithmetic the web's
     /// tool uses. A failure to read the schedule overrides costs the panels nothing but the overrides (the shipped cadences are used).
     /// </summary>
-    public async Task<SweepPressureReport?> GetSweepPressureAsync(int serverId, CancellationToken cancellationToken = default)
+    /// <param name="engineGated">#6912: the collectors this server's engine does not run (<see cref="FleetEngineGatedCollectors.For"/>). Their
+    /// pre-gate runs are left out of both panels, as <c>get_collection_health</c> computes its figures from the running rows only, so the
+    /// panel and the tool name the same peak collector for the same server. Null leaves every row in.</param>
+    public async Task<SweepPressureReport?> GetSweepPressureAsync(
+        int serverId, CancellationToken cancellationToken = default, IReadOnlySet<string>? engineGated = null)
     {
         var scheduleOverrides = await ReadScheduleOverridesForHealthAsync(cancellationToken);
         var costs = new List<(CollectorHealthRow Row, double Avg, double P95, double Max)>();
@@ -545,12 +549,27 @@ public sealed partial class ViewerDataService
             return null;
         }
 
+        return BuildSweepPressure(costs, serverId, scheduleOverrides, engineGated);
+    }
+
+    /// <summary>
+    /// The pure half of <see cref="GetSweepPressureAsync"/>: stamps each collector's cadence, leaves the <paramref name="engineGated"/> collectors
+    /// out (#6912) and builds the report from the rest. Pure, so a test drives it without a store.
+    /// </summary>
+    internal static SweepPressureReport BuildSweepPressure(
+        List<(CollectorHealthRow Row, double Avg, double P95, double Max)> costs, int serverId,
+        IReadOnlyList<CollectorScheduleRow> scheduleOverrides, IReadOnlySet<string>? engineGated)
+    {
+        var running = engineGated is null || engineGated.Count == 0
+            ? costs
+            : costs.Where(c => !engineGated.Contains(c.Row.CollectorName)).ToList();
+
         /* A name the catalog does not know is left unstamped (frequency 0), which the ranking and the roll-up both skip: the service's rule. */
         ApplyScheduledFrequencies(
-            costs.Select(c => c.Row).Where(r => CollectorScheduleDefaults.All.ContainsKey(r.CollectorName)), serverId, scheduleOverrides);
+            running.Select(c => c.Row).Where(r => CollectorScheduleDefaults.All.ContainsKey(r.CollectorName)), serverId, scheduleOverrides);
 
         /* The statement's p95 is always the upper bound of a duration bucket (P95Bucketed), as the service's reader marks it. */
-        return SweepPressureReport.Build(costs.Select(c =>
+        return SweepPressureReport.Build(running.Select(c =>
             new SweepCollectorCost(c.Row.CollectorName, c.Avg, c.P95, P95Bucketed: true, c.Max, c.Row.FrequencyMinutes)));
     }
 
@@ -1309,7 +1328,7 @@ public class CollectorHealthRow
     public string DisplayStatus => EngineGated ? EngineNotCollectedStatus : HealthStatus;
 
     /// <summary>The status word <c>get_collection_health</c> uses for a collector the engine does not run.</summary>
-    internal const string EngineNotCollectedStatus = "not_collected";
+    internal const string EngineNotCollectedStatus = CollectorRuntimePrecondition.NotCollectedStatusWord;
 
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }

@@ -41,7 +41,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class DarlingGatedCollectorRows
 {
     /// <summary>The status word on a gated row: the same word the <c>not_collected</c> envelope uses.</summary>
-    internal const string NotCollectedStatus = "not_collected";
+    internal const string NotCollectedStatus = CollectorRuntimePrecondition.NotCollectedStatusWord;
 
 
     /// <summary>The sentence on a not-applicable Always On row.</summary>
@@ -86,7 +86,7 @@ internal static class DarlingGatedCollectorRows
 
     /// <summary>
     /// #6912: one server's engine facts and the collectors they gate off. A gated collector writes no new row, so what it logged
-    /// before the gate existed (an Amazon RDS Web or Express target's SESSION_MISSING runs for <c>attention</c>, after #6895) keeps its
+    /// before the gate existed (an Amazon RDS Web or Express target's SESSION_MISSING runs for <c>attention</c>, after #6893) keeps its
     /// FAILING band for the whole seven-day window. Such a collector reads <c>not_collected</c> whatever it logged, and is left out of
     /// the sweep arithmetic and the counts. The gate is <see cref="CollectorEngineCapability.NotCollectedMessage"/>, the one the reads use.
     /// </summary>
@@ -176,6 +176,8 @@ internal static class DarlingGatedCollectorRows
             CollectorCatalog.All,
             engineKind,
             loggedRows.Select(r => r.CollectorName).ToHashSet(StringComparer.Ordinal),
+            /* The RDS kind is inert here while Rows admits PostgreSQL definitions only (the kind axis returns before the RDS axis
+               is reached). It is passed so the answer stays right if that filter ever widens. */
             name => CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, name, awsRdsKind));
     }
 

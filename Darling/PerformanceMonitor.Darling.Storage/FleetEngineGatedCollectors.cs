@@ -18,7 +18,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <summary>
 /// #6912: the collectors a server's engine does not run, by server, for the collection-health count surfaces. A gated collector
 /// writes no new row, so the rows it logged before the gate existed (the 315 SESSION_MISSING runs an Amazon RDS Web or Express
-/// target holds for <c>attention</c> after #6895) stay inside the seven-day window and band it FAILING. The answer is the same
+/// target holds for <c>attention</c> after #6893) stay inside the seven-day window and band it FAILING. The answer is the same
 /// gate that makes the collector's read answer <c>not_collected</c>, <see cref="CollectorEngineCapability.NotCollectedMessage"/>,
 /// so the health list, the fleet card, the Viewer card and the status bar cannot disagree with the reads.
 /// </summary>

@@ -172,7 +172,7 @@ public sealed class StateSelfAlertTests
         /// <summary>One check with the condition holding.</summary>
         public Task HoldAsync() => State switch
         {
-            State.CaptureDown => Evaluator.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking" }, Ct),
+            State.CaptureDown => Evaluator.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking" }, Array.Empty<string>(), Ct),
             State.AgentNotRunning => Evaluator.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct),
             State.AgSyncBehind => Evaluator.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { AgDatabase(lagSeconds: 900) }, Ct),
             State.CustomRuleHealth => Evaluator.ApplyCustomRuleHealthAsync(UnhealthyRules(), Ct),
@@ -191,7 +191,7 @@ public sealed class StateSelfAlertTests
             switch (State)
             {
                 case State.CaptureDown:
-                    await Evaluator.ApplyCaptureDownAsync(ServerId, Name, Array.Empty<string>(), Ct);
+                    await Evaluator.ApplyCaptureDownAsync(ServerId, Name, Array.Empty<string>(), Array.Empty<string>(), Ct);
                     break;
                 case State.AgentNotRunning:
                     await Evaluator.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: true, agentEverSeenRunning: true, Ct);

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using PerformanceMonitor.Collectors;
@@ -21,7 +22,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #6912: a collector that does not run on the server's engine reads <c>not_collected</c> in collection health whatever older runs it has
-/// logged, and is not counted as failing. On an Amazon RDS Web or Express target the Extended Events collectors stopped with #6895, and the
+/// logged, and is not counted as failing. On an Amazon RDS Web or Express target the Extended Events collectors stopped with #6893, and the
 /// SESSION_MISSING runs they logged before that stayed inside the seven-day window and banded them FAILING.
 /// </summary>
 public sealed class EngineGatedCollectionHealthTests
@@ -101,7 +102,7 @@ public sealed class EngineGatedCollectionHealthTests
         var ungated = new CollectorHealthClassifier.BandTally();
         foreach (var row in rows)
         {
-            ungated = ungated.Add(row.CollectorName, row.HealthStatus, alwaysOnOff: false);
+            ungated = ungated.Add(row.CollectorName, row.HealthStatus, alwaysOnOff: false, engineGated: false);
         }
 
         Assert.Equal(2, ungated.Failing);
@@ -170,5 +171,26 @@ public sealed class EngineGatedCollectionHealthTests
 
         ViewerServerTab.ApplyEngineGate(new() { attention }, "SQL-2", CollectorEngineCapability.UnknownEngineEdition, null, AwsRdsKind.None);
         Assert.Equal("FAILING", attention.DisplayStatus);
+    }
+
+    [Fact]
+    public void SweepPressurePanel_LeavesAGatedCollectorsRunsOut_SoItNamesTheSamePeakCollectorAsTheTool()
+    {
+        /* attention is the heaviest collector in the window, but it stopped running on an Amazon RDS Web or Express instance (#6893). */
+        var costs = new List<(ViewerHealthRow Row, double Avg, double P95, double Max)>
+        {
+            (new ViewerHealthRow { CollectorName = "attention" }, 20_000, 30_000, 40_000),
+            (new ViewerHealthRow { CollectorName = "wait_stats" }, 500, 800, 900),
+        };
+        var gated = FleetEngineGatedCollectors.For(2, null, AwsRdsKind.RdsWebOrExpress);
+
+        var ungated = ViewerDataService.BuildSweepPressure(costs, 1, Array.Empty<CollectorScheduleRow>(), null);
+        Assert.Equal("attention", ungated.Pressure.PeakCollectorName);
+        Assert.Contains(ungated.Heaviest, r => r.Collector == "attention");
+
+        var report = ViewerDataService.BuildSweepPressure(costs, 1, Array.Empty<CollectorScheduleRow>(), gated);
+        Assert.Equal("wait_stats", report.Pressure.PeakCollectorName);
+        Assert.DoesNotContain(report.Heaviest, r => r.Collector == "attention");
+        Assert.Contains(report.Heaviest, r => r.Collector == "wait_stats");
     }
 }

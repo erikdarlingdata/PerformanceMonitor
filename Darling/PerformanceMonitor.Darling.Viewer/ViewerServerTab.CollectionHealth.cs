@@ -129,7 +129,9 @@ public partial class ViewerServerTab
     {
         try
         {
-            ShowSweepPressure(await _dataService.GetSweepPressureAsync(_server.ServerId));
+            /* #6912: the same gate get_collection_health leaves the gated collectors' runs out with, so the panel and the tool name the same peak collector. */
+            var engineGated = FleetEngineGatedCollectors.For(_server.EngineEdition, _server.EngineKind, _server.AwsRdsKind);
+            ShowSweepPressure(await _dataService.GetSweepPressureAsync(_server.ServerId, engineGated: engineGated));
         }
         catch (OperationCanceledException)
         {

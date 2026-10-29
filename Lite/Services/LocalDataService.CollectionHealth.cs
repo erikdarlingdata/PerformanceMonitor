@@ -1604,7 +1604,7 @@ public class CollectorHealthRow
     public string? EngineNotCollectedMessage { get; set; }
 
     /// <summary>The status word <c>get_collection_health</c> uses for a collector the engine does not run.</summary>
-    internal const string EngineNotCollectedStatus = "not_collected";
+    internal const string EngineNotCollectedStatus = CollectorRuntimePrecondition.NotCollectedStatusWord;
 
     /// <summary>#6912: the word the Status column shows. A collector the server's engine does not run reads <c>not_collected</c>, as
     /// <c>get_collection_health</c> lists it, whatever band its pre-gate runs left it. Every other row shows its band.</summary>
