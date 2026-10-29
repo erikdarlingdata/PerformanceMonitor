@@ -130,6 +130,25 @@ public class BlockingChainDurationTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
+    public void Build_DmvOnlyServerOnAFiveMinuteCollector_OneLongBlockIsOneEpisode_AndStillOpen()
+    {
+        // No blocked-process report (an RDS Web or Express server): the DMV snapshot is the only source, sampled every
+        // 5 minutes. One lead blocker held for 30 minutes is seven samples. A fixed 2-minute episode gap counted
+        // seven episodes and looked for the newest sample only 2 minutes past the worst scan, so a live block read
+        // as closed (#6931).
+        var end = new DateTime(2026, 10, 25, 12, 0, 0);
+        var rows = new List<BlockingPairRow>();
+        for (var i = 0; i < 7; i++)
+            rows.Add(Pair(end.AddMinutes(-33 + 5 * i), 501, 500, 60_000 * (i + 1)));
+
+        var fact = Build(rows, end, intervalMinutes: 5);
+
+        Assert.Equal(1, fact.Metadata["total_reconstructed_chains"]);
+        Assert.Equal(1, fact.Metadata["worst_chain_open_at_end"]);
+        Assert.Equal(TimeSpan.FromMinutes(3).TotalMilliseconds, fact.Metadata["worst_chain_last_seen_age_ms"]);
+    }
+
+    [Fact]
     public void Build_NewestSampleOlderThanTwoIntervals_IsClosed_AndASlowerCadenceWidensTheBound()
     {
         var end = new DateTime(2026, 10, 25, 12, 0, 0);

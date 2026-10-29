@@ -63,15 +63,17 @@ VALUES ($1, $2, $3, $4, $2, 'FetchDb', $5, $6, $7, 'X', $8, $9, $10, $11, 7)",
 
     private static async Task InsertDmvAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime at, int blockedSpid, int blockingSpid, long waitMs,
-        string? blockedText, string? blockingText)
+        string? blockedText, string? blockingText, int monitorLoop)
     {
+        /* The reconstruction is per scan (#6931), and a snapshot cycle is one scan: its rows share a (negative)
+           monitor_loop, as the collector writes them. Rows without one would each be their own scan, by second. */
         await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO dmv_blocking_snapshots
     (collection_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocking_spid, wait_time_ms,
-     blocking_status, blocked_sql_text, blocking_sql_text, blocked_ecid, blocking_ecid)
-VALUES ($1, $2, $3, $4, $2, 'FetchDb', $5, $6, $7, 'sleeping', $8, $9, 0, 0)",
+     blocking_status, blocked_sql_text, blocking_sql_text, blocked_ecid, blocking_ecid, monitor_loop)
+VALUES ($1, $2, $3, $4, $2, 'FetchDb', $5, $6, $7, 'sleeping', $8, $9, 0, 0, $10)",
             CollectionIdGenerator.Next(), at, ServerId, ServerName, blockedSpid, blockingSpid, waitMs,
-            (object?)blockedText ?? DBNull.Value, (object?)blockingText ?? DBNull.Value);
+            (object?)blockedText ?? DBNull.Value, (object?)blockingText ?? DBNull.Value, monitorLoop);
     }
 
     /// <summary>The flow of the drill-down before #5361, run on the same store: whole text in every pair-row.</summary>
@@ -100,7 +102,11 @@ VALUES ($1, $2, $3, $4, $2, 'FetchDb', $5, $6, $7, 'sleeping', $8, $9, 0, 0)",
 
         var reconstruction = BlockingChainReconstructor.Reconstruct(
             rows, maxDepth: 50, maxPairs: 5000, stepBudget: 100_000, scopeByMonitorLoop: true);
-        return Json(reconstruction.Chains.Take(3).Select(chain => (object)new
+        /* The chains the drill-down lists since #6931: worst scan first, one per episode (the shared selection), not the
+           reconstruction's first three. The text stays whole here, which is what this oracle checks the fetch against. */
+        var shown = BlockingChainFactBuilder.DrillDownChains(
+            reconstruction, 3, CollectorScheduleDefaults.DefaultBlockingIntervalMinutes);
+        return Json(shown.Select(chain => (object)new
         {
             apex_spid = chain.ApexSpid,
             apex_sleeping = chain.ApexSleeping,
@@ -154,14 +160,15 @@ VALUES ($1, $2, $3, $4, $2, 'FetchDb', $5, $6, $7, 'sleeping', $8, $9, 0, 0)",
             await InsertBprAsync(connection, ct, t0.AddSeconds(6), 74, 72, 1_000, "SELECT null_ecid", "SELECT null_ecid_blocker", blockedEcid: null, blockingEcid: null);
 
             /* Chain B, DMV snapshots only (no report holds it): 80 -> 81 -> 82. */
-            await InsertDmvAsync(connection, ct, t0.AddMinutes(5).AddSeconds(1), 81, 80, 4_000, "SELECT dmv_old", "SELECT dmv_old_blocker");
-            await InsertDmvAsync(connection, ct, t0.AddMinutes(5).AddSeconds(30), 81, 80, 9_000, named, Plain);
-            await InsertDmvAsync(connection, ct, t0.AddMinutes(5).AddSeconds(31), 82, 81, 2_500, "SELECT dmv_82", AstralAtCut);
+            await InsertDmvAsync(connection, ct, t0.AddMinutes(5).AddSeconds(1), 81, 80, 4_000, "SELECT dmv_old", "SELECT dmv_old_blocker", -5);
+            await InsertDmvAsync(connection, ct, t0.AddMinutes(5).AddSeconds(30), 81, 80, 9_000, named, Plain, -5);
+            await InsertDmvAsync(connection, ct, t0.AddMinutes(5).AddSeconds(31), 82, 81, 2_500, "SELECT dmv_82", AstralAtCut, -5);
 
-            /* Chain C: an edge both sources hold in one minute. The report wins and the DMV edge is dropped, so the text
-               printed is the report's, not the snapshot's. */
+            /* Chain C: an edge both sources hold in one minute. Each source is its own scan and both are kept, but they are
+               one episode (the same apex a few seconds apart), listed once at its worst scan: the report's, which waited
+               longer, so the text printed is the report's, not the snapshot's. */
             await InsertBprAsync(connection, ct, t0.AddMinutes(10).AddSeconds(5), 91, 90, 6_000, "SELECT from_report", "SELECT from_report_blocker");
-            await InsertDmvAsync(connection, ct, t0.AddMinutes(10).AddSeconds(25), 91, 90, 7_000, "SELECT from_snapshot", "SELECT from_snapshot_blocker");
+            await InsertDmvAsync(connection, ct, t0.AddMinutes(10).AddSeconds(25), 91, 90, 4_000, "SELECT from_snapshot", "SELECT from_snapshot_blocker", -6);
 
             var oracle = await OracleChainsJsonAsync(connection, context, ct);
 
@@ -169,7 +176,6 @@ VALUES ($1, $2, $3, $4, $2, 'FetchDb', $5, $6, $7, 'sleeping', $8, $9, 0, 0)",
             await new PgDrillDownCollector(postgres).EnrichFindingsAsync([finding], context);
             Assert.NotNull(finding.DrillDown);
             var shipped = Json(finding.DrillDown!["reconstructed_blocking_chains"]);
-
             Assert.Equal(oracle, shipped);
 
             /* Positive controls: the comparison saw all three chains, both sources, the cut, the withheld marker and the

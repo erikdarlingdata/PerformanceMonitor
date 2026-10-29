@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -250,7 +251,7 @@ LIMIT 5000";
             rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
             context.CancellationToken, includeText: false);
 
-        /* #5361: the merge appends only the DMV edges no blocked-process-report edge already holds, after the report
+        /* #5361: the merge appends every DMV row after the report
            rows, so every row past the report count is DMV-sourced: the source of each level's text read below. */
         var dmvKeys = rows.Skip(bprRowCount).Select(r => r.Key).ToHashSet();
 
@@ -265,7 +266,9 @@ LIMIT 5000";
         var reconstruction = BlockingChainReconstructor.Reconstruct(
             rows, maxDepth: 50, maxPairs: 5000, stepBudget: 100_000, scopeByMonitorLoop: true);
 
-        var shownChains = BlockingChainFactBuilder.DrillDownChains(reconstruction, 3);
+        var shownChains = BlockingChainFactBuilder.DrillDownChains(
+            reconstruction, 3,
+            context.BlockingCollectionIntervalMinutes ?? CollectorScheduleDefaults.DefaultBlockingIntervalMinutes);
 
         /* #5361: whole statement text for the levels that print, by event key, one read per source. A level whose
            row is gone by now (retention) reads as empty text. The text is judged and cut below, as before. */
