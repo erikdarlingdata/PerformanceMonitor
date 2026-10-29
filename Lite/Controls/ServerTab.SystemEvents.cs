@@ -188,14 +188,17 @@ public partial class ServerTab : UserControl
     /// server's engine: the sentence the MCP tools return as <c>not_collected</c>
     /// (<see cref="CollectorEngineCapability.NotCollectedMessage"/>), which the Darling viewer's panels show too.
     /// Null where the collector does run. The tab only knows whether the server is an Azure SQL Database, so any
-    /// other server goes in as an unknown edition, which makes no claim.
+    /// other server goes in as an unknown edition, which makes no claim. <paramref name="isAwsRds"/> is the connection check's
+    /// finding (#6894): on Amazon RDS the Agent collectors are closed by their own gate and never run, so the note names RDS, as the
+    /// MCP tool does, instead of the "possible cause" text that implies a setup step could fix it.
     /// </summary>
-    internal static string? EngineGapNote(string serverName, bool isAzureSqlDatabase, string collectorName) =>
+    internal static string? EngineGapNote(string serverName, bool isAzureSqlDatabase, string collectorName, bool isAwsRds = false) =>
         CollectorEngineCapability.NotCollectedMessage(
             serverName,
             isAzureSqlDatabase ? CollectorEngineCapability.AzureSqlDatabaseEngineEdition : CollectorEngineCapability.UnknownEngineEdition,
             engineKind: null,
-            collectorName);
+            collectorName,
+            isAwsRds);
 
     /// <summary>The Default Trace grid's note on an Azure SQL Database, which has no default trace; null anywhere else,
     /// where the grid keeps its "no events in this window" text.</summary>

@@ -60,8 +60,8 @@ SELECT a.server_id,
 FROM agg a
 ORDER BY a.server_id";
 
-    /// <summary>One enabled server and what the registry knows of its engine (the inputs of <see cref="CollectorEngineCapability.NotCollectedMessage"/>).</summary>
-    public sealed record ServerFacts(int ServerId, string ServerName, string? DisplayName, int EngineEdition, string? EngineKind);
+    /// <summary>One enabled server and what the registry knows of its engine (the inputs of <see cref="CollectorEngineCapability.NotCollectedMessage"/>; the Amazon RDS fact is false when the host does not know it, #6894).</summary>
+    public sealed record ServerFacts(int ServerId, string ServerName, string? DisplayName, int EngineEdition, string? EngineKind, bool IsAwsRds = false);
 
     /// <summary>One row of <see cref="LivenessSql"/>.</summary>
     public sealed record RunFacts(int ServerId, DateTime? LastSuccessUtc, DateTime? LastFailureUtc, long Runs, long Failures, string? FailureStatus, string? FailureMessage);
@@ -95,7 +95,7 @@ ORDER BY a.server_id";
 
         foreach (var server in servers.OrderBy(s => s.ServerName, StringComparer.OrdinalIgnoreCase))
         {
-            var gap = CollectorEngineCapability.NotCollectedMessage(server.ServerName, server.EngineEdition, server.EngineKind, collectorName);
+            var gap = CollectorEngineCapability.NotCollectedMessage(server.ServerName, server.EngineEdition, server.EngineKind, collectorName, server.IsAwsRds);
             if (gap is not null)
             {
                 notApplicable.Add(new { server_name = server.ServerName, display_name = Name(server.DisplayName, server.ServerName), reason = gap });

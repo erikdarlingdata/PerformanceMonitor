@@ -44,7 +44,8 @@ internal static class McpEngineCapability
         LocalDataService dataService,
         int serverId,
         string serverName,
-        string collectorName)
+        string collectorName,
+        bool isAwsRds = false)
     {
         var engineEdition = await EngineEditionAsync(dataService, serverId);
 
@@ -56,7 +57,7 @@ internal static class McpEngineCapability
            Server collector on a SQL Server target makes no kind claim either way) and cannot become wrong.
            The parameter is REQUIRED rather than defaulted so that decision is visible at the call site
            instead of being made by omission. */
-        var engineEnvelope = Envelope(serverName, engineEdition, collectorName);
+        var engineEnvelope = Envelope(serverName, engineEdition, collectorName, isAwsRds);
         if (engineEnvelope is not null || collectorName is not ("query_store" or "plan_correction"))
         {
             return engineEnvelope;
@@ -66,12 +67,46 @@ internal static class McpEngineCapability
         return await McpRuntimePrecondition.QueryStoreReadableSecondaryStatusAsync(dataService, serverId, serverName);
     }
 
+    /// <summary>
+    /// #6894: the same answer for a read of a collector Amazon RDS gates off (running_jobs). The RDS fact is not in the store, so this takes the
+    /// server manager and reads it from the server's connection status; the edition axis cannot show it, because RDS reports an ordinary edition.
+    /// </summary>
+    public static Task<string?> NotCollectedStatusAsync(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        int serverId,
+        string serverName,
+        string collectorName)
+    {
+        var rds = IsAwsRds(serverManager, serverId);
+        return NotCollectedStatusAsync(dataService, serverId, serverName, collectorName, isAwsRds: rds);
+    }
+
     /// <summary>The <c>not_collected</c> envelope for this engine and collector, or <c>null</c> when the collector can run there.
     /// No engine-kind claim, for the reason given in <see cref="NotCollectedStatusAsync"/>.</summary>
-    private static string? Envelope(string serverName, int engineEdition, string collectorName)
+    private static string? Envelope(string serverName, int engineEdition, string collectorName, bool isAwsRds = false)
     {
-        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, collectorName);
+        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, collectorName, isAwsRds);
         return message is null ? null : McpHelpers.Status("not_collected", message);
+    }
+
+    /// <summary>
+    /// #6894: whether the connection check found this server to be an Amazon RDS for SQL Server instance (the <c>rdsadmin</c> database).
+    /// Lite keeps the fact in memory on the server's connection status, and a tool holds only the storage id, so the server is found the way
+    /// the collectors name it. False for a server that is not registered, was never checked, or whose check failed: no RDS claim, which leaves
+    /// the read on its own precondition answer.
+    /// </summary>
+    public static bool IsAwsRds(ServerManager serverManager, int storageServerId)
+    {
+        foreach (var server in serverManager.GetEnabledServers())
+        {
+            if (RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server)) == storageServerId)
+            {
+                return serverManager.GetConnectionStatus(server.Id).IsAwsRds;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

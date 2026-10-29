@@ -77,7 +77,7 @@ WHERE server_id = $1";
             return null;
         }
 
-        var engineEnvelope = Envelope(serverName, engineEdition, engineKind, collectorName);
+        var engineEnvelope = await EnvelopeAsync(postgres, serverId, serverName, engineEdition, engineKind, collectorName, cancellationToken);
         if (engineEnvelope is not null || !IsReadableSecondaryGated(collectorName))
         {
             return engineEnvelope;
@@ -117,10 +117,56 @@ WHERE server_id = $1";
                 "enabling a collector or starting a capture cannot change it.")
             : null;
 
-    /// <summary>The <c>not_collected</c> envelope for this engine and collector, or <c>null</c> when the collector can run there.</summary>
-    private static string? Envelope(string serverName, int engineEdition, string? engineKind, string collectorName)
+    /// <summary>
+    /// #6894: <see cref="Envelope"/> plus the Amazon RDS axis. The registry's RDS fact is read only when the engine axes found no gap AND the
+    /// collector's own gate is closed on RDS, so a read of any other collector costs nothing extra. A NULL (never stamped) or failed read is
+    /// false, which makes no RDS claim and leaves the read on its own precondition answer.
+    /// </summary>
+    private static async Task<string?> EnvelopeAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, int engineEdition, string? engineKind, string collectorName,
+        CancellationToken cancellationToken)
     {
-        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName);
+        var envelope = Envelope(serverName, engineEdition, engineKind, collectorName);
+        if (envelope is not null || CollectorEngineCapability.IsCollectedOnAwsRds(collectorName, engineKind))
+        {
+            return envelope;
+        }
+
+        return await IsAwsRdsAsync(postgres, serverId, cancellationToken)
+            ? Envelope(serverName, engineEdition, engineKind, collectorName, isAwsRds: true)
+            : null;
+    }
+
+    /// <summary>#6894: the registry's Amazon RDS fact for one server, stamped by every connect (V225). $1 server_id.</summary>
+    public const string AwsRdsSql = @"
+SELECT is_aws_rds
+FROM servers
+WHERE server_id = $1";
+
+    /// <summary>
+    /// #6894: whether the registry says this server is an Amazon RDS for SQL Server instance. False when there is no row, the column is NULL
+    /// (no connect has stamped it, or a PostgreSQL target) or the read fails: no claim is the answer that keeps a read on its own precondition
+    /// text. A cancellation still propagates.
+    /// </summary>
+    internal static async Task<bool> IsAwsRdsAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = postgres.CreateCommand(AwsRdsSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            return await command.ExecuteScalarAsync(cancellationToken) is true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The <c>not_collected</c> envelope for this engine and collector, or <c>null</c> when the collector can run there.</summary>
+    private static string? Envelope(string serverName, int engineEdition, string? engineKind, string collectorName, bool isAwsRds = false)
+    {
+        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, isAwsRds);
         return message is null ? null : McpHelpers.Status("not_collected", message);
     }
 
@@ -166,7 +212,7 @@ ORDER BY server_name";
             try
             {
                 var (engineEdition, engineKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
-                envelope = Envelope(serverName, engineEdition, engineKind, collectorName);
+                envelope = await EnvelopeAsync(postgres, serverId, serverName, engineEdition, engineKind, collectorName, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

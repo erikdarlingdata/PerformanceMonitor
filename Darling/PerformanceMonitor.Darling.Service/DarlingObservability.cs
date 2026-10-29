@@ -46,10 +46,14 @@ public static class DarlingObservability
        value already stored for the same name and engine rather than writing NULL over it (#6340 round 2, N1): a login swap must not
        blank what vouches for the machine. An address change clears the stored value in config.edit_monitored_server, so a kept value
        never belongs to another address. The registry is never purged and keeps a removed registration's row, so the identity outlives
-       the registration. */
+       the registration.
+
+       is_aws_rds (V225, #6894) is written on BOTH arms too: whether the target is an Amazon RDS for SQL Server instance is a probed fact, and the
+       collectors RDS gates off never run there, so this column is the only place the read side can learn why they have no data. NULL off a
+       PostgreSQL target, where it is not a SQL Server fact and makes no claim. */
     internal const string UpsertServerSql = @"
-INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date, monthly_cost_usd, postgres_major_version, machine_identity)
-VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $7, $8, $9, $10)
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date, monthly_cost_usd, postgres_major_version, machine_identity, is_aws_rds)
+VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $7, $8, $9, $10, $11)
 ON CONFLICT (server_id) DO UPDATE SET
     server_name = EXCLUDED.server_name,
     display_name = EXCLUDED.display_name,
@@ -60,7 +64,8 @@ ON CONFLICT (server_id) DO UPDATE SET
     monthly_cost_usd = EXCLUDED.monthly_cost_usd,
     postgres_major_version = EXCLUDED.postgres_major_version,
     machine_identity = CASE WHEN EXCLUDED.machine_identity IS NULL AND servers.server_name = EXCLUDED.server_name AND servers.engine_kind = EXCLUDED.engine_kind
-                            THEN servers.machine_identity ELSE EXCLUDED.machine_identity END;";
+                            THEN servers.machine_identity ELSE EXCLUDED.machine_identity END,
+    is_aws_rds = EXCLUDED.is_aws_rds;";
 
     /* The identity the registry holds for this registration BEFORE the connect's upsert (#6351). An upsert cannot hand back the
        value it overwrote, so it is read right before; the connect path is single-threaded per server, so nothing writes between. */
@@ -217,6 +222,9 @@ ON CONFLICT (server_id) DO UPDATE SET
             /* The machine's own name (V212, #6285, #6339), folded to the form the add and edit tools compare. NULL when the connect
                read none. */
             command.Parameters.AddWithValue((object?)machineIdentity ?? DBNull.Value);
+            /* V225 (#6894): the connector's RDS probe, SQL Server targets only. A PostgreSQL target's IsAwsRds comes from its endpoint and is not this fact. */
+            command.Parameters.AddWithValue(
+                server.Target.Engine == CollectorTargetEngine.SqlServer ? server.Target.IsAwsRds : (object)DBNull.Value);
             await command.ExecuteNonQueryAsync(cancellationToken);
 
             /* #6351: a connect that reads an identity stores exactly that value (the upsert keeps the old one only when none was read),

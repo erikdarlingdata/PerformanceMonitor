@@ -779,7 +779,8 @@ public sealed class McpHealthTools
                 var id = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s));
                 servers.Add(new CollectorFleetLiveness.ServerFacts(
                     id, s.ServerName, string.IsNullOrWhiteSpace(s.DisplayName) ? null : s.DisplayName,
-                    await McpEngineCapability.EngineEditionAsync(dataService, id), null));
+                    await McpEngineCapability.EngineEditionAsync(dataService, id), null,
+                    serverManager.GetConnectionStatus(s.Id).IsAwsRds));
             }
 
             var runs = await dataService.GetCollectorFleetLivenessAsync(collector, windowStart, windowEnd);
