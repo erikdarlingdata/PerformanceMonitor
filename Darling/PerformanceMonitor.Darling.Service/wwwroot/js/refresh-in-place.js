@@ -65,13 +65,13 @@ export function replaceNodes(container, old, fresh) {
 
 /** Run `fn`, then put the page back where the reader had scrolled it if the swap moved it. */
 export function keepScroll(fn) {
-  const y = window.scrollY;
+  const y = globalThis.scrollY;
   fn();
   if (y > 0) {
     /* The browser's scroll anchoring moves the page when it next lays out, after the nodes above the reader changed, so lay out
        now and then put the page back. Reading scrollY alone does not lay out. */
     void document.documentElement.offsetHeight;
-    if (window.scrollY !== y) window.scrollTo(0, y);
+    if (globalThis.scrollY !== y) globalThis.scrollTo(0, y);
   }
 }
 
@@ -122,6 +122,7 @@ function unitSig(n) {
  * function: a newer render calls it so a late answer cannot land on a page that has moved on.
  */
 export function refreshGridInPlace(live, staged) {
+  staged = Array.isArray(staged) ? staged : [staged]; /* a tab may return one node, as mount() accepts */
   const cancels = [];
   const liveUnits = Array.from(live.children || []);
   const sameShape = staged.length === liveUnits.length && staged.every((n, i) => unitSig(n) === unitSig(liveUnits[i]) && settled(liveUnits[i]));

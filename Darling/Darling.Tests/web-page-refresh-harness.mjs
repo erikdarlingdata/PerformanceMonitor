@@ -18,6 +18,7 @@ class FakeNode {
   appendChild(c) { if (c && typeof c === "object") c.parentNode = this; this.children.push(c); return c; }
   append(...cs) { cs.forEach((c) => this.appendChild(c)); }
   prepend(c) { this.children.unshift(c); }
+  insertBefore(c, ref) { const i = ref ? this.children.indexOf(ref) : -1; if (c && typeof c === "object") c.parentNode = this; if (i < 0) this.children.push(c); else this.children.splice(i, 0, c); return c; }
   removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); return c; }
   replaceChildren(...cs) { this.children = []; cs.forEach((c) => this.appendChild(c)); }
   remove() {}
