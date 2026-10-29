@@ -1620,11 +1620,14 @@ table.data tr.row-selected td { background: rgba(255, 213, 79, 0.12); }
 table.data tr[aria-pressed]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 /* Front door (#6840): the store picker, the sidebar's store headers and the fleet page's store sections. */
-.store-picker { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.5rem; }
+.store-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-top: 0.5rem; }
 .store-picker[hidden] { display: none; }
 .store-picker-label { font-size: 0.75rem; color: var(--muted); }
 .store-picker-select { flex: 1; min-width: 0; }
+.store-picker-note { flex-basis: 100%; font-size: 0.72rem; color: var(--muted); }
+.store-current-mark { font-size: 0.72rem; font-weight: 400; color: var(--muted); }
 .sidebar-store-header { display: flex; align-items: center; gap: 0.4rem; padding: 0.4rem 1.25rem 0.2rem; font-size: 0.78rem; font-weight: 600; color: var(--muted); }
+.sidebar-store-header.current { color: var(--fg); }
 .sidebar-store-health { font-weight: 400; font-size: 0.72rem; }
 .sidebar-store-error { font-size: 0.78rem; }
 .fleet-store { margin-bottom: 1.5rem; }

@@ -19,7 +19,7 @@
 
 import { el, mount, bandClass } from "./util.js";
 import { navigateServer } from "./panels.js";
-import { healthBandClass, healthLabel } from "./store-picker.js";
+import { healthBandClass, healthLabel, currentFirst, currentMark } from "./store-picker.js";
 import {
   favoritesFirst, isFavorite, isSidebarGrouped, setSidebarGrouped, isSidebarGroupCollapsed, toggleSidebarGroup,
 } from "./viewer-local.js";
@@ -128,7 +128,7 @@ export function paintServerList(container, fleet, activeParam) {
  * The front door's list: one block per store, each a header (the store's name and health) and that store's servers, built
  * from the store's own /api/fleet. `groups` is [{ store: { name, health }, res }] where `res` is apiGetFleet's answer: a store
  * whose read failed shows its own line and the others still draw. `current` is the store in use; only its rows carry the
- * favourite star and alert badge. The search box filters every store's rows. The lists are flat: a tag's id means a different
+ * favourite star and alert badge, and its block comes first and is marked current (#6917). The search box filters every store's rows. The lists are flat: a tag's id means a different
  * tag in each store, so the group-by-tag collapse state cannot be shared between them.
  */
 export function paintStoreServerLists(container, groups, activeParam, current) {
@@ -136,11 +136,13 @@ export function paintStoreServerLists(container, groups, activeParam, current) {
   const nodes = [];
   let anyRow = false;
   let anyRead = false;
-  for (const g of groups) {
+  for (const g of currentFirst(groups, (x) => x.store.name, current)) {
     const name = g.store.name;
-    const header = el("div", { class: "sidebar-store-header", dataset: { store: name } }, [
+    const isCurrent = name === current;
+    const header = el("div", { class: "sidebar-store-header" + (isCurrent ? " current" : ""), dataset: { store: name }, "aria-current": isCurrent ? "true" : null }, [
       el("span", { class: "dot " + healthBandClass(g.store.health) }),
       el("span", { class: "sidebar-store-name", text: name }),
+      isCurrent ? currentMark() : null,
       g.store.health === "ok" ? null : el("span", { class: "sidebar-store-health", text: healthLabel(g.store.health) }),
     ]);
     if (g.res.kind !== "data") {

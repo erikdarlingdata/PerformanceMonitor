@@ -197,7 +197,10 @@ try {
       location.hash = "#/s/use1/server/web01/queries";
       select.value = "use2";
       for (const fn of select.handlers.change || []) fn();
-      return { fromHash, fromMemory, first, unknownInHash, frontDoor: util.frontDoor(), options, hashAfter: location.hash, reloads, remembered: mem.get("darling.frontDoor.store"), storeAfter: util.currentStore(), hostHidden: host.hidden === true };
+      const notes = all(host, (n) => n.className === "store-picker-note").map((n) => n.textContent);
+      const noteIds = all(host, (n) => n.className === "store-picker-note").map((n) => n.attrs.id ?? null);
+      const labels = all(host, (n) => n.tag === "label").map((n) => n.textContent);
+      return { notes, noteIds, describedBy: select.attrs["aria-describedby"] ?? null, labels, fromHash, fromMemory, first, unknownInHash, frontDoor: util.frontDoor(), options, hashAfter: location.hash, reloads, remembered: mem.get("darling.frontDoor.store"), storeAfter: util.currentStore(), hostHidden: host.hidden === true };
     },
     fleet: async () => {
       util.setFrontDoor(true);
@@ -303,7 +306,7 @@ try {
         { store: { name: "<i>use3</i>", health: "stale" }, res: { kind: "data", data: fleetBody(["charlie"]) } },
       ];
       sidebar.paintStoreServerLists(container, groups, "alpha", "use1");
-      const headers = all(container, (n) => n.className === "sidebar-store-header").map((n) => n.textContent);
+      const headers = all(container, (n) => String(n.className).startsWith("sidebar-store-header")).map((n) => n.textContent);
       const items = all(container, (n) => String(n.className).startsWith("server-item")).map((n) => ({ server: n.dataset.server, active: n.className.includes("active") }));
       const errors = all(container, (n) => n.className.includes("sidebar-store-error")).map((n) => n.textContent);
       const itemOf = (name) => all(container, (n) => n.dataset && n.dataset.server === name)[0];
@@ -311,6 +314,55 @@ try {
       const otherHash = location.hash;
       for (const fn of itemOf("alpha").handlers.click || []) fn({});
       return { headers, items, errors, otherHash, ownHash: location.hash, stars: all(container, (n) => String(n.className).includes("fav")).length };
+    },
+    /* #6917: two stores, the SECOND one picked. The Fleet page and the sidebar draw it first, mark its header current, and still draw the other. */
+    fleetCurrentSecond: async () => {
+      util.setFrontDoor(true);
+      util.setStore("use2");
+      handler = (url, init) => {
+        if (url === "/api/front-door") {
+          return reply(200, { front_door: true, stores: [
+            { name: "use1", health: "ok", server_count: 1, last_ok_utc: null },
+            { name: "use2", health: "ok", server_count: 1, last_ok_utc: null }] });
+        }
+        if (url === "/api/fleet") return reply(200, fleetBody([storeOf(init) === "use1" ? "alpha" : "bravo"]));
+        return reply(200, {});
+      };
+      await picker.refreshStores();
+      const page = await load("pages/fleet.js");
+      const main = new FakeNode("main");
+      await page.renderFleet(main);
+      await settle();
+      const sections = all(main, (n) => n.tag === "section").map((s) => {
+        const head = all(s, (n) => String(n.className).includes("fleet-store-head"))[0];
+        return {
+          store: s.dataset.store,
+          headClass: head.className,
+          ariaCurrent: head.attrs["aria-current"] ?? null,
+          marks: all(head, (n) => n.className === "store-current-mark").map((n) => n.textContent),
+          titles: all(s, (n) => n.className === "title").map((n) => n.textContent),
+        };
+      });
+      return { sections };
+    },
+    sidebarCurrentSecond: async () => {
+      util.setFrontDoor(true);
+      util.setStore("use2");
+      const sidebar = await load("sidebar.js");
+      const container = new FakeNode("div");
+      const groups = [
+        { store: { name: "use1", health: "ok" }, res: { kind: "data", data: fleetBody(["alpha"]) } },
+        { store: { name: "use2", health: "ok" }, res: { kind: "data", data: fleetBody(["bravo"]) } },
+      ];
+      sidebar.paintStoreServerLists(container, groups, null, "use2");
+      const headers = all(container, (n) => String(n.className).startsWith("sidebar-store-header")).map((n) => ({
+        store: n.dataset.store,
+        cls: n.className,
+        ariaCurrent: n.attrs["aria-current"] ?? null,
+        marks: all(n, (m) => m.className === "store-current-mark").map((m) => m.textContent),
+      }));
+      const items = all(container, (n) => String(n.className).startsWith("server-item")).map((n) => n.dataset.server);
+      return { headers, items, groupOrder: groups.map((g) => g.store.name) };
     },
     /* A front door that lists no stores: the page says so, drawn once and with nothing drawn first and thrown away. */
     fleetNoStores: async () => {

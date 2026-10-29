@@ -14,7 +14,7 @@
  */
 
 import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId, tagPill, frontDoor, currentStore } from "../util.js";
-import { frontDoorStores, healthBandClass, healthLabel } from "../store-picker.js";
+import { frontDoorStores, healthBandClass, healthLabel, currentFirst, currentMark } from "../store-picker.js";
 import { VIZ, navigateServer } from "../panels.js";
 import { favoritesFirst, onChange as onLocalChange } from "../viewer-local.js";
 import { buildTagGroups, cardMatches } from "../fleet-groups.js";
@@ -270,11 +270,13 @@ async function renderStoreFleets(main) {
     mount(main, [pageHead(null), emptyStrip("The front door lists no stores.")]);
     return;
   }
-  const parts = listed.map((st) => {
+  const parts = currentFirst(listed, (s) => s.name, current).map((st) => {
     const body = el("div", { class: "fleet-store-body" }, [loadingStrip("Loading " + st.name + "…")]);
-    const head = el("h3", { class: "section-title fleet-store-head" }, [
+    const isCurrent = st.name === current;
+    const head = el("h3", { class: "section-title fleet-store-head" + (isCurrent ? " current" : ""), "aria-current": isCurrent ? "true" : null }, [
       el("span", { class: "dot " + healthBandClass(st.health) }),
       el("span", { class: "fleet-store-name", text: st.name }),
+      isCurrent ? currentMark() : null,
       el("span", { class: "fleet-store-health", text: healthLabel(st.health) }),
       st.server_count != null ? el("span", { class: "muted", text: st.server_count + " server" + (st.server_count === 1 ? "" : "s") }) : null,
     ]);

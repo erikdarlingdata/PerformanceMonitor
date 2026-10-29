@@ -191,11 +191,11 @@ The browser never holds a store's session. For each store, the front door signs 
 
 ### The store picker and addresses
 
-The top bar has a store picker. The page works inside one store at a time. The picker remembers the last store in the browser.
+The top bar has a store picker. The page works inside one store at a time. The picker remembers the last store in the browser. A line under the picker says that alerts, views and settings come from the picked store.
 
 - Every page address carries the store: `#/s/use1/server/web01`. A bookmark or a pasted link opens in the same store.
 - A link without a store, such as `#/server/web01`, asks the front door which store holds the server. If two stores hold it, the page says so and lists them.
-- The fleet overview shows one section per store with the store's health. The sidebar groups servers by store.
+- The fleet overview shows one section per store with the store's health. The sidebar groups servers by store. The picked store comes first in both places and is marked "current". The other stores follow in the order of the `stores` list, and their servers still show.
 - Pages for alerts, mute rules, tags, known patterns, views, admin and investigations show the picked store only.
 - The front door sends the picked store with each call in the `X-Darling-Store` request header.
 
