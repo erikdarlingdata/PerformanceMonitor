@@ -324,7 +324,7 @@ public sealed class PgOwnErrorsNotInTargetLogLiveTests
     }
 
     /// <summary>The throwaway cluster's stderr log: <c>pg.log</c> beside the data directory. Skips the test when it is not there.</summary>
-    private sealed class ServerLog
+    internal sealed class ServerLog
     {
         private readonly string _path;
 
