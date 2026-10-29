@@ -153,6 +153,9 @@ a:hover { text-decoration: underline; }
   min-width: 0;
   padding: 1.25rem 1.5rem calc(3rem + 28px); /* extra bottom padding clears the fixed status bar */
   overflow-x: hidden;
+  /* #6933: a refresh swaps content above the reader's place. The script puts the scroll position back itself, so the browser's own
+     anchoring must not also move it. */
+  overflow-anchor: none;
 }
 
 /* #6315: the phone-width shell. The top bar, backdrop and menu button are hidden above 768 px, so nothing at 769 px and wider

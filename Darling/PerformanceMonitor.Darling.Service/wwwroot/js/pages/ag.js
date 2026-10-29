@@ -20,6 +20,7 @@
  * server) and reaches the DOM through el()/textContent (R4 — never innerHTML).
  */
 
+import { holdsPage, showPage, showRefreshError } from "../refresh-in-place.js";
 import {
   el,
   mount,
@@ -68,26 +69,27 @@ const DATABASE_COLUMNS = [
   { key: "suspend_reason", label: "Data movement", render: suspendCell },
 ];
 
-export async function renderAg(main) {
-  mount(main, [pageHead(null), loadingStrip("Loading availability groups…")]);
+export async function renderAg(main, opts) {
+  /* #6933: the poll reads again with the page still on screen and swaps the new one in when the reads return. */
+  if (!holdsPage(main, "ag", opts && opts.poll === true)) mount(main, [pageHead(null), loadingStrip("Loading availability groups…")]);
 
   /* #6157: a card names the reporting server by its display name, as the fleet page and the sidebar do. The fleet read is the
      source of that name; if it fails the cards fall back to the connection key rather than blocking the page. */
   const [res, fleet] = await Promise.all([apiGet("/api/ag"), apiGetFleet()]);
   const fleetCards = fleet.kind === "data" && fleet.data && Array.isArray(fleet.data.cards) ? fleet.data.cards : [];
   if (res.kind === "error") {
-    mount(main, [pageHead(null), errorStrip(res.message)]);
+    if (!showRefreshError(main, "ag", res.message)) mount(main, [pageHead(null), errorStrip(res.message)]);
     return;
   }
 
   const d = res.data;
   const groups = (d && d.availability_groups) || [];
   if (!groups.length) {
-    mount(main, [pageHead(d), emptyStrip(NO_AGS_MESSAGE)]);
+    showPage(main, "ag", [pageHead(d), emptyStrip(NO_AGS_MESSAGE)]);
     return;
   }
 
-  mount(main, [pageHead(d), truncationNote(d), rollup(d), ...groups.map((g) => agCard(g, fleetCards))]);
+  showPage(main, "ag", [pageHead(d), truncationNote(d), rollup(d), ...groups.map((g) => agCard(g, fleetCards))]);
 }
 
 /* #5042: the tiles count every view in scope, so when a response says it was cut (a limit or a byte cap) the page

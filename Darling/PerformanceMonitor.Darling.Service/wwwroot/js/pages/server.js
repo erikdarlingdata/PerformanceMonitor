@@ -45,6 +45,7 @@
  * subtitle rather than inheriting a label that would misdescribe them.
  */
 
+import { keepScroll, refreshGridInPlace, replaceNodes } from "../refresh-in-place.js";
 import { el, mount, apiGetFleet, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, storeHash } from "../util.js";
 import { getDatabaseFilter } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
@@ -275,6 +276,13 @@ export function reachNoteText(nowMs = Date.now()) {
    renderServer). `gridKey` names the server and tab that grid shows. */
 let keepGrid = false;
 let gridKey = "";
+/* #6933: the page head, status line, tab bar and reach note the last render put around the grid, so a poll can replace them
+   while the grid stays where it is. `refreshInPlace` is raised for the one paint a poll makes over a grid that is still on
+   screen: the panels read again off screen and each is swapped in when its read returns. `cancelRefresh` stops the swaps of a
+   render that a newer one has replaced. */
+let shellNodes = [];
+let refreshInPlace = false;
+let cancelRefresh = null;
 
 /**
  * @param {object} [opts] — `{ poll: true }` when this call is the 60s poll's own refresh (app.js's refresh(),
@@ -291,6 +299,9 @@ export function renderServer(main, server, tabId, opts) {
   /* A fixed custom range cannot change under the poll, so the poll keeps the panels it already drew (same server, same
      tab) instead of reading the same hours again. The Refresh button passes `manual: true`: a click asks for a re-read, so it rebuilds even then. A live range, a preset and a tab or server click rebuild as before. */
   const keep = isPoll && !(opts && opts.manual === true) && !!custom && !custom.live && !!gridNode && gridKey === server + "|" + (tabId || "");
+  /* #6933: every other poll, and the Refresh button, keep the same server and tab's panels on screen and read them again in place. */
+  const inPlace = isPoll && !keep && gridPageIsShown(main, server, tabId);
+  if (!isPoll && cancelRefresh) { cancelRefresh(); cancelRefresh = null; }
   keepGrid = false;
   current = { server, tab: null };
 
@@ -317,8 +328,14 @@ export function renderServer(main, server, tabId, opts) {
   const tabsSlot = el("div", { class: "subtabs-slot" }, [loadingStrip()]);
   /* The notice for a carried-over range this tab reads only part of (reachNoteText), between the tab bar and the panels. */
   reachSlot = el("div", { class: "reach-note-slot" });
-  if (!keep) gridNode = el("div", { class: "panel-grid" });
-  mount(main, [head, whySlot, tabsSlot, reachSlot, gridNode]);
+  if (!keep && !inPlace) gridNode = el("div", { class: "panel-grid" });
+  if (inPlace) {
+    /* The grid is not detached: replacing only the pieces around it keeps its panels' scroll positions and the reader's place. */
+    keepScroll(() => replaceNodes(main, shellNodes, [head, whySlot, tabsSlot, reachSlot]));
+  } else {
+    mount(main, [head, whySlot, tabsSlot, reachSlot, gridNode]);
+  }
+  shellNodes = [head, whySlot, tabsSlot, reachSlot];
 
   /* Seen this server before? Then its engine is already known and the page paints now — no loading strip, and
      the tab's panels start fetching in this tick, which is what keeps the 60s poll and a sub-tab click feeling
@@ -330,7 +347,7 @@ export function renderServer(main, server, tabId, opts) {
   if (remembered) {
     fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, remembered.card, remembered.reason);
     fillDatabaseFilter(dbSlot, server, remembered.card);
-    painted = paintTabsKeeping(keep, tabsSlot, server, tabId, remembered.card);
+    painted = paintTabsKeeping(keep, tabsSlot, server, tabId, remembered.card, inPlace);
     paintedOffline = serverIsOffline(server);
   }
 
@@ -367,13 +384,22 @@ export function renderServer(main, server, tabId, opts) {
 /* paintTabs, leaving the panels the previous render drew in place when `keep`. The flag is raised only for this one
    paint and always lowered after it, so a render that never paints (a failed fleet read) cannot leave it set for the
    next Apply or preset redraw to swallow. */
-function paintTabsKeeping(keep, tabsSlot, server, tabId, card) {
+function paintTabsKeeping(keep, tabsSlot, server, tabId, card, inPlace = false) {
   keepGrid = keep;
+  refreshInPlace = inPlace;
   try {
     return paintTabs(tabsSlot, server, tabId, card);
   } finally {
     keepGrid = false;
+    refreshInPlace = false;
   }
+}
+
+/** Whether the grid on screen is the one for this server and tab and is still part of the page, so a poll can refresh it in place (#6933). */
+function gridPageIsShown(main, server, tabId) {
+  if (!gridNode || gridKey !== server + "|" + (tabId || "") || !shellNodes.length) return false;
+  const kids = Array.from(main.children);
+  return kids.includes(gridNode) && shellNodes.every((n) => kids.includes(n));
 }
 
 /** Put the tab bar, its note and its panels on the page for a card, and return the registry that card chose. */
@@ -421,11 +447,18 @@ function redrawPanels() {
     keepGrid = false;
     return;
   }
+  const inPlace = refreshInPlace;
+  refreshInPlace = false;
+  if (cancelRefresh) {
+    cancelRefresh();
+    cancelRefresh = null;
+  }
 
   /* A range longer than the common reach cannot be read until the tab's reach is known (it may take the whole range, or only the
      last 7 days of it), so the panels wait for the catalog rather than read twice. A held range within the common reach reads now. */
   if (!catalogsRead.has(current.server) && !catalogGaveUp.has(current.server) && heldSpanMs() > DEFAULT_REACH_HOURS * HOUR_MS) {
     const server = current.server;
+    if (inPlace) return;
     if (panelAbort) panelAbort.abort();
     mount(gridNode, [loadingStrip()]);
     /* A range change or the 60 second refresh during the wait lands here again: it keeps the loading strip and adds no second wait, or
@@ -455,7 +488,9 @@ function redrawPanels() {
   applyDatabaseFilter();
   /* #6793: the batch's signal rides in the tab's ctx too, for the tab files that read `ctx.signal` (the memory-grant charts, the overview strips,
      the recommendations list, the clerk and named trend draws). Without it each of them read on no signal on this page. */
-  mount(gridNode, current.tab.build(current.server, { ...rangeContext(), offline: serverIsOffline(current.server), signal: panelAbort.signal }));
+  const nodes = current.tab.build(current.server, { ...rangeContext(), offline: serverIsOffline(current.server), signal: panelAbort.signal });
+  if (inPlace) cancelRefresh = refreshGridInPlace(gridNode, nodes);
+  else mount(gridNode, nodes);
 }
 
 /* The page's database filter (#5245), set before every panel redraw the way the custom range is: the chosen names for the card's

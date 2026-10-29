@@ -258,7 +258,7 @@ export function dailyHealthCalendar({ server, initial, read, renderTable, openDa
     const title = el("h4", { class: "daycal-detail-title", text: DAY_NAMES[new Date(iso + "T00:00:00Z").getUTCDay()] + ", " + iso + " (UTC)" });
     /* #6353: a day after the calendar's today has not happened, which is not a gap: no read, no "No Data", no reason for one. */
     if (iso > todayIso) return swap(detail, title, el("div", { class: "daycal-band band-Future", text: "Not yet" }), el("div", { class: "muted", text: "This day has not happened yet." }));
-    swap(detail, title, el("div", { class: "muted", text: "Loading the day..." }));
+    swap(detail, title, el("div", { class: "muted loading", text: "Loading the day..." }));
     const mine = generation;
     const res = await read("get_daily_summary", { server, summary_date: iso });
     if (mine !== generation || selected !== iso || res.kind === "aborted") return;
@@ -327,7 +327,7 @@ export function dailyHealthCalendar({ server, initial, read, renderTable, openDa
     const mine = ++generation;
     drawHead();
     const key = keyOf(view);
-    if (!loaded.has(key)) swap(grid, el("div", { class: "muted", text: "Loading " + MONTH_NAMES[view.month0] + " " + view.year + "..." }));
+    if (!loaded.has(key)) swap(grid, el("div", { class: "muted loading", text: "Loading " + MONTH_NAMES[view.month0] + " " + view.year + "..." }));
     const entry = await load(view);
     if (mine !== generation || entry.aborted) return;
     if (entry.failure) {
