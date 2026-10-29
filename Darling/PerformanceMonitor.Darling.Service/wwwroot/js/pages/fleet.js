@@ -889,7 +889,7 @@ function identityCapacityChip(c) {
   if (!ic || !ic.columns_at_bar) return [];
   const n = ic.columns_at_bar;
   return [chip("Identity capacity", fmtInt(n) + (n === 1 ? " column" : " columns"), ic.worst_band === "critical" ? "Critical" : "Warning",
-    "At or past the warning bar. The fullest is " + ic.worst_band + ".")];
+    "At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is " + ic.worst_band + ".")];
 }
 
 function chip(label, value, sev, detail) {

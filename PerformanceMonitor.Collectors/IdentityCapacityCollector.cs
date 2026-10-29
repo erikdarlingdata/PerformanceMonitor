@@ -312,7 +312,10 @@ OPTION(RECOMPILE);";
 SET NOCOUNT ON;
 
 DECLARE
-    @skip_reason varchar(20) = {SkipReasonSql(item)};
+    @skip_reason varchar(20),
+    @executesql nvarchar(300) = QUOTENAME(@database_name) + N'.sys.sp_executesql';
+
+{SkipReasonSql()}
 
 IF @skip_reason IS NOT NULL
 BEGIN
@@ -330,34 +333,39 @@ BEGIN
     RETURN;
 END;
 
-EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
+EXECUTE @executesql
     N'{BuildPayloadBody().Replace("'", "''", StringComparison.Ordinal)}'";
 
-        return new CollectorQuery(text);
+        return new CollectorQuery(text, new List<CollectorParameter>
+        {
+            new("@database_name", item, CollectorParameterType.NVarChar128),
+        });
     }
 
     /// <summary>
-    /// The scalar subquery that names why <paramref name="item"/> is not scanned, or yields NULL when it is. A snapshot first, then a
-    /// database that is not the primary replica's copy, then one the login cannot enter: a secondary is skipped whoever can enter it.
+    /// The statement that sets <c>@skip_reason</c> to why the database named by <c>@database_name</c> is not scanned, or leaves it NULL when
+    /// it is. A snapshot first, then a database that is not the primary replica's copy, then one the login cannot enter: a secondary is
+    /// skipped whoever can enter it. The name is a bound parameter and the statement carries its own OPTION(RECOMPILE), so a server with
+    /// hundreds of databases caches one plan, not one ad hoc plan per database (#6875).
     /// </summary>
-    internal static string SkipReasonSql(string item) => $@"
-    (
-        SELECT
-            CASE
-                WHEN d.source_database_id IS NOT NULL
-                THEN '{SkipSnapshot}'
-                WHEN drs.database_id IS NOT NULL
-                AND  ISNULL(drs.is_primary_replica, 0) <> 1
-                THEN '{SkipSecondary}'
-                WHEN HAS_DBACCESS(d.name) <> 1
-                THEN '{SkipNoAccess}'
-            END
-        FROM sys.databases AS d
-        LEFT JOIN sys.dm_hadr_database_replica_states AS drs
-            ON d.database_id = drs.database_id
-            AND drs.is_local = 1
-        WHERE d.name = N'{item.Replace("'", "''", StringComparison.Ordinal)}'
-    )";
+    internal static string SkipReasonSql() => $@"
+SELECT
+    @skip_reason =
+        CASE
+            WHEN d.source_database_id IS NOT NULL
+            THEN '{SkipSnapshot}'
+            WHEN drs.database_id IS NOT NULL
+            AND  ISNULL(drs.is_primary_replica, 0) <> 1
+            THEN '{SkipSecondary}'
+            WHEN HAS_DBACCESS(d.name) <> 1
+            THEN '{SkipNoAccess}'
+        END
+FROM sys.databases AS d
+LEFT JOIN sys.dm_hadr_database_replica_states AS drs
+  ON d.database_id = drs.database_id
+  AND drs.is_local = 1
+WHERE d.name = @database_name
+OPTION(RECOMPILE);";
 
     public override async ValueTask ReadItemAsync(string item, DbDataReader reader, List<Row> rows, CollectorContext context, CancellationToken cancellationToken)
     {

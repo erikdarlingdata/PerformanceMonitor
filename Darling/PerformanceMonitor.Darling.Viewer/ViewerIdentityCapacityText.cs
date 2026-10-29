@@ -44,6 +44,9 @@ public static class ViewerIdentityCapacityText
     /// <summary>The scan state of a database scanned with no column above 10 percent.</summary>
     public const string ScannedClean = "Scanned, clean";
 
+    /// <summary>Which bars this tab bands with: the shipped ones, which the alert's configured bars and overrides may differ from.</summary>
+    public const string BandsNote = "Bands: warning from 70% used, critical from 90% used (the shipped bars, the alert's own bars may differ)";
+
     private const string Dash = "-";
 
     /// <summary>The status line: how many columns are critical and warning, and how many databases were scanned.</summary>
@@ -58,7 +61,7 @@ public static class ViewerIdentityCapacityText
         var critical = scan.Columns.Count(c => c.Band == IdentityCapacityMath.BandCritical);
         var warning = scan.Columns.Count(c => c.Band == IdentityCapacityMath.BandWarning);
         return string.Create(CultureInfo.InvariantCulture,
-            $"Critical: {critical}   Warning: {warning}   Columns above 10 percent: {scan.Columns.Count}   Databases scanned: {scan.Databases.Count}   Not yet scanned: {scan.Unscanned.Count}   Skipped: {scan.Skipped.Count}");
+            $"Critical: {critical}   Warning: {warning}   Columns above 10 percent: {scan.Columns.Count}   Databases scanned: {scan.Databases.Count}   Not yet scanned: {scan.Unscanned.Count}   Skipped: {scan.Skipped.Count}   {BandsNote}");
     }
 
     /// <summary>The columns, critical and warning first (the reader's order is fullest first), one row each.</summary>

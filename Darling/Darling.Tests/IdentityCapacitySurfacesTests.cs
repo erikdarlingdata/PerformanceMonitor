@@ -96,7 +96,7 @@ public sealed class ViewerIdentityCapacityTextTests
             [Int("Sales", "Audit", 2_000_000_000, 93.1), Int("Sales", "Warm", 1_600_000_000, 74.5), Int("Sales", "Orders", 1_000_000_000, 46.6)],
             ("Sales", Captured), ("Clean", Captured));
 
-        Assert.Equal("Critical: 1   Warning: 1   Columns above 10 percent: 3   Databases scanned: 2   Not yet scanned: 0   Skipped: 0", ViewerIdentityCapacityText.StatusLine(read));
+        Assert.Equal("Critical: 1   Warning: 1   Columns above 10 percent: 3   Databases scanned: 2   Not yet scanned: 0   Skipped: 0   " + ViewerIdentityCapacityText.BandsNote, ViewerIdentityCapacityText.StatusLine(read));
     }
 
     [Fact]
@@ -124,7 +124,7 @@ public sealed class ViewerIdentityCapacityTextTests
         Assert.Equal(["Scanned, clean", "Not yet scanned", "Not yet scanned"], rows.Select(r => r.State).ToArray());
         Assert.Equal("-", rows[1].LastScanned);
         Assert.Equal(earlier.ToLocalTime().ToString("g", CultureInfo.CurrentCulture), rows[2].LastScanned);
-        Assert.Equal("Critical: 0   Warning: 0   Columns above 10 percent: 0   Databases scanned: 1   Not yet scanned: 2   Skipped: 0", ViewerIdentityCapacityText.StatusLine(read));
+        Assert.Equal("Critical: 0   Warning: 0   Columns above 10 percent: 0   Databases scanned: 1   Not yet scanned: 2   Skipped: 0   " + ViewerIdentityCapacityText.BandsNote, ViewerIdentityCapacityText.StatusLine(read));
         Assert.Equal(ViewerIdentityCapacityRead.Data, read.Status);
     }
 

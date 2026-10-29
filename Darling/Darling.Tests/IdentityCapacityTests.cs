@@ -187,9 +187,13 @@ public sealed class IdentityCapacityCollectorTests
         Assert.True(gate > 0);
         Assert.True(gate < body.IndexOf("SELECT /* PerformanceMonitorLite */", StringComparison.Ordinal));
 
-        /* The on-premises per-database text runs the body through the database's own sp_executesql, quote-doubled. */
+        /* The on-premises per-database text runs the body through the database's own sp_executesql, its name quoted by QUOTENAME from the
+           bound parameter, so the batch text is the same for every database and the monitored server keeps one plan, not one per database. */
         var perItem = IdentityCapacityCollector.Instance.BuildPerItemQuery("Sales]Db", Context());
-        Assert.Contains("[Sales]]Db].sys.sp_executesql", perItem.Text, StringComparison.Ordinal);
+        Assert.Contains("QUOTENAME(@database_name) + N'.sys.sp_executesql'", perItem.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Sales", perItem.Text, StringComparison.Ordinal);
+        Assert.Equal(perItem.Text, IdentityCapacityCollector.Instance.BuildPerItemQuery("Other", Context()).Text);
+        Assert.Equal("Sales]Db", Assert.Single(perItem.Parameters!).Value);
         Assert.Contains("N''DATABASE''", perItem.Text, StringComparison.Ordinal);
     }
 
@@ -229,10 +233,19 @@ public sealed class IdentityCapacityCollectorTests
     [Fact]
     public void ADatabaseTheCollectorSkipsOnPurpose_IsAnsweredWithItsReasonBeforeItIsEntered()
     {
-        var perItem = IdentityCapacityCollector.Instance.BuildPerItemQuery("O'Brien", Context()).Text;
+        var query = IdentityCapacityCollector.Instance.BuildPerItemQuery("O'Brien", Context());
+        var perItem = query.Text;
 
-        /* The catalog check names the item (quote-doubled), the three reasons, and answers before the database is entered. */
-        Assert.Contains("WHERE d.name = N'O''Brien'", perItem, StringComparison.Ordinal);
+        /* The catalog check takes the database name as a bound parameter, so every database shares one plan, and carries its own hint. */
+        Assert.Contains("WHERE d.name = @database_name", perItem, StringComparison.Ordinal);
+        Assert.DoesNotContain("N'O''Brien'", perItem, StringComparison.Ordinal);
+        var parameter = Assert.Single(query.Parameters!);
+        Assert.Equal("@database_name", parameter.Name);
+        Assert.Equal("O'Brien", parameter.Value);
+        Assert.Equal(CollectorParameterType.NVarChar128, parameter.Type);
+        Assert.Contains("OPTION(RECOMPILE);", perItem[..perItem.IndexOf("EXECUTE @executesql", StringComparison.Ordinal)], StringComparison.Ordinal);
+
+        /* The three reasons, and the answer comes before the database is entered. */
         Assert.Contains("THEN 'snapshot'", perItem, StringComparison.Ordinal);
         Assert.Contains("THEN 'secondary'", perItem, StringComparison.Ordinal);
         Assert.Contains("THEN 'no_access'", perItem, StringComparison.Ordinal);
@@ -241,7 +254,7 @@ public sealed class IdentityCapacityCollectorTests
         Assert.Contains("ISNULL(drs.is_primary_replica, 0) <> 1", perItem, StringComparison.Ordinal);
         var answer = perItem.IndexOf("skip_reason = @skip_reason", StringComparison.Ordinal);
         var returns = perItem.IndexOf("RETURN;", StringComparison.Ordinal);
-        var enter = perItem.IndexOf("EXECUTE [O'Brien].sys.sp_executesql", StringComparison.Ordinal);
+        var enter = perItem.IndexOf("EXECUTE @executesql", StringComparison.Ordinal);
         Assert.True(answer > 0 && answer < returns && returns < enter, "the skip answer and RETURN come before the database is entered");
 
         /* The payload carries the ninth column on both result sets of its UNION. */
