@@ -198,8 +198,9 @@ try {
       select.value = "use2";
       for (const fn of select.handlers.change || []) fn();
       const notes = all(host, (n) => n.className === "store-picker-note").map((n) => n.textContent);
+      const noteIds = all(host, (n) => n.className === "store-picker-note").map((n) => n.attrs.id ?? null);
       const labels = all(host, (n) => n.tag === "label").map((n) => n.textContent);
-      return { notes, labels, fromHash, fromMemory, first, unknownInHash, frontDoor: util.frontDoor(), options, hashAfter: location.hash, reloads, remembered: mem.get("darling.frontDoor.store"), storeAfter: util.currentStore(), hostHidden: host.hidden === true };
+      return { notes, noteIds, describedBy: select.attrs["aria-describedby"] ?? null, labels, fromHash, fromMemory, first, unknownInHash, frontDoor: util.frontDoor(), options, hashAfter: location.hash, reloads, remembered: mem.get("darling.frontDoor.store"), storeAfter: util.currentStore(), hostHidden: host.hidden === true };
     },
     fleet: async () => {
       util.setFrontDoor(true);

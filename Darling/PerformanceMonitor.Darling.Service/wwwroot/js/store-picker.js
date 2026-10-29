@@ -57,7 +57,7 @@ export function healthBandClass(health) {
  * order (#6917). The Fleet page and the sidebar both list stores in the front door's order and both call this, so the picked
  * store leads in both. `nameOf` reads an item's store name. Returns a new array and leaves `items` alone.
  */
-export function currentFirst(items, nameOf, current = currentStore()) {
+export function currentFirst(items, nameOf, current) {
   return [...items.filter((x) => nameOf(x) === current), ...items.filter((x) => nameOf(x) !== current)];
 }
 
@@ -156,7 +156,7 @@ function paintPicker() {
   pickerHost.hidden = false;
   const select = el(
     "select",
-    { id: "store-picker-select", class: "store-picker-select", "aria-label": "Store" },
+    { id: "store-picker-select", class: "store-picker-select", "aria-label": "Store", "aria-describedby": "store-picker-note" },
     stores.map((s) => {
       const opt = el("option", { value: s.name, text: s.health === "ok" ? s.name : s.name + " (" + healthLabel(s.health) + ")" });
       if (s.name === currentStore()) opt.selected = true;
@@ -168,7 +168,7 @@ function paintPicker() {
   mount(pickerHost, [
     el("label", { class: "store-picker-label", for: "store-picker-select", text: "Store" }),
     select,
-    el("div", { class: "store-picker-note", text: "Alerts, views and settings come from this store." }),
+    el("div", { id: "store-picker-note", class: "store-picker-note", text: "Alerts, views and settings come from this store." }),
   ]);
 }
 

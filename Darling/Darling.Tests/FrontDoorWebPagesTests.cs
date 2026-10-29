@@ -230,6 +230,9 @@ public sealed class FrontDoorWebPagesTests
 
         // #6917: the picker says what a store scopes, and the label stays "Store"
         Assert.Equal(new[] { "Alerts, views and settings come from this store." }, r.GetProperty("notes").EnumerateArray().Select(o => o.GetString()).ToArray());
+        var noteIds = r.GetProperty("noteIds").EnumerateArray().Select(o => o.GetString()).ToArray();
+        Assert.Single(noteIds);
+        Assert.Equal(noteIds[0], r.GetProperty("describedBy").GetString());
         Assert.Equal(new[] { "Store" }, r.GetProperty("labels").EnumerateArray().Select(o => o.GetString()).ToArray());
     }
 
