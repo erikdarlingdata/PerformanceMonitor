@@ -918,6 +918,6 @@ function chip(label, value, sev, detail) {
       badge ? el("span", { class: "sev-badge", text: badge }) : null,
     ]),
     el("div", { class: "value", text: value }),
-    detail ? el("div", { class: "detail", text: detail }) : null,
+    detail ? el("div", { class: "detail", text: detail, title: detail }) : null,
   ]);
 }

@@ -426,10 +426,13 @@ a:hover { text-decoration: underline; }
 
 .metric-bands {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  /* minmax(0, 1fr), not 1fr: a 1fr track will not shrink below its content's min-content width, so a long nowrap
+     .detail sentence stretched its column far past the card and the ellipsis never applied (#6901). */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.4rem;
 }
 .metric-chip {
+  min-width: 0;
   background: var(--bg-dark);
   border-radius: var(--radius-sm);
   padding: 0.3rem 0.45rem;
@@ -1356,6 +1359,8 @@ pre.code {
 .server-reason.band-Offline { color: var(--err); }
 .server-reason.band-Healthy { color: var(--ok); }
 .server-why .metric-bands { max-width: 900px; }
+/* The server page has room to show the whole sentence, so the tile detail wraps instead of truncating (#6901). */
+.server-why .metric-chip .detail { white-space: normal; overflow-wrap: anywhere; }
 
 /* ─────────────────────────── Fleet Sweeps (#3466 lane 3) ─────────────────────────── */
 
