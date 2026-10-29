@@ -317,8 +317,9 @@ public class EnumerationProbeFailureTests
         try
         {
             var log = new List<(LogLevel Level, string Message)>();
+            using var db = new DuckDbInitializer(Path.Combine(dir, "pm.duckdb"));
             var service = new RemoteCollectorService(
-                new DuckDbInitializer(Path.Combine(dir, "pm.duckdb")),
+                db,
                 new ServerManager(dir),
                 new ScheduleManager(dir),
                 new CapturingLogger(log));
@@ -357,8 +358,9 @@ public class EnumerationProbeFailureTests
         try
         {
             var log = new List<(LogLevel Level, string Message)>();
+            using var db = new DuckDbInitializer(Path.Combine(dir, "pm.duckdb"));
             var service = new RemoteCollectorService(
-                new DuckDbInitializer(Path.Combine(dir, "pm.duckdb")),
+                db,
                 new ServerManager(dir),
                 new ScheduleManager(dir),
                 new CapturingLogger(log));

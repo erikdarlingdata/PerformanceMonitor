@@ -57,7 +57,7 @@ public class EmptyEnumerationNoteTests
            or both, so pinning ONE of those literals would no longer prove the host cannot drift. Routing
            the whole enumeration read — items, probe failures, and the composed note — through the shared
            driver does, because there is then no host-side text at all. */
-        Assert.Contains("EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken)", source);
+        Assert.Contains("EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken, context.Target.IsAwsRds)", source);
         Assert.Contains("telemetry.HostNote = enumeration.Note;", source);
 
         /* Via the shared driver, never a copy of the text — a literal here is exactly the drift this
