@@ -88,7 +88,7 @@ internal static class McpEngineCapability
     private static string? Envelope(string serverName, int engineEdition, string collectorName, AwsRdsKind awsRdsKind)
     {
         var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, collectorName, awsRdsKind);
-        return message is null ? null : McpHelpers.Status("not_collected", message);
+        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.NotCollectedStatusWord, message);
     }
 
     /// <summary>
