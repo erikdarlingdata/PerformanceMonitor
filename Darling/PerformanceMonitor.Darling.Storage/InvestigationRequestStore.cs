@@ -125,8 +125,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + " + GroupingWindowSql + @",
 
     internal const string AlertRowsSql = @"
 INSERT INTO config.investigation_request_alerts
-    (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json)
-SELECT $1, $2, $3, $4, k, $6, $7, $8, $9, $10
+    (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json, severity)
+SELECT $1, $2, $3, $4, k, $6, $7, $8, $9, $10, $11
 FROM unnest($5::text[]) AS k";
 
     internal const string JournalSql = @"
@@ -270,8 +270,8 @@ RETURNING route_id, server_id";
     /* #6008: the source's alert rows, without the dedup key, so the brief's alerts section reads what the source's read. $1 new, $2 source. */
     internal const string CopyFollowUpAlertsSql = @"
 INSERT INTO config.investigation_request_alerts
-    (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json)
-SELECT $1, alert_time, server_id, metric_name, NULL, current_value, threshold_value, muted, detail_text, context_json
+    (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json, severity)
+SELECT $1, alert_time, server_id, metric_name, NULL, current_value, threshold_value, muted, detail_text, context_json, severity
 FROM config.investigation_request_alerts
 WHERE request_id = $2";
 
@@ -1656,7 +1656,9 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             new NpgsqlParameter<double?> { TypedValue = facts?.ThresholdValue, NpgsqlDbType = NpgsqlDbType.Double },
             new NpgsqlParameter<bool?> { TypedValue = facts?.Muted, NpgsqlDbType = NpgsqlDbType.Boolean },
             new NpgsqlParameter<string?> { TypedValue = DerivedStoreScrub.Text(facts?.DetailText), NpgsqlDbType = NpgsqlDbType.Text },
-            new NpgsqlParameter<string?> { TypedValue = DerivedStoreScrub.Json(facts?.ContextJson), NpgsqlDbType = NpgsqlDbType.Text });
+            new NpgsqlParameter<string?> { TypedValue = DerivedStoreScrub.Json(facts?.ContextJson), NpgsqlDbType = NpgsqlDbType.Text },
+            /* #6928: the tier this alert arrived at, so the agent-action gate resolves its route at that tier. */
+            new NpgsqlParameter<string?> { TypedValue = AlertSeverityWord(alert.Severity), NpgsqlDbType = NpgsqlDbType.Text });
     }
 
     /// <summary>

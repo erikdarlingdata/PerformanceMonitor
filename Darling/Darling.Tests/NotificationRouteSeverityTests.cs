@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -185,6 +186,131 @@ public sealed class NotificationRouteSeverityTests
         var body = JsonDocument.Parse(Assert.Single(posted)).RootElement;
         Assert.Equal(expectedKey, body.GetProperty("routing_key").GetString());
         Assert.Equal("resolve", body.GetProperty("event_action").GetString());
+    }
+
+    /// <summary>An episode that fired at Warning and climbed to Critical closes the incident on each route's key, and a route that
+    /// takes both tiers is closed once.</summary>
+    [Fact]
+    public async Task ThePagerDutyClose_ForAnEpisodeAtBothTiers_ReachesEachKeyOnce()
+    {
+        var config = new DarlingConfig();
+        config.Webhooks.PagerDutyAutoResolve = true;
+        config.NotificationRoutes = new[]
+        {
+            Route(1, Metric, "critical", pagerDuty: "rk-critical"),
+            Route(2, Metric, "warning", pagerDuty: "rk-warning"),
+        };
+        var posted = new List<string>();
+        var webhooks = new WebhookAlertService(new DarlingAlertSettings(config), DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, new DiscardingHistoryStore())
+        {
+            PostPagerDutyAsyncOverride = (_, payload) =>
+            {
+                posted.Add(payload);
+                return Task.FromResult<string?>(null);
+            },
+        };
+
+        var outcome = await webhooks.TrySendPagerDutyResolveAsync(
+            Metric, "SQL01", "7", "back to normal", new AlertSeverityLevel?[] { AlertSeverityLevel.Warning, AlertSeverityLevel.Critical },
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(AlertChannelOutcome.Delivered, outcome);
+        Assert.Equal(
+            new[] { "rk-critical", "rk-warning" },
+            posted.Select(p => JsonDocument.Parse(p).RootElement.GetProperty("routing_key").GetString()!).OrderBy(k => k, StringComparer.Ordinal).ToArray());
+
+        posted.Clear();
+        var both = new DarlingConfig();
+        both.Webhooks.PagerDutyAutoResolve = true;
+        both.NotificationRoutes = new[] { Route(1, Metric, "both", pagerDuty: "rk-both") };
+        var bothWebhooks = new WebhookAlertService(new DarlingAlertSettings(both), DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, new DiscardingHistoryStore())
+        {
+            PostPagerDutyAsyncOverride = (_, payload) =>
+            {
+                posted.Add(payload);
+                return Task.FromResult<string?>(null);
+            },
+        };
+        await bothWebhooks.TrySendPagerDutyResolveAsync(
+            Metric, "SQL01", "7", "back to normal", new AlertSeverityLevel?[] { AlertSeverityLevel.Warning, AlertSeverityLevel.Critical },
+            TestContext.Current.CancellationToken);
+        Assert.Single(posted);
+    }
+
+    /// <summary>The deliverer path: Warning-only key A, Critical-only key B, auto-resolve on. The alert fires Warning, escalates to
+    /// Critical and clears, and the clear resolves the incident on A as well as on B.</summary>
+    [Fact]
+    public async Task AWarningThatEscalatesToCritical_ClosesThePagerDutyIncidentOnBothKeys()
+    {
+        var config = new DarlingConfig();
+        config.Webhooks.PagerDutyAutoResolve = true;
+        config.NotificationRoutes = new[]
+        {
+            Route(1, Metric, "warning", pagerDuty: "rk-warning"),
+            Route(2, Metric, "critical", pagerDuty: "rk-critical"),
+        };
+        var settings = new DarlingAlertSettings(config);
+        var posted = new List<string>();
+        var history = new CapturingHistoryStore();
+        var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history)
+        {
+            PostPagerDutyAsyncOverride = (_, payload) =>
+            {
+                posted.Add(payload);
+                return Task.FromResult<string?>(null);
+            },
+        };
+        var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
+
+        await deliverer.DeliverAsync(Fire("7", "SQL01", AlertSeverityLevel.Warning), TestContext.Current.CancellationToken);
+        await deliverer.DeliverAsync(
+            Fire("7", "SQL01", AlertSeverityLevel.Critical) with { Context = new AlertContext { EscalationBypassesCooldown = true } },
+            TestContext.Current.CancellationToken);
+        posted.Clear();
+        await deliverer.DeliverResolutionAsync(
+            new AlertResolution("7", "SQL01", Metric, "CPU Resolved", "SQL01: CPU back to normal"),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        var resolves = posted
+            .Select(p => JsonDocument.Parse(p).RootElement)
+            .Where(e => e.GetProperty("event_action").GetString() == "resolve")
+            .Select(e => e.GetProperty("routing_key").GetString()!)
+            .OrderBy(k => k, StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(new[] { "rk-critical", "rk-warning" }, resolves);
+    }
+
+    /// <summary>A chat channel: the same escalation sends the clear to the Warning-only channel as well as the Critical-only one.</summary>
+    [Fact]
+    public async Task AWarningThatEscalatesToCritical_SendsTheClearToTheWarningOnlyChatChannelToo()
+    {
+        using var warningSlack = new CapturingWebhookEndpoint();
+        using var criticalSlack = new CapturingWebhookEndpoint();
+        var config = new DarlingConfig();
+        config.Webhooks.SlackSendResolutions = true;
+        config.NotificationRoutes = new[]
+        {
+            Route(1, Metric, "warning", slack: warningSlack.Url),
+            Route(2, Metric, "critical", slack: criticalSlack.Url),
+        };
+        var settings = new DarlingAlertSettings(config);
+        var history = new CapturingHistoryStore();
+        var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
+
+        await deliverer.DeliverAsync(Fire("7", "SQL01", AlertSeverityLevel.Warning), TestContext.Current.CancellationToken);
+        await deliverer.DeliverAsync(
+            Fire("7", "SQL01", AlertSeverityLevel.Critical) with { Context = new AlertContext { EscalationBypassesCooldown = true } },
+            TestContext.Current.CancellationToken);
+        Assert.Single(warningSlack.Bodies);
+        Assert.Single(criticalSlack.Bodies);
+        await deliverer.DeliverResolutionAsync(
+            new AlertResolution("7", "SQL01", Metric, "CPU Resolved", "SQL01: CPU back to normal"),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, warningSlack.Bodies.Count);
+        Assert.Equal(2, criticalSlack.Bodies.Count);
+        Assert.Contains("Resolved", warningSlack.Bodies[1], StringComparison.Ordinal);
     }
 
     private static AlertOutcome Fire(string serverKey, string server, AlertSeverityLevel severity) =>

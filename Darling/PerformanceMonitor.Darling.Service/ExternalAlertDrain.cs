@@ -75,7 +75,7 @@ public sealed class ExternalAlertDrain
     private readonly ExternalAlertStore _store;
     private readonly Func<bool> _alertsEnabled;
     private readonly Func<AlertOutcome, CancellationToken, Task<AlertDelivery?>> _deliver;
-    private readonly Func<string, string, string, string?, AlertSeverityLevel?, CancellationToken, Task<AlertChannelOutcome>> _resolvePagerDuty;
+    private readonly Func<string, string, string, string?, IReadOnlyCollection<AlertSeverityLevel?>, CancellationToken, Task<AlertChannelOutcome>> _resolvePagerDuty;
     private readonly IAlertHistoryStore _history;
     private readonly Func<AlertMuteContext, bool> _isMuted;
     private readonly Func<string, ExternalAlertServer?> _resolveServer;
@@ -86,7 +86,7 @@ public sealed class ExternalAlertDrain
 
     /// <param name="alertsEnabled">The live master switch every alert family consults (#3464). Off, a pass only expires rows.</param>
     /// <param name="deliver">The record-and-send seam: <see cref="DarlingAlertDeliverer.DeliverAndReportAsync"/>.</param>
-    /// <param name="resolvePagerDuty">(firing metric, server name, server key, detail, the severity the fire went out at, token): closes the PagerDuty incident
+    /// <param name="resolvePagerDuty">(firing metric, server name, server key, detail, every severity the episode's fires went out at, token): closes the PagerDuty incident
     /// of a fire, and only with auto-resolve on: <see cref="DarlingAlertDeliverer.TryResolvePagerDutyAsync"/>.</param>
     /// <param name="isMuted">The mute check every family shares (<c>MuteRuleService.IsAlertMuted</c>).</param>
     /// <param name="resolveServer">Maps the submitted server name to a monitored server, or null when it is not registered;
@@ -95,7 +95,7 @@ public sealed class ExternalAlertDrain
         ExternalAlertStore store,
         Func<bool> alertsEnabled,
         Func<AlertOutcome, CancellationToken, Task<AlertDelivery?>> deliver,
-        Func<string, string, string, string?, AlertSeverityLevel?, CancellationToken, Task<AlertChannelOutcome>> resolvePagerDuty,
+        Func<string, string, string, string?, IReadOnlyCollection<AlertSeverityLevel?>, CancellationToken, Task<AlertChannelOutcome>> resolvePagerDuty,
         IAlertHistoryStore history,
         Func<AlertMuteContext, bool> isMuted,
         Func<string, ExternalAlertServer?> resolveServer,
@@ -361,6 +361,23 @@ public sealed class ExternalAlertDrain
         : string.Equals(firedSeverity, "warning", StringComparison.OrdinalIgnoreCase) ? AlertSeverityLevel.Warning
         : null;
 
+    /// <summary>Every tier an episode's fires went out at (#6928), so the close reaches the destination of each tier's route: a
+    /// Warning-only route's incident stays open when the alert climbs to Critical unless the close names Warning too. An episode
+    /// opened before the list was kept has only the newest word. Empty (one close with no tier) when none was confirmed.</summary>
+    private static List<AlertSeverityLevel?> SeveritiesOfFired(ExternalAlertFiringState state)
+    {
+        var tiers = new List<AlertSeverityLevel?>();
+        foreach (var word in (state.FiredSeverities ?? state.FiredSeverity ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (SeverityOfFired(word) is { } tier && !tiers.Contains(tier))
+            {
+                tiers.Add(tier);
+            }
+        }
+
+        return tiers;
+    }
+
     private async Task<ExternalAlertOutcome?> HandleClearAsync(ExternalAlertPendingRow row, CancellationToken cancellationToken)
     {
         var server = Identify(row);
@@ -384,7 +401,7 @@ public sealed class ExternalAlertDrain
         /* The PagerDuty resolve goes first: it posts only with auto-resolve on and a PagerDuty destination for this alert, and
            if it fails the firing state is left alone so the retry still finds a fire to close. */
         var pagerDuty = await _resolvePagerDuty(
-            firingMetric, firedLabel, firedKey, message, SeverityOfFired(state.FiredSeverity), cancellationToken);
+            firingMetric, firedLabel, firedKey, message, SeveritiesOfFired(state), cancellationToken);
         if (pagerDuty == AlertChannelOutcome.Failed)
         {
             return await RetryOrFailAsync(row, "the PagerDuty resolve failed");

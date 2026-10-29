@@ -137,6 +137,84 @@ public sealed class NotificationRouteSeverityLiveTests
         });
     }
 
+    /// <summary>The viewer and web writer: changing the severity filter of an agent route writes a route_agent_changed row naming it with the
+    /// words before and after, and the same change to a route with no agent level writes nothing.</summary>
+    [Fact]
+    public async Task Writer_ChangingTheSeverityFilterOfAnAgentRoute_IsJournaled_AndOfARouteWithNoAgentLevelIsNot()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the route severity journal pin (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+        }
+
+        await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bodySucceeded = false;
+        try
+        {
+            var proxies = new WebhookProxies(null, null, null, null);
+            var agentRoute = await NotificationRouteWriter.SaveAsync(
+                owner, new NotificationRouteDraft { MetricMatch = "Blocking", SmtpRecipients = "ops@example.com", AgentLevel = 2 }, null, proxies, null, null, 30, ct);
+            var plainRoute = await NotificationRouteWriter.SaveAsync(
+                owner, new NotificationRouteDraft { MetricMatch = "Deadlocks", SmtpRecipients = "ops@example.com" }, null, proxies, null, null, 30, ct);
+            const string Journal = "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed'";
+
+            /* Both to warning: Critical alerts move to a broader agent route, so the change is journaled. */
+            var stored = (await NotificationRouteWriter.ReadStoredAsync(owner, agentRoute, 30, ct))!;
+            var typed = stored.Clone();
+            typed.Severities = "warning";
+            await NotificationRouteWriter.SaveAsync(owner, typed, stored, proxies, null, null, 30, ct, "bob");
+            Assert.Equal("1", await ScalarAsync(owner, Journal, ct));
+            Assert.Equal("person:bob|changed severities|both|warning", await ScalarAsync(owner,
+                "SELECT actor || '|' || reason || '|' || (detail->'before'->>'severities') || '|' || (detail->'after'->>'severities') FROM config.investigation_journal WHERE event = 'route_agent_changed'", ct));
+
+            /* A route with no agent level is not in the agent lookup. */
+            var plainStored = (await NotificationRouteWriter.ReadStoredAsync(owner, plainRoute, 30, ct))!;
+            var plainTyped = plainStored.Clone();
+            plainTyped.Severities = "critical";
+            await NotificationRouteWriter.SaveAsync(owner, plainTyped, plainStored, proxies, null, null, 30, ct, "bob");
+            Assert.Equal("critical", await ScalarAsync(owner, $"SELECT severities FROM config.config_notification_routes WHERE route_id = {plainRoute}", ct));
+            Assert.Equal("1", await ScalarAsync(owner, Journal, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>The MCP update tool: an operator who changes the severity filter of an agent route gets a route_agent_changed row (through the
+    /// update function's before row), and the same change to a route with no agent level writes none.</summary>
+    [Fact]
+    public async Task Mcp_ChangingTheSeverityFilterOfAnAgentRoute_IsJournaled_AndOfARouteWithNoAgentLevelIsNot()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var agentRoute = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(
+                asMcp, "Blocking", agent_level: 2, served: OperatorPolicy(), cancellationToken: ct));
+            var plainRoute = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(
+                asMcp, "Deadlocks", served: OperatorPolicy(), cancellationToken: ct));
+            const string Journal = "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed'";
+            Assert.Equal("1", await ScalarAsync(owner, Journal, ct));
+
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, agentRoute, severities: "warning", served: OperatorPolicy(), cancellationToken: ct)));
+            Assert.Equal("2", await ScalarAsync(owner, Journal, ct));
+            Assert.Equal("operator:ops-lead|changed severities|both|warning", await ScalarAsync(owner,
+                $"SELECT actor || '|' || reason || '|' || (detail->'before'->>'severities') || '|' || (detail->'after'->>'severities') FROM config.investigation_journal WHERE route_id = {agentRoute} AND event = 'route_agent_changed' ORDER BY journal_id DESC LIMIT 1", ct));
+
+            /* The same word again changes nothing, and a route with no agent level writes no row. */
+            await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, agentRoute, severities: "warning", served: OperatorPolicy(), cancellationToken: ct);
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, plainRoute, severities: "critical", served: OperatorPolicy(), cancellationToken: ct)));
+            Assert.Equal("2", await ScalarAsync(owner, Journal, ct));
+        });
+    }
+
     private static async Task<string> ReadSeveritiesAsync(NpgsqlDataSource source, int routeId, CancellationToken ct) =>
         JsonDocument.Parse(await DarlingMcpAlertTools.GetNotificationRoutes(source, ct)).RootElement
             .GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("route_id").GetInt32() == routeId)

@@ -506,6 +506,29 @@ public sealed class ExternalAlertDrainLiveTests
         });
     }
 
+    /// <summary>#6928: an external alert that fired Warning and then climbed to Critical closes the PagerDuty incident at both tiers, so a
+    /// Warning-only route's key is resolved as well as the Critical-only route's.</summary>
+    [Fact]
+    public async Task TheClear_AfterAWarningThatEscalatedToCritical_AsksForTheCloseAtBothTiers()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            await rig.SubmitAsync("fire", "disk", server: "SQL01", severity: "warning");
+            await rig.Drain.RunPassAsync(rig.Ct);
+            await rig.SubmitAsync("fire", "disk", server: "SQL01", severity: "critical");
+            await rig.Drain.RunPassAsync(rig.Ct);
+            Assert.Equal("critical", await rig.ScalarAsync("SELECT fired_severity FROM config.external_alert_state WHERE alert_key = 'disk'"));
+            Assert.Equal("warning,critical", await rig.ScalarAsync("SELECT fired_severities FROM config.external_alert_state WHERE alert_key = 'disk'"));
+
+            var clear = await rig.SubmitAsync("clear", "disk", server: "SQL01");
+            await rig.Drain.RunPassAsync(rig.Ct);
+
+            Assert.Equal("delivered", await rig.StatusAsync(clear));
+            Assert.Equal(
+                new AlertSeverityLevel?[] { AlertSeverityLevel.Warning, AlertSeverityLevel.Critical }, rig.PagerDutySeverities.ToArray());
+        });
+    }
+
     [Fact]
     public async Task AFireOpenedByARetryThatSucceeds_IsConfirmed_AndItsClearResolvesIt()
     {
@@ -596,10 +619,10 @@ public sealed class ExternalAlertDrainLiveTests
                         AlertContextSerializer.Serialize(outcome.Context!)));
                     return delivery;
                 },
-                (metric, serverName, serverKey, _, firedSeverity, _) =>
+                (metric, serverName, serverKey, _, firedSeverities, _) =>
                 {
                     PagerDutyResolves.Add(metric.Split(':')[2]);
-                    PagerDutySeverities.Add(firedSeverity);
+                    PagerDutySeverities.AddRange(firedSeverities);
                     PagerDutyIdentities.Add(serverName + "|" + serverKey);
                     return Task.FromResult(AlertChannelOutcome.Delivered);
                 },

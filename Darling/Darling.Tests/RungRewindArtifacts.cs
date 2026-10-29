@@ -580,7 +580,9 @@ ALTER TABLE config.config_alert_settings
         // V229 (#6928): the severity filter on the notification routes. The column is the probe's newest sentinel. The rewind drops the column
         // (its CHECK goes with it), so a re-run of V229 does everything again. Safe on a store that never had it.
         new(229, "hasRouteSeverities",
-            @"ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS severities;"),
+            @"ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS severities;
+ALTER TABLE config.external_alert_state DROP COLUMN IF EXISTS fired_severities;
+ALTER TABLE config.investigation_request_alerts DROP COLUMN IF EXISTS severity;"),
     ];
 
     /// <summary>

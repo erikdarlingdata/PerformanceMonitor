@@ -816,6 +816,12 @@ WHERE route_id = $1";
         Compare("metric_match", before?.MetricMatch.Trim(), after?.MetricMatch.Trim());
         Compare("scope_server_id", before?.ScopeServerId, after?.ScopeServerId);
         Compare("scope_tag_id", before?.ScopeTagId, after?.ScopeTagId);
+        /* #6928: the severity filter moves alerts between agent routes. A route with no agent setting is not in the agent lookup. */
+        if (before?.AgentLevel is not null || after?.AgentLevel is not null)
+        {
+            Compare("severities", NotificationRouteKinds.NormalizeSeverities(before?.Severities), NotificationRouteKinds.NormalizeSeverities(after?.Severities));
+        }
+
         Compare("agent_level", before?.AgentLevel, after?.AgentLevel);
         Compare("agent_max_per_hour", before?.AgentMaxPerHour, after?.AgentMaxPerHour);
         Compare("agent_max_per_day", before?.AgentMaxPerDay, after?.AgentMaxPerDay);
@@ -842,6 +848,7 @@ WHERE route_id = $1";
             ["agent_lease_minutes"] = row.AgentLeaseMinutes,
             ["agent_expiry_minutes"] = row.AgentExpiryMinutes,
             ["enabled"] = row.Enabled,
+            ["severities"] = NotificationRouteKinds.NormalizeSeverities(row.Severities),
         };
 
         var detail = new System.Text.Json.Nodes.JsonObject { ["before"] = Describe(before), ["after"] = Describe(after) };

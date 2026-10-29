@@ -3009,10 +3009,19 @@ ALTER TABLE collect.servers
     /// the default, so every stored route reads <c>both</c> and keeps its effect, and a CHECK holds the three words. An alert that is not
     /// Critical counts as Warning. A route whose filter excludes an alert does not match it, and matching goes on to the next route.
     /// Idempotent: the column and the constraint are each added only when absent. No backfill and no view refresh: a registry table.
+    /// Also <c>config.external_alert_state.fired_severities</c>, every severity an external alert sent during its open episode
+    /// (comma separated), so its clear closes the incident of each tier's route. Null on an episode already open, which reads as
+    /// the newest severity alone. And <c>config.investigation_request_alerts.severity</c>, the tier (<c>critical</c> or <c>warning</c>) each
+    /// alert row of an agent request arrived at, so the agent-action gate re-resolves each alert's route at the tier dispatch used. Null on
+    /// a row written before, which resolves with no tier.
     /// </summary>
     private const string V229Sql = @"
 ALTER TABLE config.config_notification_routes
     ADD COLUMN IF NOT EXISTS severities text NOT NULL DEFAULT 'both';
+ALTER TABLE config.external_alert_state
+    ADD COLUMN IF NOT EXISTS fired_severities text;
+ALTER TABLE config.investigation_request_alerts
+    ADD COLUMN IF NOT EXISTS severity text;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_config_notification_routes_severities'

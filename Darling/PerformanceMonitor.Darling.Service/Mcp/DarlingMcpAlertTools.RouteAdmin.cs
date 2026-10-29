@@ -370,7 +370,7 @@ public sealed partial class DarlingMcpAlertTools
             /* The Viewer journals a match, scope or enabled change to a route with an agent setting (NotificationRouteWriter.AgentChange), so an
                operator's change to one is journaled too, by the agent function, with the before row the update function returns. */
             var journalsMatchOrFlag = operatorActor is not null && existing.AgentLevel is not null
-                && columns.Any(c => c is "metric_match" or "scope" or "enabled");
+                && columns.Any(c => c is "metric_match" or "scope" or "enabled" or "severities");
 
             if (agent.Any)
             {

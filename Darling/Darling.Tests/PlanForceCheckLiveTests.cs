@@ -363,7 +363,7 @@ FROM config.investigation_requests AS c JOIN config.investigation_requests AS r 
                 new AgentActionTarget(ServerId, "srv-7", NewPlan.ToString(CultureInfo.InvariantCulture), Database));
             var hooks = new ServerActionHooks
             {
-                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => 3),
+                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => 3),
                 ReadCredential = (serverId, token) => store.ReadServerCredentialStateAsync(dataSource, serverId, token),
             };
             var decision = await store.AuthorizeServerActionAsync(call, hooks, ct);

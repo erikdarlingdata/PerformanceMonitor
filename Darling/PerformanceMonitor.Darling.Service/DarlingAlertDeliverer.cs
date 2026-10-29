@@ -112,8 +112,8 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
     /// </summary>
     public Task<AlertChannelOutcome> TryResolvePagerDutyAsync(
         string firingMetric, string serverName, string serverKey, string? detailText,
-        AlertSeverityLevel? firedSeverity = null, CancellationToken cancellationToken = default) =>
-        _webhooks.TrySendPagerDutyResolveAsync(firingMetric, serverName, serverKey, detailText, firedSeverity, cancellationToken);
+        IReadOnlyCollection<AlertSeverityLevel?> firedSeverities, CancellationToken cancellationToken = default) =>
+        _webhooks.TrySendPagerDutyResolveAsync(firingMetric, serverName, serverKey, detailText, firedSeverities, cancellationToken);
 
     public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default) =>
         DeliverAndReportAsync(outcome, cancellationToken);
@@ -338,7 +338,22 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         /// against, read the way the viewer reads a row (<see cref="AlertMuteContext.PopulateFromDetailText"/>).</summary>
         public string? DetailText { get; set; }
 
-        public Dictionary<string, (string Destination, int? RouteId)> Channels { get; } = new(StringComparer.Ordinal);
+        /// <summary>Every destination each channel was fired to during the episode, each once (#6928). A severity filter can send a
+        /// Warning fire and the Critical fire after it to different routes, and the clear owes each of them its close.</summary>
+        public Dictionary<string, List<(string Destination, int? RouteId)>> Channels { get; } = new(StringComparer.Ordinal);
+
+        public void AddDestination(string channel, string destination, int? routeId)
+        {
+            if (!Channels.TryGetValue(channel, out var list))
+            {
+                Channels[channel] = list = new List<(string Destination, int? RouteId)>();
+            }
+
+            if (!list.Contains((destination, routeId)))
+            {
+                list.Add((destination, routeId));
+            }
+        }
 
         public HashSet<string> PagerDutyDedupKeys { get; } = new(StringComparer.Ordinal);
 
@@ -411,7 +426,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
             fire.DetailText = detailText;
             foreach (var (channel, where, routeId) in delivered)
             {
-                fire.Channels[channel] = (where, routeId);
+                fire.AddDestination(channel, where, routeId);
                 if (channel == NotificationRouter.PagerDutyChannel)
                 {
                     fire.PagerDutyDedupKeys.Add(dedupKey);
@@ -553,33 +568,38 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         var routeGone = new List<string>();
         foreach (var channel in s_channelOrder)
         {
-            if (!fire.Channels.TryGetValue(channel, out var reached))
+            if (!fire.Channels.TryGetValue(channel, out var reachedList))
             {
                 continue;
             }
 
-            /* The route that carried the fire, as it is now. Deleted or disabled since the fire: the same answer as the
-               history path below (#5855 review), so the clear goes nowhere on that channel and the row says why. */
-            var route = RouteNow(reached.RouteId, routes, out var gone);
-            if (gone)
+            /* #6928: a severity filter can fire one channel to different destinations during an episode, so each is closed. */
+            foreach (var reached in reachedList)
             {
-                if (!fire.RouteGoneChannels.Contains(channel))
+                /* The route that carried the fire, as it is now. Deleted or disabled since the fire: the same answer as the
+                   history path below (#5855 review), so the clear goes nowhere on that destination and the row says why. */
+                var route = RouteNow(reached.RouteId, routes, out var gone);
+                if (gone)
                 {
-                    fire.RouteGoneChannels.Add(channel);
+                    if (!fire.RouteGoneChannels.Contains(channel))
+                    {
+                        fire.RouteGoneChannels.Add(channel);
+                    }
+
+                    continue;
                 }
 
-                continue;
-            }
+                if (channel == NotificationRouter.PagerDutyChannel
+                    && (!options.ClosePagerDuty || fire.PagerDutyDedupKeys.Count == 0))
+                {
+                    continue;
+                }
 
-            if (channel == NotificationRouter.PagerDutyChannel
-                && (!options.ClosePagerDuty || fire.PagerDutyDedupKeys.Count == 0))
-            {
-                continue;
-            }
-
-            if (NotificationRouteResolutions.SendsResolutions(route, channel, flags))
-            {
-                targets.Add((channel, reached.Destination));
+                if (NotificationRouteResolutions.SendsResolutions(route, channel, flags)
+                    && !targets.Contains((channel, reached.Destination)))
+                {
+                    targets.Add((channel, reached.Destination));
+                }
             }
         }
 
@@ -659,7 +679,12 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
                 error = await _webhooks.TrySendResolutionAsync(channel, destination, facts, serverId, genericDedupKey: null, cancellationToken);
             }
 
-            outcomes[channel] = error is null ? AlertChannelOutcome.Delivered : AlertChannelOutcome.Failed;
+            /* A channel with several destinations is Failed when any of them failed. */
+            if (error is not null || !outcomes.ContainsKey(channel))
+            {
+                outcomes[channel] = error is null ? AlertChannelOutcome.Delivered : AlertChannelOutcome.Failed;
+            }
+
             if (error is not null && channel != NotificationRouter.EmailChannel)
             {
                 webhookError ??= $"{channel}: {error}";
@@ -746,7 +771,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         };
         string? firstDedupKey = null;
 
-        /* Newest first: a channel takes the destination its newest delivered fire used, as the memory path does. */
+        /* Every delivered fire of the episode adds its destination, as the memory path does (#6928). */
         foreach (var row in history.Rows)
         {
             if (AlertContextSerializer.TryReadRoute(row.ContextJson) is not { } route)
@@ -768,34 +793,13 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
                    #3313 filter dropped none of them. */
                 var genericDedupKey = destination.SentKey
                     ?? WebhookAlertService.DeriveGenericDedupKey(resolution.ServerKey, resolution.ServerName, resolution.MetricName, context);
-                if (destination.Outcome != AlertRouteOutcomes.Delivered
-                    || fire.Channels.ContainsKey(destination.Channel) || fire.RouteGoneChannels.Contains(destination.Channel))
-                {
-                    if (destination.Outcome == AlertRouteOutcomes.Delivered && destination.Channel == NotificationRouter.PagerDutyChannel)
-                    {
-                        fire.PagerDutyDedupKeys.Add(dedupKey);
-                    }
-                    else if (destination.Outcome == AlertRouteOutcomes.Delivered && destination.Channel == NotificationRouter.GenericChannel)
-                    {
-                        fire.GenericDedupKeys.Add(genericDedupKey);
-                    }
-
-                    continue;
-                }
-
-                var where = CurrentDestination(destination.Channel, destination.RouteId, routes, out var gone);
-                if (gone)
-                {
-                    fire.RouteGoneChannels.Add(destination.Channel);
-                    continue;
-                }
-
-                if (string.IsNullOrWhiteSpace(where))
+                /* #6928: every delivered fire's destination counts, not only the newest, because a severity filter can send the
+                   Warning fire and the Critical fire of one episode to different routes, and each owes its close. */
+                if (destination.Outcome != AlertRouteOutcomes.Delivered)
                 {
                     continue;
                 }
 
-                fire.Channels[destination.Channel] = (where, destination.RouteId);
                 if (destination.Channel == NotificationRouter.PagerDutyChannel)
                 {
                     fire.PagerDutyDedupKeys.Add(dedupKey);
@@ -804,6 +808,24 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
                 {
                     fire.GenericDedupKeys.Add(genericDedupKey);
                 }
+
+                var where = CurrentDestination(destination.Channel, destination.RouteId, routes, out var gone);
+                if (gone)
+                {
+                    if (!fire.RouteGoneChannels.Contains(destination.Channel))
+                    {
+                        fire.RouteGoneChannels.Add(destination.Channel);
+                    }
+
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(where))
+                {
+                    continue;
+                }
+
+                fire.AddDestination(destination.Channel, where, destination.RouteId);
             }
         }
 

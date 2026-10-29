@@ -1718,7 +1718,8 @@ BEGIN
    RETURN jsonb_build_object(
       'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
       'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
-      'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled);
+      'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled,
+      'severities', v_row.severities);
 END
 $fn$;
 REVOKE ALL ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text) FROM PUBLIC;
@@ -1803,6 +1804,10 @@ BEGIN
       IF (p_before ->> 'metric_match') IS DISTINCT FROM btrim(v_row.metric_match) THEN v_changed := array_append(v_changed, 'metric_match'); END IF;
       IF (p_before ->> 'scope_server_id')::integer IS DISTINCT FROM v_row.scope_server_id THEN v_changed := array_append(v_changed, 'scope_server_id'); END IF;
       IF (p_before ->> 'scope_tag_id')::integer IS DISTINCT FROM v_row.scope_tag_id THEN v_changed := array_append(v_changed, 'scope_tag_id'); END IF;
+      -- #6928: the severity filter moves alerts between agent routes, so it is named like the match and the scope. Only a route with an agent setting.
+      IF (p_before ->> 'severities') IS DISTINCT FROM v_row.severities AND ((p_before ->> 'agent_level') IS NOT NULL OR v_level IS NOT NULL) THEN
+         v_changed := array_append(v_changed, 'severities');
+      END IF;
    END IF;
    IF v_level IS DISTINCT FROM v_row.agent_level THEN v_changed := array_append(v_changed, 'agent_level'); END IF;
    IF v_hour IS DISTINCT FROM v_row.agent_max_per_hour THEN v_changed := array_append(v_changed, 'agent_max_per_hour'); END IF;
@@ -1828,11 +1833,13 @@ BEGIN
       v_before := CASE WHEN COALESCE(p_created, false) THEN NULL WHEN p_before IS NOT NULL THEN p_before ELSE jsonb_build_object(
          'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
          'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
-         'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled) END;
+         'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled,
+         'severities', v_row.severities) END;
       v_after := jsonb_build_object(
          'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
          'agent_level', v_level, 'agent_max_per_hour', v_hour, 'agent_max_per_day', v_day,
-         'agent_lease_minutes', v_lease, 'agent_expiry_minutes', v_expiry, 'enabled', v_row.enabled);
+         'agent_lease_minutes', v_lease, 'agent_expiry_minutes', v_expiry, 'enabled', v_row.enabled,
+         'severities', v_row.severities);
       INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail)
       VALUES (now(), NULL, p_route_id, v_row.scope_server_id, 'route_agent_changed', p_actor,
               CASE WHEN COALESCE(p_created, false) THEN 'created route' ELSE 'changed ' || array_to_string(v_changed, ', ') END,
