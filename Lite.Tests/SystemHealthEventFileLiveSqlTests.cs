@@ -117,14 +117,14 @@ AND   xet.target_name = N'event_file';", connection))
     }
 
     private static CollectorContext MakeContext(
-        int major, IReadOnlyDictionary<string, string>? state, DateTime? watermark)
+        int major, IReadOnlyDictionary<string, string>? state, DateTime? watermark, bool managedInstance = false)
         => new()
         {
             ServerId = 1,
             ServerName = "live-sql",
             CollectionTime = DateTime.UtcNow,
             Deltas = new RecordingCollectorDeltaCalculator(),
-            Target = new CollectorTargetInfo { SqlMajorVersion = major },
+            Target = new CollectorTargetInfo { SqlMajorVersion = major, IsAzureManagedInstance = managedInstance },
             Watermark = watermark,
             State = state ?? CollectorContext.NoState,
         };
@@ -158,10 +158,11 @@ AND   xet.target_name = N'event_file';", connection))
         IReadOnlyDictionary<string, string>? state,
         DateTime? watermark,
         int? maxEvents = null,
-        int? asMajor = null)
+        int? asMajor = null,
+        bool managedInstance = false)
     {
         var ct = TestContext.Current.CancellationToken;
-        var context = MakeContext(asMajor ?? server.Major, state, watermark);
+        var context = MakeContext(asMajor ?? server.Major, state, watermark, managedInstance);
         var query = SystemHealthEventsCollector.Instance.BuildQuery(context);
 
         await using var command = new SqlCommand(query.Text, server.Connection) { CommandTimeout = 120 };
@@ -242,6 +243,58 @@ AND   xet.target_name = N'event_file';", connection))
         Assert.Contains(server.CurrentFile, bookmark, StringComparison.OrdinalIgnoreCase);
         Assert.NotNull(SystemHealthEventsCollector.TryUseBookmark(
             pass.Context.PendingState, pass.Rows.Max(r => r.EventTime!.Value)));
+    }
+
+    [Fact]
+    public async Task ManagedInstanceMode_ReadsTheBarePattern_ForTheFreshReadAndTheBookmarkResume()
+    {
+        /* #6897: Managed Instance refuses a directory path and the _0_ pattern, so its batch reads system_health*.xel with
+           the bookmark's file_name as the function returned it. A box resolves the bare pattern in its default log folder,
+           where its system_health files are, so the same batch is proven here: both reads reach the file, neither falls back.
+           The bare pattern opens the OLDEST matching file first, while the ordinary path opens the file the target is writing
+           now, so a rollover file older than the current one tells the two apart: a batch that stopped using the override
+           would start the fresh read in the current file. */
+        var server = await OpenAsync();
+        await using var connection = server.Connection;
+        var ct = TestContext.Current.CancellationToken;
+
+        Assert.SkipWhen(server.Major < 14, "sys.dm_os_enumerate_filesystem needs SQL Server 2017 or later.");
+        var directory = server.FilePattern[..(server.FilePattern.LastIndexOf('\\') + 1)];
+        string? oldest = null;
+        long oldestSize = 0;
+        await using (var list = new SqlCommand(
+            @"SELECT TOP (1) fs.full_filesystem_path, fs.size_in_bytes
+FROM sys.dm_os_enumerate_filesystem(@directory, N'system_health_0_*.xel') AS fs
+ORDER BY fs.full_filesystem_path;", connection))
+        {
+            list.Parameters.Add(new SqlParameter("@directory", SqlDbType.NVarChar, 260) { Value = directory });
+            await using var reader = await list.ExecuteReaderAsync(ct);
+            if (await reader.ReadAsync(ct))
+            {
+                oldest = reader.GetString(0);
+                oldestSize = reader.GetInt64(1);
+            }
+        }
+
+        Assert.SkipWhen(
+            oldest is null || string.Equals(oldest, server.CurrentFile, StringComparison.OrdinalIgnoreCase),
+            "No rollover system_health file older than the current one, so the bare pattern and the exact path start in the same file.");
+        Assert.SkipWhen(oldestSize < 1_000_000, "The oldest system_health file is too small to hold the 50 events the fresh read is capped at.");
+
+        var fresh = await RunPassAsync(server, state: null, watermark: s_longAgo, maxEvents: 50, managedInstance: true);
+        Assert.SkipWhen(
+            Measured(fresh.Context, "event_file_fallback") is not null,
+            "This server's system_health files are not in its default log folder, where the bare pattern looks.");
+        Assert.SkipWhen(fresh.Rows.Count == 0, "The system_health files hold none of the six captured events yet.");
+        Assert.Null(Measured(fresh.Context, "event_file_error"));
+
+        /* The fresh read starts in the oldest file and the cap stops it there: no row comes from the current file. */
+        Assert.All(fresh.Rows, row => Assert.Equal(oldest, row.SourceFile, ignoreCase: true));
+
+        var resumed = await RunPassAsync(
+            server, StateFrom(fresh.Context), fresh.Rows.Max(r => r.EventTime!.Value), managedInstance: true);
+        Assert.Null(Measured(resumed.Context, "event_file_fallback"));
+        Assert.Null(Measured(resumed.Context, "event_file_error"));
     }
 
     [Fact]
