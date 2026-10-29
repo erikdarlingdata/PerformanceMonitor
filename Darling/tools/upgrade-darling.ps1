@@ -1027,12 +1027,14 @@ function Protect-DarlingRollbackBackupFolder([string]$path, [switch]$ResetChildr
             $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', $inherit, 'None', 'Allow')))
         }
         Set-Acl -LiteralPath $path -AclObject $acl -ErrorAction Stop
-        $after = (New-Object System.IO.DirectoryInfo($path)).GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+        # DirectoryInfo.GetAccessControl is .NET Framework only, so PowerShell 7 stopped here (#6920). The DirectorySecurity and FileSecurity constructors read the
+        # same DACL by name in both hosts, and (unlike Get-Acl) without opening the file, which a caller the new DACL does not name could not do.
+        $after = New-Object System.Security.AccessControl.DirectorySecurity($path, [System.Security.AccessControl.AccessControlSections]::Access)
         if ((-not $after.AreAccessRulesProtected) -or (& $notOnlyAdmins $after).Count -gt 0) {
             return "The rollback backup '$path' still grants access to accounts other than SYSTEM and Administrators after its permissions were set. Run from an elevated prompt: $fix"
         }
         foreach ($file in $reset) {
-            if ((& $notOnlyAdmins ((New-Object System.IO.FileInfo($file.FullName)).GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access))).Count -gt 0) { $left += $file.Name }
+            if ((& $notOnlyAdmins (New-Object System.Security.AccessControl.FileSecurity($file.FullName, [System.Security.AccessControl.AccessControlSections]::Access))).Count -gt 0) { $left += $file.Name }
         }
         if ($left.Count -gt 0) {
             return "In the rollback backup '$path', $($left -join ', ') could not be limited to SYSTEM and Administrators (a link, a file with more than one name, or a permission that would not change). Restrict each by hand, or delete the backup."
