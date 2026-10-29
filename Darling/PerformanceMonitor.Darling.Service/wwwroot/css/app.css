@@ -431,8 +431,9 @@ a:hover { text-decoration: underline; }
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.4rem;
 }
+/* A grid item defaults to min-width: auto, which holds the tile open at its content's width and defeats the detail ellipsis (#6901). Scoped to this grid: the AG replica chips share .metric-chip but are not items of it. */
+.metric-bands > .metric-chip { min-width: 0; }
 .metric-chip {
-  min-width: 0;
   background: var(--bg-dark);
   border-radius: var(--radius-sm);
   padding: 0.3rem 0.45rem;

@@ -114,7 +114,10 @@ const all = (node, pred, found = []) => {
   return found;
 };
 const settle = async () => { for (let i = 0; i < 60; i++) await new Promise((r) => setTimeout(r, 2)); };
-const chips = (node) => all(node, (n) => String(n.className).startsWith("metric-chip")).map((c) => ({ cls: c.className, text: c.textContent }));
+const chips = (node) => all(node, (n) => String(n.className).startsWith("metric-chip")).map((c) => {
+  const detail = (c.children || []).find((d) => d.className === "detail");
+  return { cls: c.className, text: c.textContent, detail: detail ? detail.textContent : null, detailTitle: detail ? detail.getAttribute("title") : null };
+});
 
 const iso = (msAgo) => new Date(Date.now() - msAgo).toISOString().slice(0, 19);
 const card = (over) => ({
@@ -129,6 +132,13 @@ const scenarios = {
   cards: async () => ({
     offline: chips(modules.fleet.metricBands(card({ is_online: false }))),
     online: chips(modules.fleet.metricBands(card({ last_collection: iso(1000) }))),
+  }),
+  /* #6901: a chip's detail is clamped to one line with an ellipsis, so the full sentence has to be on the detail's title. */
+  longDetail: async () => ({
+    chips: chips(modules.fleet.metricBands(card({
+      last_collection: iso(1000),
+      agent_alert_gaps: [{ message: "No alert is set for severity 19 through 25 errors." }, { message: "No alert is set for error 823, 824 or 825 (corruption)." }],
+    }))),
   }),
   /* #6828: a server whose collectors are 39 HEALTHY, 3 WARNING and 2 not collected: the Collectors chip shows the warning count and does not call them healthy. */
   collectorsWarning: async () => ({
