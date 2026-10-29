@@ -45,7 +45,7 @@ internal static class McpEngineCapability
         int serverId,
         string serverName,
         string collectorName,
-        bool isAwsRds = false)
+        AwsRdsKind awsRdsKind)
     {
         var engineEdition = await EngineEditionAsync(dataService, serverId);
 
@@ -56,8 +56,8 @@ internal static class McpEngineCapability
            the compiler could not find on the day that changes; null is behaviour-identical here (a SQL
            Server collector on a SQL Server target makes no kind claim either way) and cannot become wrong.
            The parameter is REQUIRED rather than defaulted so that decision is visible at the call site
-           instead of being made by omission. */
-        var engineEnvelope = Envelope(serverName, engineEdition, collectorName, isAwsRds);
+           instead of being made by omission. awsRdsKind is required for the same reason (#6894). */
+        var engineEnvelope = Envelope(serverName, engineEdition, collectorName, awsRdsKind);
         if (engineEnvelope is not null || collectorName is not ("query_store" or "plan_correction"))
         {
             return engineEnvelope;
@@ -68,8 +68,9 @@ internal static class McpEngineCapability
     }
 
     /// <summary>
-    /// #6894: the same answer for a read of a collector Amazon RDS gates off (running_jobs). The RDS fact is not in the store, so this takes the
-    /// server manager and reads it from the server's connection status; the edition axis cannot show it, because RDS reports an ordinary edition.
+    /// #6894, #6893: the same answer for a read of a collector Amazon RDS gates off (running_jobs, and on the Web and Express editions the four
+    /// Extended Events captures). The RDS facts are not in the store, so this takes the server manager and reads them from the server's connection
+    /// status; the edition axis cannot show them, because RDS reports an ordinary edition and the collected edition is the real one.
     /// </summary>
     public static Task<string?> NotCollectedStatusAsync(
         LocalDataService dataService,
@@ -78,35 +79,36 @@ internal static class McpEngineCapability
         string serverName,
         string collectorName)
     {
-        var rds = IsAwsRds(serverManager, serverId);
-        return NotCollectedStatusAsync(dataService, serverId, serverName, collectorName, isAwsRds: rds);
+        var awsRdsKind = AwsRdsKindOf(serverManager, serverId);
+        return NotCollectedStatusAsync(dataService, serverId, serverName, collectorName, awsRdsKind: awsRdsKind);
     }
 
     /// <summary>The <c>not_collected</c> envelope for this engine and collector, or <c>null</c> when the collector can run there.
     /// No engine-kind claim, for the reason given in <see cref="NotCollectedStatusAsync"/>.</summary>
-    private static string? Envelope(string serverName, int engineEdition, string collectorName, bool isAwsRds = false)
+    private static string? Envelope(string serverName, int engineEdition, string collectorName, AwsRdsKind awsRdsKind)
     {
-        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, collectorName, isAwsRds);
+        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, collectorName, awsRdsKind);
         return message is null ? null : McpHelpers.Status("not_collected", message);
     }
 
     /// <summary>
-    /// #6894: whether the connection check found this server to be an Amazon RDS for SQL Server instance (the <c>rdsadmin</c> database).
-    /// Lite keeps the fact in memory on the server's connection status, and a tool holds only the storage id, so the server is found the way
-    /// the collectors name it. False for a server that is not registered, was never checked, or whose check failed: no RDS claim, which leaves
-    /// the read on its own precondition answer.
+    /// #6894, #6893: what the connection check found this server to be: an Amazon RDS for SQL Server instance (the <c>rdsadmin</c> database),
+    /// and on the Web or Express edition. Lite keeps the facts in memory on the server's connection status, and a tool holds only the storage
+    /// id, so the server is found the way the collectors name it. <see cref="AwsRdsKind.None"/> for a server that is not registered, was never
+    /// checked, or whose check failed: no RDS claim, which leaves the read on its own precondition answer.
     /// </summary>
-    public static bool IsAwsRds(ServerManager serverManager, int storageServerId)
+    public static AwsRdsKind AwsRdsKindOf(ServerManager serverManager, int storageServerId)
     {
         foreach (var server in serverManager.GetEnabledServers())
         {
             if (RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server)) == storageServerId)
             {
-                return serverManager.GetConnectionStatus(server.Id).IsAwsRds;
+                var status = serverManager.GetConnectionStatus(server.Id);
+                return CollectorEngineCapability.AwsRdsKindOf(status.IsAwsRds, status.IsAwsRdsWebOrExpress);
             }
         }
 
-        return false;
+        return AwsRdsKind.None;
     }
 
     /// <summary>
@@ -125,7 +127,7 @@ internal static class McpEngineCapability
         foreach (var (serverId, serverName) in fleet)
         {
             /* The same answer NotCollectedStatusAsync gives one server; a store read that fails makes no claim. */
-            var envelope = Envelope(serverName, await EngineEditionAsync(dataService, serverId), collectorName);
+            var envelope = Envelope(serverName, await EngineEditionAsync(dataService, serverId), collectorName, awsRdsKind: AwsRdsKind.None);
             if (envelope is null) return null;
             first ??= envelope;
         }

@@ -132,7 +132,7 @@ public partial class ViewerServerTab
     private string PanelNote(string collectorName, int rowCount, string healthyEmptyText)
     {
         var gap = CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName);
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None);
 
         return EmptyNote(gap, _pgOffline, rowCount, healthyEmptyText);
     }
@@ -185,7 +185,7 @@ public partial class ViewerServerTab
     /// spend a round trip proving a permanent gap is still permanent.</summary>
     private bool PgCollectorIsGatedOff(string collectorName) =>
         CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName) is not null;
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None) is not null;
 
     // ─────────────────────────────────────────────────────────────────────────────────────────────
     // Tab loaders

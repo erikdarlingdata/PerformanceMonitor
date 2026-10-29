@@ -582,7 +582,7 @@ public class PgTableBloatStatsCollectorDefinitionTests
     public void TheCapabilityMessageNamesWhatIsNotCollected()
     {
         var message = CollectorEngineCapability.NotCollectedMessage(
-            "sql-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.SqlServer, "pg_table_bloat_stats");
+            "sql-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.SqlServer, "pg_table_bloat_stats", awsRdsKind: AwsRdsKind.None);
 
         Assert.NotNull(message);
         Assert.Contains("bloat estimate", message, StringComparison.Ordinal);

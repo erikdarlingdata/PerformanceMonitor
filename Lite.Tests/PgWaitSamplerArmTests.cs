@@ -99,7 +99,7 @@ public sealed class PgWaitSamplerArmTests
         Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind("pg_wait_sampling", "aurora-postgres"));
         Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind("pg_wait_sampling", "postgres"));
 
-        var message = CollectorEngineCapability.NotCollectedMessage("db-01", 0, "aurora-postgres", "pg_wait_sampling");
+        var message = CollectorEngineCapability.NotCollectedMessage("db-01", 0, "aurora-postgres", "pg_wait_sampling", awsRdsKind: AwsRdsKind.None);
         Assert.NotNull(message);
         Assert.Contains("pg_wait_stats", message, StringComparison.Ordinal);
         Assert.Contains("never will", message, StringComparison.Ordinal);

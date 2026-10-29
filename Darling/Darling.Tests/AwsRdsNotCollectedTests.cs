@@ -34,7 +34,7 @@ public sealed class AwsRdsNotCollectedPureTests
     [InlineData("agent_alerts")]
     public void ARdsServer_IsNotCollected_ForACollectorRdsGatesOff(string collector)
     {
-        var message = CollectorEngineCapability.NotCollectedMessage("example-rds-a", 3, MonitoredEngineKind.SqlServer, collector, isAwsRds: true);
+        var message = CollectorEngineCapability.NotCollectedMessage("example-rds-a", 3, MonitoredEngineKind.SqlServer, collector, awsRdsKind: AwsRdsKind.Rds);
 
         Assert.NotNull(message);
         Assert.Contains("Amazon RDS", message, StringComparison.Ordinal);
@@ -47,25 +47,25 @@ public sealed class AwsRdsNotCollectedPureTests
     [InlineData("running_jobs")]
     [InlineData("agent_alerts")]
     public void AServerWithNoRdsFact_MakesNoClaim(string collector) =>
-        Assert.Null(CollectorEngineCapability.NotCollectedMessage("example-box-a", 3, MonitoredEngineKind.SqlServer, collector, isAwsRds: false));
+        Assert.Null(CollectorEngineCapability.NotCollectedMessage("example-box-a", 3, MonitoredEngineKind.SqlServer, collector, awsRdsKind: AwsRdsKind.None));
 
     [Theory]
     [InlineData("wait_stats")]
     [InlineData("job_history")]
     [InlineData("server_properties")]
     public void ARdsServer_StillCollects_WhatRdsDoesNotGateOff(string collector) =>
-        Assert.Null(CollectorEngineCapability.NotCollectedMessage("example-rds-a", 3, MonitoredEngineKind.SqlServer, collector, isAwsRds: true));
+        Assert.Null(CollectorEngineCapability.NotCollectedMessage("example-rds-a", 3, MonitoredEngineKind.SqlServer, collector, awsRdsKind: AwsRdsKind.Rds));
 
     [Fact]
     public void TheRdsClaim_IsDerivedFromTheCollectorsOwnGate_AndSkipsPostgresCollectors()
     {
-        Assert.False(CollectorEngineCapability.IsCollectedOnAwsRds("running_jobs"));
-        Assert.True(CollectorEngineCapability.IsCollectedOnAwsRds("wait_stats"));
+        Assert.False(CollectorEngineCapability.IsCollectedOnAwsRds("running_jobs", null, AwsRdsKind.Rds));
+        Assert.True(CollectorEngineCapability.IsCollectedOnAwsRds("wait_stats", null, AwsRdsKind.Rds));
 
         /* An RDS flag on a PostgreSQL target (set from its endpoint) is not this fact, and a PostgreSQL collector's SQL Server sweep is empty. */
         var pgCollector = CollectorCatalog.All.First(c => c.Name == "pg_database_stats").Name;
-        Assert.Null(CollectorEngineCapability.NotCollectedMessage("pg-01", 0, MonitoredEngineKind.Postgres, pgCollector, isAwsRds: true));
-        Assert.True(CollectorEngineCapability.IsCollectedOnAwsRds(pgCollector));
+        Assert.Null(CollectorEngineCapability.NotCollectedMessage("pg-01", 0, MonitoredEngineKind.Postgres, pgCollector, awsRdsKind: AwsRdsKind.Rds));
+        Assert.True(CollectorEngineCapability.IsCollectedOnAwsRds(pgCollector, null, AwsRdsKind.Rds));
     }
 
     [Fact]
@@ -76,8 +76,8 @@ public sealed class AwsRdsNotCollectedPureTests
             "running_jobs", 24, now.AddHours(-24), now,
             new[]
             {
-                new CollectorFleetLiveness.ServerFacts(1, "example-rds-a", null, 3, MonitoredEngineKind.SqlServer, IsAwsRds: true),
-                new CollectorFleetLiveness.ServerFacts(2, "example-box-a", null, 3, MonitoredEngineKind.SqlServer),
+                new CollectorFleetLiveness.ServerFacts(1, "example-rds-a", null, 3, MonitoredEngineKind.SqlServer, AwsRdsKind.Rds),
+                new CollectorFleetLiveness.ServerFacts(2, "example-box-a", null, 3, MonitoredEngineKind.SqlServer, AwsRdsKind.None),
             },
             Array.Empty<CollectorFleetLiveness.RunFacts>());
 
@@ -116,8 +116,8 @@ public sealed class AwsRdsNotCollectedLivePostgresTests
             /* The connect upsert itself, so the column list and the parameter order are the shipped ones. */
             await UpsertAsync(connection, ct, RdsId, RdsName, isAwsRds: true);
             await UpsertAsync(connection, ct, BoxId, BoxName, isAwsRds: false);
-            Assert.True(await DarlingEngineCapability.IsAwsRdsAsync(postgres, RdsId, ct));
-            Assert.False(await DarlingEngineCapability.IsAwsRdsAsync(postgres, BoxId, ct));
+            Assert.Equal(AwsRdsKind.Rds, (await DarlingEngineCapability.ReadServerEngineAsync(postgres, RdsId, ct)).AwsRdsKind);
+            Assert.Equal(AwsRdsKind.None, (await DarlingEngineCapability.ReadServerEngineAsync(postgres, BoxId, ct)).AwsRdsKind);
 
             var rdsAlerts = await DarlingMcpAgentAlertTools.GetAgentAlerts(postgres, RdsName, cancellationToken: ct);
             Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(rdsAlerts));
@@ -136,7 +136,7 @@ public sealed class AwsRdsNotCollectedLivePostgresTests
 
             /* A reconnect that no longer finds RDS corrects the fact: the re-connect arm writes it too. */
             await UpsertAsync(connection, ct, RdsId, RdsName, isAwsRds: false);
-            Assert.False(await DarlingEngineCapability.IsAwsRdsAsync(postgres, RdsId, ct));
+            Assert.Equal(AwsRdsKind.None, (await DarlingEngineCapability.ReadServerEngineAsync(postgres, RdsId, ct)).AwsRdsKind);
 
             /* The fleet form of collection health lists the RDS server as not applicable with the same reason. */
             await UpsertAsync(connection, ct, RdsId, RdsName, isAwsRds: true);
@@ -158,13 +158,53 @@ public sealed class AwsRdsNotCollectedLivePostgresTests
         }
     }
 
-    private static async Task UpsertAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, bool isAwsRds)
+    [Fact]
+    public async Task AnRdsWebServer_KeepsItsRealEngineEdition_AndItsDeadlockReadIsNotCollected_WhileAnRdsEnterpriseServerMakesNoClaim()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live RDS fact test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* The Web instance reports EngineEdition 2, the same as Standard: the registry keeps it, and the Web or Express fact is its own column (V226). */
+            await UpsertAsync(connection, ct, RdsId, RdsName, isAwsRds: true, webOrExpress: true, engineEdition: 2);
+            await UpsertAsync(connection, ct, BoxId, BoxName, isAwsRds: true, webOrExpress: false, engineEdition: 2);
+            var web = await DarlingEngineCapability.ReadServerEngineAsync(postgres, RdsId, ct);
+            Assert.Equal(2, web.EngineEdition);
+            Assert.Equal(AwsRdsKind.RdsWebOrExpress, web.AwsRdsKind);
+            Assert.Equal(AwsRdsKind.Rds, (await DarlingEngineCapability.ReadServerEngineAsync(postgres, BoxId, ct)).AwsRdsKind);
+
+            var webDeadlocks = await DarlingMcpBlockingTools.GetDeadlocks(postgres, RdsName, cancellationToken: ct);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(webDeadlocks));
+            Assert.Contains("Amazon RDS for SQL Server Web or Express edition", webDeadlocks, StringComparison.Ordinal);
+
+            var enterpriseDeadlocks = await DarlingMcpBlockingTools.GetDeadlocks(postgres, BoxName, cancellationToken: ct);
+            Assert.NotEqual("not_collected", DarlingMcpTestData.StatusOf(enterpriseDeadlocks));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static async Task UpsertAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, bool isAwsRds, bool webOrExpress = false, int engineEdition = 3)
     {
         using var command = new NpgsqlCommand(DarlingObservability.UpsertServerSql, connection);
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(serverName);
         command.Parameters.AddWithValue(serverName);
-        command.Parameters.AddWithValue(3);
+        command.Parameters.AddWithValue(engineEdition);
         command.Parameters.AddWithValue(15);
         command.Parameters.AddWithValue(MonitoredEngineKind.SqlServer);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
@@ -172,6 +212,7 @@ public sealed class AwsRdsNotCollectedLivePostgresTests
         command.Parameters.AddWithValue(DBNull.Value);
         command.Parameters.AddWithValue(DBNull.Value);
         command.Parameters.AddWithValue(isAwsRds);
+        command.Parameters.AddWithValue(webOrExpress);
         await command.ExecuteNonQueryAsync(ct);
     }
 

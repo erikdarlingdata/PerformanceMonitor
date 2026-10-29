@@ -178,13 +178,13 @@ public sealed class AgentAlertsCollectorTests
 
         foreach (var edition in new[] { CollectorEngineCapability.AzureSqlDatabaseEngineEdition, CollectorEngineCapability.AzureManagedInstanceEngineEdition })
         {
-            var message = CollectorEngineCapability.NotCollectedMessage("srv", edition, null, "agent_alerts");
+            var message = CollectorEngineCapability.NotCollectedMessage("srv", edition, null, "agent_alerts", awsRdsKind: AwsRdsKind.None);
             Assert.NotNull(message);
             Assert.Contains("the SQL Agent alert definitions and counters", message, StringComparison.Ordinal);
             Assert.Contains("agent_alerts", message, StringComparison.Ordinal);
         }
 
-        Assert.Null(CollectorEngineCapability.NotCollectedMessage("srv", 3, null, "agent_alerts"));
+        Assert.Null(CollectorEngineCapability.NotCollectedMessage("srv", 3, null, "agent_alerts", awsRdsKind: AwsRdsKind.None));
     }
 
     [Fact]

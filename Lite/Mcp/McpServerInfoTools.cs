@@ -3,6 +3,7 @@ using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -23,7 +24,7 @@ public sealed class McpServerInfoTools
         {
             var row = await dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
             if (row == null)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_properties")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_properties", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("unavailable", "No server properties available. The properties collector may not have run yet.");
 
             return ServerPropertiesPayload(resolved.DisplayName, row);
@@ -115,7 +116,7 @@ public sealed class McpServerInfoTools
 
                 /* #5244: every answer shape says which database it was limited to (null for every database). */
                 return McpHelpers.WithDatabase(
-                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_size_stats"),
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_size_stats", awsRdsKind: AwsRdsKind.None),
                            McpDatabaseSelection.Describe(names))
                     ?? McpHelpers.StatusForDatabase("unavailable", "No database size data available. The size collector may not have run yet.", McpDatabaseSelection.Describe(names));
             }

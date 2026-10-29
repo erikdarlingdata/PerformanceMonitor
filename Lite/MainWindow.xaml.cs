@@ -32,6 +32,7 @@ using PerformanceMonitor.Ui;
 using AlertEngine = PerformanceMonitor.Alerting.AlertEngine;
 using FailedSendRetryTracker = PerformanceMonitor.Alerting.FailedSendRetryTracker;
 using AlertReadFailureCounter = PerformanceMonitor.Alerting.AlertReadFailureCounter;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite;
 
@@ -1413,7 +1414,7 @@ public partial class MainWindow : Window
         }
 
         var utcOffset = status.UtcOffsetMinutes ?? 0;
-        var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialResolver, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition, isAwsRds: status.IsAwsRds,
+        var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialResolver, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition, awsRdsKind: CollectorEngineCapability.AwsRdsKindOf(status.IsAwsRds, status.IsAwsRdsWebOrExpress),
             isLongQueryTraceEnabled: () => _scheduleManager.GetScheduleForServer(server.Id, "long_query_completions")?.Enabled ?? false);
         var tabHeader = CreateTabHeader(server);
         var tabItem = new TabItem

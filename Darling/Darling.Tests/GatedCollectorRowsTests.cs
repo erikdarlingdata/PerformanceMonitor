@@ -113,7 +113,7 @@ public sealed class GatedCollectorRowsTests
         {
             var listed = Decode(DarlingGatedCollectorRows.Rows(
                 CollectorCatalog.All, kind, new HashSet<string>(),
-                n => CollectorEngineCapability.NotCollectedMessage("alpha-a", 0, kind, n))).Select(r => r.Collector).ToArray();
+                n => CollectorEngineCapability.NotCollectedMessage("alpha-a", 0, kind, n, awsRdsKind: AwsRdsKind.None))).Select(r => r.Collector).ToArray();
             var expected = CollectorCatalog.All
                 .Where(d => d.TargetEngine == CollectorTargetEngine.PostgreSql && !CollectorEngineCapability.IsCollectedOnEngineKind(d, kind))
                 .Select(d => d.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
@@ -329,7 +329,7 @@ public sealed class GatedCollectorRowsLiveTests
                         Assert.Equal(new[] { "collector", "status", "message" }, row.EnumerateObject().Select(p => p.Name).ToArray());
                         Assert.Equal("not_collected", row.GetProperty("status").GetString());
                         var name = row.GetProperty("collector").GetString()!;
-                        Assert.Equal(CollectorEngineCapability.NotCollectedMessage(server, 0, MonitoredEngineKind.Postgres, name), row.GetProperty("message").GetString());
+                        Assert.Equal(CollectorEngineCapability.NotCollectedMessage(server, 0, MonitoredEngineKind.Postgres, name, awsRdsKind: AwsRdsKind.None), row.GetProperty("message").GetString());
                     }
                 }
             }

@@ -4,6 +4,7 @@ using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Collectors;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -109,7 +110,7 @@ public sealed class McpQueryTagUsageTools
                    Lite collects today it answers null and the empty answer below stands. */
                 if (!allServers)
                 {
-                    var unmet = await McpEngineCapability.NotCollectedStatusAsync(dataService, scope[0].Id, scope[0].Name, "query_stats");
+                    var unmet = await McpEngineCapability.NotCollectedStatusAsync(dataService, scope[0].Id, scope[0].Name, "query_stats", awsRdsKind: AwsRdsKind.None);
                     if (unmet != null) return unmet;
                 }
 

@@ -55,6 +55,20 @@ public sealed class CollectorTargetInfo
     public bool IsAwsRds { get; init; }
 
     /// <summary>
+    /// True when the target is an Amazon RDS for SQL Server instance on the Web or Express edition (#6893). RDS refuses every
+    /// Extended Events session create on those two editions ("RDS for SQL Server supports extended events only for the
+    /// Enterprise and Standard editions"), and no grant or setting changes that: only an edition change does. The four
+    /// XE-session collectors (deadlocks, blocked_process_report, attention, long_query_completions) gate off on it through
+    /// <see cref="XeSessionSupported"/>. <c>SERVERPROPERTY('EngineEdition')</c> is 2 for both Web and Standard, so it is probed
+    /// from <c>SERVERPROPERTY('Edition')</c> (see <see cref="CollectorEngineCapability.IsWebOrExpressEditionName"/>), never from the
+    /// engine edition.
+    /// </summary>
+    public bool IsAwsRdsWebOrExpress { get; init; }
+
+    /// <summary>False on an Amazon RDS for SQL Server Web or Express instance, where no Extended Events session can be created (#6893).</summary>
+    public static bool XeSessionSupported(CollectorTargetInfo target) => !(target.IsAwsRds && target.IsAwsRdsWebOrExpress);
+
+    /// <summary>
     /// SQL Server major version (13 = 2016 … 17 = 2025); 0 when unknown. Definitions gate
     /// version-specific columns on this (database_config treats 0 as "assume newest" to match
     /// the original collector).

@@ -13,6 +13,7 @@ using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -106,7 +107,7 @@ public partial class DatabaseStateOverridesWindow : Window
         }
 
         var (text, visibility) = await ViewerServerTab.ReadEngineGapStateAsync(
-            readLastRun, null, pick.ServerId, pick.ServerName, pick.EngineEdition, pick.EngineKind, "database_states", rowCount, readLatestOutcome);
+            readLastRun, null, pick.ServerId, pick.ServerName, pick.EngineEdition, pick.EngineKind, "database_states", rowCount, readLatestOutcome, awsRdsKind: AwsRdsKind.None);
 
         return visibility == Visibility.Visible ? text : null;
     }

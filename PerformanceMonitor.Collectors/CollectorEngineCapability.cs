@@ -64,6 +64,23 @@ namespace PerformanceMonitor.Collectors;
 /// — is a permanent gap on stock PostgreSQL, while <c>pg_stat_io</c>'s PG16 floor and the writer-only
 /// autovacuum read are not and keep the <c>unavailable</c> vocabulary.</para>
 /// </summary>
+/// <summary>
+/// Which Amazon RDS for SQL Server shape a server is, for the not-collected answer (#6893, #6894). REQUIRED at every call of
+/// <see cref="CollectorEngineCapability.NotCollectedMessage"/> and the surfaces' gap helpers, so each call site decides it in the
+/// open, and one value cannot say two things at once (a bool pair could say "Web or Express" without "RDS").
+/// </summary>
+public enum AwsRdsKind
+{
+    /// <summary>Not Amazon RDS, no fact stored yet, or a surface where the question cannot apply (a PostgreSQL panel, a collector with no RDS gate). Makes no claim.</summary>
+    None = 0,
+
+    /// <summary>An Amazon RDS for SQL Server instance on an edition that allows Extended Events (Standard or Enterprise).</summary>
+    Rds = 1,
+
+    /// <summary>An Amazon RDS for SQL Server instance on the Web or Express edition, where every Extended Events session create is refused.</summary>
+    RdsWebOrExpress = 2,
+}
+
 public static class CollectorEngineCapability
 {
     /// <summary>The probe returned no edition — a server that has never connected, or a PostgreSQL target
@@ -217,6 +234,17 @@ public static class CollectorEngineCapability
         };
 
     /// <summary>
+    /// True when <c>SERVERPROPERTY('Edition')</c> names the Web or Express edition (<c>Web Edition (64-bit)</c>,
+    /// <c>Express Edition (64-bit)</c>, <c>Express Edition with Advanced Services (64-bit)</c>). Whether that blocks Extended Events
+    /// also needs the RDS flag: a box-product Web or Express can create XE sessions. <c>SERVERPROPERTY('EngineEdition')</c> is 2 for both
+    /// Web and Standard and 4 for Express, so the edition name is the only probe that tells them apart (#6893).
+    /// </summary>
+    public static bool IsWebOrExpressEditionName(string? edition) =>
+        !string.IsNullOrWhiteSpace(edition) &&
+        (edition.TrimStart().StartsWith("Web Edition", StringComparison.OrdinalIgnoreCase) ||
+         edition.TrimStart().StartsWith("Express Edition", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
     /// Human-readable <c>SERVERPROPERTY('EngineEdition')</c> description. The single copy: Darling's
     /// connector delegates here rather than keeping a second switch, because two edition tables in one repo
     /// drift and the one that drifts is never the one being read.
@@ -258,15 +286,19 @@ public static class CollectorEngineCapability
             {
                 foreach (var isAwsRds in new[] { false, true })
                 {
-                    yield return new CollectorTargetInfo
+                    foreach (var isAwsRdsWebOrExpress in new[] { false, true })
                     {
-                        Engine = CollectorTargetEngine.SqlServer,
-                        IsAzureSqlDb = engineEdition == AzureSqlDatabaseEngineEdition,
-                        IsAzureManagedInstance = engineEdition == AzureManagedInstanceEngineEdition,
-                        IsAwsRds = isAwsRds,
-                        HasMsdbAccess = hasMsdbAccess,
-                        SqlMajorVersion = major,
-                    };
+                        yield return new CollectorTargetInfo
+                        {
+                            Engine = CollectorTargetEngine.SqlServer,
+                            IsAzureSqlDb = engineEdition == AzureSqlDatabaseEngineEdition,
+                            IsAzureManagedInstance = engineEdition == AzureManagedInstanceEngineEdition,
+                            IsAwsRds = isAwsRds,
+                            IsAwsRdsWebOrExpress = isAwsRdsWebOrExpress,
+                            HasMsdbAccess = hasMsdbAccess,
+                            SqlMajorVersion = major,
+                        };
+                    }
                 }
             }
         }
@@ -378,15 +410,19 @@ public static class CollectorEngineCapability
                             {
                                 foreach (var isAzureManagedInstance in new[] { false, true })
                                 {
-                                    yield return new CollectorTargetInfo
+                                    foreach (var isAwsRdsWebOrExpress in new[] { false, true })
                                     {
-                                        Engine = CollectorTargetEngine.SqlServer,
-                                        IsAzureSqlDb = isAzureSqlDb,
-                                        IsAzureManagedInstance = isAzureManagedInstance,
-                                        IsAwsRds = isAwsRds,
-                                        HasMsdbAccess = hasMsdbAccess,
-                                        SqlMajorVersion = major,
-                                    };
+                                        yield return new CollectorTargetInfo
+                                        {
+                                            Engine = CollectorTargetEngine.SqlServer,
+                                            IsAzureSqlDb = isAzureSqlDb,
+                                            IsAzureManagedInstance = isAzureManagedInstance,
+                                            IsAwsRds = isAwsRds,
+                                            IsAwsRdsWebOrExpress = isAwsRdsWebOrExpress,
+                                            HasMsdbAccess = hasMsdbAccess,
+                                            SqlMajorVersion = major,
+                                        };
+                                    }
                                 }
                             }
                         }
@@ -529,25 +565,31 @@ public static class CollectorEngineCapability
     /// <summary>How an Amazon RDS for SQL Server target is named in a not-collected message (#6894).</summary>
     public const string AwsRdsDescription = "Amazon RDS for SQL Server (an AWS RDS instance)";
 
+    /// <summary>How an Amazon RDS for SQL Server target on the Web or Express edition is named in a not-collected message (#6893).</summary>
+    public const string AwsRdsWebOrExpressDescription = "Amazon RDS for SQL Server Web or Express edition";
+
     /// <summary>
-    /// True when SOME Amazon RDS for SQL Server target runs <paramref name="definition"/> (#6894): the third axis, after engine KIND and
-    /// engine EDITION. Derived exactly like the edition axis, by asking the collector's own gate over every shape the fact permits:
-    /// the RDS fact is fixed, the two Azure flags are fixed false (an RDS instance is neither), and the msdb access and the SQL major
-    /// version vary, because an operator can change both. A collector that is gated on RDS only for want of msdb access or a version floor
-    /// is therefore not reported as an RDS gap, and a gate that opens up stops the claim by itself.
-    /// <para>A PostgreSQL collector, a PostgreSQL target and an unrecognised collector make no claim (true): the question does not apply
-    /// to them, the same way <see cref="IsCollectedOnEngineEdition(ICollectorSchemaInfo, int)"/> treats a foreign dialect.</para>
+    /// True when SOME Amazon RDS for SQL Server target of this <paramref name="kind"/> runs <paramref name="definition"/> (#6894): the third
+    /// axis, after engine KIND and engine EDITION. Derived exactly like the edition axis, by asking the collector's own gate over every shape
+    /// the fact permits: the RDS fact is fixed, the Web or Express fact is fixed by the kind (#6893), the two Azure flags are fixed false (an
+    /// RDS instance is neither), and the msdb access and the SQL major version vary, because an operator can change both. A collector that is
+    /// gated on RDS only for want of msdb access or a version floor is therefore not reported as an RDS gap, and a gate that opens up stops
+    /// the claim by itself.
+    /// <para><see cref="AwsRdsKind.None"/>, a PostgreSQL collector, a PostgreSQL target and an unrecognised collector make no claim (true):
+    /// the question does not apply to them, the same way <see cref="IsCollectedOnEngineEdition(ICollectorSchemaInfo, int)"/> treats a
+    /// foreign dialect.</para>
     /// </summary>
-    public static bool IsCollectedOnAwsRds(ICollectorSchemaInfo definition, string? engineKind)
+    public static bool IsCollectedOnAwsRds(ICollectorSchemaInfo definition, string? engineKind, AwsRdsKind kind)
     {
-        if (MonitoredEngineKind.IsPostgres(engineKind) || !CollectorCatalog.EngineMatches(definition, SqlServerProbe))
+        if (kind == AwsRdsKind.None || MonitoredEngineKind.IsPostgres(engineKind) || !CollectorCatalog.EngineMatches(definition, SqlServerProbe))
         {
             return true;
         }
 
+        var webOrExpress = kind == AwsRdsKind.RdsWebOrExpress;
         foreach (var target in TargetsWithEngineEdition(UnknownEngineEdition))
         {
-            if (target.IsAwsRds && CollectorCatalog.AppliesTo(definition, target))
+            if (target.IsAwsRds && target.IsAwsRdsWebOrExpress == webOrExpress && CollectorCatalog.AppliesTo(definition, target))
             {
                 return true;
             }
@@ -556,12 +598,20 @@ public static class CollectorEngineCapability
         return false;
     }
 
-    /// <summary>The by-name form of <see cref="IsCollectedOnAwsRds(ICollectorSchemaInfo, string?)"/>; an unknown name is true (no claim).</summary>
-    public static bool IsCollectedOnAwsRds(string collectorName, string? engineKind = null)
+    /// <summary>
+    /// The kind a server's two stored RDS facts make (#6893): the RDS fact decides whether there is any claim at all, and the Web or Express
+    /// fact only refines it. A Web or Express fact without the RDS fact is no claim, because the edition limit is Amazon RDS's, not the
+    /// edition's.
+    /// </summary>
+    public static AwsRdsKind AwsRdsKindOf(bool isAwsRds, bool isAwsRdsWebOrExpress) =>
+        !isAwsRds ? AwsRdsKind.None : isAwsRdsWebOrExpress ? AwsRdsKind.RdsWebOrExpress : AwsRdsKind.Rds;
+
+    /// <summary>The by-name form of <see cref="IsCollectedOnAwsRds(ICollectorSchemaInfo, string?, AwsRdsKind)"/>; an unknown name is true (no claim).</summary>
+    public static bool IsCollectedOnAwsRds(string collectorName, string? engineKind, AwsRdsKind kind)
     {
         var definition = CollectorCatalog.Find(collectorName);
 
-        return definition is null || IsCollectedOnAwsRds(definition, engineKind);
+        return definition is null || IsCollectedOnAwsRds(definition, engineKind, kind);
     }
 
     /// <summary>
@@ -648,8 +698,12 @@ public static class CollectorEngineCapability
     /// a pre-#2530 row, a server that has not connected since the rung landed, or a SKU with no engine-kind
     /// column at all (Lite, which has no PostgreSQL target seam). Null makes NO claim on this axis; the
     /// edition axis then answers exactly as it did before.</para>
+    ///
+    /// <para><paramref name="awsRdsKind"/> is REQUIRED, like <paramref name="engineKind"/>, so each call site decides it in the open (#6894):
+    /// pass the surface's real Amazon RDS fact, or an explicit <see cref="AwsRdsKind.None"/> where it has none or cannot apply (a PostgreSQL
+    /// panel, a collector with no RDS gate). <see cref="AwsRdsKind.None"/> makes no RDS claim.</para>
     /// </summary>
-    public static string? NotCollectedMessage(string serverName, int engineEdition, string? engineKind, string collectorName, bool isAwsRds = false)
+    public static string? NotCollectedMessage(string serverName, int engineEdition, string? engineKind, string collectorName, AwsRdsKind awsRdsKind)
     {
         var definition = CollectorCatalog.Find(collectorName);
 
@@ -698,11 +752,26 @@ public static class CollectorEngineCapability
             /* #6894: the third axis, and the last. Amazon RDS reports an ordinary edition, so the edition axis cannot see it and a
                read of a collector RDS gates off fell back to a "possible cause" precondition that says a setup step can fix it. The
                caller passes the RDS fact only when it knows it (Darling reads it from the registry, Lite from its connection check);
-               false makes no claim, which is the pre-#6894 answer. */
-            return isAwsRds && !IsCollectedOnAwsRds(definition, engineKind)
-                ? $"{serverName} runs on {AwsRdsDescription}. The {collectorName} collector does not run on it — its own AppliesTo gate excludes " +
-                  $"Amazon RDS — so this server does not collect {CapturePathOf(collectorName)}, and never will. {PermanentGapEpilogue}"
-                : null;
+               None makes no claim, which is the pre-#6894 answer. #6893: the Web and Express editions are the second kind. RDS refuses every
+               Extended Events session create on them, so the four XE captures are open on a plain RDS instance and closed on this one.
+               SERVERPROPERTY('EngineEdition') is 2 for both Web and Standard, so the registry's edition cannot say it and the stored fact does. */
+            if (awsRdsKind == AwsRdsKind.None || IsCollectedOnAwsRds(definition, engineKind, awsRdsKind))
+            {
+                return null;
+            }
+
+            if (awsRdsKind == AwsRdsKind.RdsWebOrExpress && IsCollectedOnAwsRds(definition, engineKind, AwsRdsKind.Rds))
+            {
+                return $"{serverName} runs on {AwsRdsWebOrExpressDescription}. Amazon RDS for SQL Server supports Extended Events only on the " +
+                       $"Enterprise and Standard editions and refuses every Extended Events session create on Web and Express, so this server does not collect " +
+                       $"{CapturePathOf(collectorName)}, and never will unless the instance moves to the Standard or Enterprise edition. " +
+                       PermanentGapEpilogue + $" (The collector for it is {collectorName}.)" + CoveredInsteadSuffix(collectorName);
+            }
+
+            var awsRdsDescription = awsRdsKind == AwsRdsKind.RdsWebOrExpress ? AwsRdsWebOrExpressDescription : AwsRdsDescription;
+            return $"{serverName} runs on {awsRdsDescription}. The {collectorName} collector does not run on it — its own AppliesTo gate excludes " +
+                   $"Amazon RDS — so this server does not collect {CapturePathOf(collectorName)}, and never will. {PermanentGapEpilogue}" +
+                   CoveredInsteadSuffix(collectorName);
         }
 
         /* "this server does not collect X" rather than "X is not collected", so the sentence reads correctly

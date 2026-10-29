@@ -11,6 +11,7 @@ using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -71,7 +72,7 @@ public sealed class McpPvsTools
 
                 /* #5244: every answer shape says which database it was limited to (null for every database). */
                 return McpHelpers.WithDatabase(
-                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "pvs_stats"),
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "pvs_stats", awsRdsKind: AwsRdsKind.None),
                            McpDatabaseSelection.Describe(names))
                     ?? McpHelpers.StatusForDatabase("empty",
                         "No PVS data collected for this server. The collector reads sys.dm_tran_persistent_version_store_stats " +

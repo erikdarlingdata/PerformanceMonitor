@@ -42,7 +42,7 @@ public sealed class McpIoTools
                 }
 
                 return McpHelpers.WithDatabase(
-                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "file_io_stats"),
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "file_io_stats", awsRdsKind: AwsRdsKind.None),
                            echo)
                     ?? McpHelpers.StatusForDatabase("unavailable", "No file I/O stats available.", echo);
             }
@@ -129,7 +129,7 @@ public sealed class McpIoTools
                    server whose file_io_stats collector ran every cycle. */
                 /* #5244: every answer shape says which database it was limited to (null for every database), as Darling's twin does. */
                 var gated = McpHelpers.WithDatabase(
-                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "file_io_stats"), scope);
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "file_io_stats", awsRdsKind: AwsRdsKind.None), scope);
                 if (gated != null)
                 {
                     return gated;

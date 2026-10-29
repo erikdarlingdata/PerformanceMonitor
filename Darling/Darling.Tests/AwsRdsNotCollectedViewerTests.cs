@@ -30,16 +30,30 @@ public sealed class AwsRdsNotCollectedViewerTests
     private static readonly DateTime ServerLastCollected = new(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc);
 
     [Theory]
+    [InlineData("deadlocks")]
+    [InlineData("blocked_process_report")]
+    public void AnEmptyDeadlockSurfaceOnAnRdsWebOrExpressServer_NamesTheEditionLimit_AndAnEnterpriseRdsServerMakesNoClaim(string collector)
+    {
+        var web = ViewerServerTab.EngineGapNote(ServerName, 2, MonitoredEngineKind.SqlServer, collector, AwsRdsKind.RdsWebOrExpress);
+        Assert.NotNull(web);
+        Assert.Contains("Amazon RDS for SQL Server Web or Express edition", web, StringComparison.Ordinal);
+        Assert.Equal(CollectorEngineCapability.NotCollectedMessage(ServerName, 2, MonitoredEngineKind.SqlServer, collector, AwsRdsKind.RdsWebOrExpress), web);
+
+        Assert.Null(ViewerServerTab.EngineGapNote(ServerName, 3, MonitoredEngineKind.SqlServer, collector, AwsRdsKind.Rds));
+        Assert.Null(ViewerServerTab.EngineGapNote(ServerName, 3, MonitoredEngineKind.SqlServer, collector, AwsRdsKind.None));
+    }
+
+    [Theory]
     [InlineData("running_jobs")]
     [InlineData("agent_alerts")]
     public void AnEmptySurfaceOnAnRdsServer_NamesRds_AndIsTheMcpSentence(string collector)
     {
         var state = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, collector, 0, null, ServerLastCollected, null, isAwsRds: true);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, collector, 0, null, ServerLastCollected, null, awsRdsKind: AwsRdsKind.Rds);
 
         Assert.Equal(Visibility.Visible, state.Visibility);
         Assert.Equal(
-            CollectorEngineCapability.NotCollectedMessage(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, collector, isAwsRds: true),
+            CollectorEngineCapability.NotCollectedMessage(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, collector, awsRdsKind: AwsRdsKind.Rds),
             state.Text);
         Assert.Contains("Amazon RDS", state.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("Possible cause", state.Text, StringComparison.Ordinal);
@@ -49,7 +63,7 @@ public sealed class AwsRdsNotCollectedViewerTests
     public void TheSameFactsWithNoRdsFact_KeepTheOldPossibleCauseText()
     {
         var state = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, ServerLastCollected, null);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, ServerLastCollected, null, awsRdsKind: AwsRdsKind.None);
 
         Assert.Equal(Visibility.Visible, state.Visibility);
         Assert.Contains(CollectorRuntimePrecondition.RunningJobsPossibleCauses, state.Text, StringComparison.Ordinal);
@@ -58,11 +72,11 @@ public sealed class AwsRdsNotCollectedViewerTests
     [Fact]
     public void AnRdsServer_ReadsNothingFromTheCollectionLog_AndAGridWithRowsShowsNoNote()
     {
-        Assert.False(ViewerServerTab.NeedsCollectorRunRead(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, isAwsRds: true));
-        Assert.True(ViewerServerTab.NeedsCollectorRunRead(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0));
+        Assert.False(ViewerServerTab.NeedsCollectorRunRead(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, awsRdsKind: AwsRdsKind.Rds));
+        Assert.True(ViewerServerTab.NeedsCollectorRunRead(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, awsRdsKind: AwsRdsKind.None));
 
         var withRows = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 3, null, ServerLastCollected, null, isAwsRds: true);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 3, null, ServerLastCollected, null, awsRdsKind: AwsRdsKind.Rds);
         Assert.Equal(Visibility.Collapsed, withRows.Visibility);
     }
 
@@ -72,7 +86,7 @@ public sealed class AwsRdsNotCollectedViewerTests
         var state = await ViewerServerTab.ReadEngineGapStateAsync(
             (_, _) => throw new InvalidOperationException("collection_log must not be read"), null, 1, ServerName,
             OnPremEngineEdition, MonitoredEngineKind.SqlServer, "agent_alerts", 0,
-            (_, _) => throw new InvalidOperationException("collection_log must not be read"), isAwsRds: true);
+            (_, _) => throw new InvalidOperationException("collection_log must not be read"), awsRdsKind: AwsRdsKind.Rds);
 
         Assert.Equal(Visibility.Visible, state.Visibility);
         Assert.Contains("Amazon RDS", state.Text, StringComparison.Ordinal);
@@ -81,8 +95,8 @@ public sealed class AwsRdsNotCollectedViewerTests
     [Fact]
     public void AnRdsFact_DoesNotChangeACollectorRdsDoesNotGate()
     {
-        Assert.Null(ViewerServerTab.EngineGapNote(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "wait_stats", isAwsRds: true));
-        Assert.Null(ViewerServerTab.EngineGapNote(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "job_history", isAwsRds: true));
+        Assert.Null(ViewerServerTab.EngineGapNote(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "wait_stats", awsRdsKind: AwsRdsKind.Rds));
+        Assert.Null(ViewerServerTab.EngineGapNote(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "job_history", awsRdsKind: AwsRdsKind.Rds));
     }
 }
 
@@ -140,8 +154,8 @@ VALUES (1, 'viewer-rds', 'viewer-rds-host', 'integrated', TRUE, 'sqlserver'),
         {
             foreach (var list in new[] { await viewer.GetManagedServersAsync(ct), await viewer.GetServersAsync(ct) })
             {
-                Assert.True(list.Find(s => s.DisplayName == "viewer-rds")!.IsAwsRds);
-                Assert.False(list.Find(s => s.DisplayName == "viewer-box")!.IsAwsRds);
+                Assert.Equal(AwsRdsKind.Rds, list.Find(s => s.DisplayName == "viewer-rds")!.AwsRdsKind);
+                Assert.Equal(AwsRdsKind.None, list.Find(s => s.DisplayName == "viewer-box")!.AwsRdsKind);
             }
 
             var servers = await viewer.GetManagedServersAsync(ct);
@@ -159,7 +173,7 @@ VALUES (1, 'viewer-rds', 'viewer-rds-host', 'integrated', TRUE, 'sqlserver'),
         {
             var servers = await viewer.GetManagedServersAsync(ct);
             Assert.Equal(2, servers.Count);
-            Assert.All(servers, s => Assert.False(s.IsAwsRds));
+            Assert.All(servers, s => Assert.Equal(AwsRdsKind.None, s.AwsRdsKind));
         }
     }
 }

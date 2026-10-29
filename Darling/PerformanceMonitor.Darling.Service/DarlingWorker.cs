@@ -1939,6 +1939,14 @@ LIMIT 1";
            hour or at the next reconnect. Written on the pool thread only (INV-2), like the long-query fault. */
         public string? AttentionXePermissionFault { get; set; }
 
+        /* #6893: what the last ensure left for the deadlock and blocked-process runs. A session whose create was refused for permission
+           records PERMISSIONS, one that failed for any other reason records SESSION_MISSING, and neither read happens: the join to the
+           session views returns no rows for an absent session, which a run records as a SUCCESS with zero rows, so collection health
+           read HEALTHY and the Capture Down self-alert could not fire. Replaced by every ensure (at connect, then hourly), so the
+           first one that succeeds clears it. On Azure SQL Database the fault is set only when the create failed in every database; a
+           failure in some leaves a partial note on the run instead. Written on the pool thread only (INV-2). */
+        public DarlingXeSessions.CaptureEnsureOutcome CaptureEnsure { get; set; } = new();
+
         /* #5640 (L5): whether the last ensure ran with the attention collector enabled. An ensure that skipped the client-timeout
            session because the collector was off leaves this false, so turning the collector on makes the next sweep ensure it at
            once and not after the hour. Reset on every (re)connect. */
@@ -1990,8 +1998,10 @@ LIMIT 1";
         /* Stamped before the ensure, so a server that refuses it is asked once an hour and not on every sweep. */
         server.XeSessionsEnsuredAtUtc = utcNow;
         server.AttentionXeEnsuredWhileEnabled = attentionEnabled;
-        var attentionFault = await DarlingXeSessions.EnsureAllAsync(server.Runtime, runner, logger, cancellationToken, attentionEnabled);
+        var captureOutcome = new DarlingXeSessions.CaptureEnsureOutcome();
+        var attentionFault = await DarlingXeSessions.EnsureAllAsync(server.Runtime, runner, logger, cancellationToken, attentionEnabled, captureOutcome);
         server.AttentionXePermissionFault = attentionFault?.Message;
+        server.CaptureEnsure = captureOutcome;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -5171,6 +5181,15 @@ LIMIT 1";
             return;
         }
 
+        /* #6893: Amazon RDS Web and Express refuse every session create, and write each refusal into the instance's own error log. The
+           collector does not apply there, so neither the create nor the drop is sent, on any sweep. */
+        if (!CollectorTargetInfo.XeSessionSupported(server.Runtime.Target))
+        {
+            server.LongQueryTraceFault = null;
+            server.LongQueryTracePartialNote = null;
+            return;
+        }
+
         /* On Azure SQL Database the trace follows the monitored set, so the latch also holds what that set
            depended on: the scope the read loop resolves (the runner's own accessor, not a copy), the exclusions,
            and the databases monitored as their own servers. Any change re-runs the reconcile, which drops the
@@ -6504,6 +6523,21 @@ LIMIT 1";
     /// <summary>#5640 (H2): the permission fault the attention run records as PERMISSIONS, or null for any other collector and when the ensure was not denied.</summary>
     internal static string? AttentionPermissionFaultFor(string collectorName, ServerLoopState server) =>
         IsAttentionCollector(collectorName) ? server.AttentionXePermissionFault : null;
+
+    /// <summary>
+    /// #6893: the ensure failure the deadlock or blocked-process run records instead of reading a session that does not exist, or null for
+    /// any other collector and when the last ensure left the session in place.
+    /// </summary>
+    internal static DarlingXeSessions.XeEnsureFailure? CaptureEnsureFaultFor(string collectorName, ServerLoopState server) =>
+        string.Equals(collectorName, DeadlocksCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.Deadlock
+        : string.Equals(collectorName, BlockedProcessReportCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.BlockedProcess
+        : null;
+
+    /// <summary>#6893: the partial note (Azure SQL Database, the create failed in some databases) merged onto a successful deadlock or blocked-process run, or null.</summary>
+    internal static string? CaptureEnsurePartialNoteFor(string collectorName, ServerLoopState server) =>
+        string.Equals(collectorName, DeadlocksCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.DeadlockPartialNote
+        : string.Equals(collectorName, BlockedProcessReportCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.BlockedProcessPartialNote
+        : null;
 
     internal static bool IsAttentionCollector(string collectorName) =>
         string.Equals(collectorName, AttentionCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
@@ -14205,8 +14239,10 @@ AND   j.hypertable_name = '{relation}'", connection))
             if (runtime.Target.Engine == CollectorTargetEngine.SqlServer)
             {
                 var attentionEnabled = StoreConfigProvider.ResolveSchedule("attention", server.Config.ServerId, _scheduleOverrides).Enabled;
-                var attentionFault = await DarlingXeSessions.EnsureAllAsync(runtime, runner, _logger, cancellationToken, attentionEnabled);
+                var captureOutcome = new DarlingXeSessions.CaptureEnsureOutcome();
+                var attentionFault = await DarlingXeSessions.EnsureAllAsync(runtime, runner, _logger, cancellationToken, attentionEnabled, captureOutcome);
                 server.AttentionXePermissionFault = attentionFault?.Message;
+                server.CaptureEnsure = captureOutcome;
                 server.AttentionXeEnsuredWhileEnabled = attentionEnabled;
                 server.XeSessionsEnsuredAtUtc = DateTime.UtcNow;
             }
@@ -16609,6 +16645,19 @@ LIMIT 1";
                 throw new DarlingXeSessionDeniedException(attentionFault);
             }
 
+            /* #6893: the deadlock and blocked-process sessions, the same two outcomes as the two above. The ensure that could not create the
+               session left its failure on the server: PERMISSIONS for a denied create, SESSION_MISSING for anything else. Without this
+               the read joined an absent session and returned zero rows, and the run recorded SUCCESS. */
+            if (CaptureEnsureFaultFor(collectorName, server) is { } captureFault)
+            {
+                if (captureFault.IsPermission)
+                {
+                    throw new DarlingXeSessionDeniedException(captureFault.Message);
+                }
+
+                throw new DarlingXeSessionMissingException(captureFault.Message);
+            }
+
             var result = await run(runner, runtime, cancellationToken);
 
             /* #4964: a run of this collector succeeded, so its run of missing-session failures is over: the next failure
@@ -16625,6 +16674,12 @@ LIMIT 1";
             if (IsLongQueryCompletionsCollector(collectorName) && server.LongQueryTracePartialNote is { } partialNote)
             {
                 result = result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, partialNote) };
+            }
+
+            /* #6893: the same partial case for the deadlock and blocked-process sessions on Azure SQL Database. */
+            if (CaptureEnsurePartialNoteFor(collectorName, server) is { } captureNote)
+            {
+                result = result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, captureNote) };
             }
 
             /* #4004 review, round 3: the first pg_log_events run after a start that replaced a discarded log-hash key

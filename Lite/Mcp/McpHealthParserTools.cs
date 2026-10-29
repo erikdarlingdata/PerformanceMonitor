@@ -3,6 +3,7 @@ using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -728,7 +729,7 @@ public sealed class McpHealthParserTools
                 hints: (await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true)).AsHints());
         }
 
-        if (await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, SystemHealthCollectorName) is { } notCollected)
+        if (await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, SystemHealthCollectorName, awsRdsKind: AwsRdsKind.None) is { } notCollected)
         {
             return notCollected;
         }

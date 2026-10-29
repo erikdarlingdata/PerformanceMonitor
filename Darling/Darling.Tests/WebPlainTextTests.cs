@@ -552,7 +552,7 @@ public sealed class WebPlainTextTests
     [Fact]
     public void TheEngineGateSentence_NamesAzureSqlDatabase_WhenThatIsTheEngine()
     {
-        var azure = PerformanceMonitor.Collectors.CollectorEngineCapability.NotCollectedMessage("example-azure-db", 5, null, "cpu_scheduler_stats")!;
+        var azure = PerformanceMonitor.Collectors.CollectorEngineCapability.NotCollectedMessage("example-azure-db", 5, null, "cpu_scheduler_stats", awsRdsKind: AwsRdsKind.None)!;
         var o = Run([azure], out var generic);
         Assert.Equal("Azure SQL Database does not have this data.", o[0]);
         Assert.NotEqual(generic, o[0]);

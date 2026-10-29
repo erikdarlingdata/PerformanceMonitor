@@ -174,12 +174,21 @@ public sealed class AlwaysOnXeReadOnlyIntentTests : IAsyncDisposable
         public required DarlingCollectorRunner Runner { get; init; }
         public required ServerRuntime Runtime { get; init; }
         public Pair Alpha { get; } = new();
+        public Pair Beta { get; } = new();
         public DarlingSelfAlertTests.CapturingLogger Logger { get; } = new();
 
         /* The connection string of every open, in order. */
         public List<string> OpenedStrings { get; } = new();
 
         public Task EnsureAsync() => DarlingXeSessions.EnsureAllAsync(Runtime, Runner, Logger, CancellationToken.None);
+
+        /// <summary>The same pass, handing back what it left for the deadlock and blocked-process runs (#6893).</summary>
+        public async Task<DarlingXeSessions.CaptureEnsureOutcome> EnsureWithOutcomeAsync()
+        {
+            var outcome = new DarlingXeSessions.CaptureEnsureOutcome();
+            await DarlingXeSessions.EnsureAllAsync(Runtime, Runner, Logger, CancellationToken.None, outcome: outcome);
+            return outcome;
+        }
 
         /// <summary>
         /// The server's removal: its long-query trace was never on (nothing to drop there), and no other registration
@@ -231,12 +240,13 @@ public sealed class AlwaysOnXeReadOnlyIntentTests : IAsyncDisposable
         runner.AlwaysOnXeConnectionForTests = (_, database, connectionString, _) =>
         {
             /* The removal reads the database name back from the choice's key, which keeps it in upper case. */
-            Assert.Equal("alpha", database, ignoreCase: true);
-            Assert.Equal("alpha", new SqlConnectionStringBuilder(connectionString).InitialCatalog, ignoreCase: true);
+            var pair = string.Equals(database, "beta", StringComparison.OrdinalIgnoreCase) ? rig.Beta : rig.Alpha;
+            Assert.Equal(pair == rig.Beta ? "beta" : "alpha", database, ignoreCase: true);
+            Assert.Equal(database, new SqlConnectionStringBuilder(connectionString).InitialCatalog, ignoreCase: true);
             var intent = new SqlConnectionStringBuilder(connectionString).ApplicationIntent;
             rig.OpenedStrings.Add(connectionString);
-            rig.Alpha.Opens.Add(intent);
-            return Task.FromResult<IAlwaysOnXeDatabase>(new Channel(rig.Alpha, intent));
+            pair.Opens.Add(intent);
+            return Task.FromResult<IAlwaysOnXeDatabase>(new Channel(pair, intent));
         };
 
         return rig;
@@ -415,6 +425,53 @@ public sealed class AlwaysOnXeReadOnlyIntentTests : IAsyncDisposable
         await rig.EnsureAsync();
         await rig.EnsureAsync();
         Assert.Equal(expected, rig.Loud().OrderBy(line => line, StringComparer.Ordinal));
+    }
+
+    /* #4961 against #6893: a read-only refusal counts as ensured, so the run carries no fault for it. Were it a failed ensure, an
+       Azure registration whose databases are all read-only (geo-secondaries) would record SESSION_MISSING every sweep and fire
+       Capture Down for a state no grant can fix. */
+    [Fact]
+    public async Task AReadOnlyDatabaseWithoutTheIntent_LeavesNoFaultForTheDeadlockOrBlockedProcessRun()
+    {
+        var rig = BuildRig(readOnlyIntent: false);
+        rig.Alpha.PrimaryIsReadOnly = true;
+
+        var outcome = await rig.EnsureWithOutcomeAsync();
+
+        /* The refusal was reached and told, so the nulls below are the ensure's answer and not a skipped database. */
+        Assert.Equal(Kinds.Length, rig.Loud().Count);
+        Assert.Null(outcome.Deadlock);
+        Assert.Null(outcome.BlockedProcess);
+        Assert.Null(outcome.DeadlockPartialNote);
+        Assert.Null(outcome.BlockedProcessPartialNote);
+    }
+
+    [Fact]
+    public async Task SomeDatabasesReadOnly_AreNotCountedAsMissingInAPartialNote_AndOnlyAGenuineFailureIs()
+    {
+        var rig = BuildRig(readOnlyIntent: false);
+        rig.Runner.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { "master", "alpha", "beta" });
+        rig.Alpha.PrimaryIsReadOnly = true;
+
+        /* beta is healthy: nothing for the run, though one database of two refused. */
+        var outcome = await rig.EnsureWithOutcomeAsync();
+        Assert.Null(outcome.Deadlock);
+        Assert.Null(outcome.BlockedProcess);
+        Assert.Null(outcome.DeadlockPartialNote);
+        Assert.Null(outcome.BlockedProcessPartialNote);
+
+        /* beta unreachable on top of that: it is the only database a note names. */
+        var inner = rig.Runner.AlwaysOnXeConnectionForTests!;
+        rig.Runner.AlwaysOnXeConnectionForTests = (server, database, connectionString, token) =>
+            string.Equals(database, "beta", StringComparison.OrdinalIgnoreCase)
+                ? throw new InvalidOperationException("beta is unreachable")
+                : inner(server, database, connectionString, token);
+        var withFailure = await rig.EnsureWithOutcomeAsync();
+        Assert.Null(withFailure.Deadlock);
+        Assert.NotNull(withFailure.DeadlockPartialNote);
+        Assert.Contains("1 of 2", withFailure.DeadlockPartialNote, StringComparison.Ordinal);
+        Assert.Contains("beta", withFailure.DeadlockPartialNote, StringComparison.Ordinal);
+        Assert.DoesNotContain("alpha", withFailure.DeadlockPartialNote, StringComparison.Ordinal);
     }
 
     private static SqlException ReadOnlyRefusal() =>

@@ -40,17 +40,17 @@ public sealed class EngineGapNoteTests
     [Fact]
     public void AzureWithNoRows_ShowsTheEditionSentence()
     {
-        var (text, visibility) = ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: true, collectorNeverRan: false, "running_jobs", rowCount: 0);
+        var (text, visibility) = ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: true, collectorNeverRan: false, "running_jobs", rowCount: 0, awsRdsKind: AwsRdsKind.None);
 
         Assert.Equal(Visibility.Visible, visibility);
-        Assert.Equal(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, "running_jobs"), text);
+        Assert.Equal(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, "running_jobs", awsRdsKind: AwsRdsKind.None), text);
         Assert.Contains("Azure SQL Database", text, StringComparison.Ordinal);
     }
 
     [Fact]
     public void AzureWithRows_IsHidden()
     {
-        var (_, visibility) = ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: true, collectorNeverRan: false, "running_jobs", rowCount: 3);
+        var (_, visibility) = ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: true, collectorNeverRan: false, "running_jobs", rowCount: 3, awsRdsKind: AwsRdsKind.None);
 
         Assert.Equal(Visibility.Collapsed, visibility);
     }
@@ -58,7 +58,7 @@ public sealed class EngineGapNoteTests
     [Fact]
     public void OnPremisesThatRanWithNoRows_IsHidden_SoTheNormalEmptyStateStands()
     {
-        var (_, visibility) = ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, collectorNeverRan: false, "server_config", rowCount: 0);
+        var (_, visibility) = ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, collectorNeverRan: false, "server_config", rowCount: 0, awsRdsKind: AwsRdsKind.None);
 
         Assert.Equal(Visibility.Collapsed, visibility);
     }
@@ -66,31 +66,31 @@ public sealed class EngineGapNoteTests
     [Fact]
     public void OnPremisesThatNeverRan_ShowsTheGenericSentence_WithNoRows()
     {
-        var (text, visibility) = ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, collectorNeverRan: true, "server_config", rowCount: 0);
+        var (text, visibility) = ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, collectorNeverRan: true, "server_config", rowCount: 0, awsRdsKind: AwsRdsKind.None);
 
         Assert.Equal(Visibility.Visible, visibility);
         Assert.Equal(ServerTab.NeverCollectedNote(ServerName, "server_config"), text);
         Assert.Contains(ServerName, text, StringComparison.Ordinal);
         Assert.Contains("server_config", text, StringComparison.Ordinal);
 
-        Assert.Equal(Visibility.Collapsed, ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, collectorNeverRan: true, "server_config", rowCount: 2).Visibility);
+        Assert.Equal(Visibility.Collapsed, ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, collectorNeverRan: true, "server_config", rowCount: 2, awsRdsKind: AwsRdsKind.None).Visibility);
     }
 
     [Fact]
     public void ANeverRanNoteReplacesTheGenericSentence_ButTheEditionSentenceStillComesFirst()
     {
-        var onPremises = ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, collectorNeverRan: true, "running_jobs", rowCount: 0, neverRanNote: "custom");
-        var azure = ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: true, collectorNeverRan: true, "running_jobs", rowCount: 0, neverRanNote: "custom");
+        var onPremises = ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, collectorNeverRan: true, "running_jobs", rowCount: 0, neverRanNote: "custom", awsRdsKind: AwsRdsKind.None);
+        var azure = ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: true, collectorNeverRan: true, "running_jobs", rowCount: 0, neverRanNote: "custom", awsRdsKind: AwsRdsKind.None);
 
         Assert.Equal("custom", onPremises.Text);
-        Assert.Equal(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, "running_jobs"), azure.Text);
+        Assert.Equal(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, "running_jobs", awsRdsKind: AwsRdsKind.None), azure.Text);
     }
 
     [Fact]
     public void AnUnknownEditionWithNoCollectionLogRowAtAll_IsHidden()
     {
         var neverRan = CollectorRunHistory.Empty.NeverRan("running_jobs");
-        var (_, visibility) = ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, neverRan, "running_jobs", rowCount: 0);
+        var (_, visibility) = ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, neverRan, "running_jobs", rowCount: 0, awsRdsKind: AwsRdsKind.None);
 
         Assert.False(neverRan);
         Assert.Equal(Visibility.Collapsed, visibility);
@@ -119,7 +119,7 @@ public sealed class EngineGapNoteTests
         Assert.True(staleHistory.NeverRan("running_jobs"));
 
         var note = ServerTab.NoRunNote(ServerName, "running_jobs", skipped: null, staleHistory);
-        var (_, visibility) = ServerTab.EngineGapStateFromRuns(ServerName, isAzureSqlDatabase: false, "running_jobs", rowCount: 0, skipped: null, staleHistory);
+        var (_, visibility) = ServerTab.EngineGapStateFromRuns(ServerName, isAzureSqlDatabase: false, "running_jobs", rowCount: 0, skipped: null, staleHistory, awsRdsKind: AwsRdsKind.None);
 
         Assert.Null(note);
         Assert.Equal(Visibility.Collapsed, visibility);
@@ -154,15 +154,15 @@ public sealed class EngineGapNoteTests
                 CollectorScheduleDefaults.All[collector].FrequencyMinutes + CollectorRuntimePrecondition.FirstRunSlackMinutes);
 
             var inside = HistoryCollectingFrom(FirstCollected, due.AddSeconds(-1), "wait_stats");
-            var (notYet, notYetVisibility) = ServerTab.EngineGapStateFromRuns(ServerName, isAzureSqlDatabase: false, collector, rowCount: 0, skipped: null, inside);
+            var (notYet, notYetVisibility) = ServerTab.EngineGapStateFromRuns(ServerName, isAzureSqlDatabase: false, collector, rowCount: 0, skipped: null, inside, awsRdsKind: AwsRdsKind.None);
             Assert.Equal(Visibility.Visible, notYetVisibility);
             Assert.Equal(CollectorRuntimePrecondition.NotYetRunMessage(ServerName, collector, due.AddSeconds(-1), FirstCollected), notYet);
             Assert.Contains("has not run against", notYet, StringComparison.Ordinal);
             Assert.False(inside.NeverRan(collector));
-            Assert.Equal(Visibility.Collapsed, ServerTab.EngineGapStateFromRuns(ServerName, isAzureSqlDatabase: false, collector, rowCount: 3, skipped: null, inside).Visibility);
+            Assert.Equal(Visibility.Collapsed, ServerTab.EngineGapStateFromRuns(ServerName, isAzureSqlDatabase: false, collector, rowCount: 3, skipped: null, inside, awsRdsKind: AwsRdsKind.None).Visibility);
 
             var over = HistoryCollectingFrom(FirstCollected, due, "wait_stats");
-            var (overdue, overdueVisibility) = ServerTab.EngineGapStateFromRuns(ServerName, isAzureSqlDatabase: false, collector, rowCount: 0, skipped: null, over);
+            var (overdue, overdueVisibility) = ServerTab.EngineGapStateFromRuns(ServerName, isAzureSqlDatabase: false, collector, rowCount: 0, skipped: null, over, awsRdsKind: AwsRdsKind.None);
             Assert.Equal(Visibility.Visible, overdueVisibility);
             Assert.Equal(ServerTab.NeverCollectedNote(ServerName, collector), overdue);
             Assert.True(over.NeverRan(collector));
@@ -277,9 +277,9 @@ public sealed class EngineGapNoteTests
         foreach (var collector in SurfaceCollectors)
         {
             var (text, visibility) = ServerTab.EngineGapStateFromRuns(
-                ServerName, isAzureSqlDatabase: true, collector, rowCount: 0, skipped: null, azure);
+                ServerName, isAzureSqlDatabase: true, collector, rowCount: 0, skipped: null, azure, awsRdsKind: AwsRdsKind.None);
             Assert.Equal(Visibility.Visible, visibility);
-            Assert.Equal(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, collector), text);
+            Assert.Equal(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, collector, awsRdsKind: AwsRdsKind.None), text);
         }
 
         await CollectorRunHistory.ReadAsync(CollectorRunHistory.Empty, Read, isAzureSqlDatabase: false);
@@ -465,7 +465,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         var history = await new LocalDataService(_duckDb).GetCollectorRunHistoryAsync(ServerId);
 
         Assert.False(history.NeverRan("server_config"));
-        Assert.Equal(Visibility.Collapsed, ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, history.NeverRan("server_config"), "server_config", rowCount: 0).Visibility);
+        Assert.Equal(Visibility.Collapsed, ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, history.NeverRan("server_config"), "server_config", rowCount: 0, awsRdsKind: AwsRdsKind.None).Visibility);
     }
 
     /* #6764: the two reconnect sentences the short form ends on, as the web page words them. */
@@ -487,8 +487,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
             note);
         Assert.DoesNotContain("runtime PRECONDITION", note, StringComparison.Ordinal);
 
-        var empty = ServerTab.EngineGapStateFromRuns(ServerName, false, "running_jobs", rowCount: 0, note, CollectorRunHistory.Empty);
-        var withRows = ServerTab.EngineGapStateFromRuns(ServerName, false, "running_jobs", rowCount: 2, note, CollectorRunHistory.Empty);
+        var empty = ServerTab.EngineGapStateFromRuns(ServerName, false, "running_jobs", rowCount: 0, note, CollectorRunHistory.Empty, awsRdsKind: AwsRdsKind.None);
+        var withRows = ServerTab.EngineGapStateFromRuns(ServerName, false, "running_jobs", rowCount: 2, note, CollectorRunHistory.Empty, awsRdsKind: AwsRdsKind.None);
         Assert.Equal(Visibility.Visible, empty.Visibility);
         Assert.Equal(note, empty.Text);
         Assert.Equal(Visibility.Collapsed, withRows.Visibility);

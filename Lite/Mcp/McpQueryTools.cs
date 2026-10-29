@@ -111,7 +111,7 @@ public sealed class McpQueryTools
                 /* #6226 (Darling's twin): the collector looked and nothing ran. query_stats stores only what executed since its
                    watermark, so a window in which it ran successfully and stored no row is a measurement (empty), not a gap
                    (unavailable). After not_collected, which names an engine that never runs the collector. */
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None)
                     ?? EmptyCollectorRan(
                         await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "query_stats", hours_back, asOfUtc: windowEnd),
                         "query_stats", hours_back, "executed statements", database_name)
@@ -292,7 +292,7 @@ public sealed class McpQueryTools
             if (rows.Count == 0)
             {
                 return McpHelpers.WithDatabasesLeftOut(
-                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats")
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", awsRdsKind: AwsRdsKind.None)
                     ?? EmptyProcedureStatsStatus(
                         await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "procedure_stats", hours_back, asOfUtc: windowEnd),
                         hours_back, leftOut?.Count ?? 0), leftOut)!;
@@ -513,7 +513,7 @@ public sealed class McpQueryTools
                             window_truncated = truncated
                         });
 
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store", awsRdsKind: AwsRdsKind.None)
                     /* #2546: the sentence below GUESSES ("may not be enabled"), and it had to, because the
                        read had no way to find out. The store has known all along — query_store_health
                        records actual_state per database every hour for exactly this purpose. Asking it turns
@@ -834,7 +834,7 @@ public sealed class McpQueryTools
             }
 
             /* #6181: Query Store on, collector healthy, first interval not closed yet: say so instead of "may be OFF". */
-            return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, "query_store")
+            return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, "query_store", awsRdsKind: AwsRdsKind.None)
                 ?? (await McpRuntimePrecondition.QueryStoreFirstIntervalMessageAsync(
                         dataService, serverId, serverName, databases is { Length: 1 } ? databases[0] : null)
                     is { } firstInterval ? McpHelpers.Status("unavailable", firstInterval + (replay ? $" That is this server's state now, not as of {windowEnd:yyyy-MM-dd HH:mm}Z, the end of the requested window, which holds no Query Store sample." : "") + " There is nothing to compare yet, so this is not a report of zero regressions.") : null)
@@ -1095,7 +1095,7 @@ public sealed class McpQueryTools
 
         if (!hasAny)
         {
-            var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, "query_stats");
+            var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, "query_stats", awsRdsKind: AwsRdsKind.None);
             if (gated != null)
             {
                 return gated;
@@ -1171,7 +1171,7 @@ public sealed class McpQueryTools
                 /* Same two states again, same words as Darling's twin. The probe reads v_query_stats
                    because THIS trend does; Darling's probes the base table because ITS trend does. Each
                    probe follows its own read — what the caller sees is one sentence, not two. */
-                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats"), database);
+                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None), database);
                 if (gated != null)
                 {
                     return gated;
@@ -1242,7 +1242,7 @@ public sealed class McpQueryTools
                 resolved.ServerId, hours_back, asOfUtc: windowEnd, bucketMinutes, database == null ? null : new[] { database });
             if (points.Count == 0)
             {
-                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats"), database);
+                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", awsRdsKind: AwsRdsKind.None), database);
                 if (gated != null)
                 {
                     return gated;
@@ -1296,7 +1296,7 @@ public sealed class McpQueryTools
                     every database on the instance. A server with no Query Store data is not a server with
                     no slow queries, so the message names that cause first.
                 */
-                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store"), database);
+                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store", awsRdsKind: AwsRdsKind.None), database);
                 if (gated != null)
                 {
                     return gated;
@@ -1669,7 +1669,7 @@ public sealed class McpQueryTools
             var rows = await dataService.GetQueryStatsHistoryAsync(resolved.ServerId, database_name, query_hash, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("empty", $"No history found for query_hash '{query_hash}' in database '{database_name}' within the last {hours_back} hours.");
             }
 
