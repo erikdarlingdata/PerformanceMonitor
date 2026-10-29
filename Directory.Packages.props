@@ -33,7 +33,7 @@
     <PackageVersion Include="Npgsql" Version="10.0.3" />
     <PackageVersion Include="ScottPlot.WPF" Version="5.1.59" />
     <PackageVersion Include="System.IO.FileSystem.AccessControl" Version="5.0.0" />
-    <!-- #5802: pinned to the patched 10.0.13 until a Microsoft.Data.SqlClient release depends on a patched Pkcs (7.1.1 pulls in 9.0.18); drop the direct references then.
+    <!-- #5802: pinned to a patched version (10.0.13 or later) until a Microsoft.Data.SqlClient release depends on a patched Pkcs (7.1.1 pulls in 9.0.18); drop the direct references then.
          Transitive pinning is off, so this line alone lifts nothing: a transitive package gets a CentralTransitive lock entry
          that still resolves the lower version (ProtectedData in deprecated/Installer.Tests/packages.lock.json shows it). The
          direct references in PlanAnalysis, Darling.Analysis and Darling.Service do the lifting. The self-contained Lite and
