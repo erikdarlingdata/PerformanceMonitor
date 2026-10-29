@@ -721,7 +721,7 @@ public sealed class ServerSummaryItem
     public string IdentityCapacityDisplay => IdentityCapacity is null ? "" : IdentityCapacity.ColumnsAtBar == 1 ? "1 column" : $"{IdentityCapacity.ColumnsAtBar} columns";
 
     /// <summary>Identity capacity detail: the fullest column's band.</summary>
-    public string IdentityCapacityDetail => IdentityCapacity is null ? "" : $"At or past the warning bar. The fullest is {IdentityCapacity.WorstBand}.";
+    public string IdentityCapacityDetail => IdentityCapacity is null ? "" : $"At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is {IdentityCapacity.WorstBand}.";
 
     /// <summary>The row's dot and value brush: the card's critical red when the fullest is critical, else its warning amber.</summary>
     public SolidColorBrush IdentityCapacityBrush => IdentityCapacity?.WorstBand == IdentityCapacityMath.BandCritical ? s_criticalBrush : s_warningBrush;
