@@ -142,7 +142,7 @@ public sealed class ViewerAzureSqlDatabaseCallSiteTests
 
         /* The registry reader answers both the success path and the not_collected gate, from the same read of the servers row. */
         Assert.Contains("(await ReadServerEngineAsync(postgres, serverId, cancellationToken)).EngineEdition", MethodBody(EngineCapabilityFile, "Task<int> EngineEditionAsync("), StringComparison.Ordinal);
-        Assert.Contains("(engineEdition, engineKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);", MethodBody(EngineCapabilityFile, "Task<string?> NotCollectedStatusAsync("), StringComparison.Ordinal);
+        Assert.Contains("(engineEdition, engineKind, awsRdsKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);", MethodBody(EngineCapabilityFile, "Task<string?> NotCollectedStatusAsync("), StringComparison.Ordinal);
         Assert.Contains("sql_engine_edition", DarlingEngineCapability.ServerEngineSql, StringComparison.Ordinal);
         Assert.Contains("FROM servers", DarlingEngineCapability.ServerEngineSql, StringComparison.Ordinal);
     }
