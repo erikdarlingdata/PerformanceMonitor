@@ -59,7 +59,7 @@ Lite keeps each log file for 7 days. To open the logs, click **View Log** or **O
 
 All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a different folder from the install directory (`%LOCALAPPDATA%\PerformanceMonitorLite\`), so neither an in-app update nor re-running `Setup.exe` can disturb it. Data from an older install is moved into the new folder automatically the first time this version starts.
 
-- **Hot data** in DuckDB 1.5.5 — non-blocking checkpoints, free block reuse, stable file size without periodic resets
+- **Hot data** in DuckDB 1.5.6: non-blocking checkpoints, free block reuse, stable file size without periodic resets
 - **Archive** to Parquet with ZSTD compression (~10x reduction) — automatic monthly compaction keeps file count low (~75 files vs thousands)
 - **Retention**: 3-month calendar-month rolling window. Retention is fixed at 3 months and cannot be changed.
 - **Memory limit**: DuckDB's memory limit is a setting (Settings, Dashboard Defaults, "DuckDB memory limit"). The default is 2 GB, and it can go from 1 GB up to 80% of memory. A change applies after a restart.

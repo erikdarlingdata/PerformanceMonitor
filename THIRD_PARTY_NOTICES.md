@@ -218,7 +218,7 @@ The following NuGet packages are used as runtime dependencies. Test-only package
 
 ### Microsoft.Data.SqlClient
 
-**Version**: 6.1.4
+**Version**: 7.1.1
 **Author**: Microsoft
 **License**: MIT
 **Project URL**: https://aka.ms/sqlclientproject
@@ -230,7 +230,7 @@ The following NuGet packages are used as runtime dependencies. Test-only package
 
 ### Microsoft.Extensions.Configuration / Configuration.Json / Hosting / Logging
 
-**Versions**: 10.0.3
+**Versions**: 10.0.14
 **Author**: Microsoft
 **License**: MIT
 **Repository**: https://github.com/dotnet/runtime
@@ -241,7 +241,7 @@ The following NuGet packages are used as runtime dependencies. Test-only package
 
 ### System.Text.Json
 
-**Version**: 10.0.3
+**Version**: 10.0.14
 **Author**: Microsoft
 **License**: MIT
 **Repository**: https://github.com/dotnet/runtime
@@ -280,7 +280,7 @@ SOFTWARE.
 
 ### ScottPlot.WPF
 
-**Version**: 5.1.57
+**Version**: 5.1.59
 **Author**: Scott Harden
 **License**: MIT
 **Project URL**: https://scottplot.net/
@@ -314,7 +314,7 @@ SOFTWARE.
 
 ### DuckDB.NET.Data / DuckDB.NET.Bindings.Full
 
-**Version**: 1.5.0
+**Version**: 1.5.6.1
 **Author**: Giorgi Dalakishvili
 **License**: MIT
 **Repository**: https://github.com/Giorgi/DuckDB.NET
@@ -407,7 +407,7 @@ limitations under the License.
 
 ### ModelContextProtocol / ModelContextProtocol.AspNetCore
 
-**Version**: 0.7.0-preview.1
+**Version**: 2.3.0
 **Authors**: Anthropic and Contributors
 **License**: Apache License 2.0
 **Project URL**: https://modelcontextprotocol.github.io/csharp-sdk

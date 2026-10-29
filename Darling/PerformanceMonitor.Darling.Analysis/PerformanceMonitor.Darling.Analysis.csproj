@@ -28,7 +28,7 @@
          Directory.Packages.props already pins it for Lite. -->
     <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" />
     <PackageReference Include="ModelContextProtocol" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" VersionOverride="10.0.13" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" />
   </ItemGroup>
 
   <ItemGroup>
