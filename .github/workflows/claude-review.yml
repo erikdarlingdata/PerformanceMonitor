@@ -4,7 +4,8 @@ name: Claude Auto Review
 # where one pays. A release pull request from dev into main gets no second review: its changes came
 # into dev as pull requests, and those are where review happens. WHAT RUNS depends on the event, and
 # the `decide` job makes that call once:
-#   - opened, reopened, ready_for_review: a FULL review, at the tier described further down.
+#   - opened, reopened, ready_for_review: a FULL review, at the tier described further down (the
+#     light tier when the bot already posted a full-tier verdict, see #6782 below).
 #   - a push (synchronize): at most ONE follow-up review after each full one. It runs on Sonnet
 #     with 100 turns and covers only the commits since the commit the newest verdict reviewed. That
 #     commit is compared with the pushed head FIRST, whatever kind the verdict is: only a head
@@ -30,10 +31,18 @@ name: Claude Auto Review
 #     done. A push while the label is still on the pull request is also a full review, so a
 #     request that a push cancelled is not lost and the label cannot get stuck.
 #   - a draft, or any other label: no review, and no runner starts.
-# Measured on 2026-10-02: a full-tier review (Opus, 120 turns) cost a median $7.53 and took 18
+# Measured on 2026-10-02: a full-tier review (then Opus, 120 turns) cost a median $7.53 and took 18
 # minutes, a light-tier one about $0.64, and every push to every pull request, drafts included,
 # started a full one. Rounds after the first found mostly comment accuracy, so the later pushes
-# now get the cheap follow-up. Each review marks its kind and the head it reviewed in its body
+# now get the cheap follow-up.
+# Measured on 2026-10-26 (#6782), over 4 days and 397 reviews: about $1,315 at API prices, and the
+# Opus 5 full tier was 83% of it, at $6.44 on average against $0.99 for the light tier. So the full
+# tier now runs Opus 5.5 (120 turns; $4/$20 per million tokens against Opus 5's $5/$25), and a pull
+# request gets at most ONE full-tier pass: once the
+# bot has posted a verdict whose ledger says tier=full, every later pass runs the light tier,
+# whatever its scope and whatever event started it. Only a pass the `re-review` label asked for
+# keeps the full tier. Which commits a pass covers (full scope or follow-up) is unchanged.
+# Each review marks its kind and the head it reviewed in its body
 # with a hidden `<!-- review-pass: full head=<sha> -->` or `<!-- review-pass: follow-up
 # head=<sha> -->` line, which is what the next push reads. The head is the pull request's head
 # when the run started. GitHub stamps a review with the head at the moment it is SUBMITTED (`gh pr
@@ -84,8 +93,10 @@ name: Claude Auto Review
 #     fails the job when the newest verdict lacks the header or the ledger.
 # Plus a model and a TIER: a paths-filter step routes changes to the shared libraries, the
 # Darling Storage/Analysis/Service trees, Lite's service/MCP/database layers, install/ and every
-# .sql file to a FULL pass (Opus, 1M context, 120 turns) and everything else (tests, docs, viewer
-# XAML, wwwroot) to a LIGHT pass (Sonnet, 100 turns). Same prompt, same verdict contract, one
+# .sql file to a FULL pass (Opus 5.5, 120 turns) and
+# everything else (tests, docs, viewer XAML, wwwroot) to a LIGHT pass (Sonnet 5.5, 100 turns). A FULL
+# pass on a pull request that already has a full-tier verdict runs the light tier unless the
+# `re-review` label asked for it. Same prompt, same verdict contract, one
 # review step -- the guard counts that step's conclusion and the bot's reviews, and neither
 # accounting knows or cares which tier ran.
 on:
@@ -140,6 +151,9 @@ jobs:
       # Set only for a follow-up, and only once the step has checked that `base` and `head` are both
       # 40-character hex SHAs: the review job puts the two into its claude_args.
       head: ${{ steps.pass.outputs.head }}
+      # #6782: true when the bot has already posted a full-tier verdict on this pull request and the
+      # `re-review` label did not ask for this pass. The tier step runs the light tier for it.
+      prior_full: ${{ steps.pass.outputs.prior_full }}
     steps:
       # Every input arrives through env:, never through a ${{ }} interpolation into the script text.
       # `re-review` appears as a literal in four places in this file (the decide job's `if`, the
@@ -162,6 +176,11 @@ jobs:
           RE_REVIEW: re-review
           # Author of every review the action leaves behind (the action's bot_name default).
           REVIEW_BOT: claude[bot]
+          # #6782: the ledger line of a verdict that ran on the full tier. It sits in the review's body,
+          # so the list reads below, which already carry the bodies, can tell a full-tier verdict from a
+          # light one without another call. The ledger is a line of its own, so the pattern is anchored
+          # to a line start and never matches prose that merely mentions it.
+          LEDGER_FULL_RE: '(^|\n)<!-- review-ledger: [^\n]* tier=full model='
         run: |
           set -euo pipefail
           summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
@@ -185,6 +204,14 @@ jobs:
           }
 
           pass=''; base=''; reason=''; marker_note=''
+          # #6782: true only when the bot has already posted a verdict whose ledger says tier=full on
+          # this pull request, and this pass was not asked for by the `re-review` label. The tier step
+          # turns it into the light tier. It stays false for the label (an explicit request keeps the
+          # full tier), and when the reviews cannot be read: with no proof that a full-tier verdict
+          # exists, the pass keeps today's full tier, the same fail-toward-thorough direction every
+          # other read here takes. A pass that is wrongly full costs one review; a pass that is wrongly
+          # light could under-review a pull request that never had a full one.
+          prior_full=false
           if [ "$DRAFT" = "true" ]; then
             pass=skip; reason="the pull request is a draft"
           elif [ "$ACTION" = "labeled" ] && [ "$LABEL" != "$RE_REVIEW" ]; then
@@ -194,6 +221,16 @@ jobs:
           elif [ "$ACTION" != "synchronize" ]; then
             # opened, reopened and ready_for_review, and anything the trigger list may grow.
             pass=full; reason="the pull request was $ACTION"
+            # No list is read on this path, so this is the one extra call (#6782): a pull request that
+            # was marked ready again or reopened after a full-tier verdict does not get a second one.
+            # A read that fails leaves prior_full false.
+            if lookup --paginate "repos/$R/pulls/$PR/reviews?per_page=100" \
+                --jq '.[] | select(.user.login == env.REVIEW_BOT and .submitted_at != null
+                                   and ((.body // "") | test(env.LEDGER_FULL_RE))) | .id'; then
+              if [ -n "$LOOKUP_OUT" ]; then prior_full=true; fi
+            else
+              echo "::warning title=Full-tier verdict read failed::The reviews could not be read ($LOOKUP_ERR), so this pass keeps today's tier."
+            fi
           elif [ "$HAS_LABEL" = "true" ]; then
             # The label is a request that stays until a full review has answered it. A push that
             # cancelled the requested review must not lose it, and a stuck label cannot be added again.
@@ -208,15 +245,18 @@ jobs:
             if ! lookup --paginate "repos/$R/pulls/$PR/reviews?per_page=100" \
                 --jq '.[] | select(.user.login == env.REVIEW_BOT and .submitted_at != null
                                    and ((.body // "") | length) > 0)
-                      | "\(.id)\t\(.commit_id // "")"'; then
+                      | "\(.id)\t\(if ((.body // "") | test(env.LEDGER_FULL_RE)) then 1 else 0 end)\t\(.commit_id // "")"'; then
               pass=full; reason="the reviews could not be read ($LOOKUP_ERR)"
             else
+              # The middle field says whether that verdict's ledger names the full tier (#6782); the commit
+              # stays last so an empty commit_id is a trailing empty field, which `read` keeps.
+              if printf '%s\n' "$LOOKUP_OUT" | grep -qE $'^[0-9]+\t1\t'; then prior_full=true; fi
               newest=$(printf '%s\n' "$LOOKUP_OUT" | tail -n 1)
               if [ -z "$newest" ]; then
                 # No verdict yet: its full review was cancelled or never ran.
                 pass=full; reason="$REVIEW_BOT has posted no verdict on this pull request yet"
               else
-                IFS=$'\t' read -r last_id last_commit <<<"$newest"
+                IFS=$'\t' read -r last_id _ last_commit <<<"$newest"
                 if ! lookup "repos/$R/pulls/$PR/reviews/$last_id" --jq '.body // ""'; then
                   pass=full; reason="the newest verdict could not be read ($LOOKUP_ERR)"
                 else
@@ -356,7 +396,7 @@ jobs:
             fi
           fi
 
-          echo "review pass: $pass -- $reason"
+          echo "review pass: $pass -- $reason -- prior_full=$prior_full"
           if [ "$pass" = skip ]; then
             echo "::notice title=No review - skipped on purpose::$reason."
           else
@@ -365,8 +405,10 @@ jobs:
           summary "### Review pass: $pass"
           summary "- $reason"
           if [ "$pass" = follow-up ]; then summary "- covers \`${base:0:12}..${HEAD_SHA:0:12}\`"; fi
+          if [ "$prior_full" = true ]; then summary "- the bot already posted a full-tier verdict here, so this pass runs the light tier"; fi
           {
             echo "pass=$pass"
+            echo "prior_full=$prior_full"
             echo "base=$base"
             echo "head=$head_sha"
           } >> "$GITHUB_OUTPUT"
@@ -433,8 +475,9 @@ jobs:
       # the shared libraries every product compiles against, the Darling store/analysis/service
       # trees (Compose and Mcp are under Service), Lite's service, MCP and database layers, the
       # install scripts, and every .sql file wherever it sits (upgrades/, tools/, fixtures) -- and
-      # a change there gets Opus with the 1M context window, which the callers rule needs on a
-      # large Storage diff. Everything else is the LIGHT tier. Same version-tag pinning as the
+      # a change there gets the full tier (Opus 5.5; see the tier step for the one-full-pass
+      # rule). Everything
+      # else is the LIGHT tier. Same version-tag pinning as the
       # rest of this repo's actions (build.yml uses dorny/paths-filter@v4; nothing here is
       # SHA-pinned, so neither is this).
       #
@@ -486,16 +529,20 @@ jobs:
       # through a ${{ }} interpolation into script text -- a PR author controls file names, and an
       # interpolated name is the pull_request script-injection footgun build.yml describes.
       #
-      # The model ids are Claude Code's own catalog ids: `claude-opus-5[1m]` (the [1m] selector
-      # opts into the 1M context window; claude-code-action's docs name Opus 5 and Sonnet 5 as
-      # the models that carry it) and `claude-sonnet-5`, the Sonnet family's current id, spelled
-      # out rather than left to the default so the ledger names it. No effort flag exists in
+      # The full tier runs `claude-opus-5-5` (120 turns) and the light tier `claude-sonnet-5-5` (100
+      # turns): Claude Code's own catalog ids for Opus 5.5 and Sonnet 5.5, spelled out rather than
+      # left to the default so the ledger names them. Both have the 1M context window natively, so
+      # no [1m] selector; until #6782 the full tier ran `claude-opus-5[1m]`. ONE FULL-TIER PASS PER
+      # PULL REQUEST: the decide job sets prior_full when the bot already posted a verdict whose
+      # ledger says tier=full, and this step then runs the light tier whatever the scope. The
+      # re-review label never sets it, so an explicit request keeps the full tier. No effort flag exists in
       # claude_args (#3710's ruling); the turn ceiling is the cost lever.
       - name: Decide the review tier
         id: tier
         if: ${{ env.HAS_OAUTH_TOKEN == 'true' }}
         env:
           PASS: ${{ needs.decide.outputs.pass }}
+          PRIOR_FULL: ${{ needs.decide.outputs.prior_full }}
           PATHS_OUTCOME: ${{ steps.paths.outcome }}
           FULL: ${{ steps.paths.outputs.full }}
           FULL_COUNT: ${{ steps.paths.outputs.full_count }}
@@ -507,6 +554,11 @@ jobs:
             # The paths step did not run (only a full pass classifies), so its outcome says nothing
             # here. A follow-up reads a few new commits, and the cheap tier is what it is for.
             echo "::notice title=Follow-up review::A follow-up pass always runs the light tier's model and turns."
+            tier=light
+          elif [ "${PRIOR_FULL:-}" = "true" ]; then
+            # #6782: one full-tier pass per pull request. A pass the re-review label asked for never
+            # gets here with this set, so an explicit request keeps the full tier.
+            echo "::notice title=Light-tier review::The bot already posted a full-tier verdict on this pull request, and only one full-tier pass runs per pull request. Add the re-review label to ask for another."
             tier=light
           elif [ "$PATHS_OUTCOME" != "success" ]; then
             echo "::warning title=Path classification failed - reviewing at the full tier::The paths-filter"\
@@ -523,9 +575,9 @@ jobs:
             tier=light
           fi
           if [ "$tier" = full ]; then
-            model='claude-opus-5[1m]'; max_turns=120
+            model='claude-opus-5-5'; max_turns=120
           else
-            model='claude-sonnet-5'; max_turns=100
+            model='claude-sonnet-5-5'; max_turns=100
           fi
           echo "tier=$tier -- model=$model -- max_turns=$max_turns"
           {
@@ -537,7 +589,7 @@ jobs:
       # The step NAME is read by claude-review-guard.yml (REVIEW_STEP) to tell a clean no-op from a
       # run that said nothing; renaming it blinds the guard. The id is for the steps below.
       #
-      # The `|| 'full'` / `|| 'claude-opus-5[1m]'` / `|| '60'` fallbacks: if the tier step somehow
+      # The `|| 'full'` / `|| 'claude-opus-5-5'` / `|| '60'` fallbacks: if the tier step somehow
       # left an output empty, the review still runs, at the full tier -- the same fail-toward-
       # thorough direction the tier step takes -- instead of handing Claude Code `--model ""`.
       - name: Claude review
@@ -562,7 +614,7 @@ jobs:
             PR NUMBER: ${{ github.event.pull_request.number }}
             REVIEW PASS: ${{ needs.decide.outputs.pass }}
             REVIEW TIER: ${{ steps.tier.outputs.tier || 'full' }}
-            MODEL: ${{ steps.tier.outputs.model || 'claude-opus-5[1m]' }}
+            MODEL: ${{ steps.tier.outputs.model || 'claude-opus-5-5' }}
             FOLLOW-UP RANGE: ${{ needs.decide.outputs.base && format('{0}..{1}', needs.decide.outputs.base, github.event.pull_request.head.sha) || 'none (this is a full review)' }}
 
             You are reviewing a pull request in a repository whose defects recur in known shapes and
@@ -701,7 +753,7 @@ jobs:
             ### Reviewer checklist
             - [ ] <what a human should check by hand that a read-only tree could not: a live read, a build, a rig, a production page>
             <!-- review-pass: ${{ needs.decide.outputs.pass }} head=${{ github.event.pull_request.head.sha }} -->
-            <!-- review-ledger: verdict=LGTM verified=<N> unverified=<N> refuted=<N> traps=<N> tier=${{ steps.tier.outputs.tier || 'full' }} model=${{ steps.tier.outputs.model || 'claude-opus-5[1m]' }} -->
+            <!-- review-ledger: verdict=LGTM verified=<N> unverified=<N> refuted=<N> traps=<N> tier=${{ steps.tier.outputs.tier || 'full' }} model=${{ steps.tier.outputs.model || 'claude-opus-5-5' }} -->
 
             Ledger arithmetic: verified / unverified / refuted are the bullet counts under Claims
             in each state; traps is the bullet count under Traps near this diff; verdict matches
@@ -770,7 +822,7 @@ jobs:
           # configuration, which the Read rule above already keeps from the file tools. Claude Code runs
           # some read-only git commands with no allow rule, so these four need deny rules of their own.
           claude_args: |
-            --model "${{ steps.tier.outputs.model || 'claude-opus-5[1m]' }}"
+            --model "${{ steps.tier.outputs.model || 'claude-opus-5-5' }}"
             --max-turns ${{ steps.tier.outputs.max_turns || '120' }}
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff ${{ github.event.pull_request.number }}),Bash(gh pr diff ${{ github.event.pull_request.number }} --name-only),Bash(gh pr view ${{ github.event.pull_request.number }}),Bash(gh pr view ${{ github.event.pull_request.number }} --json commits),Bash(gh pr view ${{ github.event.pull_request.number }} --comments),Bash(gh pr comment ${{ github.event.pull_request.number }} --body-file -),Bash(gh pr review ${{ github.event.pull_request.number }} --comment --body-file -),Bash(gh pr review ${{ github.event.pull_request.number }} --request-changes --body-file -),Read(./**)${{ needs.decide.outputs.base && needs.decide.outputs.head && format(',Bash(git diff {0} {1}),Bash(git diff {0} {1} -- *)', needs.decide.outputs.base, needs.decide.outputs.head) || '' }}"
             --disallowedTools "Read(./.git/**),Read(//proc/**),Bash(git remote *),Bash(git config *),Bash(git ls-remote *),Bash(git var *)"
