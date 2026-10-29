@@ -2532,6 +2532,49 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS checkdb_overdue_enabled boolean NOT NULL DEFAULT FALSE;";
 
     /// <summary>
+    /// V224 (#6875) - <c>collect.identity_capacity</c>: how full the identity columns are, read from <c>sys.identity_columns</c> by
+    /// <c>IdentityCapacityCollector</c> every six hours, per database: the top 20 columns above 10 percent used (value, seed, increment,
+    /// type, precision and the percent) plus ONE all-NULL marker row (<c>column_name</c> NULL) per scanned database, so a database with no
+    /// high column reads as scanned and clean, and one that was not scanned has no marker. A PLAIN table on every store
+    /// (<c>StaysPlainTable</c>), 90-day time-sliced DELETE, at most 21 rows per database per pass. Columns and the (server_id,
+    /// collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a fresh store (V1's catalog walk) and an upgraded one
+    /// agree. The marker index finds a database's newest scan by one seek. New table, no data moves, no grant (the <c>collect</c> schema
+    /// carries blanket SELECT). Every statement is idempotent.
+    /// The same rung adds three <c>config.config_alert_settings</c> columns for the "Identity Capacity" alert (catalog-only): <c>identity_capacity_enabled</c>
+    /// (<c>boolean NOT NULL DEFAULT FALSE</c>, the alert ships OFF) and the warning and critical bars <c>identity_capacity_warning_percent</c> (70) and
+    /// <c>identity_capacity_critical_percent</c> (90), the global values a per-server or per-database threshold override replaces. An older build never
+    /// reads the columns.
+    /// </summary>
+    private const string V224Sql = @"
+CREATE TABLE IF NOT EXISTS collect.identity_capacity (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    table_name text,
+    column_name text,
+    data_type text,
+    type_precision integer,
+    last_value numeric(38,0),
+    seed_value numeric(38,0),
+    increment_value numeric(38,0),
+    percent_used double precision,
+    skip_reason text
+);
+
+CREATE INDEX IF NOT EXISTS idx_identity_capacity_time ON collect.identity_capacity(server_id, collection_time);
+
+CREATE INDEX IF NOT EXISTS idx_identity_capacity_markers
+    ON collect.identity_capacity (server_id, database_name, collection_time) WHERE column_name IS NULL;
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS identity_capacity_enabled boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS identity_capacity_warning_percent integer NOT NULL DEFAULT 70,
+    ADD COLUMN IF NOT EXISTS identity_capacity_critical_percent integer NOT NULL DEFAULT 90;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2929,6 +2972,7 @@ $rung$;";
         new Migration(221, "query-store-hash-hourly", V221Sql),
         new Migration(222, "agent-alerts", V222Sql),
         new Migration(223, "database-protection", V223Sql),
+        new Migration(224, "identity-capacity", V224Sql),
     };
 
     /// <summary>

@@ -930,6 +930,7 @@ GROUP BY server_id, collector_name";
            servers on the old pair and the rest on the new one — a mixed reading no configuration ever held,
            and the band counts and the worst-first ranking would be derived from it. */
         var deadlockTiers = await ReadDeadlockRateThresholdsAsync(postgres, cancellationToken);
+        var identityCapacity = await ReadIdentityCapacityAsync(postgres, now, cancellationToken);
 
         var cards = new List<FleetServerCard>(servers.Count);
         foreach (var server in servers)
@@ -960,12 +961,13 @@ GROUP BY server_id, collector_name";
             failingCollectors.TryGetValue(server.ServerId, out var collectors);
             tags.TryGetValue(server.ServerId, out var serverTags);
             agentAlertGaps.TryGetValue(server.ServerId, out var serverAgentAlertGaps);
+            identityCapacity.TryGetValue(server.ServerId, out var serverIdentityCapacity);
 
             databaseProtection.TryGetValue(server.ServerId, out var serverDatabaseProtection);
 
             cards.Add(BuildCard(
                 server, c, pg, m, mp, t, b, deadlock, pgDeadlock, collected.LastCollection, collectors, serverTags, now,
-                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection, serverAgentAlertGaps, serverDatabaseProtection));
+                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection, serverAgentAlertGaps, serverDatabaseProtection, serverIdentityCapacity));
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest, collectionHealthAgeSeconds,
@@ -995,6 +997,82 @@ GROUP BY server_id, collector_name";
     /// null <paramref name="lastCollection"/> apart: registered before the window is Offline, registered
     /// inside it is awaiting its first collection. Trailing and defaulted to null, which keeps the shared
     /// ladder's reading, so a caller that only exercises the metric rows need not invent a registration.</param>
+    /// <summary>The window a server's identity capacity scans count in (#6875): seven days, the one the tool and the alert read, so a database the pass
+    /// budget has not reached again keeps its last scan.</summary>
+    internal static readonly TimeSpan IdentityCapacityWindow = TimeSpan.FromHours(168);
+
+    /// <summary>
+    /// Each database's newest scan in the window, and its columns at the warning bar or past it, one statement for the fleet (#6875). Shaped like the
+    /// other per-server reads in this file: <c>servers</c> drives a lateral that range-scans the marker index (<c>idx_identity_capacity_markers</c>,
+    /// <c>server_id, database_name, collection_time</c>, markers only) on the server_id prefix and keeps each database's newest marker, then the
+    /// column rows at that same instant are read through <c>idx_identity_capacity_time</c> (<c>server_id, collection_time</c>). A time-only predicate
+    /// over the whole table is never used, so a fleet load does not walk the 90-day table. Like <see cref="FleetCpuSql"/> and its siblings it
+    /// skips a disabled server and a PostgreSQL target, which never write this table, so they get no probe (the filter sits after the lateral, the
+    /// form the siblings use, and the planner applies it to <c>servers</c> before the lateral runs). A skip row (<c>skip_reason</c> set) is not a
+    /// scan marker. $1 is the window start, $2 the percent of the warning bar.
+    ///
+    /// <para><b>Measured (EXPLAIN (ANALYZE, BUFFERS), PostgreSQL 18.6 scratch store, 60 registered servers of which 41 enabled SQL Server targets wrote rows,
+    /// 265,680 rows over 90 days, six databases each).</b> Without the filter the lateral ran 60 times (19 probes for servers that never write this
+    /// table), with it 41. The window predicate on the column rows (<c>c.collection_time &gt;= $1</c>, implied by the join to the marker but not visible to
+    /// the planner) matters more: without it the planner hashed every column row of a server over all 90 days (a bitmap scan of
+    /// <c>idx_identity_capacity_time</c>, 2,160 rows and about 3,200 buffers per server) and the statement took 111 to 115 ms and 138,700 buffers. With it
+    /// the plan is a nested loop of a seq scan of <c>servers</c> (41 rows after the filter), the marker index bitmap scan with a unique sort per server,
+    /// and one index scan of <c>idx_identity_capacity_time</c> per kept marker (246 loops): 9 to 11.5 ms and 10,800 buffers, the same 246 rows.</para>
+    /// </summary>
+    internal const string FleetIdentityCapacitySql = $@"
+SELECT c.server_id, c.percent_used
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT DISTINCT ON (x.database_name) x.database_name, x.collection_time
+    FROM collect.identity_capacity AS x
+    WHERE x.server_id = s.server_id
+    AND   x.column_name IS NULL
+    AND   x.skip_reason IS NULL
+    AND   x.collection_time >= $1
+    ORDER BY x.database_name, x.collection_time DESC
+) AS n
+JOIN collect.identity_capacity AS c
+  ON c.server_id = s.server_id AND c.collection_time = n.collection_time AND c.database_name = n.database_name
+  AND c.collection_time >= $1
+WHERE s.is_enabled
+AND   {SqlServerCollectedTargetSql}
+AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
+
+    /// <summary>The worst band and the count of columns at warning or critical per server, for the servers that have any (#6875). The band is
+    /// <see cref="IdentityCapacityMath.Band(double)"/>.</summary>
+    internal static async Task<Dictionary<int, FleetIdentityCapacity>> ReadIdentityCapacityAsync(
+        NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var counts = new Dictionary<int, (int Columns, bool Critical)>();
+        await using var command = postgres.CreateCommand(FleetIdentityCapacitySql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - IdentityCapacityWindow, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(IdentityCapacityMath.WarningPercent);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (reader.IsDBNull(1))
+            {
+                continue;
+            }
+
+            var band = IdentityCapacityMath.Band(reader.GetDouble(1));
+            if (band == IdentityCapacityMath.BandOk)
+            {
+                continue;
+            }
+
+            var serverId = reader.GetInt32(0);
+            counts.TryGetValue(serverId, out var seen);
+            counts[serverId] = (seen.Columns + 1, seen.Critical || band == IdentityCapacityMath.BandCritical);
+        }
+
+        return counts.ToDictionary(
+            c => c.Key,
+            c => new FleetIdentityCapacity(c.Value.Critical ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, c.Value.Columns));
+    }
+
     internal static FleetServerCard BuildCard(
         FleetServerRow server,
         CpuRow cpu,
@@ -1014,7 +1092,8 @@ GROUP BY server_id, collector_name";
         DateTime? registeredAt = null,
         DateTime? olderCollection = null,
         IReadOnlyList<FleetAgentAlertGap>? agentAlertGaps = null,
-        IReadOnlyList<FleetDatabaseProtectionOverdue>? databaseProtectionOverdue = null)
+        IReadOnlyList<FleetDatabaseProtectionOverdue>? databaseProtectionOverdue = null,
+        FleetIdentityCapacity? identityCapacity = null)
     {
 
         /* Lite's XE-preferred / DMV-fallback, per server: XE when it has any row this window, else the DMV
@@ -1202,6 +1281,8 @@ GROUP BY server_id, collector_name";
                 : null,
             DeadlockWindow = deadlockWindow,
             DeadlockRateThresholds = deadlockTiers,
+            /* #6875: set only when a column is at the warning bar or past it. The Band below is not read from it. */
+            IdentityCapacity = identityCapacity,
             DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(
                 deadlocksForBand, deadlockWindow, deadlockTiers),
             DeadlockCollectorBand = deadlockCollectorBand,
@@ -2609,6 +2690,11 @@ public sealed record FleetDatabaseProtectionOverdue(
 
 public sealed class FleetServerCard
 {
+    /// <summary>The identity columns at the warning bar or past it (#6875), from each database's newest scan in the last seven days: the worst band
+    /// (<see cref="IdentityCapacityMath.Band(double)"/>, the one the tool and the alert use) and how many columns are at warning or critical. Null when
+    /// no column is, and on every server that never scans. A chip on the card and nothing more: no band reads it.</summary>
+    [JsonPropertyName("identity_capacity")] public FleetIdentityCapacity? IdentityCapacity { get; init; }
+
     [JsonPropertyName("server_id")] public int ServerId { get; init; }
     [JsonPropertyName("display_name")] public string DisplayName { get; init; } = "";
     [JsonPropertyName("server_name")] public string ServerName { get; init; } = "";
@@ -2983,6 +3069,11 @@ public sealed class FleetServerCard
         CollectorCount = CollectorCount,
     };
 }
+
+/// <summary>The identity columns at a bar on one server, as the fleet card carries them (#6875).</summary>
+public sealed record FleetIdentityCapacity(
+    [property: JsonPropertyName("worst_band")] string WorstBand,
+    [property: JsonPropertyName("columns_at_bar")] int ColumnsAtBar);
 
 /// <summary>One tag on a fleet card — read-only, for the web pills (#2020). Serialized snake_case like the card.
 /// <c>colour</c> is the stored <c>#RRGGBB</c> or null (null renders as a neutral pill, matching the desktop

@@ -228,6 +228,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         [("ViewerServerTab.xaml", "PgLogEventsGrid", "TimesSeen")] = "a count of sightings",
         [("ViewerServerTab.xaml", "PgLockStatsGrid", "Captures")] = "a count of captures",
         [("ViewerServerTab.xaml", "PgReplicationStatsGrid", "Samples")] = "a count of samples",
+        [("IdentityCapacityTab.xaml", "ColumnsDataGrid", "RatePerDay")] = "identity values used per day, a rate and not a time",
         [("ViewerServerTab.xaml", "PgKernelStatsGrid", "CounterReset")] = "a yes/no flag that the counters were reset, not when",
         [("ViewerServerTab.xaml", "PgWaitSamplingGrid", "CounterReset")] = "a yes/no flag that the counters were reset, not when",
         [("ViewerServerTab.xaml", "PgAutovacuumGrid", "InsertsSinceVacuum")] = "a row count",

@@ -139,6 +139,7 @@ public sealed class AgentLevel2ToolPolicyTests
             DarlingSelfAlertEvaluator.BackupOverdueMetric, DarlingSelfAlertEvaluator.LogBackupOverdueMetric,
             DarlingSelfAlertEvaluator.CheckDbOverdueMetric,
             DarlingSelfAlertEvaluator.AgentAlertSetupMetric,
+            DarlingSelfAlertEvaluator.IdentityCapacityMetric,
             DarlingSelfAlertEvaluator.CollectorCostDigestMetric, DarlingSelfAlertEvaluator.FleetSweepRollupMetric,
             DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric,
         };
@@ -377,6 +378,7 @@ VALUES ('{id}', {(enabled ? "TRUE" : "FALSE")}, now() AT TIME ZONE 'utc', {(serv
 
     [Theory]
     [InlineData("Agent Not Running")]
+    [InlineData("Identity Capacity")]
     [InlineData("Collector Cost Digest")]
     [InlineData("AG Failover")]
     public async Task AMuteOnAnUncoveredSelfAlert_IsAllowed(string metric)

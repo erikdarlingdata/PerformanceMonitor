@@ -255,6 +255,22 @@ ORDER BY collection_time DESC
 LIMIT 1";
 
     /// <summary>
+    /// The identity columns at the warning bar or past it on one server (#6875) for its Overview card, from each database's newest scan in the last
+    /// seven days through <see cref="DarlingIdentityCapacityReader.ReadNewestScansAsync"/> (the card needs the columns only, not the listing of databases waiting) and <see cref="IdentityCapacityMath.Band(double)"/>, the read and the band the web
+    /// fleet card, the tool and the alert use. Null when no column is.
+    /// </summary>
+    public async Task<IdentityCapacityCard?> GetIdentityCapacityCardAsync(int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        var read = await DarlingIdentityCapacityReader.ReadNewestScansAsync(
+            _dataSource, serverId, DatabaseFilter.All, nowUtc.AddHours(-168), nowUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        var bands = read.Columns.Select(c => c.Band).Where(b => b is IdentityCapacityMath.BandWarning or IdentityCapacityMath.BandCritical).ToList();
+        return bands.Count == 0
+            ? null
+            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count);
+    }
+
+    /// <summary>
     /// One server's Overview-card summary — Lite's <c>GetServerSummaryAsync</c> ported to Postgres and
     /// enriched toward the Dashboard's <c>ServerHealthCard</c>. The caller sets
     /// <see cref="ServerSummaryItem.ServerName"/> and applies the freshness-derived status
@@ -540,8 +556,10 @@ LIMIT 1";
 
         var protectionChip = await GetDatabaseProtectionChipAsync(serverId, nowUtc, cancellationToken);
 
+        var identityCapacity = await GetIdentityCapacityCardAsync(serverId, nowUtc, cancellationToken);
         return new ServerSummaryItem
         {
+            IdentityCapacity = identityCapacity,
             DisplayName = displayName,
             ServerId = serverId,
             CpuPercent = cpuPercent,
@@ -697,6 +715,22 @@ WHERE id = 1";
 /// </summary>
 public sealed class ServerSummaryItem
 {
+    /// <summary>The identity columns at the warning bar or past it (#6875), the same worst band and count the web fleet card's "Identity capacity" chip
+    /// carries. Null when none is, and on a server that never scans. Shown as its own row and never changes the card's band.</summary>
+    public IdentityCapacityCard? IdentityCapacity { get; set; }
+
+    /// <summary>True when the Identity capacity row shows.</summary>
+    public bool HasIdentityCapacity => IdentityCapacity is { ColumnsAtBar: > 0 };
+
+    /// <summary>Identity capacity value, "1 column" or "N columns" (the web chip's words).</summary>
+    public string IdentityCapacityDisplay => IdentityCapacity is null ? "" : IdentityCapacity.ColumnsAtBar == 1 ? "1 column" : $"{IdentityCapacity.ColumnsAtBar} columns";
+
+    /// <summary>Identity capacity detail: the fullest column's band.</summary>
+    public string IdentityCapacityDetail => IdentityCapacity is null ? "" : $"At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is {IdentityCapacity.WorstBand}.";
+
+    /// <summary>The row's dot and value brush: the card's critical red when the fullest is critical, else its warning amber.</summary>
+    public SolidColorBrush IdentityCapacityBrush => IdentityCapacity?.WorstBand == IdentityCapacityMath.BandCritical ? s_criticalBrush : s_warningBrush;
+
     /* Freshness + per-metric severity thresholds live once in PerformanceMonitor.Common's
        ServerHealthThresholds / ServerHealthClassifier (#1562); this card keeps only the brush mapping. */
 
@@ -1523,3 +1557,6 @@ public sealed class ServerTagPill
 
     public System.Windows.Media.Brush TextBrush => TagColorBrushes.PillText;
 }
+
+/// <summary>The identity columns at a bar on one server, as the Overview card carries them (#6875): the worst band and how many columns are at warning or critical.</summary>
+public sealed record IdentityCapacityCard(string WorstBand, int ColumnsAtBar);

@@ -564,6 +564,8 @@ public sealed class NotificationRoutingTests
                parameter (FireAsync(key, serverName, metric, ...)), a variable the FireAsync literal scan below cannot see. */
             DarlingSelfAlertEvaluator.BackupOverdueMetric, DarlingSelfAlertEvaluator.LogBackupOverdueMetric,
             DarlingSelfAlertEvaluator.CheckDbOverdueMetric,
+            /* #6875: the Identity Capacity alert fires through DarlingSelfAlertEvaluator.IdentityCapacityMetric, a constant the FireAsync literal scan cannot see. */
+            DarlingSelfAlertEvaluator.IdentityCapacityMetric,
         };
 
         /* The literals: the third argument of every `new AlertOutcome(` in the shared engine and the worker

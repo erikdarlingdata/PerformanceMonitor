@@ -33,7 +33,7 @@ internal static class DarlingMcpToolClassification
         "get_daily_summary", "get_daily_summary_range", "get_database_config", "get_database_config_changes",
         "get_database_protection", "get_database_scoped_config", "get_database_state_expectations", "get_database_sizes", "get_deadlock_detail", "get_deadlock_plan_xml",
         "get_deadlock_trend", "get_deadlocks", "get_default_trace_events", "get_file_io_stats", "get_file_io_trend",
-        "get_finops", "get_finops_inventory", "get_finops_recommendations", "get_fleet_overview", "get_forced_plans", "get_query_store_hints",
+        "get_finops", "get_finops_inventory", "get_finops_recommendations", "get_fleet_overview", "get_forced_plans", "get_identity_capacity", "get_query_store_hints",
         "get_health_parser_cpu_tasks", "get_health_parser_io_issues", "get_health_parser_memory_broker",
         "get_health_parser_memory_conditions", "get_health_parser_memory_node_oom",
         "get_health_parser_scheduler_issues", "get_health_parser_severe_errors",

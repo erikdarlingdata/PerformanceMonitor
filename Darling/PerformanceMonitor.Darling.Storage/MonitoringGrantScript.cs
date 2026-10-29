@@ -116,7 +116,7 @@ public static class MonitoringGrantScript
         new(GrantSet.Base, GrantScope.Server, "CONNECT ANY DATABASE", null, true,
             "Enter every current and future database, with no per-database users to maintain.", RdsRefused: true),
         new(GrantSet.Base, GrantScope.Server, "VIEW ANY DEFINITION", null, true,
-            "Catalog visibility. Catalog views hide rows instead of raising an error, so without this the index, object and availability group collectors see nothing."),
+            "Catalog visibility. Catalog views hide rows instead of raising an error, so without this the index, object, identity column capacity and availability group collectors see nothing. The identity check also stops on a database where it is missing, rather than report it clean."),
         new(GrantSet.Base, GrantScope.Server, "ALTER ANY EVENT SESSION", null, true,
             "The deadlock, blocked-process and attention Extended Events sessions."),
         new(GrantSet.Base, GrantScope.Server, "ALTER TRACE", null, false,
@@ -140,7 +140,7 @@ public static class MonitoringGrantScript
             "FinOps Index Analysis. Only db_owner has this by default, and VIEW DEFINITION does not include it."),
         new(GrantSet.AzureSqlDatabase, GrantScope.Database, "VIEW DATABASE STATE", null, true, "The database-scoped DMVs."),
         new(GrantSet.AzureSqlDatabase, GrantScope.Database, "VIEW DEFINITION", null, true,
-            "The database-scoped form of catalog visibility: without it sys.tables and sys.indexes return no rows."),
+            "The database-scoped form of catalog visibility: without it sys.tables, sys.indexes and sys.identity_columns return no rows."),
         new(GrantSet.AzureSqlDatabase, GrantScope.Database, "ALTER ANY DATABASE EVENT SESSION", null, true,
             "Lets the service create its Extended Events sessions in the database."),
     };

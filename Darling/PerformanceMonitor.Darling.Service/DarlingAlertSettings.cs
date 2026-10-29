@@ -190,6 +190,11 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
         AttentionBaselineMath.ClampMultiples(_config.Alerts.ClientTimeoutsWarningMultiple, _config.Alerts.ClientTimeoutsCriticalMultiple).Warning;
     public int ClientTimeoutsCriticalMultiple =>
         AttentionBaselineMath.ClampMultiples(_config.Alerts.ClientTimeoutsWarningMultiple, _config.Alerts.ClientTimeoutsCriticalMultiple).Critical;
+    /// <summary>#6875: the Identity Capacity alert's switch. Off by default; not on <see cref="IAlertEngineSettings"/> because Lite has no such alert.</summary>
+    public bool IdentityCapacityEnabled => _config.Alerts.IdentityCapacityEnabled;
+    /// <summary>#6875: the warning bar, 1 to 100 percent used. The critical bar below never falls under it.</summary>
+    public int IdentityCapacityWarningPercent => Math.Clamp(_config.Alerts.IdentityCapacityWarningPercent, 1, 100);
+    public int IdentityCapacityCriticalPercent => Math.Clamp(_config.Alerts.IdentityCapacityCriticalPercent, IdentityCapacityWarningPercent, 100);
     /// <summary>#6874: the Agent Alert Gaps alert's switch. Off by default; not on <see cref="IAlertEngineSettings"/> because Lite has no such alert.</summary>
     public bool AgentAlertGapsEnabled => _config.Alerts.AgentAlertGapsEnabled;
     /// <summary>#6873: the three database protection alerts' switches. Off by default; not on <see cref="IAlertEngineSettings"/> because Lite has no such alerts.</summary>

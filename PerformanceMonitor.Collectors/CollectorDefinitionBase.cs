@@ -80,6 +80,9 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
 
     public virtual TimeSpan? PerItemWallClockBudget => null;
 
+    /* Declared here as well as on the interface, the IsDarlingOnly pair and for the same reason. See ICollectorSchemaInfo.PassWallClockBudget. */
+    public virtual TimeSpan? PassWallClockBudget => null;
+
     public virtual CollectorTargetEngine TargetEngine => CollectorTargetEngine.SqlServer;
 
     /// <summary>

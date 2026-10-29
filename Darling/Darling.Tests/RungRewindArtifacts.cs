@@ -561,6 +561,14 @@ ALTER TABLE config.config_alert_settings DROP COLUMN IF EXISTS agent_alert_gaps_
         new(223, "hasDatabaseProtection",
             @"DROP TABLE IF EXISTS collect.database_protection;
 ALTER TABLE config.config_alert_settings DROP COLUMN IF EXISTS backup_overdue_enabled, DROP COLUMN IF EXISTS log_backup_overdue_enabled, DROP COLUMN IF EXISTS checkdb_overdue_enabled;"),
+        // V224 (#6875): the identity capacity table. The table is the probe's newest sentinel. The rewind drops it (its indexes go with it), so a
+        // re-run of V224 does everything again. Safe on a store that never had it.
+        new(224, "hasIdentityCapacity",
+            @"DROP TABLE IF EXISTS collect.identity_capacity;
+ALTER TABLE config.config_alert_settings
+    DROP COLUMN IF EXISTS identity_capacity_enabled,
+    DROP COLUMN IF EXISTS identity_capacity_warning_percent,
+    DROP COLUMN IF EXISTS identity_capacity_critical_percent;"),
     ];
 
     /// <summary>

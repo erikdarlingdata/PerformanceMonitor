@@ -67,6 +67,7 @@ public static partial class CustomViewValidation
         "get_collection_log",
         "get_current_waits_trend",
         "get_client_timeouts",
+        "get_identity_capacity",
         "get_blocking_stats",
         "get_cpu_utilization",
         "get_file_io_stats",

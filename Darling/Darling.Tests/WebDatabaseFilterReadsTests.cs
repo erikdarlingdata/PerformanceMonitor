@@ -239,17 +239,17 @@ public sealed class WebDatabaseFilterReadsTests
     }
 
     /// <summary>The identity reads are the query drill and the seven plan-viewer reads, and no others: the filter is never injected
-    /// into them, so a tenth would silently lose its panel's filter. The database-scoped reads are 36 in all (FILTERED and UNFILTERED
+    /// into them, so a tenth would silently lose its panel's filter. The database-scoped reads are 37 in all (FILTERED and UNFILTERED
     /// together; moving a read from one to the other keeps the total), and FILTERED is a subset of what the plan filters: none of
     /// the three deadlock reads.</summary>
     [Fact]
-    public void TheIdentityReads_AreTheTenRowIdentityReads_AndTheDatabaseScopedReadsAreThirtySix()
+    public void TheIdentityReads_AreTheTenRowIdentityReads_AndTheDatabaseScopedReadsAreThirtySeven()
     {
         var classes = Classes();
         Assert.Equal(
             Sorted(new[] { "get_query_trend", "get_plan_xml", "get_query_store_plan_xml", "get_active_query_plan_xml", "get_procedure_plan_xml", "get_query_store_query_history", "get_plan_force_precheck", "get_blocking_plan_xml", "get_deadlock_plan_xml", "get_query_repro_script" }),
             Sorted(classes["IDENTITY"]));
-        Assert.Equal(36, classes["FILTERED"].Length + classes["UNFILTERED"].Length);
+        Assert.Equal(37, classes["FILTERED"].Length + classes["UNFILTERED"].Length);
         Assert.DoesNotContain(classes["FILTERED"], read => read is "get_deadlock_trend" or "get_deadlocks" or "get_deadlock_detail");
         foreach (var deadlock in new[] { "get_deadlock_trend", "get_deadlocks", "get_deadlock_detail" })
         {
