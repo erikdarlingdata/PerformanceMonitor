@@ -1980,9 +1980,16 @@ ORDER BY server_name";
                feed the sweep arithmetic below: this only changes what the response lists. An AG collector whose band is not
                HEALTHY keeps its real row (L5): a failing collector must keep its Last Error. */
             var alwaysOnOff = await DarlingGatedCollectorRows.AlwaysOnOffAsync(postgres, resolved.ServerId, cancellationToken);
+
+            /* #6912: a collector that does not run on this server's engine reads not_collected whatever it logged before the gate existed.
+               Its older runs would otherwise band it FAILING for the whole seven-day window. Left out of every row list, count and sweep
+               figure below, and listed once as not_collected with the engine's own sentence. */
+            var engineGate = await DarlingGatedCollectorRows.ReadEngineGateAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken);
+            var runningRows = engineGate is null ? rows : engineGate.RowsThatRun(rows);
+
             List<CollectorHealth> shownRows = alwaysOnOff
-                ? DarlingGatedCollectorRows.RowsShownWhenAlwaysOnOff(rows)
-                : rows;
+                ? DarlingGatedCollectorRows.RowsShownWhenAlwaysOnOff(runningRows)
+                : runningRows;
 
             var compactCount = full_detail ? 0 : shownRows.Count(IsCollectionHealthCompactEligible);
             /* #4198's second cut: a row that fails the predicate above used to keep the full ~30-field shape
@@ -2002,7 +2009,9 @@ ORDER BY server_name";
             });
             result = result.Concat(await DarlingGatedCollectorRows.AppendAsync(postgres, resolved.ServerId, resolved.DisplayName, rows, cancellationToken));
             if (alwaysOnOff)
-                result = result.Concat(DarlingGatedCollectorRows.AlwaysOnOffRows(rows));
+                result = result.Concat(DarlingGatedCollectorRows.AlwaysOnOffRows(runningRows));
+            if (engineGate is not null)
+                result = result.Concat(engineGate.NotCollectedRows(rows));
 
             static object FullCollectionHealthRow(CollectorHealth r, CollectorRunTimeReading? runTime) => new
             {
@@ -2190,10 +2199,10 @@ ORDER BY server_name";
                single-run cost is not a cost the body pays: charged to it, index_object_stats read as the
                collector that owns a body it never ran in. One filter feeds both readings, so the roll-up and
                the heaviest list describe the same population. */
-            var pressure = SweepPressureClassifier.Compute(SweepBodyCollectors(rows));
+            var pressure = SweepPressureClassifier.Compute(SweepBodyCollectors(runningRows));
             /* #6384: the ranking and its rounding are SweepPressureReport.HeaviestOf's, the one the viewer's Heaviest
                Collectors panel runs too. Only the run time is joined here. */
-            var heaviest = HeaviestCollectorRows(rows, runTimes);
+            var heaviest = HeaviestCollectorRows(runningRows, runTimes);
 
             /* #2446: the collector that owns the most of ONE sweep, which is a different collector from
                the ones above whenever it is infrequent enough for amortization to hide it. Named on every
@@ -2213,7 +2222,7 @@ ORDER BY server_name";
                 amortized_ms_per_minute = Math.Round(pressure.PeakCollectorAvgDurationMs / pressure.PeakCollectorFrequencyMinutes, 0),
                 pct_of_sweep_budget_per_run = Math.Round(pressure.PeakCollectorPeakRunMs / SweepPressureClassifier.SweepBudgetMs * 100.0, 1)
             };
-            var peakCycleNote = WithP95Basis(SweepPressureClassifier.FormatPeakCycleNote(pressure), rows);
+            var peakCycleNote = WithP95Basis(SweepPressureClassifier.FormatPeakCycleNote(pressure), runningRows);
 
             /* #3013: the alerting layer's own store reads, which appear on no other health surface. A
                condition check that cannot read the store logs one line and skips — correctly, since firing

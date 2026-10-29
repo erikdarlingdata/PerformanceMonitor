@@ -297,7 +297,7 @@ public sealed class RegressedFromProductiveTests
            class, one count - so the anchor moved with it. The member is still a PREDICATE and not a band,
            which is what this pin is about. */
         Assert.Contains(
-            "existing.Regressed + (health.AnyRegression ? 1 : 0)",
+            "existing.Regressed + (health.AnyRegression && !engineGated ? 1 : 0)",
             reader,
             StringComparison.Ordinal);
         Assert.DoesNotContain("status == \"REGRESSED\"", reader, StringComparison.Ordinal);

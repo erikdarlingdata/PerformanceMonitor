@@ -671,12 +671,14 @@ WHERE id = 1";
         var tally = new CollectorHealthClassifier.BandTally();
         foreach (var row in rows)
         {
-            tally = tally.Add(row.CollectorName, row.HealthStatus, row.ServerAlwaysOnOff);
+            tally = tally.Add(row.CollectorName, row.HealthStatus, row.ServerAlwaysOnOff, row.EngineGated);
         }
 
+        /* #6912: a deadlocks collector the engine does not run keeps its old rows' band, so it reads as no band, as the service's fleet card
+           reads it (DarlingFleetReader.AddCollector). */
         var deadlockBand = rows
             .FirstOrDefault(r => string.Equals(r.CollectorName, DeadlocksCollector.Instance.Name, StringComparison.Ordinal))
-            ?.HealthStatus;
+            is { EngineGated: false } deadlockRow ? deadlockRow.HealthStatus : null;
         var pgDeadlockBand = rows
             .FirstOrDefault(r => string.Equals(r.CollectorName, PgDatabaseStatsCollector.Instance.Name, StringComparison.Ordinal))
             ?.HealthStatus;

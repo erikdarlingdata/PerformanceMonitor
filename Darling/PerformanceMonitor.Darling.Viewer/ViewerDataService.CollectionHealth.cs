@@ -514,7 +514,11 @@ public sealed partial class ViewerDataService
     /// shipped default, as <see cref="ApplyScheduledFrequencies"/> resolves it), to <see cref="SweepPressureReport"/>, the arithmetic the web's
     /// tool uses. A failure to read the schedule overrides costs the panels nothing but the overrides (the shipped cadences are used).
     /// </summary>
-    public async Task<SweepPressureReport?> GetSweepPressureAsync(int serverId, CancellationToken cancellationToken = default)
+    /// <param name="engineGated">#6912: the collectors this server's engine does not run (<see cref="FleetEngineGatedCollectors.For"/>). Their
+    /// pre-gate runs are left out of both panels, as <c>get_collection_health</c> computes its figures from the running rows only, so the
+    /// panel and the tool name the same peak collector for the same server. Null leaves every row in.</param>
+    public async Task<SweepPressureReport?> GetSweepPressureAsync(
+        int serverId, CancellationToken cancellationToken = default, IReadOnlySet<string>? engineGated = null)
     {
         var scheduleOverrides = await ReadScheduleOverridesForHealthAsync(cancellationToken);
         var costs = new List<(CollectorHealthRow Row, double Avg, double P95, double Max)>();
@@ -545,12 +549,27 @@ public sealed partial class ViewerDataService
             return null;
         }
 
+        return BuildSweepPressure(costs, serverId, scheduleOverrides, engineGated);
+    }
+
+    /// <summary>
+    /// The pure half of <see cref="GetSweepPressureAsync"/>: stamps each collector's cadence, leaves the <paramref name="engineGated"/> collectors
+    /// out (#6912) and builds the report from the rest. Pure, so a test drives it without a store.
+    /// </summary>
+    internal static SweepPressureReport BuildSweepPressure(
+        List<(CollectorHealthRow Row, double Avg, double P95, double Max)> costs, int serverId,
+        IReadOnlyList<CollectorScheduleRow> scheduleOverrides, IReadOnlySet<string>? engineGated)
+    {
+        var running = engineGated is null || engineGated.Count == 0
+            ? costs
+            : costs.Where(c => !engineGated.Contains(c.Row.CollectorName)).ToList();
+
         /* A name the catalog does not know is left unstamped (frequency 0), which the ranking and the roll-up both skip: the service's rule. */
         ApplyScheduledFrequencies(
-            costs.Select(c => c.Row).Where(r => CollectorScheduleDefaults.All.ContainsKey(r.CollectorName)), serverId, scheduleOverrides);
+            running.Select(c => c.Row).Where(r => CollectorScheduleDefaults.All.ContainsKey(r.CollectorName)), serverId, scheduleOverrides);
 
         /* The statement's p95 is always the upper bound of a duration bucket (P95Bucketed), as the service's reader marks it. */
-        return SweepPressureReport.Build(costs.Select(c =>
+        return SweepPressureReport.Build(running.Select(c =>
             new SweepCollectorCost(c.Row.CollectorName, c.Avg, c.P95, P95Bucketed: true, c.Max, c.Row.FrequencyMinutes)));
     }
 
@@ -753,6 +772,9 @@ LIMIT 1";
            rows of a server in it stamp the Always On collectors as not collected, as get_collection_health lists them, so the card and the
            status bar do not count them as healthy. */
         var alwaysOnOffServers = await FleetAlwaysOnOff.ReadAsync(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, CancellationToken.None);
+        /* #6912: the collectors each server's engine does not run, read at the same point for the same reason. Their older logged runs
+           stay in the window, so the rows are stamped as not collected and the card and the status bar do not count them as failing. */
+        var engineGatedServers = await FleetEngineGatedCollectors.ReadAsync(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, CancellationToken.None);
         var now = DateTime.UtcNow;
         var windowStart = DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified);
         var headEnd = CollectionHealthRollupSupport.CeilingHour(windowStart);
@@ -792,6 +814,7 @@ LIMIT 1";
 
                 var row = MapFleetByServerRow(reader);
                 row.ServerAlwaysOnOff = alwaysOnOffServers.Contains(serverId);
+                row.EngineGated = engineGatedServers.TryGetValue(serverId, out var gatedNames) && gatedNames.Contains(row.CollectorName);
                 rows.Add(row);
             }
         }
@@ -1291,7 +1314,21 @@ public class CollectorHealthRow
     internal bool ServerAlwaysOnOff { get; set; }
 
     /// <summary>#6828: an Always On collector, HEALTHY, on a server with Always On off, which <c>get_collection_health</c> lists as not_collected.</summary>
-    internal bool NotCollected => CollectorHealthClassifier.IsNotCollectedWhenAlwaysOnOff(CollectorName, HealthStatus, ServerAlwaysOnOff);
+    internal bool NotCollected => EngineGated || CollectorHealthClassifier.IsNotCollectedWhenAlwaysOnOff(CollectorName, HealthStatus, ServerAlwaysOnOff);
+
+    /// <summary>#6912: this collector does not run on the server's engine, so whatever it logged before the gate existed reads as not collected. Stamped by the fleet read.</summary>
+    internal bool EngineGated { get; set; }
+
+    /// <summary>#6912: the engine's own sentence for a gated collector (<see cref="CollectorEngineCapability.NotCollectedMessage"/>, the one
+    /// <c>get_collection_health</c> lists beside <c>not_collected</c>), shown in the Note column. Null for a collector the engine runs.</summary>
+    internal string? EngineNotCollectedMessage { get; set; }
+
+    /// <summary>#6912: the word the Status column shows. A collector the server's engine does not run reads <c>not_collected</c>, as
+    /// <c>get_collection_health</c> lists it, whatever band the runs it logged before the gate existed left it. Every other row shows its band.</summary>
+    public string DisplayStatus => EngineGated ? EngineNotCollectedStatus : HealthStatus;
+
+    /// <summary>The status word <c>get_collection_health</c> uses for a collector the engine does not run.</summary>
+    internal const string EngineNotCollectedStatus = CollectorRuntimePrecondition.NotCollectedStatusWord;
 
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
@@ -1434,7 +1471,7 @@ public class CollectorHealthRow
     /// identically. Never feeds <see cref="HealthStatus"/>.
     /// </summary>
     public string NoteFormatted =>
-        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases, RecoveredNote, ReadSource);
+        EngineGated && EngineNotCollectedMessage is not null ? EngineNotCollectedMessage : CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases, RecoveredNote, ReadSource);
 
     /// <summary>#6254: where the newest Query Store run read its rows from (for example <c>replica 12, primary 2</c>), shown in the Note column.
     /// Null for every collector but Query Store and for every server with the replica setting off. Informational only: it never feeds <see cref="HealthStatus"/>.</summary>

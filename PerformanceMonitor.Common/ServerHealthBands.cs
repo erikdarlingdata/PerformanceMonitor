@@ -2247,13 +2247,15 @@ namespace PerformanceMonitor.Common
         public readonly record struct BandTally(int Healthy, int Warning, int Failing, int NotCollected, int Total)
         {
             /// <summary>This tally plus one collector row, banded by the caller through the shared ladder.</summary>
-            public BandTally Add(string? collectorName, string band, bool alwaysOnOff)
+            /// <param name="engineGated">#6912: the collector does not run on this server's engine. Whatever band the logged runs left it, it is
+            /// not collected and counts as neither healthy, warning nor failing.</param>
+            public BandTally Add(string? collectorName, string band, bool alwaysOnOff, bool engineGated)
             {
-                var notCollected = IsNotCollectedWhenAlwaysOnOff(collectorName, band, alwaysOnOff);
+                var notCollected = engineGated || IsNotCollectedWhenAlwaysOnOff(collectorName, band, alwaysOnOff);
                 return new BandTally(
                     Healthy + (!notCollected && string.Equals(band, CollectorHealthClassifier.Healthy, StringComparison.Ordinal) ? 1 : 0),
-                    Warning + (string.Equals(band, CollectorHealthClassifier.Warning, StringComparison.Ordinal) ? 1 : 0),
-                    Failing + (string.Equals(band, CollectorHealthClassifier.Failing, StringComparison.Ordinal) ? 1 : 0),
+                    Warning + (!notCollected && string.Equals(band, CollectorHealthClassifier.Warning, StringComparison.Ordinal) ? 1 : 0),
+                    Failing + (!notCollected && string.Equals(band, CollectorHealthClassifier.Failing, StringComparison.Ordinal) ? 1 : 0),
                     NotCollected + (notCollected ? 1 : 0),
                     Total + 1);
             }

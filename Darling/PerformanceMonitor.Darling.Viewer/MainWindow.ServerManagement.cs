@@ -394,7 +394,7 @@ public partial class MainWindow
             return;
         }
 
-        var failing = health.Where(h => h.HealthStatus == "FAILING").ToList();
+        var failing = health.Where(h => h.HealthStatus == "FAILING" && !h.EngineGated).ToList();
         if (failing.Count > 0)
         {
             CollectorHealthText.Text = $"Collectors: {failing.Count} erroring";
@@ -410,7 +410,7 @@ public partial class MainWindow
             var tally = new CollectorHealthClassifier.BandTally();
             foreach (var h in health)
             {
-                tally = tally.Add(h.CollectorName, h.HealthStatus, h.ServerAlwaysOnOff);
+                tally = tally.Add(h.CollectorName, h.HealthStatus, h.ServerAlwaysOnOff, h.EngineGated);
             }
 
             CollectorHealthText.Text = $"Collectors: {tally.Healthy} OK"

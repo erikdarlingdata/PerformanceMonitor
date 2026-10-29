@@ -742,7 +742,7 @@ public sealed class DarlingSelfAlertTests
         var h = new Harness();
         var e = h.Build();
 
-        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct);
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Array.Empty<string>(), Ct);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Capture Down", fired.MetricName);
         Assert.Equal("Blocking and Deadlock", fired.CurrentValue);
@@ -751,11 +751,11 @@ public sealed class DarlingSelfAlertTests
 
         /* Still down a minute later: a state alert (#5493) sends once per occurrence, no re-fire. */
         h.Now = h.Now.AddMinutes(1);
-        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct);
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Array.Empty<string>(), Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
         /* Sessions back — one "Capture Restored" audit row. */
-        await e.ApplyCaptureDownAsync(ServerId, Name, Array.Empty<string>(), Ct);
+        await e.ApplyCaptureDownAsync(ServerId, Name, Array.Empty<string>(), Array.Empty<string>(), Ct);
         var restored = Assert.Single(h.History.Records);
         Assert.Equal("Capture Restored", restored.MetricName);
     }
@@ -768,7 +768,7 @@ public sealed class DarlingSelfAlertTests
         h.Settings.DeadlockEnabled = false;
         var e = h.Build();
 
-        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking" }, Ct);
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking" }, Array.Empty<string>(), Ct);
         Assert.Empty(h.Deliverer.Outcomes);
     }
 
@@ -778,7 +778,7 @@ public sealed class DarlingSelfAlertTests
         var h = new Harness();
         var e = h.Build();
 
-        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking" }, Ct);
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking" }, Array.Empty<string>(), Ct);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Contains("The Blocking Extended Events session is missing", fired.DetailText, StringComparison.Ordinal);
@@ -786,10 +786,129 @@ public sealed class DarlingSelfAlertTests
 
         /* Two sessions: the short message agrees the way the detail does (#6703's round-1 review). */
         var h2 = new Harness();
-        await h2.Build().ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct);
+        await h2.Build().ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Array.Empty<string>(), Ct);
         var both = Assert.Single(h2.Deliverer.Outcomes);
         Assert.Contains("Extended Events sessions are missing", both.DetailText, StringComparison.Ordinal);
         Assert.EndsWith("capture is not running \u2014 XE sessions missing", both.ShortMessage, StringComparison.Ordinal);
+    }
+
+    /* ---------------- capture-down on a server whose engine does not run the collector (#6912) ---------------- */
+
+    private static readonly (int EngineEdition, string? EngineKind, PerformanceMonitor.Collectors.AwsRdsKind AwsRdsKind) PlainSqlServer =
+        (2, null, PerformanceMonitor.Collectors.AwsRdsKind.None);
+
+    private static readonly (int EngineEdition, string? EngineKind, PerformanceMonitor.Collectors.AwsRdsKind AwsRdsKind) RdsWebOrExpress =
+        (2, null, PerformanceMonitor.Collectors.AwsRdsKind.RdsWebOrExpress);
+
+    /* The pass the worker runs, with the store read replaced by what collection_log said and the registry read by the server's engine facts. */
+    private static async Task CaptureDownPassAsync(
+        DarlingSelfAlertEvaluator e, string[] missing,
+        (int EngineEdition, string? EngineKind, PerformanceMonitor.Collectors.AwsRdsKind AwsRdsKind) engine)
+    {
+        e.CaptureDownReadOverride = (_, _, _) => Task.FromResult<IReadOnlyList<string>>(missing);
+        e.CaptureDownEngineReadOverride = (_, _, _) => Task.FromResult(engine);
+        await e.EvaluateStoreAlertsAsync(null!, ServerId, Name, connected: true, Ct);
+    }
+
+    [Fact]
+    public async Task CaptureDown_ClientTimeoutsMissingOnRdsWebOrExpress_FiresNothing()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* The attention collector stopped on this edition, so its last SESSION_MISSING row stays the newest forever. */
+        await CaptureDownPassAsync(e, new[] { "Client timeouts" }, RdsWebOrExpress);
+
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Capture Down");
+    }
+
+    [Fact]
+    public async Task CaptureDown_EngineFactsReadFails_MakesNoClaim_AndCaptureDownStillFires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* #6912: a faulting registry read (a store statement_timeout is not retried) must not silence the alert for the pass.
+           No engine claim means nothing is dropped, so the pre-gate answer stands. */
+        e.CaptureDownReadOverride = (_, _, _) => Task.FromResult<IReadOnlyList<string>>(new[] { "Client timeouts" });
+        e.CaptureDownEngineReadOverride = (_, _, _) => throw new InvalidOperationException("the servers read faulted");
+        await e.EvaluateStoreAlertsAsync(null!, ServerId, Name, connected: true, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Capture Down");
+        Assert.Contains("Client timeouts", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CaptureDown_ActiveAlertOnAServerWhoseEngineDoesNotRunTheCapture_ResolvesSayingSo()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Fired before the service learned this server was an RDS Web or Express instance. */
+        await CaptureDownPassAsync(e, new[] { "Client timeouts" }, PlainSqlServer);
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Capture Down");
+
+        await CaptureDownPassAsync(e, new[] { "Client timeouts" }, RdsWebOrExpress);
+
+        var cleared = Assert.Single(h.History.Records);
+        Assert.Equal("Capture Cleared", cleared.MetricName);
+        Assert.Contains("Client timeouts capture does not run on this server's engine", cleared.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("running again", cleared.DetailText, StringComparison.Ordinal);
+        Assert.True(PerformanceMonitor.Common.AlertMetricClassifier.IsResolution(cleared.MetricName));
+    }
+
+    [Fact]
+    public async Task CaptureDown_ClientTimeoutsMissingOnPlainSqlServer_StillFires_AndSaysNothingAboutBlockingOrDeadlocks()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await CaptureDownPassAsync(e, new[] { "Client timeouts" }, PlainSqlServer);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Capture Down");
+        Assert.Equal("Client timeouts", fired.CurrentValue);
+        Assert.Contains("client timeouts and cancels capture", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("locking", fired.DetailText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("deadlock", fired.DetailText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ALTER ANY EVENT SESSION", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CaptureDown_BlockingAndDeadlockMissing_DetailNamesBothAlertKinds()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await CaptureDownPassAsync(e, new[] { "Blocking", "Deadlock" }, PlainSqlServer);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Capture Down");
+        Assert.Contains("blocking alerts can never fire", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("deadlock alerts can never fire", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("client timeouts", fired.DetailText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CaptureDown_RealRecovery_NamesTheCaptureThatCameBack_AndTheEngineIsNotReadForAnEmptyAnswer()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        await CaptureDownPassAsync(e, new[] { "Client timeouts" }, PlainSqlServer);
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Capture Down");
+
+        var engineReads = 0;
+        e.CaptureDownReadOverride = (_, _, _) => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
+        e.CaptureDownEngineReadOverride = (_, _, _) =>
+        {
+            engineReads++;
+            return Task.FromResult(PlainSqlServer);
+        };
+        await e.EvaluateStoreAlertsAsync(null!, ServerId, Name, connected: true, Ct);
+
+        var restored = Assert.Single(h.History.Records);
+        Assert.Equal("Capture Restored", restored.MetricName);
+        Assert.Contains("Client timeouts capture is running again", restored.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Blocking/deadlock", restored.DetailText, StringComparison.Ordinal);
+        Assert.Equal(0, engineReads);
     }
 
     /* ---------------- agent-not-running edge (#1433 Phase 2) ---------------- */
@@ -5419,13 +5538,13 @@ public sealed class DarlingSelfAlertTests
 
         var generation = e.GenerationOf(ServerId);
         e.Forget(ServerId);
-        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct, sweepGeneration: generation);
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Array.Empty<string>(), Ct, sweepGeneration: generation);
         Assert.Empty(h.Deliverer.Outcomes);
 
-        await e.ApplyCaptureDownAsync(ServerId, Name, Array.Empty<string>(), Ct);
+        await e.ApplyCaptureDownAsync(ServerId, Name, Array.Empty<string>(), Array.Empty<string>(), Ct);
         Assert.Empty(h.History.Records);
 
-        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct);
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Array.Empty<string>(), Ct);
         Assert.Equal("Capture Down", Assert.Single(h.Deliverer.Outcomes).MetricName);
     }
 
@@ -5462,11 +5581,11 @@ public sealed class DarlingSelfAlertTests
         foreach (var (serverId, sweepGeneration) in new (int, int?)[] { (ServerId, generation), (ServerId + 2, null) })
         {
             await e.ApplyCollectionStoppedAsync(serverId, Name, stopped: true, "no recent collection", Ct, sweepGeneration: sweepGeneration);
-            await e.ApplyCaptureDownAsync(serverId, Name, new[] { "Blocking" }, Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyCaptureDownAsync(serverId, Name, new[] { "Blocking" }, Array.Empty<string>(), Ct, sweepGeneration: sweepGeneration);
             await e.ApplyAgentNotRunningAsync(serverId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct, sweepGeneration: sweepGeneration);
 
             await e.ApplyCollectionStoppedAsync(serverId, Name, stopped: false, "", Ct, sweepGeneration: sweepGeneration);
-            await e.ApplyCaptureDownAsync(serverId, Name, Array.Empty<string>(), Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyCaptureDownAsync(serverId, Name, Array.Empty<string>(), Array.Empty<string>(), Ct, sweepGeneration: sweepGeneration);
             await e.ApplyAgentNotRunningAsync(serverId, Name, agentRunningFresh: true, agentEverSeenRunning: true, Ct, sweepGeneration: sweepGeneration);
         }
 
@@ -5496,7 +5615,7 @@ public sealed class DarlingSelfAlertTests
             "await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken, sweepGeneration: generation);",
             sweep, StringComparison.Ordinal);
         Assert.Contains(
-            "await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken, sweepGeneration: generation);",
+            "await ApplyCaptureDownAsync(serverId, serverName, missing, notRunOnEngine, cancellationToken, sweepGeneration: generation);",
             sweep, StringComparison.Ordinal);
         Assert.Contains(
             "await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, everRan, cancellationToken, sweepGeneration: generation);",

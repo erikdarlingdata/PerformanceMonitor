@@ -2228,6 +2228,9 @@ AND   {SqlServerCollectedTargetSql}";
         /* #6828: the servers that report Always On off, read once here for the same one-connection reason. get_collection_health lists
            a HEALTHY Always On collector there as not_collected, so the tally counts it there too and not as healthy. */
         var alwaysOnOffServers = await FleetAlwaysOnOff.ReadAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        /* #6912: the collectors each server's engine does not run. Their older logged runs stay in the window, so they count as not
+           collected here, as get_collection_health lists them. */
+        var engineGatedServers = await FleetEngineGatedCollectors.ReadAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken);
         /* #3893 arm 2, #4477: the composed read (hourly aggregate + raw head slice + any hole hours read raw
            alongside it) when the guard passes, else the raw scan. Same fourteen ordinals either way, so
            everything below is shared. */
@@ -2272,45 +2275,62 @@ AND   {SqlServerCollectedTargetSql}";
         foreach (var (serverId, health) in rows)
         {
             counts.TryGetValue(serverId, out var existing);
-            var status = health.HealthStatus;
-            /* #6828: one tally for every count surface (CollectorHealthClassifier.BandTally). A WARNING collector is not healthy, and a
-               HEALTHY Always On collector on a server with Always On off is not collected. */
-            var tally = new CollectorHealthClassifier.BandTally(existing.Healthy, existing.Warning, existing.Failing, existing.NotCollected, existing.Total)
-                .Add(health.CollectorName, status, alwaysOnOffServers.Contains(serverId));
-            counts[serverId] = new CollectorCounts(
-                tally.Healthy,
-                tally.Failing,
-                /* #3539 A8d: every banded row, whatever its band — the share's denominator. */
-                tally.Total,
-                /* #3819: counted off the PREDICATE rather than off the band, and the two are not the same
-                   population. The band floor only moves a row that would have read HEALTHY; a collector
-                   whose success clock has already run out reads FAILING and is regressed as well. Keyed
-                   on the band, this count would go quiet exactly when the regression got worse.
-
-                   #3885: the SAME count, now over both regression classes -- stopped SKIPPING and stopped
-                   PRODUCING -- through the row's one AnyRegression member. One number, because an install
-                   countersign reads it as "collectors that stopped doing what they used to do" and a second
-                   parallel count would have to be learned, added, and never confused with the first. The
-                   two predicates are disjoint by construction (one needs the newest run to be a skip, the
-                   other needs it to be a success), so nothing is double-counted. */
-                existing.Regressed + (health.AnyRegression ? 1 : 0),
-                /* #3017: the ONE collector per engine whose band the deadlock total's coverage turns on,
-                   kept alongside the Healthy/Failing tallies because it comes out of the same aggregate —
-                   no extra round trip, which is what keeps this reader's fan-out bounded. Named from the
-                   collector rather than as a literal so a rename cannot leave this silently matching
-                   nothing and reporting every server uncovered. Both engines' bands are kept on every
-                   server because this aggregate does not know the engine; BuildCard picks. */
-                string.Equals(health.CollectorName, DeadlocksCollector.Instance.Name, StringComparison.Ordinal)
-                    ? status
-                    : existing.DeadlockBand,
-                string.Equals(health.CollectorName, PgDatabaseStatsCollector.Instance.Name, StringComparison.Ordinal)
-                    ? status
-                    : existing.PgDeadlockBand,
-                tally.Warning,
-                tally.NotCollected);
+            var engineGated = engineGatedServers.TryGetValue(serverId, out var gatedNames) && gatedNames.Contains(health.CollectorName);
+            counts[serverId] = AddCollector(existing, health, alwaysOnOffServers.Contains(serverId), engineGated);
         }
 
         return counts;
+    }
+
+    /// <summary>
+    /// One collector row added to a server's running counts: the band tally, the regression count and the two deadlock-source bands. The
+    /// pure step of <see cref="ReadFailingCollectorCountsAsync"/>, so a test drives it without a store.
+    /// </summary>
+    /// <param name="existing">The server's counts so far (<c>default</c> for its first row).</param>
+    /// <param name="health">The collector's 7-day aggregate.</param>
+    /// <param name="alwaysOnOff">The server reports Always On off (#6828).</param>
+    /// <param name="engineGated">#6912: the collector does not run on the server's engine.</param>
+    internal static CollectorCounts AddCollector(CollectorCounts existing, CollectorHealth health, bool alwaysOnOff, bool engineGated)
+    {
+        var status = health.HealthStatus;
+        /* #6828: one tally for every count surface (CollectorHealthClassifier.BandTally). A WARNING collector is not healthy, and a
+           HEALTHY Always On collector on a server with Always On off is not collected. */
+        var tally = new CollectorHealthClassifier.BandTally(existing.Healthy, existing.Warning, existing.Failing, existing.NotCollected, existing.Total)
+            .Add(health.CollectorName, status, alwaysOnOff, engineGated);
+        return new CollectorCounts(
+            tally.Healthy,
+            tally.Failing,
+            /* #3539 A8d: every banded row, whatever its band — the share's denominator. */
+            tally.Total,
+            /* #3819: counted off the PREDICATE rather than off the band, and the two are not the same
+               population. The band floor only moves a row that would have read HEALTHY; a collector
+               whose success clock has already run out reads FAILING and is regressed as well. Keyed
+               on the band, this count would go quiet exactly when the regression got worse.
+
+               #3885: the SAME count, now over both regression classes -- stopped SKIPPING and stopped
+               PRODUCING -- through the row's one AnyRegression member. One number, because an install
+               countersign reads it as "collectors that stopped doing what they used to do" and a second
+               parallel count would have to be learned, added, and never confused with the first. The
+               two predicates are disjoint by construction (one needs the newest run to be a skip, the
+               other needs it to be a success), so nothing is double-counted. */
+            existing.Regressed + (health.AnyRegression && !engineGated ? 1 : 0),
+            /* #3017: the ONE collector per engine whose band the deadlock total's coverage turns on,
+               kept alongside the Healthy/Failing tallies because it comes out of the same aggregate —
+               no extra round trip, which is what keeps this reader's fan-out bounded. Named from the
+               collector rather than as a literal so a rename cannot leave this silently matching
+               nothing and reporting every server uncovered. Both engines' bands are kept on every
+               server because this aggregate does not know the engine; BuildCard picks. */
+            /* #6912: a deadlocks collector the engine does not run left its old rows in the window, and their stale band would read as a deadlock
+               capture the card could trust. Gated, it reads as a target with no deadlock capture: no band, the same null a server with no
+               row in the window has, which the card classifies as a silent collector rather than a read one. */
+            string.Equals(health.CollectorName, DeadlocksCollector.Instance.Name, StringComparison.Ordinal)
+                ? (engineGated ? null : status)
+                : existing.DeadlockBand,
+            string.Equals(health.CollectorName, PgDatabaseStatsCollector.Instance.Name, StringComparison.Ordinal)
+                ? status
+                : existing.PgDeadlockBand,
+            tally.Warning,
+            tally.NotCollected);
     }
 
     /// <summary>

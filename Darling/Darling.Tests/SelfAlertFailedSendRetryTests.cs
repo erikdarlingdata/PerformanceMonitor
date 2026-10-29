@@ -143,7 +143,7 @@ public sealed class SelfAlertFailedSendRetryTests
         public Task SweepAsync(Arm arm, DateTime costDataPoint) => arm switch
         {
             Arm.CollectionStopped => Evaluator.ApplyCollectionStoppedAsync(ServerId, Name, stopped: true, "no recent collection", Ct),
-            Arm.CaptureDown => Evaluator.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking" }, Ct),
+            Arm.CaptureDown => Evaluator.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking" }, Array.Empty<string>(), Ct),
             Arm.AgentDown => Evaluator.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct),
             Arm.CostRegression => Evaluator.ApplyCostRegressionsAsync(new[] { Regression(costDataPoint) }, Ct),
             _ => throw new ArgumentOutOfRangeException(nameof(arm)),
