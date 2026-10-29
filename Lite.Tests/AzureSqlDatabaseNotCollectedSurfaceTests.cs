@@ -63,6 +63,9 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
     private const string JobsReason =
         "Fleet-wide Job History tab; an Azure SQL Database server has no SQL Server Agent, so it has no rows and no filter entry.";
 
+    private const string DarlingOnlyAgentAlertsReason =
+        "Darling-only collector (IsDarlingOnly): Lite never reads the SQL Agent alert definitions on any engine, so it has no surface that could say so.";
+
     private const string AvailabilityGroupsReason =
         "Fleet-wide Availability Groups tab, hidden until rows exist; its empty state already says these collectors do not run on Azure SQL Database.";
 
@@ -82,6 +85,7 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
         ["default_trace_events"] = Entry.Shown(new Surface(SystemEventsFile, ServerTabXaml, "DefaultTraceNoDataMessage", Via: "DefaultTraceGapNote")),
         ["job_history"] = Entry.Because(JobsReason),
         ["agent_status"] = Entry.Because(JobsReason),
+        ["agent_alerts"] = Entry.Because(DarlingOnlyAgentAlertsReason),
         ["ag_replica_states"] = Entry.Because(AvailabilityGroupsReason),
         ["ag_database_replica_states"] = Entry.Because(AvailabilityGroupsReason),
     };

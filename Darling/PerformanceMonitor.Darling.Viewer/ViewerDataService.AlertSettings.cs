@@ -93,7 +93,9 @@ public sealed partial class ViewerDataService
            the same reason and under the same connect-time store gate. */
         "excluded_volumes, " +
         /* #5736 (V211): the relative Client Timeouts bars' two multiples, APPENDED for the same reason and under the same gate. */
-        "client_timeouts_warning_multiple, client_timeouts_critical_multiple";
+        "client_timeouts_warning_multiple, client_timeouts_critical_multiple, " +
+        /* #6874 (V222): the Agent Alert Gaps alert's switch (off by default), APPENDED for the same reason and under the same gate. */
+        "agent_alert_gaps_enabled";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -110,7 +112,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79,
+        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -192,6 +194,7 @@ ON CONFLICT (id) DO UPDATE SET
     excluded_volumes = EXCLUDED.excluded_volumes,
     client_timeouts_warning_multiple = EXCLUDED.client_timeouts_warning_multiple,
     client_timeouts_critical_multiple = EXCLUDED.client_timeouts_critical_multiple,
+    agent_alert_gaps_enabled = EXCLUDED.agent_alert_gaps_enabled,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -322,6 +325,7 @@ ON CONFLICT (id) DO UPDATE SET
         var (ctWarningMultiple, ctCriticalMultiple) = AttentionBaselineMath.ClampMultiples(r.ClientTimeoutsWarningMultiple, r.ClientTimeoutsCriticalMultiple);
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ctWarningMultiple });                // $78 (#5736, V211)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ctCriticalMultiple });               // $79 (#5736, V211)
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.AgentAlertGapsEnabled });          // $80 (#6874, V222)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -425,6 +429,8 @@ ON CONFLICT (id) DO UPDATE SET
         /* #5736 (V211) the relative bars' multiples appended at ordinals 77-78. */
         ClientTimeoutsWarningMultiple = reader.GetInt32(77),
         ClientTimeoutsCriticalMultiple = reader.GetInt32(78),
+        /* #6874 (V222) the Agent Alert Gaps switch appended at ordinal 79. */
+        AgentAlertGapsEnabled = reader.GetBoolean(79),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -568,6 +574,8 @@ public sealed class AlertSettingsRow
     public int ClientTimeoutsWarningMultiple { get; set; } = AttentionBaselineMath.DefaultWarningMultiple;
     /// <summary>#5736 (V211): the Critical bar is at least this many times the baseline. Default 10; never below the Warning multiple.</summary>
     public int ClientTimeoutsCriticalMultiple { get; set; } = AttentionBaselineMath.DefaultCriticalMultiple;
+    /// <summary>#6874 (V222): judge the SQL Server Agent alert setup and alert on a gap. Off by default: a new alert must not start firing on upgrade.</summary>
+    public bool AgentAlertGapsEnabled { get; set; }
     public bool LongRunningQueryEnabled { get; set; } = true;
     public int LongRunningQueryThresholdMinutes { get; set; } = 30;
     public bool TempDbSpaceEnabled { get; set; } = true;
@@ -696,6 +704,7 @@ public sealed class AlertSettingsRow
             && ClientTimeoutsCriticalPerMinute == other.ClientTimeoutsCriticalPerMinute
             && ClientTimeoutsWarningMultiple == other.ClientTimeoutsWarningMultiple
             && ClientTimeoutsCriticalMultiple == other.ClientTimeoutsCriticalMultiple
+            && AgentAlertGapsEnabled == other.AgentAlertGapsEnabled
             && LongRunningQueryEnabled == other.LongRunningQueryEnabled
             && LongRunningQueryThresholdMinutes == other.LongRunningQueryThresholdMinutes
             && TempDbSpaceEnabled == other.TempDbSpaceEnabled

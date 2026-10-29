@@ -128,13 +128,14 @@ public sealed class AgentLevel2ToolPolicyTests
         Assert.True(DarlingMcpAgentActions.IsProtectedMetric(metric));
 
     [Fact]
-    public void EverySelfAlertMetricConstant_IsProtected_ExceptTheNineAnAgentMayMute()
+    public void EverySelfAlertMetricConstant_IsProtected_ExceptTheTenAnAgentMayMute()
     {
         var unprotected = new[]
         {
             DarlingSelfAlertEvaluator.AgFailoverMetric, DarlingSelfAlertEvaluator.AgReplicaDisconnectedMetric,
             DarlingSelfAlertEvaluator.AgReplicaReconnectedMetric, DarlingSelfAlertEvaluator.AgSyncFellBehindMetric,
             DarlingSelfAlertEvaluator.AgDatabaseSuspendedMetric, DarlingSelfAlertEvaluator.AgentDownMetric,
+            DarlingSelfAlertEvaluator.AgentAlertSetupMetric,
             DarlingSelfAlertEvaluator.CollectorCostDigestMetric, DarlingSelfAlertEvaluator.FleetSweepRollupMetric,
             DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric,
         };

@@ -578,6 +578,7 @@ LIMIT 1";
             DeadlockCollectorBand = deadlockBand,
             PgDeadlockCollectorBand = pgDeadlockBand,
             LastCollectionTime = lastCollection,
+            AgentAlertGaps = await GetAgentAlertGapsAsync(serverId, nowUtc, cancellationToken),
         };
     }
 
@@ -1115,6 +1116,23 @@ public sealed class ServerSummaryItem
         : FailedCollectorCount > 0 ? $"{FailedCollectorCount} failed"
         : CollectorCount > 0 ? "OK"
         : "--";
+
+    /// <summary>The gaps in this server's SQL Server Agent alert setup (#6874), from the newest fresh capture: the same gaps the web fleet
+    /// card's "Agent alerts" chip counts. Empty when the setup is complete, the capture is not fresh, or the server never captures. It is
+    /// shown as its own row and never changes the card's band.</summary>
+    public System.Collections.Generic.IReadOnlyList<AgentAlertGap> AgentAlertGaps { get; set; } = System.Array.Empty<AgentAlertGap>();
+
+    /// <summary>True when the Agent alerts row shows (there is at least one gap).</summary>
+    public bool HasAgentAlertGaps => AgentAlertGaps.Count > 0;
+
+    /// <summary>Agent alerts value, "1 gap" or "N gaps" (the web chip's words).</summary>
+    public string AgentAlertsDisplay => AgentAlertGaps.Count == 1 ? "1 gap" : $"{AgentAlertGaps.Count} gaps";
+
+    /// <summary>Agent alerts detail, the gaps' sentences in order.</summary>
+    public string AgentAlertsDetail => string.Join(" ", AgentAlertGaps.Select(g => g.Message));
+
+    /// <summary>The row's dot and value brush: the card's warning amber.</summary>
+    public SolidColorBrush AgentAlertsBrush => s_warningBrush;
 
     /// <summary>Collectors detail — "No recent collection" when offline, else "Healthy: N, Failing: M" (Dashboard's CollectorDetailText).</summary>
     public string CollectorDetail =>

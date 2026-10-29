@@ -126,6 +126,8 @@ public static class MonitoringGrantScript
         new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.sysjobhistory", false, "Optional: SQL Agent job monitoring."),
         new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.sysjobschedules", false, "Optional: SQL Agent job monitoring."),
         new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.syscategories", false, "Optional: SQL Agent job monitoring."),
+        new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.sysalerts", false, "Optional: SQL Server Agent alert definitions and counters (not read on Azure SQL Managed Instance or Amazon RDS)."),
+        new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.sysnotifications", false, "Optional: the operators each Agent alert notifies."),
         new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.syssessions", false, "Optional: SQL Agent job monitoring."),
         new(GrantSet.Base, GrantScope.Msdb, "EXECUTE", "dbo.agent_datetime", false, "Optional: SQL Agent job monitoring."),
         new(GrantSet.FinOps, GrantScope.EachDatabase, "VIEW DATABASE STATE", null, true, "FinOps Index Analysis runs sp_IndexCleanup in each database you inspect."),
