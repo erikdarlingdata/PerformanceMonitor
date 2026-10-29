@@ -41,6 +41,12 @@ public sealed class AwsRdsNotCollectedPureTests
         Assert.Contains(collector, message, StringComparison.Ordinal);
         Assert.Contains("never will", message, StringComparison.Ordinal);
         Assert.Contains("permanent engine capability gap", message, StringComparison.Ordinal);
+        /* #6908: the sentence is shown to people, so it is plain words with no code name, no dashes and no semicolons. */
+        Assert.Contains("collector does not run on Amazon RDS", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("AppliesTo", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("gate", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("—", message, StringComparison.Ordinal);
+        Assert.DoesNotContain(";", message, StringComparison.Ordinal);
     }
 
     [Theory]

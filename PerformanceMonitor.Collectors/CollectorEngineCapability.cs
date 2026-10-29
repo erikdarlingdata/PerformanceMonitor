@@ -769,8 +769,10 @@ public static class CollectorEngineCapability
             }
 
             var awsRdsDescription = awsRdsKind == AwsRdsKind.RdsWebOrExpress ? AwsRdsWebOrExpressDescription : AwsRdsDescription;
-            return $"{serverName} runs on {awsRdsDescription}. The {collectorName} collector does not run on it — its own AppliesTo gate excludes " +
-                   $"Amazon RDS — so this server does not collect {CapturePathOf(collectorName)}, and never will. {PermanentGapEpilogue}" +
+            /* #6908: plain words, the way the Azure arms below say their gap. No code name (the collector's own gate) and no dashes,
+               because this sentence is shown to people in the Viewer, the web dashboard and MCP answers. */
+            return $"{serverName} runs on {awsRdsDescription}. The {collectorName} collector does not run on Amazon RDS, " +
+                   $"so this server does not collect {CapturePathOf(collectorName)}, and never will. {PermanentGapEpilogue}" +
                    CoveredInsteadSuffix(collectorName);
         }
 
