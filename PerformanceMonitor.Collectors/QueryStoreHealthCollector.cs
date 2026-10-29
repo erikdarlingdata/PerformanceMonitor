@@ -139,6 +139,7 @@ LEFT JOIN sys.dm_hadr_database_replica_states AS drs
 WHERE (d.database_id > 4 OR d.database_id = 2)
 AND   d.database_id < 32761
 AND   d.name <> N'PerformanceMonitor'
+" + DatabaseScopeFilter.VendorControlledDatabaseScreen + @"
 AND   d.state_desc = N'ONLINE'
 AND
 (

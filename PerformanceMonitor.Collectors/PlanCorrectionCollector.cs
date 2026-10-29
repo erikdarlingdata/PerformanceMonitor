@@ -452,10 +452,15 @@ FROM sys.databases AS d
 LEFT JOIN sys.dm_hadr_database_replica_states AS drs
     ON d.database_id = drs.database_id
     AND drs.is_local = 1
-WHERE @product_major >= 14 /*automatic plan correction is 2017+; older instances enumerate nothing*/
+WHERE
+(
+    @product_major >= 14 /*automatic plan correction is 2017+; older instances enumerate nothing*/
+    OR CONVERT(integer, SERVERPROPERTY('EngineEdition')) = 8 /*Managed Instance reports 12.0.x yet has it (#6889)*/
+)
 AND   (d.database_id > 4 OR d.database_id = 2)
 AND   d.database_id < 32761
 AND   d.name <> N'PerformanceMonitor'
+" + DatabaseScopeFilter.VendorControlledDatabaseScreen + @"
 AND   d.state_desc = N'ONLINE'
 AND
 (

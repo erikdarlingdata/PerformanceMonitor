@@ -494,6 +494,7 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 FROM sys.databases AS d
 WHERE d.state_desc = N'ONLINE'
 AND   d.database_id > 0
+{DatabaseScopeFilter.VendorControlledDatabaseScreen}
 {exclusionClause}
 ORDER BY
     d.name;

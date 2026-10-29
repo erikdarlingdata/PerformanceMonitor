@@ -130,7 +130,7 @@ DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
         AND   d.name NOT IN
           (
               N'master', N'model', N'msdb', N'tempdb',
-              N'rdsadmin', N'gcloud_cloudsqladmin',
+              " + DatabaseScopeFilter.VendorControlledDatabaseNames + @",
               N'ReportServer', N'ReportServerTempDB',
               N'DWConfiguration', N'DWDiagnostics', N'DWQueue',
               N'DBAUtil', N'DBAUtils', N'Utility'
