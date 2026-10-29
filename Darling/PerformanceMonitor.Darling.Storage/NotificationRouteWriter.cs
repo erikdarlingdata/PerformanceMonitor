@@ -403,9 +403,10 @@ WHERE route_id = $1";
 
     /// <summary>The sentence for a severity filter that is not <c>both</c>, <c>critical</c> or <c>warning</c> (case-insensitive), else null (#6928).</summary>
     public static string? SeveritiesRefusal(string? severities) =>
-        severities is not null && NotificationRouteKinds.NormalizeSeverities(severities) != severities.Trim().ToLowerInvariant()
-            ? "severities is critical, warning or both."
-            : null;
+        severities?.Trim().ToLowerInvariant() is null or "" or NotificationRouteKinds.SeveritiesBoth
+            or NotificationRouteKinds.SeveritiesCritical or NotificationRouteKinds.SeveritiesWarning
+            ? null
+            : "severities is critical, warning or both.";
 
     /// <summary>Binds the agent columns, the resolution override and the fallback, in the order every insert and update takes them.</summary>
     public static void AddAgentColumns(NpgsqlCommand command, NotificationRouteDraft row)
