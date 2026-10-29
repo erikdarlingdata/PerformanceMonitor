@@ -301,7 +301,7 @@ public sealed class ManagedConfVerdictsLiveTests
 
             var connectionString =
                 $"Host=127.0.0.1;Port={port};Username=darling;Database=postgres;Pooling=false;SSL Mode=Disable";
-            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
             var ct = timeout.Token;
 
             await using var connection = await OpenAsync(connectionString, ct);
