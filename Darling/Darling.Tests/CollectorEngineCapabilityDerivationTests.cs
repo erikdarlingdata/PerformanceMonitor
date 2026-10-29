@@ -570,6 +570,9 @@ public sealed class CollectorEngineCapabilityMovingGateTests
         Assert.DoesNotContain("never runs against another engine", ownGate, StringComparison.Ordinal);
         Assert.DoesNotContain("does not run on this engine", dialect, StringComparison.Ordinal);
         Assert.DoesNotContain("check that collection is running", ownGate, StringComparison.OrdinalIgnoreCase);
+        /* The covered-instead suffix rides on this message: it names the sibling and has no em dash. */
+        Assert.Contains("by the pg_wait_sampling collector, which reads a different source for it. Check that panel rather than this one.", ownGate, StringComparison.Ordinal);
+        Assert.DoesNotContain("\u2014", ownGate, StringComparison.Ordinal);
 
         /* No EngineEdition claim about a PostgreSQL server, on either shape. */
         Assert.DoesNotContain("EngineEdition", dialect, StringComparison.Ordinal);
