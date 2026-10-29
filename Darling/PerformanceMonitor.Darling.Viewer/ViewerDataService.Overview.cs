@@ -671,7 +671,7 @@ WHERE id = 1";
         var tally = new CollectorHealthClassifier.BandTally();
         foreach (var row in rows)
         {
-            tally = tally.Add(row.CollectorName, row.HealthStatus, row.ServerAlwaysOnOff);
+            tally = tally.Add(row.CollectorName, row.HealthStatus, row.ServerAlwaysOnOff, row.EngineGated);
         }
 
         var deadlockBand = rows

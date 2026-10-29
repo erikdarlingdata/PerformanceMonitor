@@ -92,6 +92,46 @@ internal static class McpEngineCapability
     }
 
     /// <summary>
+    /// #6912: splits a server's collection-health rows into those its engine runs and the ones it does not. A collector the engine does
+    /// not run writes no new row, so what it logged before the gate existed (an Amazon RDS Web or Express server's SESSION_MISSING runs
+    /// for <c>attention</c>, after #6893) keeps its FAILING band for the whole window. Those read <c>not_collected</c> whatever they
+    /// logged, through the same gate the reads use. A failed edition read makes no claim, so the log-driven rows stand.
+    /// </summary>
+    public static async Task<(List<CollectorHealthRow> Running, List<object> NotCollected)> SplitCollectionHealthByEngineAsync(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        int serverId,
+        string serverName,
+        List<CollectorHealthRow> rows)
+    {
+        var engineEdition = await EngineEditionAsync(dataService, serverId);
+        var awsRdsKind = AwsRdsKindOf(serverManager, serverId);
+        return SplitCollectionHealthByEngine(serverName, engineEdition, awsRdsKind, rows);
+    }
+
+    /// <summary>The pure half of <see cref="SplitCollectionHealthByEngineAsync"/>: the engine facts are given.</summary>
+    internal static (List<CollectorHealthRow> Running, List<object> NotCollected) SplitCollectionHealthByEngine(
+        string serverName, int engineEdition, AwsRdsKind awsRdsKind, List<CollectorHealthRow> rows)
+    {
+        var running = new List<CollectorHealthRow>();
+        var notCollected = new List<object>();
+        foreach (var row in rows)
+        {
+            var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, row.CollectorName, awsRdsKind);
+            if (message is null)
+            {
+                running.Add(row);
+            }
+            else
+            {
+                notCollected.Add(new { collector = row.CollectorName, status = "not_collected", message });
+            }
+        }
+
+        return (running, notCollected);
+    }
+
+    /// <summary>
     /// #6894, #6893: what the connection check found this server to be: an Amazon RDS for SQL Server instance (the <c>rdsadmin</c> database),
     /// and on the Web or Express edition. Lite keeps the facts in memory on the server's connection status, and a tool holds only the storage
     /// id, so the server is found the way the collectors name it. <see cref="AwsRdsKind.None"/> for a server that is not registered, was never

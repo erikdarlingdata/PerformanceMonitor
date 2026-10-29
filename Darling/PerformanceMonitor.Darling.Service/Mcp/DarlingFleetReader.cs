@@ -2228,6 +2228,9 @@ AND   {SqlServerCollectedTargetSql}";
         /* #6828: the servers that report Always On off, read once here for the same one-connection reason. get_collection_health lists
            a HEALTHY Always On collector there as not_collected, so the tally counts it there too and not as healthy. */
         var alwaysOnOffServers = await FleetAlwaysOnOff.ReadAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        /* #6912: the collectors each server's engine does not run. Their older logged runs stay in the window, so they count as not
+           collected here, as get_collection_health lists them. */
+        var engineGatedServers = await FleetEngineGatedCollectors.ReadAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken);
         /* #3893 arm 2, #4477: the composed read (hourly aggregate + raw head slice + any hole hours read raw
            alongside it) when the guard passes, else the raw scan. Same fourteen ordinals either way, so
            everything below is shared. */
@@ -2273,10 +2276,11 @@ AND   {SqlServerCollectedTargetSql}";
         {
             counts.TryGetValue(serverId, out var existing);
             var status = health.HealthStatus;
+            var engineGated = engineGatedServers.TryGetValue(serverId, out var gatedNames) && gatedNames.Contains(health.CollectorName);
             /* #6828: one tally for every count surface (CollectorHealthClassifier.BandTally). A WARNING collector is not healthy, and a
                HEALTHY Always On collector on a server with Always On off is not collected. */
             var tally = new CollectorHealthClassifier.BandTally(existing.Healthy, existing.Warning, existing.Failing, existing.NotCollected, existing.Total)
-                .Add(health.CollectorName, status, alwaysOnOffServers.Contains(serverId));
+                .Add(health.CollectorName, status, alwaysOnOffServers.Contains(serverId), engineGated);
             counts[serverId] = new CollectorCounts(
                 tally.Healthy,
                 tally.Failing,
@@ -2293,7 +2297,7 @@ AND   {SqlServerCollectedTargetSql}";
                    parallel count would have to be learned, added, and never confused with the first. The
                    two predicates are disjoint by construction (one needs the newest run to be a skip, the
                    other needs it to be a success), so nothing is double-counted. */
-                existing.Regressed + (health.AnyRegression ? 1 : 0),
+                existing.Regressed + (health.AnyRegression && !engineGated ? 1 : 0),
                 /* #3017: the ONE collector per engine whose band the deadlock total's coverage turns on,
                    kept alongside the Healthy/Failing tallies because it comes out of the same aggregate —
                    no extra round trip, which is what keeps this reader's fan-out bounded. Named from the

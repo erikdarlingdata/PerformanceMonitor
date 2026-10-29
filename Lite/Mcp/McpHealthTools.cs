@@ -310,6 +310,12 @@ public sealed class McpHealthTools
                 return McpHelpers.Status("unavailable", "No collection health data available.");
             }
 
+            /* #6912: a collector this server's engine does not run reads not_collected whatever it logged before the gate existed, and is
+               left out of the figures below. */
+            List<object> engineNotCollected;
+            (rows, engineNotCollected) = await McpEngineCapability.SplitCollectionHealthByEngineAsync(
+                dataService, serverManager, resolved.ServerId, resolved.DisplayName, rows);
+
             /* #4938: a collector's run time, read fresh on every call from the schedule the sweep reads. It is never an
                input to the band: HealthStatus is classified from the shipped cadence inside the health read. */
             var runTimeReadings = runTimes is null
@@ -331,7 +337,7 @@ public sealed class McpHealthTools
                     : IsCollectionHealthCompactEligible(r)
                         ? (object)CompactCollectionHealthRow(r, runTime)
                         : (object)PartialCollectionHealthRow(r, runTime);
-            });
+            }).Concat(engineNotCollected);
 
             static object FullCollectionHealthRow(CollectorHealthRow r, CollectorRunTimeReading? runTime) => new
             {

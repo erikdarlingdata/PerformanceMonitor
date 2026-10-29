@@ -156,6 +156,8 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, DateTime> _lastCollectionStoppedAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeCaptureDown = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastCaptureDownAlert = new();
+    /* #6912: the captures named by the last pass that found any down, so a recovery can say which came back. */
+    private readonly ConcurrentDictionary<string, string> _lastCaptureDownList = new();
     private readonly ConcurrentDictionary<string, bool> _activeAgentDown = new();
     /* #6875: the Identity Capacity alert's standing state, the same two maps as Agent Not Running. */
     private readonly ConcurrentDictionary<string, bool> _activeIdentityCapacity = new();
@@ -1504,8 +1506,18 @@ internal sealed class DarlingSelfAlertEvaluator
             var missing = engine == CollectorTargetEngine.PostgreSql
                 ? (IReadOnlyList<string>)Array.Empty<string>()
                 : await (CaptureDownReadOverride ?? ReadMissingCaptureSessionsAsync)(postgres, serverId, cancellationToken);
+            /* #6912: a capture whose collector does not run on this server's engine writes no new row, so its last
+               SESSION_MISSING row stays the newest forever. Drop those. The engine facts are read only when the
+               read named a capture, so the common empty answer costs nothing. */
+            IReadOnlyList<string> notRunOnEngine = Array.Empty<string>();
+            if (missing.Count > 0)
+            {
+                var facts = await ReadCaptureDownEngineFactsAsync(postgres, serverId, cancellationToken);
+                (missing, notRunOnEngine) = SplitCapturesByEngine(serverName, missing, facts.EngineEdition, facts.EngineKind, facts.AwsRdsKind);
+            }
+
             captureReadClock.Restart();
-            await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken, sweepGeneration: generation);
+            await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken, sweepGeneration: generation, notRunOnEngine: notRunOnEngine);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1899,7 +1911,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// this judges nothing, sends nothing and leaves no standing-alert flag or cooldown stamp behind.</param>
     internal async Task ApplyCaptureDownAsync(
         int serverId, string serverName, IReadOnlyList<string> missing, CancellationToken cancellationToken,
-        int? sweepGeneration = null)
+        int? sweepGeneration = null, IReadOnlyList<string>? notRunOnEngine = null)
     {
         /* #4795: before any state is read or written and before any send. */
         if (IsStaleSweep(serverId, sweepGeneration))
@@ -1918,17 +1930,18 @@ internal sealed class DarlingSelfAlertEvaluator
         if (missing.Count > 0)
         {
             _activeCaptureDown[key] = true;
+            var list = string.Join(" and ", missing);
+            _lastCaptureDownList[key] = list;
             /* #5493: a state alert, the same policy as "Collection Stopped" (#5489): one alert on entry, a repeat
                only per connection_refire_minutes, a send again only for an alert no channel took (#4795). */
             var decision = DecideStateAlert(_lastCaptureDownAlert, key, CaptureDownMetric, key, now, out var refire);
             if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
             {
                 _lastCaptureDownAlert[key] = now;
-                var list = string.Join(" and ", missing);
                 var delivery = await FireAsync(
                     key, serverName, CaptureDownMetric, list, "session running",
                     detail: StateRepeatNote(decision, refire) + $"The {list} Extended Events {(missing.Count == 1 ? "session is" : "sessions are")} missing and could not be created. " +
-                        "Blocking/deadlock data is NOT being captured, so those alerts can never fire. Check the " +
+                        CaptureDownConsequence(missing) + " Check the " +
                         "collection log for the SESSION_MISSING detail (usually a permissions problem: " +
                         "ALTER ANY EVENT SESSION on-prem, CREATE ANY DATABASE EVENT SESSION on Azure SQL DB).",
                     severity: AlertSeverityLevel.Critical,
@@ -1948,11 +1961,82 @@ internal sealed class DarlingSelfAlertEvaluator
         else if (_activeCaptureDown.TryRemove(key, out var was) && was)
         {
             EndStateAlert(_lastCaptureDownAlert, key, CaptureDownMetric, key);
-            await RecordResolutionAsync(new AlertResolution(
-                key, serverName, CaptureDownMetric,
-                "Capture Restored", $"{serverName}: Blocking/deadlock capture is running again"), cancellationToken);
+            _lastCaptureDownList.TryRemove(key, out var wasDown);
+            if (notRunOnEngine is { Count: > 0 })
+            {
+                /* #6912: the session did not come back. What was down does not run on this server's engine, so
+                   "restored" would be false: this one is a clear, not a recovery. */
+                await RecordResolutionAsync(new AlertResolution(
+                    key, serverName, CaptureDownMetric,
+                    "Capture Cleared",
+                    $"{serverName}: The {string.Join(" and ", notRunOnEngine)} capture does not run on this server's engine, so it is no longer expected"), cancellationToken);
+            }
+            else
+            {
+                await RecordResolutionAsync(new AlertResolution(
+                    key, serverName, CaptureDownMetric,
+                    "Capture Restored", $"{serverName}: The {(string.IsNullOrEmpty(wasDown) ? "Blocking, Deadlock and Client timeouts" : wasDown)} capture is running again"), cancellationToken);
+            }
         }
     }
+
+    /// <summary>#6912: the collector behind each friendly capture name <see cref="ReadMissingCaptureSessionsAsync"/> returns.</summary>
+    private static string CaptureCollectorName(string capture) => capture switch
+    {
+        "Deadlock" => "deadlocks",
+        "Client timeouts" => "attention",
+        _ => "blocked_process_report",
+    };
+
+    /// <summary>
+    /// #6912: splits the captures the read named into those this server's engine can run and those it cannot, with the same
+    /// gate that makes the collector's read answer not_collected (the engine kind, the edition and the Amazon RDS kind).
+    /// </summary>
+    internal static (IReadOnlyList<string> Running, IReadOnlyList<string> NotRunOnEngine) SplitCapturesByEngine(
+        string serverName, IReadOnlyList<string> captures, int engineEdition, string? engineKind, AwsRdsKind awsRdsKind)
+    {
+        var running = new List<string>();
+        var notRun = new List<string>();
+        foreach (var capture in captures)
+        {
+            if (CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, CaptureCollectorName(capture), awsRdsKind) is null)
+            {
+                running.Add(capture);
+            }
+            else
+            {
+                notRun.Add(capture);
+            }
+        }
+
+        return (running, notRun);
+    }
+
+    /// <summary>#6912: what the Capture Down detail says is not captured, built from the captures in the list.</summary>
+    private static string CaptureDownConsequence(IReadOnlyList<string> missing)
+    {
+        var sentences = new List<string>();
+        foreach (var capture in missing)
+        {
+            sentences.Add(capture switch
+            {
+                "Blocking" => "Blocking data is NOT being captured, so blocking alerts can never fire.",
+                "Deadlock" => "Deadlock data is NOT being captured, so deadlock alerts can never fire.",
+                _ => "The client timeouts and cancels capture is NOT recording.",
+            });
+        }
+
+        return string.Join(" ", sentences);
+    }
+
+    /// <summary>Test seam (#6912): replaces the engine-facts read the capture-down pass makes when a capture is down.</summary>
+    internal Func<NpgsqlDataSource, int, CancellationToken, Task<(int EngineEdition, string? EngineKind, AwsRdsKind AwsRdsKind)>>? CaptureDownEngineReadOverride { get; set; }
+
+    private Task<(int EngineEdition, string? EngineKind, AwsRdsKind AwsRdsKind)> ReadCaptureDownEngineFactsAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        => ReadWithOneRetryAsync(
+            token => (CaptureDownEngineReadOverride ?? Mcp.DarlingEngineCapability.ReadServerEngineAsync)(postgres, serverId, token),
+            serverId, CaptureDownEngineReadName, cancellationToken);
 
     /// <summary>
     /// FLEET-level (not per-server): the tool's OWN collectors regressing in cost ON the monitored servers
@@ -8794,6 +8878,7 @@ WHERE c.is_enabled";
         _lastCollectionStoppedAlert.TryRemove(key, out _);
         _activeCaptureDown.TryRemove(key, out _);
         _lastCaptureDownAlert.TryRemove(key, out _);
+        _lastCaptureDownList.TryRemove(key, out _);
         _activeAgentDown.TryRemove(key, out _);
         _lastAgentDownAlert.TryRemove(key, out _);
         _activeAgentAlertGaps.TryRemove(key, out _);
@@ -8871,6 +8956,7 @@ WHERE c.is_enabled";
 
     /// <summary>The counter's name for the capture-down condition's read.</summary>
     internal const string MissingCaptureSessionsReadName = "capture-down self-alert";
+    internal const string CaptureDownEngineReadName = "capture-down engine facts";
 
     /// <summary>
     /// The counter's name for the agent-not-running condition's TWO reads — the latest status and the

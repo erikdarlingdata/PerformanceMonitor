@@ -753,6 +753,9 @@ LIMIT 1";
            rows of a server in it stamp the Always On collectors as not collected, as get_collection_health lists them, so the card and the
            status bar do not count them as healthy. */
         var alwaysOnOffServers = await FleetAlwaysOnOff.ReadAsync(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, CancellationToken.None);
+        /* #6912: the collectors each server's engine does not run, read at the same point for the same reason. Their older logged runs
+           stay in the window, so the rows are stamped as not collected and the card and the status bar do not count them as failing. */
+        var engineGatedServers = await FleetEngineGatedCollectors.ReadAsync(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, CancellationToken.None);
         var now = DateTime.UtcNow;
         var windowStart = DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified);
         var headEnd = CollectionHealthRollupSupport.CeilingHour(windowStart);
@@ -792,6 +795,7 @@ LIMIT 1";
 
                 var row = MapFleetByServerRow(reader);
                 row.ServerAlwaysOnOff = alwaysOnOffServers.Contains(serverId);
+                row.EngineGated = engineGatedServers.TryGetValue(serverId, out var gatedNames) && gatedNames.Contains(row.CollectorName);
                 rows.Add(row);
             }
         }
@@ -1291,7 +1295,10 @@ public class CollectorHealthRow
     internal bool ServerAlwaysOnOff { get; set; }
 
     /// <summary>#6828: an Always On collector, HEALTHY, on a server with Always On off, which <c>get_collection_health</c> lists as not_collected.</summary>
-    internal bool NotCollected => CollectorHealthClassifier.IsNotCollectedWhenAlwaysOnOff(CollectorName, HealthStatus, ServerAlwaysOnOff);
+    internal bool NotCollected => EngineGated || CollectorHealthClassifier.IsNotCollectedWhenAlwaysOnOff(CollectorName, HealthStatus, ServerAlwaysOnOff);
+
+    /// <summary>#6912: this collector does not run on the server's engine, so whatever it logged before the gate existed reads as not collected. Stamped by the fleet read.</summary>
+    internal bool EngineGated { get; set; }
 
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
