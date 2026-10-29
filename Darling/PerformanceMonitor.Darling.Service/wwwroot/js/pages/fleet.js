@@ -878,7 +878,16 @@ export function metricBands(c) {
     chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail),
     /* #6875: a chip only when a column is at the warning bar or past it. It is not a band: nothing above reads it, and a server without one shows no extra chip. */
     ...identityCapacityChip(c),
+    /* #6874: a chip only when the server's Agent alert setup has a gap. It is not a band: nothing above reads it, and a
+       server without a gap shows no extra chip. */
+    ...agentAlertChip(c),
   ]);
+}
+
+function agentAlertChip(c) {
+  const gaps = c.agent_alert_gaps;
+  if (!Array.isArray(gaps) || gaps.length === 0) return [];
+  return [chip("Agent alerts", fmtInt(gaps.length) + (gaps.length === 1 ? " gap" : " gaps"), "Warning", gaps.map((g) => g.message).join(" "))];
 }
 
 /* A short non-color severity cue so severity isn't conveyed by border color alone (M2). */

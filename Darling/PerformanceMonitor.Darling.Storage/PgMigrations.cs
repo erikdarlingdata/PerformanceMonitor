@@ -2371,6 +2371,48 @@ CREATE INDEX IF NOT EXISTS idx_query_store_hints_markers
     ON collect.query_store_hints (server_id, database_name, collection_time) WHERE query_hint_id IS NULL;";
 
     /// <summary>
+    /// V222 (#6874) - <c>collect.agent_alerts</c>: the SQL Server Agent alert definitions and their counters, read from
+    /// <c>msdb.dbo.sysalerts</c> (with the operator count from <c>msdb.dbo.sysnotifications</c>) by <c>AgentAlertsCollector</c> every 15
+    /// minutes. One row per alert per pass, so the change in <c>occurrence_count</c> between two passes says which alert fired in a window.
+    /// An instance with no alerts writes ONE marker row whose <c>alert_id</c> is NULL, so "collected, none defined" differs from "never
+    /// collected". A PLAIN table on every store (<c>StaysPlainTable</c>, tens of rows per pass), 30-day time-sliced DELETE. Columns and the
+    /// (server_id, collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a fresh store (V1's catalog walk) and an upgraded
+    /// one agree. New table, no data moves, no grant (the <c>collect</c> schema carries blanket SELECT). Every statement is idempotent. An
+    /// older build never reads the table and is unaffected.
+    /// The same rung adds <c>config.config_alert_settings.agent_alert_gaps_enabled</c> (<c>boolean NOT NULL DEFAULT FALSE</c>, catalog-only): the "Agent Alert Gaps"
+    /// alert ships OFF. An older build never reads the column.
+    /// </summary>
+    private const string V222Sql = @"
+CREATE TABLE IF NOT EXISTS collect.agent_alerts (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    alert_id integer,
+    alert_name text,
+    enabled boolean,
+    event_source text,
+    message_id integer,
+    severity integer,
+    database_name text,
+    event_description_keyword text,
+    performance_condition text,
+    delay_between_responses integer,
+    last_occurrence timestamp,
+    last_response timestamp,
+    occurrence_count integer,
+    count_reset timestamp,
+    has_notification integer,
+    operator_count integer,
+    response_job_id text
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_alerts_time ON collect.agent_alerts(server_id, collection_time);
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS agent_alert_gaps_enabled boolean NOT NULL DEFAULT FALSE;";
+
+    /// <summary>
     /// V218 (#6569): <c>ck_config_server_actions_action</c> also allows <c>recompile_module</c> (the switch of the Level 3 action that
     /// runs <c>sys.sp_recompile</c> on a procedure, function or trigger), <c>create_plan_guide</c> and <c>drop_plan_guide</c> (the plan guide actions). The CHECK is replaced in place under its own name, only when
     /// the stored definition does not already name the newest action (V196's guard shape), so a second run replaces nothing. It inserts no row:
@@ -2450,7 +2492,7 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
         "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.HashHourlyCreateSql;
 
     /// <summary>
-    /// V222 (#6875) - <c>collect.identity_capacity</c>: how full the identity columns are, read from <c>sys.identity_columns</c> by
+    /// V223 (#6875) - <c>collect.identity_capacity</c>: how full the identity columns are, read from <c>sys.identity_columns</c> by
     /// <c>IdentityCapacityCollector</c> every six hours, per database: the top 20 columns above 10 percent used (value, seed, increment,
     /// type, precision and the percent) plus ONE all-NULL marker row (<c>column_name</c> NULL) per scanned database, so a database with no
     /// high column reads as scanned and clean, and one that was not scanned has no marker. A PLAIN table on every store
@@ -2463,7 +2505,7 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
     /// <c>identity_capacity_critical_percent</c> (90), the global values a per-server or per-database threshold override replaces. An older build never
     /// reads the columns.
     /// </summary>
-    private const string V222Sql = @"
+    private const string V223Sql = @"
 CREATE TABLE IF NOT EXISTS collect.identity_capacity (
     collection_id bigint NOT NULL,
     collection_time timestamp NOT NULL,
@@ -2888,7 +2930,8 @@ $rung$;";
         new Migration(219, "query-store-self-keys", V219Sql),
         new Migration(220, "job-history-success-index", V220Sql),
         new Migration(221, "query-store-hash-hourly", V221Sql),
-        new Migration(222, "identity-capacity", V222Sql),
+        new Migration(222, "agent-alerts", V222Sql),
+        new Migration(223, "identity-capacity", V223Sql),
     };
 
     /// <summary>

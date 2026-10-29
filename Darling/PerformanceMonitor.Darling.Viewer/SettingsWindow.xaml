@@ -405,6 +405,12 @@
                                     <Button x:Name="ConfigureDatabaseStatesButton" Content="Configure…" Margin="8,0,0,0" Padding="8,2"
                                             VerticalAlignment="Center" Click="ConfigureDatabaseStatesButton_Click"/>
                                 </WrapPanel>
+                                <!-- #6874: off by default. Alerts when the newest SQL Server Agent alert capture shows a gap (no alert for
+                                     severity 19 to 25 or errors 823 to 825, an alert with no operator, an alert off, or none defined). -->
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertAgentAlertGapsCheckBox" Content="SQL Server Agent alert setup has a gap (off by default)"
+                                              VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
                                 <!-- #6875: off by default. Alerts when an identity column is at or past the warning bar (70 percent used) or the
                                      critical bar (90 percent) of its type's capacity. The bars are set with update_alert_settings or a threshold override. -->
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">

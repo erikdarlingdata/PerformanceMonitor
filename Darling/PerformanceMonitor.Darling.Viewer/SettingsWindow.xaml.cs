@@ -935,6 +935,7 @@ public partial class SettingsWindow : Window
         AlertFailedJobCheckBox.IsChecked = r.FailedJobEnabled;
         AlertFailedJobLookbackBox.Text = r.FailedJobLookbackMinutes.ToString(CultureInfo.InvariantCulture);
         AlertDatabaseStateCheckBox.IsChecked = r.DatabaseStateEnabled;
+        AlertAgentAlertGapsCheckBox.IsChecked = r.AgentAlertGapsEnabled;
         AlertIdentityCapacityCheckBox.IsChecked = r.IdentityCapacityEnabled;
         /* #6875: the two bars have no box here (update_alert_settings and the threshold overrides set them), so a Save carries the loaded values back unchanged. */
         _identityCapacityWarningPercent = r.IdentityCapacityWarningPercent;
@@ -1008,6 +1009,7 @@ public partial class SettingsWindow : Window
             LongRunningJobEnabled = AlertLongRunningJobCheckBox.IsChecked == true,
             FailedJobEnabled = AlertFailedJobCheckBox.IsChecked == true,
             DatabaseStateEnabled = AlertDatabaseStateCheckBox.IsChecked == true,
+            AgentAlertGapsEnabled = AlertAgentAlertGapsCheckBox.IsChecked == true,
             IdentityCapacityEnabled = AlertIdentityCapacityCheckBox.IsChecked == true,
             IdentityCapacityWarningPercent = _identityCapacityWarningPercent,
             IdentityCapacityCriticalPercent = _identityCapacityCriticalPercent,
@@ -1405,6 +1407,8 @@ public partial class SettingsWindow : Window
             parts.Add($"disk free < {AlertLowDiskThresholdPercentBox.Text}% or {AlertLowDiskThresholdGbBox.Text}GB");
         if (AlertPvsCheckBox.IsChecked == true)
             parts.Add($"PVS >= {AlertPvsThresholdPercentBox.Text}% of database");
+        if (AlertAgentAlertGapsCheckBox.IsChecked == true)
+            parts.Add("Agent alert setup gaps");
         if (AlertFileGrowthCheckBox.IsChecked == true)
             /* #3539 A8c: the rise is a RATE (MB per hour) averaged over the lookback, in the same unit phrase the
                row's label, the alert's threshold line and the MCP payload description use. It used to read
@@ -1500,6 +1504,7 @@ public partial class SettingsWindow : Window
         AlertLowDiskCheckBox.IsEnabled = enabled;
         AlertLowDiskThresholdPercentBox.IsEnabled = enabled;
         AlertPvsCheckBox.IsEnabled = enabled;
+        AlertAgentAlertGapsCheckBox.IsEnabled = enabled;
         AlertPvsThresholdPercentBox.IsEnabled = enabled;
         AlertPvsFloorGbBox.IsEnabled = enabled;
         AlertLowDiskThresholdGbBox.IsEnabled = enabled;

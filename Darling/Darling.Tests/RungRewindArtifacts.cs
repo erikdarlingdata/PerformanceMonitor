@@ -551,9 +551,14 @@ DROP TABLE IF EXISTS collect.query_store_self_keys_state, collect.query_store_se
         new(221, "hasQueryStoreHashHourly",
             @"DROP TABLE IF EXISTS collect.query_store_hash_hourly, collect.query_store_hash_daily, collect.query_store_hash_daily_built, collect.query_store_hash_daily_failures;
 ALTER TABLE collect.query_store_compose_stamp_built DROP COLUMN IF EXISTS hash_built_seq;"),
-        // V222 (#6875): the identity capacity table. The table is the probe's newest sentinel. The rewind drops it (its indexes go with it), so a
-        // re-run of V222 does everything again. Safe on a store that never had it.
-        new(222, "hasIdentityCapacity",
+        // V222 (#6874): the Agent alerts table. The table is the probe's newest sentinel. The rewind drops it (its index goes with it), so a
+        // re-run of V222 builds it again. Safe on a store that never had it.
+        new(222, "hasAgentAlerts",
+            @"DROP TABLE IF EXISTS collect.agent_alerts;
+ALTER TABLE config.config_alert_settings DROP COLUMN IF EXISTS agent_alert_gaps_enabled;"),
+        // V223 (#6875): the identity capacity table. The table is the probe's newest sentinel. The rewind drops it (its indexes go with it), so a
+        // re-run of V223 does everything again. Safe on a store that never had it.
+        new(223, "hasIdentityCapacity",
             @"DROP TABLE IF EXISTS collect.identity_capacity;
 ALTER TABLE config.config_alert_settings
     DROP COLUMN IF EXISTS identity_capacity_enabled,

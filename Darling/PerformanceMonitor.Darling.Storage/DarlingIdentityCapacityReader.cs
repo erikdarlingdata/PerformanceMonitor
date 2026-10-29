@@ -113,7 +113,7 @@ public sealed record IdentityCapacityRead(
 }
 
 /// <summary>
-/// #6875: identity column capacity in place, from <c>collect.identity_capacity</c> (V222): per scanned database one all-NULL marker row
+/// #6875: identity column capacity in place, from <c>collect.identity_capacity</c> (V223): per scanned database one all-NULL marker row
 /// (<c>column_name</c> NULL) plus the top 20 columns above 10 percent, all stamped with the pass's one <c>collection_time</c>. A database is
 /// judged by its own newest marker in the window, so a database the pass budget did not reach is not judged against another's scan. The
 /// marker is what separates "scanned, nothing above 10 percent" (a marker and no column) from "not scanned" (no marker). The rate compares

@@ -191,6 +191,13 @@ public sealed class McpAlertSettingsKeyTests
     /// <c>ag.disconnect_refire_minutes</c>. Omission is the honest answer until Lite grows a band.</summary>
     private const string HealthBandsGroup = "health_bands";
 
+    /// <summary>#6874: the third group Darling reports and Lite does not. The Agent Alert Gaps alert judges the
+    /// <c>agent_alerts</c> collector's capture of <c>msdb.dbo.sysalerts</c>, and that collector is Darling-only
+    /// (<c>IsDarlingOnly</c>): Lite never reads the Agent alert definitions and has no alert for their gaps. Reporting
+    /// <c>agent_alert_gaps.enabled</c> would advertise a switch this product cannot act on, the placeholder failure
+    /// <see cref="GetAlertSettings_OmitsSelfAlerts_WhichLiteHasNoEquivalentFor"/>'s history rejected. Omission is the honest answer.</summary>
+    private const string AgentAlertGapsGroup = "agent_alert_gaps";
+
     /// <summary>#2417: the MEMBER-level counterpart to <see cref="SelfAlertsGroup"/> — Darling keys Lite
     /// genuinely has no equivalent for, exempted BY NAME so the hole is a decision someone justified here
     /// rather than a loosened assertion. Each entry is paid for by a test asserting the omission is still
@@ -332,7 +339,7 @@ public sealed class McpAlertSettingsKeyTests
 
         foreach (var (group, darlingKeys) in darling)
         {
-            if (group == SelfAlertsGroup || group == HealthBandsGroup || group == FleetSweepGroup || group == IdentityCapacityGroup) continue;
+            if (group == SelfAlertsGroup || group == HealthBandsGroup || group == FleetSweepGroup || group == IdentityCapacityGroup || group == AgentAlertGapsGroup) continue;
 
             if (!root.TryGetProperty(group, out var element))
             {

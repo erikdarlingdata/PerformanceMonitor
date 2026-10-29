@@ -171,6 +171,19 @@ const out = {};
   out.tagRows = rowsOf(cardOfSection("plan_cache"));
 }
 
+/* #6865: the Query Store section in the backlog state draws the note with the gap and the backlog hours as two numbers, from the shipped sectionCard.
+   Without backlog fields (or with the count 0) it draws none. */
+{
+  const qs = { name: "query_store", title: "Query Store" };
+  const mutedOf = (block) => all(modules.page.sectionCard(qs, block, () => {})).filter((n) => n.className === "muted").map((n) => n.textContent);
+  const base = { section: "query_store", status: "empty", source: "collect.query_store_interval_wide", effective_start: "2026-10-26T20:00:00.0000000Z" };
+  out.backlogStart = modules.util.localTime(base.effective_start);
+  out.backlogNotes = mutedOf({ ...base, window_truncated: true, backlog_hours_waiting: 4, hours_left_out: 8 });
+  out.backlogOneNotes = mutedOf({ ...base, window_truncated: true, backlog_hours_waiting: 1, hours_left_out: 1 });
+  out.noBacklogNotes = mutedOf({ ...base, window_truncated: false });
+  out.zeroBacklogNotes = mutedOf({ ...base, window_truncated: true, backlog_hours_waiting: 0, hours_left_out: 0 });
+}
+
 /* #6831: the other edge cases, said from the fields. */
 out.edgeCases = [
   { tier: "hourly", window_edges_note: "n", served_start: "2026-10-26T13:00:00Z", window_end: "2026-10-27T11:00:00Z", start_dropped_from: "2026-10-26T12:59:00Z", materialized_to: null, end_hour_counted_whole: true },

@@ -335,6 +335,7 @@ namespace PerformanceMonitor.Common
                        Both stored the 0 sentinel from the day they shipped and rendered it as "0.00". */
                     or "Capture Down"
                     or "Agent Not Running"
+                    or "Agent Alert Gaps"
 
                     /* #1881, the metrics that stored a NONZERO number that was not a measurement:
 

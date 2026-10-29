@@ -589,6 +589,8 @@ public sealed partial class DarlingMcpAlertTools
         /* #6875: the Identity Capacity alert (an identity column is nearly out of values). Off by default. The two bars are percent used; a threshold override
            (identity_capacity.warning_percent, identity_capacity.critical_percent) replaces them for one server or one database. */
         identity_capacity = new { enabled = s.IdentityCapacityEnabled, warning_percent = s.IdentityCapacityWarningPercent, critical_percent = s.IdentityCapacityCriticalPercent },
+        /* #6874: the Agent Alert Gaps alert (SQL Server Agent alert setup has a gap). Off by default. */
+        agent_alert_gaps = new { enabled = s.AgentAlertGapsEnabled },
         /* #2417: the AG family, read out of the store since V35/V37 and emitted to nobody until now -- so
            an agent asked why nothing alerted when a replica fell behind could not see the lag threshold,
            could not see whether AG notification was on at all, and had no way to tell "configured not to
@@ -3169,6 +3171,17 @@ public sealed partial class DarlingMcpAlertTools
                         {
                             case "enabled": AddBool("database_state_enabled", n, "database_state.enabled"); break;
                             default: error = $"Unknown field 'database_state.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "agent_alert_gaps":
+                    Group(prop.Value, "agent_alert_gaps", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("agent_alert_gaps_enabled", n, "agent_alert_gaps.enabled"); break;
+                            default: error = $"Unknown field 'agent_alert_gaps.{k}'."; break;
                         }
                     });
                     break;

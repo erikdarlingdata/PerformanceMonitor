@@ -533,7 +533,9 @@ LIMIT 1";
         /* #5736 (V211): the relative Client Timeouts bars' two multiples (integer NOT NULL, defaults 3 and 10). APPENDED, same reason. */
         int ClientTimeoutsWarningMultiple,
         int ClientTimeoutsCriticalMultiple,
-        /* #6875 (V222): the Identity Capacity switch (boolean NOT NULL, default off) and its warning and critical bars (integer NOT NULL, 70 and 90). APPENDED, same reason. */
+        /* #6874 (V222): the Agent Alert Gaps switch (boolean NOT NULL, default off). APPENDED, same reason. */
+        bool AgentAlertGapsEnabled,
+        /* #6875 (V223): the Identity Capacity switch (boolean NOT NULL, default off) and its warning and critical bars (integer NOT NULL, 70 and 90). APPENDED, same reason. */
         bool IdentityCapacityEnabled,
         int IdentityCapacityWarningPercent,
         int IdentityCapacityCriticalPercent);
@@ -575,6 +577,7 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute,
        excluded_volumes,
        client_timeouts_warning_multiple, client_timeouts_critical_multiple,
+       agent_alert_gaps_enabled,
        identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent
 FROM config_alert_settings
 WHERE id = 1";
@@ -643,8 +646,10 @@ WHERE id = 1";
             reader.IsDBNull(76) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(76),
             /* #5736 (V211): the multiples at 77-78. */
             reader.GetInt32(77), reader.GetInt32(78),
-            /* #6875 (V222): the Identity Capacity switch and bars at 79-81. */
-            reader.GetBoolean(79), reader.GetInt32(80), reader.GetInt32(81));
+            /* #6874 (V222): the Agent Alert Gaps switch at 79. */
+            reader.GetBoolean(79),
+            /* #6875 (V223): the Identity Capacity switch and bars at 80-82. */
+            reader.GetBoolean(80), reader.GetInt32(81), reader.GetInt32(82));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

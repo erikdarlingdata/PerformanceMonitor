@@ -1,0 +1,74 @@
+<UserControl x:Class="PerformanceMonitor.Darling.Viewer.AgentAlertsTab"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             mc:Ignorable="d"
+             d:DesignHeight="450" d:DesignWidth="900">
+    <!-- #6874: one server's SQL Server Agent alerts and the gaps in them, the Viewer twin of the web's Configuration tab panels.
+         The read, the status and the words are shared with get_agent_alerts through ViewerDataService.ReadAgentAlertsAsync and
+         ViewerAgentAlertsText, so both surfaces show the same sentences. Read only. -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" MinHeight="36">
+            <TextBlock Text="Agent Alerts" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14"
+                       Foreground="{DynamicResource ForegroundBrush}"/>
+            <TextBlock Text="Server:" VerticalAlignment="Center" Margin="12,0,4,0"
+                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+            <ComboBox x:Name="ServerComboBox" Width="200" VerticalAlignment="Center"
+                      SelectionChanged="ServerComboBox_SelectionChanged"/>
+            <Button Content="Refresh" Click="RefreshButton_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
+            <TextBlock x:Name="LastRefreshedIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
+                       FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+        </WrapPanel>
+
+        <TextBlock Grid.Row="1" x:Name="StatusLine" Margin="10,0,10,6" FontWeight="SemiBold" TextWrapping="Wrap"
+                   Foreground="{DynamicResource ForegroundBrush}"/>
+
+        <TextBlock Grid.Row="2" Text="Alert Setup Gaps" Margin="10,4,10,2" FontWeight="Bold"
+                   Foreground="{DynamicResource ForegroundBrush}"/>
+        <Grid Grid.Row="3" Margin="10,0,10,6">
+            <DataGrid x:Name="GapsDataGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="True"
+                      GridLinesVisibility="Horizontal" HeadersVisibility="Column" MaxHeight="180">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="What is wrong" Binding="{Binding Message}" Width="420"/>
+                    <DataGridTextColumn Header="Which" Binding="{Binding Which}" Width="*"/>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="GapsEmptyMessage" Visibility="Collapsed" TextWrapping="Wrap" Margin="4,6"
+                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+        </Grid>
+
+        <Grid Grid.Row="4" Margin="10,0,10,6">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <TextBlock Grid.Row="0" Text="Alert Definitions" Margin="0,4,0,2" FontWeight="Bold"
+                       Foreground="{DynamicResource ForegroundBrush}"/>
+            <DataGrid Grid.Row="1" x:Name="AlertsDataGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="True"
+                      GridLinesVisibility="Horizontal" HeadersVisibility="Column" SelectionMode="Extended">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Alert" Binding="{Binding Name}" Width="220"/>
+                    <DataGridTextColumn Header="Enabled" Binding="{Binding Enabled}" Width="70"/>
+                    <DataGridTextColumn Header="Severity" Binding="{Binding Severity}" Width="70"/>
+                    <DataGridTextColumn Header="Error" Binding="{Binding Error}" Width="70"/>
+                    <DataGridTextColumn Header="Database" Binding="{Binding Database}" Width="130"/>
+                    <DataGridTextColumn Header="Operators" Binding="{Binding Operators}" Width="80"/>
+                    <DataGridTextColumn Header="Fired in the window" Binding="{Binding FiredInWindow}" Width="120"/>
+                    <DataGridTextColumn Header="Times fired" Binding="{Binding TimesFired}" Width="80"/>
+                    <DataGridTextColumn Header="Last fired (server clock)" Binding="{Binding LastFired}" Width="*"/>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock Grid.Row="1" x:Name="AlertsEmptyMessage" Visibility="Collapsed" TextWrapping="Wrap" Margin="4,6"
+                       VerticalAlignment="Top" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+        </Grid>
+    </Grid>
+</UserControl>

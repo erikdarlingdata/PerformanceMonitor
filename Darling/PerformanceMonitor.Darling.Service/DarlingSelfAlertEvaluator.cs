@@ -165,6 +165,10 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly Func<int> _identityCapacityCriticalPercent;
     private readonly Func<string, string, string?, int, int> _resolveThreshold;
     private readonly ConcurrentDictionary<string, DateTime> _lastAgentDownAlert = new();
+    /* #6874: the Agent alert setup's standing state, the same two maps as Agent Not Running. */
+    private readonly ConcurrentDictionary<string, bool> _activeAgentAlertGaps = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastAgentAlertGapAlert = new();
+    private readonly Func<bool> _agentAlertSetupEnabled;
 
     /// <summary>The failed-send streaks behind <see cref="AfterSelfFire"/> (#4795): per (alert metric, key), how
     /// many sends in a row reached no channel. In memory only, like the stamps it back-dates; a restart starts
@@ -1285,6 +1289,7 @@ internal sealed class DarlingSelfAlertEvaluator
         ISelfAlertDeliveryStampStore? deliveryStamps = null,
         Func<TimeSpan, CancellationToken, Task>? retryDelay = null,
         Func<IReadOnlyList<WebhookChannelFailureCount>>? webhookChannelFailures = null,
+        Func<bool>? agentAlertSetupEnabled = null,
         Func<bool>? identityCapacityEnabled = null,
         Func<int>? identityCapacityWarningPercent = null,
         Func<int>? identityCapacityCriticalPercent = null,
@@ -1303,6 +1308,8 @@ internal sealed class DarlingSelfAlertEvaluator
         /* Unsupplied AG seams fall back to the V35 DDL defaults (master switch on, 5-minute lag, redo queue
            off) so an evaluator built without them behaves like a store at its shipped defaults. */
         _notifyAgHealth = notifyAgHealth ?? (() => true);
+        /* #6874: an evaluator built without the seam behaves like a store at its shipped default: the Agent alert setup alert is off. */
+        _agentAlertSetupEnabled = agentAlertSetupEnabled ?? (() => false);
         /* #6875: an evaluator built without these seams behaves like a store at its shipped defaults: the Identity Capacity alert is off, its bars are 70 and
            90 percent, and no override applies. */
         _identityCapacityEnabled = identityCapacityEnabled ?? (() => false);
@@ -1540,6 +1547,29 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             _logger?.LogError("[{Server}] Agent-not-running self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(Key(serverId), AgentStatusReadName, agentReadClock.ElapsedMilliseconds);
+        }
+
+        /* Agent Alert Gaps (#6874): off by default, so a fleet that never turned it on pays no read here. The collector only
+           writes rows on SQL Server (not Azure SQL Database, Managed Instance or Amazon RDS), so on those a server has no capture
+           and nothing is judged. */
+        if (_agentAlertSetupEnabled())
+        {
+            var agentAlertReadClock = Stopwatch.StartNew();
+            try
+            {
+                var read = await ReadAgentAlertSetupAsync(postgres, serverId, cancellationToken);
+                agentAlertReadClock.Restart();
+                await ApplyAgentAlertSetupAsync(serverId, serverName, read, cancellationToken, sweepGeneration: generation);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("[{Server}] Agent-alert-setup self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentAlertReadClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(Key(serverId), AgentAlertSetupReadName, agentAlertReadClock.ElapsedMilliseconds);
+            }
         }
 
         /* Identity Capacity (#6875): off by default, so a fleet that never turned it on pays no read here. A server with no scan in the window
@@ -4336,6 +4366,82 @@ internal sealed class DarlingSelfAlertEvaluator
             await RecordResolutionAsync(new AlertResolution(
                 key, serverName, AgentDownMetric,
                 "Agent Restarted", $"{serverName}: SQL Server Agent service is running again"), cancellationToken);
+        }
+    }
+
+    /// <summary>How far back the Agent alert setup looks for a firing that told no operator (#6874).</summary>
+    internal static readonly TimeSpan AgentAlertSetupWindow = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// The server's Agent alerts for the last <see cref="AgentAlertSetupWindow"/> (#6874), or null when there is no FRESH capture:
+    /// none in the window, or the newest is older than the collection-stale window. A lagging feed is the collection-stopped
+    /// alert's to report, so it neither fires nor clears this one.
+    /// </summary>
+    internal async Task<AgentAlertRead?> ReadAgentAlertSetupAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var now = _utcNow();
+        var read = await ReadWithOneRetryAsync(
+            token => DarlingAgentAlertReader.ReadAsync(
+                postgres, serverId, now - AgentAlertSetupWindow, now, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, token),
+            serverId, AgentAlertSetupReadName, cancellationToken);
+        if (!read.HasCapture)
+        {
+            return null;
+        }
+
+        var newest = DateTime.SpecifyKind(read.NewestCapture!.Value, DateTimeKind.Utc);
+        return now - newest < SettingsStaleWindow ? read : null;
+    }
+
+    /// <summary>
+    /// Edge-applies "Agent Alert Gaps" (#6874) from the instance status <see cref="AgentAlertStatus.Evaluate"/> gives the newest
+    /// Agent alert capture. Shaped like <see cref="ApplyAgentNotRunningAsync"/>: fires once when a gap appears, re-fires after the
+    /// cooldown while it stands, and writes one "Agent Alert Gaps Cleared" history row when the status is ok again. A null
+    /// <paramref name="read"/> (no fresh capture) judges nothing and leaves the standing state alone. Off unless the
+    /// <c>agent_alert_gaps_enabled</c> setting is on, and gated on the master alerts switch.
+    /// </summary>
+    internal async Task ApplyAgentAlertSetupAsync(
+        int serverId, string serverName, AgentAlertRead? read, CancellationToken cancellationToken, int? sweepGeneration = null)
+    {
+        if (IsStaleSweep(serverId, sweepGeneration) || !_settings.AlertsEnabled || !_agentAlertSetupEnabled() || read is null)
+        {
+            return;
+        }
+
+        var key = Key(serverId);
+        var now = _utcNow();
+        var status = AgentAlertStatus.Evaluate(read.Alerts);
+        if (status.Gaps.Count > 0)
+        {
+            _activeAgentAlertGaps[key] = true;
+            var decision = DecideStateAlert(_lastAgentAlertGapAlert, key, AgentAlertSetupMetric, key, now, out var refire);
+            if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
+            {
+                _lastAgentAlertGapAlert[key] = now;
+                var gapText = string.Join(" ", status.Gaps.Select(g => g.Alerts.Count > 0 ? $"{g.Message} ({string.Join(", ", g.Alerts)})" : g.Message));
+                var delivery = await FireAsync(
+                    key, serverName, AgentAlertSetupMetric, "Gaps", "Complete",
+                    detail: StateRepeatNote(decision, refire) + "The SQL Server Agent alerts on this server have gaps. " + gapText +
+                        " A server without these alerts says nothing when the engine reports corruption or a fatal error.",
+                    severity: AlertSeverityLevel.Warning,
+                    shortMessage: $"SQL Server Agent alerts have {status.Gaps.Count} gap(s): {string.Join(", ", status.Gaps.Select(g => g.Code))}",
+                    numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                    cancellationToken);
+                if (IsStaleSweep(serverId, sweepGeneration))
+                {
+                    return;
+                }
+
+                NoteStateSend(AgentAlertSetupMetric, key, delivery);
+            }
+        }
+        else if (_activeAgentAlertGaps.TryRemove(key, out var was) && was)
+        {
+            EndStateAlert(_lastAgentAlertGapAlert, key, AgentAlertSetupMetric, key);
+            await RecordResolutionAsync(new AlertResolution(
+                key, serverName, AgentAlertSetupMetric,
+                "Agent Alert Gaps Cleared", $"{serverName}: the SQL Server Agent alerts have no gaps"), cancellationToken);
         }
     }
 
@@ -8557,11 +8663,14 @@ WHERE c.is_enabled";
         _lastCaptureDownAlert.TryRemove(key, out _);
         _activeAgentDown.TryRemove(key, out _);
         _lastAgentDownAlert.TryRemove(key, out _);
+        _activeAgentAlertGaps.TryRemove(key, out _);
+        _lastAgentAlertGapAlert.TryRemove(key, out _);
         _activeIdentityCapacity.TryRemove(key, out _);
         _lastIdentityCapacityAlert.TryRemove(key, out _);
         _stateRetries.Clear(StateRetryKey(IdentityCapacityMetric, key));
         _stateRetries.Clear(StateRetryKey(CaptureDownMetric, key));
         _stateRetries.Clear(StateRetryKey(AgentDownMetric, key));
+        _stateRetries.Clear(StateRetryKey(AgentAlertSetupMetric, key));
         _connectionState.TryRemove(key, out _);
         _hasBeenOnline.TryRemove(key, out _);
         _collectionWatchStart[key] = Unstamped;
@@ -9221,6 +9330,8 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
 
     internal const string CaptureDownMetric = "Capture Down";
     internal const string AgentDownMetric = "Agent Not Running";
+    internal const string AgentAlertSetupMetric = "Agent Alert Gaps";
+    internal const string AgentAlertSetupReadName = "agent-alert-setup self-alert";
     internal const string IdentityCapacityMetric = "Identity Capacity";
     internal const string IdentityCapacityReadName = "identity-capacity self-alert";
 

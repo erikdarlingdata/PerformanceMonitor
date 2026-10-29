@@ -214,6 +214,15 @@ public static class CollectorRuntimePrecondition
         "collector: it runs and reports a permission error instead, and a grant takes effect on its next run.";
 
     /// <summary>
+    /// What could stop the agent_alerts collector from running, as <c>get_agent_alerts</c> words it (#6874). The engine edition is
+    /// answered before this is asked (Azure SQL Database and Managed Instance are <c>not_collected</c>), so AWS RDS is the one
+    /// remaining candidate: it reports an ordinary edition, so the registry cannot tell it from a plain SQL Server.
+    /// </summary>
+    public const string AgentAlertsPossibleCauses =
+        "Possible cause: this is an AWS RDS instance, where this collector does not run. A login without msdb access " +
+        "does not stop this collector: it runs and reports a permission error instead, and a grant takes effect on its next run.";
+
+    /// <summary>
     /// The closing sentence every precondition message ends on. One copy, for the same reason
     /// <c>CollectorEngineCapability.PermanentGapEpilogue</c> is one copy: the messages have to agree about
     /// what a precondition IS, and a second wording would eventually disagree about whether it is worth

@@ -25,7 +25,7 @@ internal static class DarlingMcpToolClassification
     {
         "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
         "analyze_server", "audit_config", "backtest_custom_alert_rule", "compare_analysis", "describe_custom_view_catalog", "get_active_queries",
-        "get_active_query_plan_xml", "get_ag_health", "get_alert_history", "get_alert_settings",
+        "get_active_query_plan_xml", "get_ag_health", "get_agent_alerts", "get_alert_history", "get_alert_settings",
         "get_analysis_facts", "get_analysis_findings", "get_blocked_process_xml", "get_blocking",
         "find_database", "get_blocking_plan_xml", "get_blocking_stats", "get_blocking_trend", "get_change_watches", "get_known_patterns", "get_client_timeouts", "get_collection_health",
         "get_collection_log", "get_collection_state", "get_collector_cost", "get_collector_schedules", "get_server_actions", "get_server_settings", "get_command_result", "get_agent_changes", "get_collector_stall_probes", "get_cpu_by_database", "get_cpu_scheduler_pressure",

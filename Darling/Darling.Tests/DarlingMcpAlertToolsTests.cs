@@ -1331,7 +1331,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         ExcludedVolumes: new[] { "S:\\", "/mnt/scratch" },
         /* #5736 (V211): not the shipped 3 / 10, for the same reason as the floors above. */
         ClientTimeoutsWarningMultiple: 2, ClientTimeoutsCriticalMultiple: 7,
-        IdentityCapacityEnabled: true, IdentityCapacityWarningPercent: 72, IdentityCapacityCriticalPercent: 92);
+        AgentAlertGapsEnabled: true, IdentityCapacityEnabled: true, IdentityCapacityWarningPercent: 72, IdentityCapacityCriticalPercent: 92);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

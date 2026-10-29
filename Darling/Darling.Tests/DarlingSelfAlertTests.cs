@@ -307,6 +307,8 @@ public sealed class DarlingSelfAlertTests
         /// Purge Over Horizon read-failure count.</summary>
         public AlertReadFailureCounter? ReadFailures { get; set; }
 
+        /// <summary>#6874: the Agent Alert Gaps switch, read live. Default off, the shipped default.</summary>
+        public bool AgentAlertSetupEnabled { get; set; }
         /// <summary>#6875: the Identity Capacity switch, read live. Default off, the shipped default. The bars default to 70 and 90, and an override
         /// resolver (wire, server key, database, global) replaces them for a scope.</summary>
         public bool IdentityCapacityEnabled { get; set; }
@@ -334,6 +336,7 @@ public sealed class DarlingSelfAlertTests
             retentionHoldCriticalRatio: WireRetentionHoldKnobs ? () => RetentionHoldCriticalRatio : null,
             readFailures: ReadFailures,
             storeName: StoreName,
+            agentAlertSetupEnabled: () => AgentAlertSetupEnabled,
             identityCapacityEnabled: () => IdentityCapacityEnabled,
             resolveThreshold: ResolveThreshold);
     }

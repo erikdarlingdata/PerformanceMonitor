@@ -481,6 +481,9 @@ public partial class MainWindow : Window
         FleetSweepsContent.Initialize(_dataService);
         FleetSweepsContent.StatusChanged += OnServerTabStatusChanged;
 
+        /* Agent Alerts (#6874): a self-loading control over the SQL Server Agent alert setup of one server; it loads on activation and its own Refresh. */
+        AgentAlertsContent.Initialize(_dataService);
+        AgentAlertsContent.StatusChanged += OnServerTabStatusChanged;
         /* Identity Capacity (#6875): a self-loading read-only control over the identity column capacity scans. */
         IdentityCapacityContent.Initialize(_dataService);
         IdentityCapacityContent.StatusChanged += OnServerTabStatusChanged;
@@ -663,6 +666,7 @@ public partial class MainWindow : Window
            otherwise double-refresh the same grid). Every other aggregate tab still auto-refreshes. */
         if (ReferenceEquals(MainTabs.SelectedItem, RecommendationsTab)
             || ReferenceEquals(MainTabs.SelectedItem, JobHistoryTabItem)
+            || ReferenceEquals(MainTabs.SelectedItem, AgentAlertsTabItem)
             || ReferenceEquals(MainTabs.SelectedItem, FinOpsTab)
             || ReferenceEquals(MainTabs.SelectedItem, OverviewTab))
         {
@@ -1302,6 +1306,10 @@ public partial class MainWindow : Window
                 case TabItem tab when ReferenceEquals(tab, JobHistoryTabItem):
                     await JobHistoryContent.RefreshJobsAsync();
                     StampRefreshed("job history");
+                    break;
+                case TabItem tab when ReferenceEquals(tab, AgentAlertsTabItem):
+                    await AgentAlertsContent.RefreshAsync();
+                    StampRefreshed("agent alerts");
                     break;
                 case TabItem tab when ReferenceEquals(tab, FleetSweepsTabItem):
                     await FleetSweepsContent.RefreshAsync();

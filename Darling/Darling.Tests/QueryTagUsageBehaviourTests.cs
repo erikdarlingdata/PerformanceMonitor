@@ -161,6 +161,24 @@ public sealed class QueryTagUsageBehaviourTests
     }
 
     [Fact]
+    public void TheQueryStoreCard_InTheBacklogState_DrawsTheGapAndTheBacklogAsTwoNumbers_AndWithoutBacklogDrawsNothing()
+    {
+        // #6865: the section starts after the newest hour still waiting for the hourly builder. The gap (hours_left_out) and the backlog hours inside it
+        // (backlog_hours_waiting) are different numbers, and the page words them as the MCP and Viewer notes do (QueryTagRollupHashRoute.BacklogNote).
+        var run = Run();
+        var start = run.GetProperty("backlogStart").GetString()!;
+        Assert.False(string.IsNullOrWhiteSpace(start));
+        var drawn = run.GetProperty("backlogNotes").EnumerateArray().Select(n => n.GetString()).ToArray();
+        Assert.Equal([PerformanceMonitor.Darling.Storage.QueryTagRollupHashRoute.BacklogNote(start, 8, 4)], drawn);
+        Assert.Contains("leaves out the first 8 hours of the window, because 4 hours in that part are still being built", drawn[0]);
+        var one = run.GetProperty("backlogOneNotes").EnumerateArray().Select(n => n.GetString()).ToArray();
+        Assert.Equal([PerformanceMonitor.Darling.Storage.QueryTagRollupHashRoute.BacklogNote(start, 1, 1)], one);
+        Assert.Contains("the first 1 hour of the window, because 1 hour in that part is still being built", one[0]);
+        Assert.Empty(run.GetProperty("noBacklogNotes").EnumerateArray());
+        Assert.Empty(run.GetProperty("zeroBacklogNotes").EnumerateArray());
+    }
+
+    [Fact]
     public void TheAvailabilityGroupCard_SaysAsReportedByTheDisplayName_AndFallsBackToTheKey()
     {
         // #6157: "As reported by <name>" read the connection key before.

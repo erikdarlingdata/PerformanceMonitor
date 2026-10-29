@@ -1041,9 +1041,11 @@ public sealed class AlertReadFailureSurfaceTests
     /// read ("runnable queue top requests"), counted because it IS a store read the alert pass swallowed, though only
     /// the card's request items go missing and the fire does not. And a FORTY-FIRST since #5640: the Client Timeouts window read ("client timeouts"), counted because a swallowed read neither fires nor clears the alert. And a FORTY-SECOND since #5654: the external-alert delivery self-alert's count of undelivered rows, counted because a
     /// swallowed read leaves the standing alert unjudged (the worker holds it rather than resolving it). And a FORTY-THIRD since #5715 part B: the escalation-tier seed read ("escalation tier seed"), counted because a swallowed read leaves a Warning delivered before a restart unknown to the engine, so the Critical that follows waits out the cooldown instead of escalating; it seeds nothing, never blocks a fire, and is retried on the next sweep.</para>
-    /// And a FORTY-FOURTH since #5916: the threshold-override reload ("threshold-override reload"), counted because a swallowed read keeps the overrides already in force, so a nonzero count says a changed override has not yet taken effect. And a FORTY-FIFTH since #6875: the Identity Capacity window read ("identity-capacity self-alert"), counted because a swallowed read neither fires nor clears the alert, so a population of them would leave a nearly exhausted identity column unreported for as long as the store stayed unreadable.
+    /// And a FORTY-FOURTH since #5916: the threshold-override reload ("threshold-override reload"), counted because a swallowed read keeps the overrides already in force, so a nonzero count says a changed override has not yet taken effect.
+    /// And a FORTY-FIFTH since #6874: the Agent Alert Gaps read ("agent-alert-setup self-alert"), counted because a swallowed read leaves the standing alert unjudged and a nonzero count says the setup check is not running.
+    /// And a FORTY-SIXTH since #6875: the Identity Capacity window read ("identity-capacity self-alert"), counted because a swallowed read neither fires nor clears the alert, so a population of them would leave a nearly exhausted identity column unreported for as long as the store stayed unreadable.
     /// </summary>
-    private const int CountedSites = 45;
+    private const int CountedSites = 46;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the

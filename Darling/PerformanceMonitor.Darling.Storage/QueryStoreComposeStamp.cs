@@ -86,6 +86,15 @@ public static class QueryStoreComposeStamp
     /// <summary>The wall-clock budget of one tick: no new build starts once this has passed.</summary>
     public static readonly TimeSpan MaxTickDuration = TimeSpan.FromMinutes(10);
 
+    /// <summary>The most backlog hours (see <see cref="Build.Backlog"/>) one tick builds on top of its <see cref="MaxBuildsPerTick"/> (#6865).</summary>
+    public const int MaxExtraBacklogBuilds = 24;
+
+    /// <summary>The wall-clock budget of a tick's extra backlog builds (#6865): no extra build starts once they have run this long. It is a fraction of
+    /// <see cref="MaxTickDuration"/> (the normal six builds take about 21 s of it). At that speed (about 3.5 s a build) the budget would allow about 50
+    /// hours, so <see cref="MaxExtraBacklogBuilds"/> (24, which makes 6 + 24 = 30 hours a tick) is what ends the extras, and the budget binds only when a
+    /// build takes more than about 7.5 s (3 minutes over 24 builds).</summary>
+    public static readonly TimeSpan ExtraBacklogBudget = TimeSpan.FromMinutes(3);
+
     /// <summary>The server-side <c>statement_timeout</c> each build's transaction runs under.</summary>
     public const int BuildStatementTimeoutSeconds = 60;
 
@@ -493,6 +502,24 @@ WHERE hour < $1;";
       AND a.pid <> pg_backend_pid()";
 
     /// <summary>
+    /// The writer cutoff (#5582 review round 2) as the ONE definition the planner (<see cref="PlanSql"/>) and the fleet rollup read
+    /// (<c>QueryTagRollupHashRoute.LedgerSql</c>, #6865) share: a one-row <c>SELECT</c> of <c>since</c>, the start of the oldest open writer
+    /// of the wide table. No writer is <c>infinity</c>, and a writer whose <c>xact_start</c> reads NULL is <c>-infinity</c> (it counts as open
+    /// from before every hour, see <see cref="OpenWriterSql"/>). Used as a CTE named <c>cutoff</c>, with <see cref="BlockedByWriterTail"/>.
+    /// </summary>
+    internal const string WriterCutoffSql = @"SELECT coalesce(min(coalesce(w.xact_start AT TIME ZONE 'UTC', '-infinity'::timestamp)), 'infinity'::timestamp) AS since
+    FROM (" + WideWriterRowsSql + @"
+    ) AS w";
+
+    /// <summary>
+    /// What follows an hour expression to say "an open writer would defer this hour" against the <c>cutoff</c> CTE
+    /// (<see cref="WriterCutoffSql"/>): the row trigger skips a row within one hour of the writer's clock, so a row of hour H can land
+    /// unmarked only while the store's clock is before H + 2 h (<see cref="OpenWriterSql"/>). The planner and the fleet rollup read both
+    /// use it, so an hour the builder will not build because of a writer is the same hour the read does not wait for.
+    /// </summary>
+    internal const string BlockedByWriterTail = " + interval '2 hours' > cutoff.since";
+
+    /// <summary>
     /// The margin guard (#5582 review round 1, narrowed in round 2): the oldest open WRITER OF THE WIDE TABLE (<see cref="WideWriterRowsSql"/>)
     /// that could hold an unmarked row of the hour, if there is one: $1 the hour. The row trigger skips a row whose
     /// <c>collection_time</c> is within one hour of the hour of the writer's clock (<see cref="WhenOffset"/>), so a row of hour H can land
@@ -628,7 +655,7 @@ ON CONFLICT (hour) DO UPDATE SET built_at = EXCLUDED.built_at;";
 
     /// <summary>
     /// The hours to build, as (hour, stale): $1 the floor (<see cref="FloorHour"/>), $2 the cap PER KIND, so at most that many
-    /// stale hours and at most that many never-built hours; <see cref="ChooseBuilds"/> splits one tick's builds between the two.
+    /// stale hours and at most that many never-built hours (backlog hours: see the sixth column); <see cref="ChooseBuilds"/> splits one tick's builds between the two.
     /// First the stale hours (an hour the builder has done that has a pair with <c>built_seq IS DISTINCT FROM late_seq</c>, or with
     /// <c>hash_built_seq IS DISTINCT FROM late_seq</c> for the hash-hourly table: NULL on every hour built before V221, so those plan as
     /// stale, newest first, and the backfill is the ordinary tick),
@@ -643,6 +670,12 @@ ON CONFLICT (hour) DO UPDATE SET built_at = EXCLUDED.built_at;";
     ///
     /// <para>$3 is NULL in the service. A test passes a store clock of its own (<see cref="TickOptions.StoreNow"/>), because a writer
     /// blocks a plannable hour only once it has been open for over an hour, and a test cannot wait that long.</para>
+    ///
+    /// <para>The sixth column, <c>backlog</c> (#6865), is true for a stale hour whose pairs are stale only for the hash-hourly table (<c>built_seq</c>
+    /// equals <c>late_seq</c> but <c>hash_built_seq</c> is NULL or different): the hours every store has after V221, and the hours a service host that
+    /// predates V221 built. No writer touched them, so the rollup itself is right and only the hash table waits. A stale hour with any pair whose
+    /// <c>built_seq</c> differs from <c>late_seq</c> is a late-write hour, not backlog. $5 is <see cref="MaxExtraBacklogBuilds"/>: backlog hours are
+    /// capped at $2 plus $5, the others at $2, so the tick can build its extra backlog hours (<see cref="ChooseExtraBacklog"/>).</para>
     ///
     /// <para>The third column, <c>blocked</c>, is true for an hour an open writer of the wide table would defer (<see cref="OpenWriterSql"/>:
     /// the oldest writer started before the hour plus two hours; a writer with no readable start blocks every hour). The cap is per kind AND
@@ -670,42 +703,42 @@ clock AS
 ),
 cutoff AS
 (
-    SELECT coalesce(min(coalesce(w.xact_start AT TIME ZONE 'UTC', '-infinity'::timestamp)), 'infinity'::timestamp) AS since
-    FROM (" + WideWriterRowsSql + @"
-    ) AS w
+    " + WriterCutoffSql + @"
 ),
 stale AS
 (
-    SELECT DISTINCT b.hour, true AS stale, (b.hour + interval '2 hours' > cutoff.since) AS blocked
+    SELECT b.hour, true AS stale, (b.hour" + BlockedByWriterTail + @") AS blocked,
+           NOT bool_or(b.built_seq IS DISTINCT FROM b.late_seq) AS backlog
     FROM collect.query_store_compose_stamp_built AS b
     JOIN collect.query_store_compose_stamp_hours AS h ON h.hour = b.hour
     CROSS JOIN bounds
     CROSS JOIN cutoff
     WHERE (b.built_seq IS DISTINCT FROM b.late_seq OR b.hash_built_seq IS DISTINCT FROM b.late_seq)
       AND b.hour >= bounds.floor_hour
+    GROUP BY b.hour, cutoff.since
 ),
 missing AS
 (
-    SELECT g AS hour, false AS stale, (g + interval '2 hours' > cutoff.since) AS blocked
+    SELECT g AS hour, false AS stale, (g" + BlockedByWriterTail + @") AS blocked, false AS backlog
     FROM bounds
     CROSS JOIN cutoff
     CROSS JOIN clock
     CROSS JOIN LATERAL generate_series(bounds.floor_hour, date_trunc('hour', clock.at - interval '3 hours'), interval '1 hour') AS g
     WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_hours AS h WHERE h.hour = g)
 )
-SELECT p.hour, p.stale, p.blocked, p.failures, p.extended
+SELECT p.hour, p.stale, p.blocked, p.failures, p.extended, p.backlog
 FROM
 (
-    SELECT u.hour, u.stale, u.blocked, coalesce(f.failures, 0) AS failures,
+    SELECT u.hour, u.stale, u.blocked, u.backlog, coalesce(f.failures, 0) AS failures,
            coalesce(f.last_sqlstate = $4::text, false) AS extended,
-           row_number() OVER (PARTITION BY u.stale, u.blocked ORDER BY u.hour DESC) AS rn
+           row_number() OVER (PARTITION BY u.stale, u.blocked, u.backlog ORDER BY u.hour DESC) AS rn
     FROM (SELECT * FROM stale UNION ALL SELECT * FROM missing) AS u
     LEFT JOIN collect.query_store_compose_stamp_failures AS f ON f.hour = u.hour
     CROSS JOIN clock
     WHERE f.hour IS NULL
        OR f.retry_at <= clock.at
 ) AS p
-WHERE p.rn <= $2
+WHERE p.rn <= CASE WHEN p.backlog THEN $2::integer + $5::integer ELSE $2::integer END
 ORDER BY p.stale DESC, p.blocked, p.hour DESC;";
 
     /// <summary>
@@ -777,8 +810,9 @@ WHERE hour < $1;";
 
     /// <summary>One planned build: <paramref name="Failures"/> is the hour's consecutive failed builds (#5867, 0 for none), and
     /// <paramref name="Extended"/> is true when the last one was a statement timeout, so this attempt runs under
-    /// <see cref="ExtendedBuildStatementTimeoutSeconds"/>.</summary>
-    public readonly record struct Build(DateTime Hour, bool Stale, int Failures = 0, bool Extended = false);
+    /// <see cref="ExtendedBuildStatementTimeoutSeconds"/>. <paramref name="Backlog"/> (#6865) is a stale hour that is stale only for the
+    /// hash-hourly table (see <see cref="PlanSql"/>); it is also <paramref name="Stale"/>.</summary>
+    public readonly record struct Build(DateTime Hour, bool Stale, int Failures = 0, bool Extended = false, bool Backlog = false);
 
     /// <summary>One hour's failure record (<see cref="ReadFailuresSql"/>, #5867). Times are naive UTC on the store's clock.</summary>
     public readonly record struct HourFailure(
@@ -789,9 +823,9 @@ WHERE hour < $1;";
     public readonly record struct FailureOutcome(int Failures, DateTime NextAttemptAt, bool BackedOff);
 
     /// <summary>What one tick did.</summary>
-    public readonly record struct TickResult(int BuiltStale, int BuiltMissing, int Failed, long HoursRemoved, int Deferred = 0, int DeferredForWriters = 0, int HeldBack = 0, int BackedOff = 0, int DaysBuilt = 0, int DaysFailed = 0)
+    public readonly record struct TickResult(int BuiltStale, int BuiltMissing, int Failed, long HoursRemoved, int Deferred = 0, int DeferredForWriters = 0, int HeldBack = 0, int BackedOff = 0, int DaysBuilt = 0, int DaysFailed = 0, int BuiltBacklog = 0)
     {
-        public int Built => BuiltStale + BuiltMissing;
+        public int Built => BuiltStale + BuiltMissing + BuiltBacklog;
     }
 
     private static DateTime Unspecified(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
@@ -829,17 +863,39 @@ WHERE hour < $1;";
     {
         ArgumentNullException.ThrowIfNull(candidates);
 
-        var stale = candidates.Where(b => b.Stale).OrderByDescending(b => b.Hour).ToList();
+        /* #6865: a backlog hour (stale only for the hash-hourly table) is not a late write, so it does not take the never-built half. It fills
+           whatever the late-write stale hours and the never-built hours leave. */
+        var stale = candidates.Where(b => b.Stale && !b.Backlog).OrderByDescending(b => b.Hour).ToList();
         var missing = candidates.Where(b => !b.Stale).OrderByDescending(b => b.Hour).ToList();
+        var backlog = candidates.Where(b => b.Stale && b.Backlog).OrderByDescending(b => b.Hour).ToList();
         var staleCap = missing.Count > 0 ? max / 2 : max;
         var chosen = stale.Take(staleCap).ToList();
         chosen.AddRange(missing.Take(Math.Max(0, max - chosen.Count)));
+        chosen.AddRange(backlog.Take(Math.Max(0, max - chosen.Count)));
         /* OrderBy is stable: the order above holds within each group. */
         return chosen.OrderBy(b => b.Failures > 0).ToList();
     }
 
+    /// <summary>
+    /// The backlog hours a tick builds after its normal builds (#6865): the backlog hours of <paramref name="candidates"/> that
+    /// <paramref name="chosen"/> does not hold, newest first, at most <paramref name="maxExtra"/>. An hour that has failed before is left
+    /// to the normal selection and its back-off, so an extra build never retries a failure. Pure: the tick adds the wall-clock budget.
+    /// </summary>
+    public static IReadOnlyList<Build> ChooseExtraBacklog(IReadOnlyList<Build> candidates, IReadOnlyList<Build> chosen, int maxExtra)
+    {
+        ArgumentNullException.ThrowIfNull(candidates);
+        ArgumentNullException.ThrowIfNull(chosen);
+
+        var taken = chosen.Select(b => b.Hour).ToHashSet();
+        return candidates
+            .Where(b => b.Stale && b.Backlog && b.Failures == 0 && !taken.Contains(b.Hour))
+            .OrderByDescending(b => b.Hour)
+            .Take(Math.Max(0, maxExtra))
+            .ToList();
+    }
+
     /// <summary>One plan: the hours to build, and how many hours the plan held back because an open writer of the wide table would defer them.</summary>
-    public readonly record struct Plan(IReadOnlyList<Build> Builds, int HeldBack);
+    public readonly record struct Plan(IReadOnlyList<Build> Builds, int HeldBack, IReadOnlyList<Build>? ExtraBacklog = null);
 
     /// <summary>The hours to build at <paramref name="nowUtc"/>: <see cref="ChooseBuilds"/> over <see cref="PlanSql"/>, at most <see cref="MaxBuildsPerTick"/>.</summary>
     public static async Task<IReadOnlyList<Build>> PlanBuildsAsync(
@@ -860,6 +916,7 @@ WHERE hour < $1;";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = MaxBuildsPerTick });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = storeNow is { } at ? Unspecified(at) : DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = StatementTimeoutSqlState });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = MaxExtraBacklogBuilds });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -869,10 +926,11 @@ WHERE hour < $1;";
                 continue;
             }
 
-            builds.Add(new Build(reader.GetDateTime(0), reader.GetBoolean(1), reader.GetInt32(3), reader.GetBoolean(4)));
+            builds.Add(new Build(reader.GetDateTime(0), reader.GetBoolean(1), reader.GetInt32(3), reader.GetBoolean(4), reader.GetBoolean(5)));
         }
 
-        return new Plan(ChooseBuilds(builds, MaxBuildsPerTick), heldBack);
+        var normal = ChooseBuilds(builds, MaxBuildsPerTick);
+        return new Plan(normal, heldBack, ChooseExtraBacklog(builds, normal, MaxExtraBacklogBuilds));
     }
 
     /// <summary>What a caller can set on <see cref="RunTickAsync(NpgsqlDataSource, DateTime, int, ILogger, Func{TimeSpan}, CancellationToken, TickOptions?)"/>:
@@ -1246,7 +1304,7 @@ WHERE hour < $1;";
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(elapsed);
 
-        int builtStale = 0, builtMissing = 0, failed = 0, started = 0, deferredForWriters = 0, backedOff = 0;
+        int builtStale = 0, builtMissing = 0, builtBacklog = 0, failed = 0, started = 0, deferredForWriters = 0, backedOff = 0;
         var watch = options?.Watch ?? DeferralWatch.Shared;
 
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
@@ -1254,11 +1312,27 @@ WHERE hour < $1;";
         var planned = await PlanAsync(connection, nowUtc, retentionDays, cancellationToken, options?.StoreNow);
         var plan = planned.Builds;
 
-        foreach (var item in plan)
+        /* #6865: after the normal builds the tick keeps building backlog hours, newest first, while the extra builds stay inside
+           ExtraBacklogBudget and the tick inside MaxTickDuration. Each one is built, failed and backed off like any other hour. */
+        var extra = planned.ExtraBacklog ?? Array.Empty<Build>();
+        TimeSpan? extraStart = null;
+        var startedExtra = 0;
+        foreach (var (item, isExtra) in plan.Select(build => (build, false)).Concat(extra.Select(build => (build, true))))
         {
             if (elapsed() >= MaxTickDuration)
             {
                 break;
+            }
+
+            if (isExtra)
+            {
+                extraStart ??= elapsed();
+                if (elapsed() - extraStart.Value >= ExtraBacklogBudget)
+                {
+                    break;
+                }
+
+                startedExtra++;
             }
 
             started++;
@@ -1267,11 +1341,21 @@ WHERE hour < $1;";
             {
                 if (await BuildHourAsync(connection, item.Hour, nowUtc, cancellationToken, statementTimeoutSeconds: timeoutSeconds) is null)
                 {
-                    deferredForWriters++;
+                    /* Only a plan hour is "deferred" by a writer: an extra the writer held is opportunistic and is the next tick's backlog, so it is in
+                       neither Deferred nor the writer warning's count (it would report hours the plan never held, #6865). */
+                    if (!isExtra)
+                    {
+                        deferredForWriters++;
+                    }
+
                     continue;
                 }
 
-                if (item.Stale)
+                if (item.Backlog)
+                {
+                    builtBacklog++;
+                }
+                else if (item.Stale)
                 {
                     builtStale++;
                 }
@@ -1338,10 +1422,11 @@ WHERE hour < $1;";
             watch.ShouldWarn(false, null);
         }
 
-        var deferred = plan.Count - started + deferredForWriters;
-        var result = new TickResult(builtStale, builtMissing, failed, removed, deferred, deferredForWriters, planned.HeldBack, backedOff, days.Built, days.Failed);
-        logger.LogInformation("Query Store compose rollup: built {Built} hour(s) (stale {Stale}, missing {Missing}), failed {Failed}, deferred {Deferred}, removed {Removed} hour(s), built {DaysBuilt} day(s), failed {DaysFailed} day(s), {ElapsedMs} ms",
-            result.Built, builtStale, builtMissing, failed, deferred, removed, days.Built, days.Failed, (long)elapsed().TotalMilliseconds);
+        /* The extra builds are opportunistic: the ones the budget did not reach are not "deferred", they are the next tick's backlog. */
+        var deferred = plan.Count - (started - startedExtra) + deferredForWriters;
+        var result = new TickResult(builtStale, builtMissing, failed, removed, deferred, deferredForWriters, planned.HeldBack, backedOff, days.Built, days.Failed, builtBacklog);
+        logger.LogInformation("Query Store compose rollup: built {Built} hour(s) (stale {Stale}, missing {Missing}, backlog {Backlog}), failed {Failed}, deferred {Deferred}, removed {Removed} hour(s), built {DaysBuilt} day(s), failed {DaysFailed} day(s), {ElapsedMs} ms",
+            result.Built, builtStale, builtMissing, builtBacklog, failed, deferred, removed, days.Built, days.Failed, (long)elapsed().TotalMilliseconds);
         return result;
     }
 }

@@ -117,6 +117,7 @@ public static class CollectorEngineCapability
             ["running_jobs"] = "the SQL Agent running-job snapshot",
             ["job_history"] = "the SQL Agent job history",
             ["agent_status"] = "the SQL Agent service status",
+            ["agent_alerts"] = "the SQL Agent alert definitions and counters",
             ["database_states"] = "the sys.databases state snapshot",
             ["ag_replica_states"] = "the Always On availability replica states",
             ["ag_database_replica_states"] = "the Always On per-database replica states",

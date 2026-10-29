@@ -193,4 +193,30 @@ public sealed class QueryTagUsageNotesTests : IDisposable
         Assert.All(planCache, t => Assert.Equal(note, t.Note));
         Assert.All(result.Tables, t => AssertPlain(t.Note ?? ""));
     }
+
+    /// <summary>
+    /// #6865: a fleet read that leaves out the backlog hours and starts a server later at an unaligned hour produces two sentences, the backlog one and the
+    /// tier and edges one. The viewer keeps both, the backlog sentence first, the order the tool's keys and the page give them. Before this the backlog
+    /// note replaced the edges note and the viewer lost the tier and the dropped partial hour.
+    /// </summary>
+    [Fact]
+    public void A_backlog_note_keeps_the_tier_and_edges_sentence_after_it()
+    {
+        var at = QueryTagUsageNotes.Stamper(1);
+        var served = Utc(27, 2, 0);
+        var edges = QueryTagUsageNotes.QueryStore(daily: false, served, Utc(27, 1, 43), Utc(27, 14, 0), at);
+        Assert.False(string.IsNullOrEmpty(edges));
+
+        var note = QueryTagUsageNotes.QueryStoreBacklog(served, 16, 11, at, edges);
+
+        var backlog = QueryTagRollupHashRoute.BacklogNote(at(served), 16, 11);
+        Assert.Equal(backlog + " " + edges, note);
+        Assert.StartsWith("The figures start at 2026-10-27 02:00 UTC, which leaves out the first 16 hours of the window, because 11 hours in that part are still being built", note, StringComparison.Ordinal);
+        Assert.Contains("before the first full hour are not included", note, StringComparison.Ordinal);
+        AssertPlain(note);
+
+        /* No tier and edges sentence (a tail-only answer, or an aligned start): the backlog sentence alone, as before. */
+        Assert.Equal(backlog, QueryTagUsageNotes.QueryStoreBacklog(served, 16, 11, at, null));
+        Assert.Equal(backlog, QueryTagUsageNotes.QueryStoreBacklog(served, 16, 11, at));
+    }
 }

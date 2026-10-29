@@ -2317,6 +2317,9 @@ export const SERVER_TABS = [
       ),
       /* #6875: identity column capacity, one read feeding two panels (the columns, then each database's scan state). */
       ...identityCapacityPanels(server),
+      /* #6874: the SQL Server Agent alerts and the gaps in them, one read feeding three panels. A server with no Agent alerts at all
+         (Azure SQL Database, Managed Instance) or whose collector is refused answers with its own sentence in every panel. */
+      ...fanout("get_agent_alerts", { server }, AGENT_ALERT_SPECS),
     ],
   },
 
@@ -5397,6 +5400,61 @@ function identityCapacityPanels(server) {
   })();
   return [columnsShell.panel, scanShell.panel];
 }
+/* #6874: the Agent alert panels on the Configuration tab. The status words and the gap sentences are the service's (AgentAlertStatus),
+   the same ones the Viewer shows. A gap names either the alerts it is about or the severities and errors that have no alert. */
+function agentAlertGapWhich(r) {
+  const alerts = Array.isArray(r && r.alerts) ? r.alerts : [];
+  const missing = Array.isArray(r && r.missing) ? r.missing : [];
+  return alerts.length ? alerts.join(", ") : missing.join(", ");
+}
+const AGENT_ALERT_STAT_COLUMNS = [
+  { key: "instance_status", label: "Alert setup", format: "text", small: true },
+  { key: "alert_count", label: "Alerts defined", format: "int" },
+  { key: "captured_at", label: "Captured", format: "time", small: true },
+];
+const AGENT_ALERT_GAP_COLUMNS = [
+  { key: "message", label: "What is wrong" },
+  { key: "which", label: "Which", render: (r) => el("span", { text: agentAlertGapWhich(r) }), sortValue: agentAlertGapWhich },
+];
+const AGENT_ALERT_COLUMNS = [
+  { key: "name", label: "Alert" },
+  { key: "enabled", label: "Enabled", format: "bool" },
+  { key: "severity", label: "Severity", format: "int" },
+  { key: "message_id", label: "Error", format: "int" },
+  { key: "database_name", label: "Database" },
+  { key: "operator_count", label: "Operators", format: "int" },
+  { key: "fired_in_window", label: "Fired in the window", format: "bool" },
+  { key: "occurrence_count", label: "Times fired", format: "int" },
+  { key: "last_occurrence", label: "Last fired (server clock)" },
+];
+const AGENT_ALERT_SPECS = [
+  {
+    title: "Agent Alerts",
+    subtitle: "msdb.dbo.sysalerts, collected every 15 minutes",
+    span: 2,
+    viz: "stat",
+    stats: AGENT_ALERT_STAT_COLUMNS,
+    emptyText: "No SQL Server Agent alert capture yet.",
+  },
+  {
+    title: "Alert Setup Gaps",
+    subtitle: "severities 19 to 25, errors 823 to 825, operators",
+    span: 2,
+    viz: "table",
+    rowsKey: "gaps",
+    columns: AGENT_ALERT_GAP_COLUMNS,
+    emptyText: "No gaps. Every severity from 19 to 25 and every error from 823 to 825 has an enabled alert that tells an operator.",
+  },
+  {
+    title: "Alert Definitions",
+    subtitle: "newest capture, fired judged over the last 24 hours",
+    span: 2,
+    viz: "table",
+    rowsKey: "alerts",
+    columns: AGENT_ALERT_COLUMNS,
+    emptyText: "No SQL Server Agent alert is defined on this instance.",
+  },
+];
 
 /* The Job History grid on the Activity tab: the cross-server page's columns less Server, since the tab is one server's. */
 const JOB_HISTORY_COLUMNS = [
