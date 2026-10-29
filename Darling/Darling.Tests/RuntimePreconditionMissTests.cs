@@ -500,7 +500,7 @@ public sealed class CollectorRuntimePreconditionTests
 
         var source = File.ReadAllText(Path.Combine(
             RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingRuntimePrecondition.cs"));
-        Assert.Contains("collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);", source, StringComparison.Ordinal);
+        Assert.Contains("collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc);", source, StringComparison.Ordinal);
 
         var read = Regex.Match(source, @"ReadCollectorLastRunAsync\(\s*NpgsqlDataSource", RegexOptions.CultureInvariant);
         Assert.True(read.Success, "ReadCollectorLastRunAsync not found in DarlingRuntimePrecondition.cs");
@@ -630,7 +630,7 @@ public sealed class CollectorRuntimePreconditionTests
 
         var body = source[at..source.IndexOf("\n    }", at, StringComparison.Ordinal)];
         Assert.Contains(
-            "CollectorRuntimePrecondition.GatedOffStatusWord(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc)",
+            "CollectorRuntimePrecondition.GatedOffStatusWord(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc)",
             body, StringComparison.Ordinal);
         Assert.DoesNotContain("CollectorRuntimePrecondition.StatusWord", body, StringComparison.Ordinal);
     }

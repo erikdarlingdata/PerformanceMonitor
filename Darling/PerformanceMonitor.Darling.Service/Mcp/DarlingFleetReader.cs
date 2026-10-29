@@ -1299,6 +1299,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             HealthyCollectorCount = collectors.Healthy,
             WarningCollectorCount = collectors.Warning,
             NotCollectedCollectorCount = collectors.NotCollected,
+            NoPermissionCollectorCount = collectors.NoPermission,
             FailedCollectorCount = collectors.Failing,
             RegressedCollectorCount = collectors.Regressed,
             CollectorCount = collectors.Total,
@@ -2295,7 +2296,7 @@ AND   {SqlServerCollectedTargetSql}";
         var status = health.HealthStatus;
         /* #6828: one tally for every count surface (CollectorHealthClassifier.BandTally). A WARNING collector is not healthy, and a
            HEALTHY Always On collector on a server with Always On off is not collected. */
-        var tally = new CollectorHealthClassifier.BandTally(existing.Healthy, existing.Warning, existing.Failing, existing.NotCollected, existing.Total)
+        var tally = new CollectorHealthClassifier.BandTally(existing.Healthy, existing.Warning, existing.Failing, existing.NotCollected, existing.NoPermission, existing.Total)
             .Add(health.CollectorName, status, alwaysOnOff, engineGated);
         return new CollectorCounts(
             tally.Healthy,
@@ -2330,7 +2331,8 @@ AND   {SqlServerCollectedTargetSql}";
                 ? status
                 : existing.PgDeadlockBand,
             tally.Warning,
-            tally.NotCollected);
+            tally.NotCollected,
+            tally.NoPermission);
     }
 
     /// <summary>
@@ -2502,7 +2504,7 @@ AND   {SqlServerCollectedTargetSql}";
     /// old), so the band floor moves it to WARNING; by the second day the success clock has run out and
     /// the same collector reads FAILING while still being regressed. Counting off the band would make
     /// this go quiet precisely as the regression got worse.</para></param>
-    internal readonly record struct CollectorCounts(int Healthy, int Failing, int Total, int Regressed, string? DeadlockBand = null, string? PgDeadlockBand = null, int Warning = 0, int NotCollected = 0);
+    internal readonly record struct CollectorCounts(int Healthy, int Failing, int Total, int Regressed, string? DeadlockBand = null, string? PgDeadlockBand = null, int Warning = 0, int NotCollected = 0, int NoPermission = 0);
 
     /// <summary>One completed 7-day collection-health scan (#3735): the per-server counts
     /// <see cref="ReadFailingCollectorCountsAsync"/> produced and the <c>nowUtc</c> the scan was started with —
@@ -2986,6 +2988,11 @@ public sealed class FleetServerCard
     /// <summary>#6828: Always On collectors on a server with Always On off, which <c>get_collection_health</c> lists as <c>not_collected</c> and
     /// the card does not count as healthy.</summary>
     [JsonPropertyName("not_collected_collector_count")] public int NotCollectedCollectorCount { get; init; }
+
+    /// <summary>#6932: collectors the monitored server refused (NO_PERMISSIONS) or lacks an extension for (EXTENSION_MISSING), the two bands
+    /// a person fixes at the monitored server. Healthy + warning + failed + not collected + this = <c>collector_count</c>. It does not move
+    /// <c>collector_severity</c>, so an optional collector refused after an upgrade shows here without turning the card yellow.</summary>
+    [JsonPropertyName("no_permission_collector_count")] public int NoPermissionCollectorCount { get; init; }
     [JsonPropertyName("failed_collector_count")] public int FailedCollectorCount { get; init; }
 
     /// <summary>

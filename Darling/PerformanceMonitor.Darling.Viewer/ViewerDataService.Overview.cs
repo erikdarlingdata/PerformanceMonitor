@@ -551,7 +551,7 @@ LIMIT 1";
         /* Collectors row — REUSE the viewer's own 7-day per-collector health banding (the same STALE /
            FAILING / NEVER_RUN / HEALTHY logic the Collection Health tab renders), mirroring the Dashboard's
            SUM(CASE health_status = 'HEALTHY' / 'FAILING') over report.collection_health. */
-        var (healthyCollectors, warningCollectors, failingCollectors, notCollectedCollectors, totalCollectors, deadlockBand, pgDeadlockBand) = await GetCollectorHealthCountsAsync(serverId, cancellationToken);
+        var (healthyCollectors, warningCollectors, failingCollectors, notCollectedCollectors, noPermissionCollectors, totalCollectors, deadlockBand, pgDeadlockBand) = await GetCollectorHealthCountsAsync(serverId, cancellationToken);
 
 
         var protectionChip = await GetDatabaseProtectionChipAsync(serverId, nowUtc, cancellationToken);
@@ -593,6 +593,7 @@ LIMIT 1";
             HealthyCollectorCount = healthyCollectors,
             WarningCollectorCount = warningCollectors,
             NotCollectedCollectorCount = notCollectedCollectors,
+            NoPermissionCollectorCount = noPermissionCollectors,
             FailedCollectorCount = failingCollectors,
             CollectorCount = totalCollectors,
             DeadlockCollectorBand = deadlockBand,
@@ -657,7 +658,7 @@ WHERE id = 1";
     /// terms; this method does not know the engine, so the card carries both and
     /// <see cref="ServerSummaryItem.DeadlockSource"/> picks once <c>IsPostgres</c> is stamped.</para>
     /// </summary>
-    private async Task<(int Healthy, int Warning, int Failing, int NotCollected, int Total, string? DeadlockBand, string? PgDeadlockBand)> GetCollectorHealthCountsAsync(int serverId, CancellationToken cancellationToken)
+    private async Task<(int Healthy, int Warning, int Failing, int NotCollected, int NoPermission, int Total, string? DeadlockBand, string? PgDeadlockBand)> GetCollectorHealthCountsAsync(int serverId, CancellationToken cancellationToken)
     {
         /* #4226: the fleet-wide rollup-backed read, memoized, instead of this server's OWN raw
            CollectionHealthSql scan — the Overview loader's per-server loop now shares one store round trip
@@ -683,7 +684,7 @@ WHERE id = 1";
             .FirstOrDefault(r => string.Equals(r.CollectorName, PgDatabaseStatsCollector.Instance.Name, StringComparison.Ordinal))
             ?.HealthStatus;
         /* #3539 A8d: every banded row is the share's denominator — the service's CollectorCounts.Total. */
-        return (tally.Healthy, tally.Warning, tally.Failing, tally.NotCollected, tally.Total, deadlockBand, pgDeadlockBand);
+        return (tally.Healthy, tally.Warning, tally.Failing, tally.NotCollected, tally.NoPermission, tally.Total, deadlockBand, pgDeadlockBand);
     }
 
     /// <summary>Whole minutes elapsed from a stored naive-UTC instant to now (UTC), floored at 0, or null
@@ -955,6 +956,9 @@ public sealed class ServerSummaryItem
     /// <summary>#6828: Always On collectors on a server with Always On off, which <c>get_collection_health</c> lists as not_collected.</summary>
     public int NotCollectedCollectorCount { get; set; }
 
+    /// <summary>#6932: collectors the monitored server refused (NO_PERMISSIONS) or lacks an extension for (EXTENSION_MISSING). Does not change the card's severity.</summary>
+    public int NoPermissionCollectorCount { get; set; }
+
     /// <summary>Collectors whose 7-day band is FAILING (no success in over 24h).</summary>
     public int FailedCollectorCount { get; set; }
 
@@ -1194,7 +1198,8 @@ public sealed class ServerSummaryItem
         : $"Healthy: {HealthyCollectorCount}, "
             + (WarningCollectorCount > 0 ? $"Warning: {WarningCollectorCount}, " : "")
             + $"Failing: {FailedCollectorCount}"
-            + (NotCollectedCollectorCount > 0 ? $", Not collected: {NotCollectedCollectorCount}" : "");
+            + (NotCollectedCollectorCount > 0 ? $", Not collected: {NotCollectedCollectorCount}" : "")
+            + (NoPermissionCollectorCount > 0 ? $", No permission: {NoPermissionCollectorCount}" : "");
 
     /// <summary>
     /// The stored collection_time is naive UTC; the viewer shows it in the viewer machine's local time
