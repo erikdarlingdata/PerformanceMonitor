@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -14,6 +15,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -65,6 +67,36 @@ SELECT $1 + g, $2, $3, $4, $5, g, g + 1000, '0x' || g::text, 'MANUAL', 0, NULL F
         DarlingMcpForcedPlanTools.GetForcedPlans(postgres, ServerName, 24, null, DatabaseFilter.All, queryId, planId, limit, offset, ct);
 
     private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement;
+
+    /// <summary>
+    /// #6834: a slow <c>get_forced_plans</c> call's slow-read row named no server and kept no server id. A server id is a hash of the name, so
+    /// about half of them are negative, and the scope took a negative id for "none noted". The server here has a negative id on purpose.
+    /// </summary>
+    [Fact]
+    public async Task ASlowGetForcedPlans_IsRecordedWithItsServerAndArguments_ForAServerWhoseIdIsNegative()
+    {
+        Assert.True(ServerId < 0, "the pin needs a server whose id is negative");
+        await WithStoreAsync(async (postgres, ct) =>
+        {
+            using var opened = ReadScope.Open(null);
+            await Call(postgres, null, null, 200, 0, ct);
+
+            var slowReads = new SlowReadLog(0);
+            var arguments = McpToolLatencyFilter.SlowReadArguments("get_forced_plans", new Dictionary<string, JsonElement>
+            {
+                ["server_name"] = JsonDocument.Parse("\"" + ServerName + "\"").RootElement,
+                ["hours_back"] = JsonDocument.Parse("12").RootElement,
+            });
+            slowReads.Offer(opened.Scope, ReadSurface.Mcp, "get_forced_plans", ReadOutcome.Ok, 6_000, arguments, null, null);
+
+            Assert.True(slowReads.TryRead(out var record));
+            Assert.Equal(ServerId, record!.ServerId);
+            var stored = JsonDocument.Parse(record.ArgumentsJson).RootElement;
+            Assert.Equal(ServerId, stored.GetProperty("server_id").GetInt32());
+            Assert.Equal(12, stored.GetProperty("hours_back").GetInt32());
+            return 0;
+        });
+    }
 
     [Fact]
     public async Task ThePlanFilter_ReturnsAPlanThatSortsPastTheFirst200()

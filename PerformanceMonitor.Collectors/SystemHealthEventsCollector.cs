@@ -65,10 +65,10 @@ namespace PerformanceMonitor.Collectors;
 /// <see cref="MaxEventsPerPass"/> events, so one pass stays under the host's command timeout (a read the client cancels
 /// saves no state and would repeat every interval); a pass that hits the cap keeps its rows and moves the bookmark to the
 /// last buffer it scanned, even when every event there was older than the watermark, and the next one continues. Anything
-/// that stops the file read (no event_file target, a permission refusal, Managed Instance or RDS, an error) drops back to
+/// that stops the file read (no event_file target, a permission refusal, RDS, an error) drops back to
 /// the ring buffer exactly as before, truncation measurement included. The run records <c>event_file_events</c> for a
 /// file read that reached the end of what the file holds (a pass the cap stopped does not, #6453), <c>event_file_fallback</c> for the fallback, <c>event_file_error</c> (the SQL Server error number) next to
-/// it when an error caused it, and <c>event_file_buffer_cut</c> when one buffer held more than <see cref="BufferReReadFactor"/> times the cap, and <c>event_file_wildcard</c> when the bookmark's file had rolled over and the read opened every rollover file (#6544).</para>
+/// it when an error caused it, and <c>event_file_buffer_cut</c> when one buffer held more than <see cref="BufferReReadFactor"/> times the cap, and <c>event_file_wildcard</c> when the bookmark's file had rolled over and the read opened every rollover file (#6544). On Managed Instance every read uses the bare pattern (#6897), so this measurement does not describe how many files were read there.</para>
 /// </summary>
 public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<SystemHealthEventsCollector.Row>
 {
@@ -109,7 +109,7 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
     /// <summary>1 on a pass where one buffer held more events than <see cref="BufferReReadFactor"/> times the cap: the pass kept the events it read and the bookmark skips the rest of that buffer. Written only then.</summary>
     internal const string EventFileBufferCutMeasurement = "event_file_buffer_cut";
 
-    /// <summary>1 on a pass that read every <c>&lt;stem&gt;_0_*.xel</c> file because the bookmark's file is no longer the one the target is writing (#6544). A pass whose bookmark is in the current file, or that has no bookmark, reads that one file and writes nothing. Written only then.</summary>
+    /// <summary>1 on a pass that read every <c>&lt;stem&gt;_0_*.xel</c> file because the bookmark's file is no longer the one the target is writing (#6544). A pass whose bookmark is in the current file, or that has no bookmark, reads that one file and writes nothing. On Managed Instance every read uses the bare pattern (#6897), so this measurement does not describe how many files were read there. Written only then.</summary>
     internal const string EventFileWildcardMeasurement = "event_file_wildcard";
 
     /// <summary>
@@ -256,7 +256,9 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
        the bookmark (#6544, measured: the wildcard costs about 2 s a pass, the exact path about 0.1 s). SQL
        Server refuses a bookmark whose file is gone (error 25717, the operating system's file-not-found) or whose offset is
        not a buffer start (error 25722); SystemHealthEventFileLiveSqlTests proves both live. A refusal moves to
-       attempt 2: the current file alone (never every file: a read of every file is what outran the command timeout). A
+       attempt 2: the current file alone (never every file: a read of every file is what outran the command timeout). On
+       Managed Instance attempt 2 reads the bare pattern from the oldest file instead, and stays bounded by the cap: the
+       time test is in the CASE on attempt 2, so the 3,000 raw-event cap counts every event wherever it is. A
        refusal of attempt 2 leaves @event_file_ok at 0 and the ring buffer is read.
 
        Each read is capped at @max_events raw events, taken in file order BEFORE the XML cast (measured: the function
@@ -368,6 +370,17 @@ BEGIN
     END;
 END;
 
+/* #6897: Managed Instance refuses every path with a directory in it and the `_0_` pattern (error 40538), so there the
+   read always uses the bare pattern the host passes. The target must still name a file, or there is no event_file to read.
+   The SET below is a readiness flag, not a path: it exists to open the `WHILE @event_file_path IS NOT NULL` guard on
+   Managed Instance. The path the read uses comes from the override arm of the CASE that sets @read_path, and the `.xel`,
+   `_0_` and FILETIME shape checks above do not gate the read there. */
+IF  @read_path_override IS NOT NULL
+AND @event_file_name IS NOT NULL
+BEGIN
+    SET @event_file_path = @read_path_override;
+END;
+
 SET @attempt =
     CASE
         WHEN @bookmark_file IS NOT NULL
@@ -392,7 +405,14 @@ BEGIN
         END;
 
     SELECT
-        @read_path = CASE WHEN @read_wildcard = 1 THEN @event_file_path ELSE @event_file_name END,
+        @read_path =
+            CASE
+                WHEN @read_path_override IS NOT NULL
+                THEN @read_path_override
+                WHEN @read_wildcard = 1
+                THEN @event_file_path
+                ELSE @event_file_name
+            END,
         @read_file = CASE WHEN @attempt = 1 THEN @bookmark_file END,
         @read_offset = CASE WHEN @attempt = 1 THEN @bookmark_offset END,
         @read_cutoff =
@@ -665,8 +685,25 @@ SELECT
             new("@bookmark_file", bookmark?.File, CollectorParameterType.NVarChar260),
             new("@bookmark_offset", bookmark?.Offset, CollectorParameterType.BigInt),
             new("@max_events", MaxEventsPerPass, CollectorParameterType.Int32),
+            new("@read_path_override", EventFileReadPathOverride(context.Target), CollectorParameterType.NVarChar260),
         });
     }
+
+    /// <summary>
+    /// The bare file pattern Managed Instance reads the system_health event_file with (#6897).
+    /// </summary>
+    internal const string ManagedInstanceReadPath = "system_health*.xel";
+
+    /// <summary>
+    /// #6897: the read path the batch must use instead of the directory-qualified one, or NULL to keep the usual paths. Azure
+    /// SQL Managed Instance refuses any path with a directory in it and the <c>system_health_0_*.xel</c> pattern with error
+    /// 40538, and accepts the bare <c>system_health*.xel</c> for the fresh read and for the bookmark resume alike (the
+    /// bookmark's <c>file_name</c> goes in unchanged, as the function returned it). The <c>_0_</c> pattern exists so a user
+    /// session named like <c>system_health_copy</c> is not matched, and on Managed Instance a user session cannot write an
+    /// event_file to a local folder (only to an https URL), so the bare pattern cannot match another session's files there.
+    /// </summary>
+    internal static string? EventFileReadPathOverride(CollectorTargetInfo target) =>
+        target.IsAzureManagedInstance ? ManagedInstanceReadPath : null;
 
     /// <summary>
     /// The cutoff a pass reads past: the most recent event_time in the host store, or <see cref="CollectorContext.EventFallbackWindow"/>

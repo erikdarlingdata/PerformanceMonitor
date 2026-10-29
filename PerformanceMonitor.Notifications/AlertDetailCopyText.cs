@@ -202,7 +202,7 @@ public static class AlertChainLink
             "tempdb Space" or "Version Store (PVS)" => AlertServerTab.TempDb,
             "Volume Free Space" => AlertServerTab.FileIo,
             "Database File Growth" => AlertServerTab.SystemEvents,
-            "Database State" => AlertServerTab.Configuration,
+            "Database State" or "Backup Overdue" or "Log Backup Overdue" or "CHECKDB Overdue" or "Identity Capacity" or "Agent Alert Gaps" => AlertServerTab.Configuration,
             "Failed Agent Job" or "Long-Running Job" or "Agent Not Running" => AlertServerTab.RunningJobs,
             "Collection Stopped" or "Collection Gap At Start" or "Collection Gaps In History" => AlertServerTab.CollectionHealth,
             "Server Unreachable" or "Server Restored" or "AG Failover" or "AG Replica Disconnected" or "AG Replica Reconnected"

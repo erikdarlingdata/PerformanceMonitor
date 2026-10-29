@@ -311,6 +311,233 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, 'ring_buffer_truncated=1 ring_buff
             Assert.DoesNotContain("quiet", message, StringComparison.Ordinal);
         });
 
+    /// <summary>The note the collector itself writes for a truncated read: its own measurement labels through the same render the run's note takes.</summary>
+    private static string CollectorWrittenTruncatedNote(long hidden)
+    {
+        var context = new CollectorContext
+        {
+            ServerId = 1,
+            ServerName = "labels",
+            CollectionTime = new DateTime(2026, 10, 22, 9, 30, 0, DateTimeKind.Utc),
+            Deltas = null!,
+            Target = new CollectorTargetInfo(),
+        };
+        context.Measure(RingBufferXml.TruncatedMeasurement, 1);
+        context.Measure(RingBufferXml.EventsHiddenMeasurement, hidden);
+        context.Measure(RingBufferXml.NewestVisibleAgeMeasurement, 19380);
+        return CollectorMeasurementNote.Render(context.Measurements)!;
+    }
+
+    private static Task SeedTruncatedRunAsync(NpgsqlConnection c, string scenario, DateTime at, int hidden = 773, string? note = null)
+    {
+        var name = HealthName(scenario);
+        return DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+            @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
+VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, $6)",
+            CollectionIdGenerator.Next(), ServerIdHelper.GetDeterministicHashCode(name), name, Collector, DarlingMcpTestData.Naive(at),
+            note ?? $"ring_buffer_truncated=1 ring_buffer_events_hidden={hidden} newest_visible_event_age_s=19380");
+    }
+
+    private static string Minute(DateTime at) => at.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture) + " UTC";
+
+    /* #6827: the truncation check reads the runs INSIDE the read's window, not the collector's newest run. Four windows over
+       the same seeded history (clean runs every 30 minutes for 8 days). Before the fix the first two were answered backwards
+       (a replay of a truncated window said `empty`, a clean past window said `unavailable` because of today's run). */
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task TruncatedRunsInsideAPastWindow_WithACleanNewestRun_AreUnavailableAndNameTheStretch_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rbpast-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbpast-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rbpast-" + tool, tool, end.AddDays(-20));
+            var pastEnd = end.AddDays(-3);
+            await SeedTruncatedRunAsync(c, "rbpast-" + tool, pastEnd.AddHours(-5), hidden: 99);
+            await SeedTruncatedRunAsync(c, "rbpast-" + tool, pastEnd.AddHours(-2), hidden: 240);
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbpast-" + tool, 24, pastEnd));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+            Assert.Contains("2 system_health collection runs that read events of this window", message, StringComparison.Ordinal);
+            Assert.Contains("the first at " + Minute(pastEnd.AddHours(-5)), message, StringComparison.Ordinal);
+            Assert.Contains("the last at " + Minute(pastEnd.AddHours(-2)), message, StringComparison.Ordinal);
+            Assert.Contains("240 event(s) are hidden", message, StringComparison.Ordinal);
+        });
+
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task ACleanPastWindow_WithATruncatedNewestRun_StaysEmpty_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rbclean-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbclean-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rbclean-" + tool, tool, end.AddDays(-20));
+            /* A minute after the seeded clean run at `end`, so it is unambiguously the newest. */
+            await SeedTruncatedRunAsync(c, "rbclean-" + tool, end.AddMinutes(1));
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbclean-" + tool, 24, end.AddDays(-3)));
+
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+            Assert.DoesNotContain("all-clear", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        });
+
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task AWindowTruncatedOnlyInItsMiddle_IsUnavailable_AndNamesTheOneRun_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rbmid-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbmid-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rbmid-" + tool, tool, end.AddDays(-20));
+            var middle = end.AddHours(-12);
+            await SeedTruncatedRunAsync(c, "rbmid-" + tool, middle);
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbmid-" + tool, 24, end));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+            Assert.Contains("the system_health collection run at " + Minute(middle) + ", which read events of this window, reported that", message, StringComparison.Ordinal);
+        });
+
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task ACleanWindow_BesideTruncatedRunsJustOutsideIt_StaysEmpty_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rbedge-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbedge-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rbedge-" + tool, tool, end.AddDays(-20));
+            await SeedTruncatedRunAsync(c, "rbedge-" + tool, end.AddHours(-25));
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbedge-" + tool, 24, end));
+
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+        });
+
+    /* #6827: a truncated run hides events, and the hidden ones can fall in the window's last minutes. So the run just after an
+       as_of window's end is asked too. A clean window whose FIRST later run is truncated is unavailable, and one whose only the
+       SECOND later run is truncated stays empty (that run read nothing of this window's events). Clean runs every 30 minutes. */
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task ACleanWindow_WhoseFirstRunAfterItsEndIsTruncated_IsUnavailable_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rbnext-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbnext-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rbnext-" + tool, tool, end.AddDays(-20));
+            var pastEnd = end.AddDays(-3);
+            var after = pastEnd.AddMinutes(10);
+            await SeedTruncatedRunAsync(c, "rbnext-" + tool, after, hidden: 321);
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbnext-" + tool, 24, pastEnd));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+            Assert.Contains("the system_health collection run at " + Minute(after) + ", which read events of this window, reported that", message, StringComparison.Ordinal);
+            Assert.Contains("321 event(s) are hidden", message, StringComparison.Ordinal);
+        });
+
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task ACleanWindow_WhoseSecondRunAfterItsEndIsTruncated_StaysEmpty_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rbnext2-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbnext2-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rbnext2-" + tool, tool, end.AddDays(-20));
+            var pastEnd = end.AddDays(-3);
+            /* The seeded clean run at pastEnd + 30 min is the first after the end, so this one is the second. */
+            await SeedTruncatedRunAsync(c, "rbnext2-" + tool, pastEnd.AddMinutes(45));
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbnext2-" + tool, 24, pastEnd));
+
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+        });
+
+    /* #6827: the window read finds the note the collector WRITES, through the collector's own labels. A label renamed in the writer
+       or the Common reader alone, or left as a literal in the SQL when the constant moves, and this window reads clean again. */
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task ATruncatedRun_WrittenByTheCollectorsOwnLabels_IsFoundByTheWindowRead_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rblabel-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rblabel-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rblabel-" + tool, tool, end.AddDays(-20));
+            await SeedTruncatedRunAsync(c, "rblabel-" + tool, end.AddHours(-12), note: CollectorWrittenTruncatedNote(hidden: 555));
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rblabel-" + tool, 24, end));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            Assert.Contains("555 event(s) are hidden", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        });
+
+    /* #6827: a note can match the SQL's pre-filter and still not be a truncated note by TryParse (a value of 1x). The newest
+       truncated-looking run is such a note here, and the older run in the window is a real one: it must still be named. */
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task ANewestTruncatedLookingRunThatDoesNotParse_DoesNotHideAnOlderOneThatDoes_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rbparse-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbparse-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rbparse-" + tool, tool, end.AddDays(-20));
+            var older = end.AddHours(-12);
+            await SeedTruncatedRunAsync(c, "rbparse-" + tool, older, hidden: 240);
+            await SeedTruncatedRunAsync(c, "rbparse-" + tool, end.AddHours(-6), note: "ring_buffer_truncated=1x ring_buffer_events_hidden=9 newest_visible_event_age_s=60");
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbparse-" + tool, 24, end));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.Contains("the system_health collection run at " + Minute(older) + ", which read events of this window, reported that", message, StringComparison.Ordinal);
+            Assert.Contains("240 event(s) are hidden", message, StringComparison.Ordinal);
+        });
+
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task ARunWhoseNoteOnlyLooksTruncated_StaysEmpty_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rblook-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rblook-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rblook-" + tool, tool, end.AddDays(-20));
+            await SeedTruncatedRunAsync(c, "rblook-" + tool, end.AddHours(-6), note: "ring_buffer_truncated=1x ring_buffer_events_hidden=9");
+            await SeedTruncatedRunAsync(c, "rblook-" + tool, end.AddHours(-5), note: "old_ring_buffer_truncated=1 ring_buffer_events_hidden=9");
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rblook-" + tool, 24, end));
+
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+        });
+
+    /* #6827: the check now answers for the read's own window. A collector whose NEWEST run is truncated but sits before the
+       window (stale, nothing since) used to be `unavailable` on that run. No run inside the window read its events and none
+       after its end did, so it is `empty` with the cut-window claim: the window's own runs are the witness. */
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task AStaleCollector_WhoseNewestTruncatedRunIsBeforeTheWindow_IsEmptyAndSaysTheWindowIsCut_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rbstale-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbstale-" + tool, end.AddDays(-30), end.AddDays(-8), end.AddHours(-4));
+            await SeedHealthEventAsync(c, "rbstale-" + tool, tool, end.AddDays(-20));
+            await SeedTruncatedRunAsync(c, "rbstale-" + tool, end.AddHours(-3));
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbstale-" + tool, 1, end));
+
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.DoesNotContain("NOT an all-clear", message, StringComparison.Ordinal);
+            var hints = root.GetProperty("hints");
+            Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+            var start = hints.TryGetProperty("effective_start", out var e) && e.ValueKind == JsonValueKind.String ? e.GetString() : null;
+            Assert.Contains(McpHelpers.CutWindowClaim(start), message, StringComparison.Ordinal);
+        });
+
     /* #6650: events of the tool's type WERE read in the window and its gate dropped them. The truncation answer must say
        how many were read, not "No ... events were found" over a count of one or more. */
     [Fact]

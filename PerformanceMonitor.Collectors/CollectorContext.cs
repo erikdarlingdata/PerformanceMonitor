@@ -129,9 +129,12 @@ public sealed class CollectorContext
     /// extension's objects with (#6143). Monitoring connections pin search_path to pg_catalog, so an extension object
     /// named without its schema would not resolve. An extension the host did not find (not created in this
     /// database) gives <c>pg_catalog</c>, never <c>public</c>: only a superuser can create an object there, so a
-    /// same-named function or view another role put in <c>public</c> is never reached, and the query still fails
-    /// with the "does not exist" error (42883 / 42P01) the host classifies as a missing extension. The host does
-    /// not guess when the lookup itself fails: that run fails instead.
+    /// same-named function or view another role put in <c>public</c> is never reached. A collector that declares the
+    /// extension (<see cref="ICollectorSchemaInfo.RequiredPgExtensions"/>) and reads it does not get that far: once the
+    /// host's catalog read has succeeded, it records the missing-extension outcome itself and does not send the query
+    /// (#6888), because the failed query would put an ERROR line in the monitored server's log. The <c>pg_catalog</c>
+    /// answer is what a query that is sent anyway would name. The host does not guess when the lookup itself fails:
+    /// that run fails instead.
     /// </summary>
     public string PgExtensionSchema(string extensionName) =>
         PgExtensionSchemas is not null && PgExtensionSchemas.TryGetValue(extensionName, out var schema)
@@ -574,6 +577,14 @@ public sealed class CollectorContext
     /// instead of silently defaulting to UTF-8.
     /// </summary>
     public Encoding? PgLogEncoding { get; set; }
+
+    /// <summary>
+    /// How a log reader asks the target to prove the time of lines stamped in a NAMED local zone (#6866). Set by the
+    /// host for the collectors that read a PostgreSQL server log, on a connection of its own, since the log read
+    /// holds the main one open while it parses. Null (the default, and every host that never sets it) keeps the
+    /// refusal for a target whose <c>log_timezone</c> is not UTC. See <see cref="PgLogNamedZone"/>.
+    /// </summary>
+    public PgLogZoneResolver? PgLogZoneResolver { get; set; }
 
     /// <summary>
     /// Whether this target has granted read access to <c>pg_file_settings</c> (#4251), resolved by the host

@@ -523,7 +523,7 @@ public class PgIndexUsageStatsCollectorDefinitionTests
     public void TheCapabilityMessageNamesWhatIsNotCollected()
     {
         var message = CollectorEngineCapability.NotCollectedMessage(
-            "sql-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.SqlServer, "pg_index_usage_stats");
+            "sql-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.SqlServer, "pg_index_usage_stats", awsRdsKind: AwsRdsKind.None);
 
         Assert.NotNull(message);
         Assert.Contains("pg_stat_user_indexes", message, StringComparison.Ordinal);

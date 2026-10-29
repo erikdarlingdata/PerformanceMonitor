@@ -22,6 +22,7 @@
  */
 
 import {
+  storeHash,
   el,
   mount,
   loadingStrip,
@@ -1480,8 +1481,8 @@ function vizBandlist(data, desc) {
 /* ─────────────────────────── shared helpers ─────────────────────────── */
 
 /** Set the hash route to a server's detail page. */
-export function navigateServer(serverName) {
-  location.hash = "#/server/" + encodeURIComponent(serverName);
+export function navigateServer(serverName, store) {
+  location.hash = storeHash("#/server/" + encodeURIComponent(serverName), store);
 }
 
 /** Collector rows worst first (Failing, then Warning, then the rest, then Healthy, then not applicable), each group in

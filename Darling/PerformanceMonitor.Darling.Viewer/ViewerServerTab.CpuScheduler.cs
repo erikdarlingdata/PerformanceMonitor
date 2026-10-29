@@ -67,7 +67,7 @@ public partial class ViewerServerTab
     /// <summary>The CPU Scheduler tab's note where the cpu_scheduler_stats collector cannot run (Azure SQL Database),
     /// the same sentence <see cref="PanelNote"/> gives; null anywhere else, where the tab shows no note.</summary>
     internal static string? CpuSchedulerGapNote(string serverName, int engineEdition, string? engineKind) =>
-        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, "cpu_scheduler_stats");
+        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, "cpu_scheduler_stats", awsRdsKind: AwsRdsKind.None);
 
     private CpuSchedulerChartRenderer? _cpuSchedRendererField;
     private CpuSchedulerChartRenderer CpuSchedRenderer =>

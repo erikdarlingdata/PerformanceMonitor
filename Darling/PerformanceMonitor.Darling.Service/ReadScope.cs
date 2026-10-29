@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -36,21 +35,27 @@ internal sealed class ReadScope
     private readonly object _gate = new();
     private ReadFallback? _fallback;
 
-    /// <summary>The most statements one scope keeps; later ones are counted in <see cref="StatementsDropped"/>.</summary>
-    internal const int MaxStatements = 64;
+    /// <summary>The most statements one scope keeps (#6795): the slowest this many by time, whatever order they ran in. A
+    /// faster one that arrives once the scope is full is only counted, in <see cref="StatementsDropped"/>. The slow-read row
+    /// stores them all, so this is the same number.</summary>
+    internal const int MaxStatements = SlowReadLog.MaxStatementsStored;
 
     /// <summary>The fixed vocabulary <see cref="NoteSource"/> accepts.</summary>
     internal const string SourceRaw = ComposeReadSources.Raw;
     internal const string SourceIntervalTable = ComposeReadSources.IntervalTable;
     internal const string SourceHourlyEdges = ComposeReadSources.HourlyEdges;
 
-    private readonly ConcurrentQueue<StatementTiming> _statements = new();
+    /* #6795: a min-heap on (duration, then the later arrival), so the root is the statement to evict: the fastest kept, and the
+       latest-arriving of any tie. Guarded by _statementGate; a statement arrives on whatever thread closed its reader. */
+    private readonly PriorityQueue<StatementTiming, (double DurationMs, int NegatedOrdinal)> _statements = new();
+    private readonly object _statementGate = new();
     private int _statementCount;
-    private int _statementsDropped;
     private string? _source;
     private string? _sourceReason;
     private long _rows = -1;
-    private int _serverId = -1;
+    /* #6834: a server id is a hash of the name, so half of them are negative; "none noted" is a value no int can hold. */
+    private const long NoServer = long.MinValue;
+    private long _serverId = NoServer;
     private long _waitTicks;
     private DateTime? _windowStart;
     private DateTime? _windowEnd;
@@ -177,8 +182,18 @@ internal sealed class ReadScope
     /// commands only inside a scope with this set.</summary>
     internal bool CaptureStatements { get; set; }
 
-    /// <summary>Statements that arrived after the queue held <see cref="MaxStatements"/>.</summary>
-    internal int StatementsDropped => Volatile.Read(ref _statementsDropped);
+    /// <summary>Statements the scope saw but does not hold: the ones too fast to stay among the slowest
+    /// <see cref="MaxStatements"/>.</summary>
+    internal int StatementsDropped
+    {
+        get
+        {
+            lock (_statementGate)
+            {
+                return _statementCount - _statements.Count;
+            }
+        }
+    }
 
     /// <summary>The source a reader noted (<c>raw</c>, <c>interval_table</c>, <c>hourly_edges</c>), or null.</summary>
     internal string? Source { get { lock (_gate) { return _source; } } }
@@ -190,14 +205,14 @@ internal sealed class ReadScope
     internal long? Rows { get { var r = Interlocked.Read(ref _rows); return r < 0 ? null : r; } }
 
     /// <summary>The monitored server id the read resolved, or null for a store-wide or fleet read.</summary>
-    internal int? ServerId { get { var id = Volatile.Read(ref _serverId); return id < 0 ? null : id; } }
+    internal int? ServerId { get { var id = Interlocked.Read(ref _serverId); return id == NoServer ? null : (int)id; } }
 
     /// <summary>Notes the server a read resolved. Ignored outside a scope; the first one noted stays.</summary>
     internal static void NoteServer(int serverId)
     {
-        if (s_current.Value is { } scope && serverId >= 0)
+        if (s_current.Value is { } scope)
         {
-            Interlocked.CompareExchange(ref scope._serverId, serverId, -1);
+            Interlocked.CompareExchange(ref scope._serverId, serverId, NoServer);
         }
     }
 
@@ -291,24 +306,65 @@ internal sealed class ReadScope
         }
     }
 
-    /// <summary>Appends one statement timing; past <see cref="MaxStatements"/> it is only counted.</summary>
+    /// <summary>
+    /// Adds one statement timing (#6795). The scope keeps the slowest <see cref="MaxStatements"/> by time, each with its arrival
+    /// ordinal, and counts the rest: a read that opens with many small statements keeps the big ones that come later. This runs
+    /// for every statement of every read, so a statement too fast to stay is counted and dropped under one short lock and its
+    /// text is never labelled or hashed. A statement that stays takes the lock twice: once to take its ordinal and see whether
+    /// it beats the fastest kept one, and once, after its text is labelled and hashed outside the lock, to join the kept set,
+    /// where the bound is enforced again because other statements may have arrived between the two. A tie keeps the earlier
+    /// statement.
+    /// </summary>
     internal void AddStatement(string? sql, double durationMs, long? rows)
     {
-        var ordinal = Interlocked.Increment(ref _statementCount);
-        if (ordinal > MaxStatements)
+        int ordinal;
+        lock (_statementGate)
         {
-            Interlocked.Increment(ref _statementsDropped);
-            return;
+            ordinal = ++_statementCount;
+            if (_statements.Count >= MaxStatements && _statements.TryPeek(out _, out var fastestKept) && durationMs <= fastestKept.DurationMs)
+            {
+                return;
+            }
         }
 
-        _statements.Enqueue(new StatementTiming(ordinal, StatementLabel.Label(sql), StatementLabel.Hash(sql), durationMs, rows));
+        var timing = new StatementTiming(ordinal, StatementLabel.Label(sql), StatementLabel.Hash(sql), durationMs, rows);
+        lock (_statementGate)
+        {
+            _statements.Enqueue(timing, (durationMs, -ordinal));
+            if (_statements.Count > MaxStatements)
+            {
+                _statements.Dequeue();
+            }
+        }
     }
 
-    /// <summary>Every statement the scope saw, including the ones past <see cref="MaxStatements"/> that were only counted.</summary>
-    internal int StatementTotal => Volatile.Read(ref _statementCount);
+    /// <summary>Every statement the scope saw, including the ones it counted but did not keep.</summary>
+    internal int StatementTotal
+    {
+        get
+        {
+            lock (_statementGate)
+            {
+                return _statementCount;
+            }
+        }
+    }
 
-    /// <summary>The captured statements in arrival order (for tests).</summary>
-    internal IReadOnlyList<StatementTiming> Snapshot() => _statements.ToArray();
+    /// <summary>The statements the scope kept, the slowest ones, in arrival order.</summary>
+    internal IReadOnlyList<StatementTiming> Snapshot()
+    {
+        lock (_statementGate)
+        {
+            var kept = new List<StatementTiming>(_statements.Count);
+            foreach (var (timing, _) in _statements.UnorderedItems)
+            {
+                kept.Add(timing);
+            }
+
+            kept.Sort(static (x, y) => x.Ordinal.CompareTo(y.Ordinal));
+            return kept;
+        }
+    }
 
     /// <summary>The scope the calling async flow runs inside, or null outside any recorder.</summary>
     internal static ReadScope? Current => s_current.Value;

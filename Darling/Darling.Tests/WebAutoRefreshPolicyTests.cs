@@ -49,7 +49,7 @@ public sealed class WebAutoRefreshPolicyTests
     [Fact]
     public void ComposedPanelRead_IsCounted_ThroughApiSendRead()
     {
-        // The composed-panel run is a read that travels as a POST. It must count in inFlightReads so the
+        // The composed-panel run is a read that travels as a POST. It must count in the page's read count so the
         // overlap guard waits it out and the back-off measures the render that contains it.
         var compose = Js("compose.js");
         var run = compose.Substring(compose.IndexOf("export function runCompose(", StringComparison.Ordinal));
@@ -60,10 +60,10 @@ public sealed class WebAutoRefreshPolicyTests
         var util = Js("util.js");
         var fn = util.Substring(util.IndexOf("export async function apiSendRead(", StringComparison.Ordinal));
         fn = fn.Substring(0, fn.IndexOf("\n}", StringComparison.Ordinal));
-        Assert.Contains("inFlightReads++", fn);
+        Assert.Contains("scope.n++", fn);
         var finallyAt = fn.IndexOf("finally", StringComparison.Ordinal);
         Assert.True(finallyAt > 0, "the decrement must sit in a finally");
-        Assert.True(fn.IndexOf("inFlightReads--", StringComparison.Ordinal) > finallyAt);
+        Assert.True(fn.IndexOf("scope.n--", StringComparison.Ordinal) > finallyAt);
 
         var callers = Directory.GetFiles(
                 RepoFile.PathTo(s_wwwroot), "*.js", SearchOption.AllDirectories)

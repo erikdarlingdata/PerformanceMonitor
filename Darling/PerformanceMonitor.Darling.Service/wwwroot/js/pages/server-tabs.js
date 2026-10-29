@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, chartNoteText, getPath, fmtMs, fmtInt, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
+import { routeHash, el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, chartNoteText, getPath, fmtMs, fmtInt, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
 import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP, SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "./active-snapshots.js";
@@ -229,8 +229,11 @@ function fanout(read, params, specs, intro = null) {
     if (s.hideWhenNoRows && !panelHadRows.get(keys[i])) shells[i].panel.style.display = "none";
   });
   const introNode = intro ? el("div", { class: "panel-intro" }, []) : null;
+  /* #6793: the batch's signal, captured while the tab is built (setPanelSignal holds it then), so leaving the page or a redraw cancels this read. */
+  const signal = getPanelSignal();
   (async () => {
-    const res = await readToolWithinKeptHistory(read, params);
+    const res = await readToolWithinKeptHistory(read, params, signal);
+    if (res.kind === "aborted") return;
     if (introNode && res.kind === "data" && intro.when(res.data)) {
       mount(introNode, [noticeStrip(intro.text)]);
     }
@@ -285,8 +288,10 @@ const WAIT_METRICS = [
  */
 export function waitsPanel(server, ctx) {
   const { panel, body } = panelShell("Wait Stats", ctx.label + ", with a trend for the waits you check", 2, "get_wait_stats");
+  const signal = getPanelSignal();
   (async () => {
-    const res = await readToolWithinKeptHistory("get_wait_stats", { server, hours: ctx.hours, limit: 20 });
+    const res = await readToolWithinKeptHistory("get_wait_stats", { server, hours: ctx.hours, limit: 20 }, signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
@@ -442,8 +447,10 @@ function perfmonDefaults(available, max) {
  */
 export function perfmonPanel(server, ctx) {
   const { panel, body } = panelShell("Perfmon Counters", "latest snapshot, with a trend for the counters you check", 2, "get_perfmon_stats");
+  const signal = getPanelSignal();
   (async () => {
-    const res = await readTool("get_perfmon_stats", { server });
+    const res = await readTool("get_perfmon_stats", { server }, signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
 
@@ -622,11 +629,14 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
     null,
     picker
   );
+  const signal = getPanelSignal();
   (async () => {
     const res = await readToolWithinKeptHistory(
       "get_top_queries_by_cpu",
-      rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "queries")
+      rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "queries"),
+      signal
     );
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
@@ -669,9 +679,9 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
         value: String(i),
         label: "#" + t.rank + " · " + t.query.database_name + " · " + truncate(t.query.query_text || "(no statement text captured)", 60),
       }));
-      const picker = pickerControl("Query", options, (i) => drawQueryTrend(chartSlot, server, ctx, trendable[Number(i)].query));
+      const picker = pickerControl("Query", options, (i) => drawQueryTrend(chartSlot, server, ctx, trendable[Number(i)].query, signal));
       parts.push(el("div", { class: "picker-row" }, [picker]), chartSlot);
-      drawQueryTrend(chartSlot, server, ctx, trendable[0].query);
+      drawQueryTrend(chartSlot, server, ctx, trendable[0].query, signal);
     } else if (queries.length) {
       parts.push(
         emptyStrip(
@@ -685,14 +695,15 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
   return panel;
 }
 
-async function drawQueryTrend(slot, server, ctx, query) {
+async function drawQueryTrend(slot, server, ctx, query, signal) {
   mount(slot, loadingStrip());
   const trend = await readToolWithinKeptHistory("get_query_trend", {
     server,
     query_hash: query.query_hash,
     database_name: query.database_name,
     hours: ctx.hours,
-  });
+  }, signal);
+  if (trend.kind === "aborted") return;
   if (trend.kind !== "data") {
     mount(slot, trend.kind === "empty" ? [keptWindowStrip(trend), emptyStrip(trend.message)] : readErrorStrip(trend.message));
     return;
@@ -1273,7 +1284,7 @@ function overviewStripsPanel(server, ctx) {
  */
 export function fileIoGrain(server) {
   const filter = getActiveDatabaseFilter();
-  const hash = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  const hash = routeHash();
   const one = filter && filter.server === server && hash.startsWith("#/server/") && filter.databases.length === 1;
   return one ? "per file" : "per database and file type";
 }
@@ -1285,8 +1296,10 @@ export function fileIoGrain(server) {
  */
 export function fileIoPanel(server, ctx) {
   const { panel, body } = panelShell("File I/O Latency", "avg read and write latency " + fileIoGrain(server) + ", " + ctx.label, 2, "get_file_io_trend");
+  const signal = getPanelSignal();
   (async () => {
-    const res = await readToolWithinKeptHistory("get_file_io_trend", { server, hours: ctx.hours });
+    const res = await readToolWithinKeptHistory("get_file_io_trend", { server, hours: ctx.hours }, signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
@@ -1347,9 +1360,11 @@ export function fileIoPanel(server, ctx) {
 export function dailySummaryPanels(server) {
   const tile = panelShell("Daily Summary", "today (UTC)", 2, "get_daily_summary_range");
   const calendar = panelShell("Daily Health Calendar", "month (UTC)", 2, "get_daily_summary_range");
+  const signal = getPanelSignal();
   (async () => {
     /* 31 days, not 30 (#6294): the month calendar's current month starts on the 1st, which is up to 30 days before today. */
-    const res = await readTool("get_daily_summary_range", { server, days_back: 31 });
+    const res = await readTool("get_daily_summary_range", { server, days_back: 31 }, signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") {
       mount(tile.body, readErrorStrip(res.message));
       return mount(calendar.body, readErrorStrip(res.message));
@@ -1362,7 +1377,7 @@ export function dailySummaryPanels(server) {
       /* "empty" is a span with no day while the server has history elsewhere, so the calendar still opens, every day "no data", and an
          earlier month can be stepped to (#6294); "unavailable" is a server nothing was ever collected for, which has no month to show. */
       if (res.status !== "empty") return mount(calendar.body, emptyStrip(res.message));
-      return renderInto(calendar.body, () => dailyHealthCalendar({ server, initial: null, read: readTool, renderTable: (month) => dailyRangeGrid(month.rows, month.missing) }));
+      return renderInto(calendar.body, () => dailyHealthCalendar({ server, initial: null, read: (tool, params) => readTool(tool, params, signal), renderTable: (month) => dailyRangeGrid(month.rows, month.missing) }));
     }
 
     /* Each panel renders on its own, the way fanout() guards its specs: a render fault in one says so in that
@@ -1377,7 +1392,7 @@ export function dailySummaryPanels(server) {
     });
 
     /* The month calendar (#6294, daily-calendar.js) over the same fetch; "Show as table" is the grid this panel was, over the shown month. */
-    renderInto(calendar.body, () => dailyHealthCalendar({ server, initial: data, read: readTool, renderTable: (month) => dailyRangeGrid(month.rows, month.missing) }));
+    renderInto(calendar.body, () => dailyHealthCalendar({ server, initial: data, read: (tool, params) => readTool(tool, params, signal), renderTable: (month) => dailyRangeGrid(month.rows, month.missing) }));
   })();
   return [tile.panel, calendar.panel];
 }
@@ -2300,6 +2315,15 @@ export const SERVER_TABS = [
         "No trace flags are enabled on this server.",
         1
       ),
+      /* #6873: the last full backup, log backup and CHECKDB per database, one read feeding two panels. The state words, the age text and
+         the platform label are the service's (DatabaseProtectionBands), the same ones the Viewer shows. A server with no capture, a
+         refused collector or an engine that is not collected answers with its own sentence in each panel. */
+      ...fanout("get_database_protection", { server }, DATABASE_PROTECTION_SPECS),
+      /* #6874: the SQL Server Agent alerts and the gaps in them, one read feeding three panels. A server with no Agent alerts at all
+         (Azure SQL Database, Managed Instance) or whose collector is refused answers with its own sentence in every panel. */
+      ...fanout("get_agent_alerts", { server }, AGENT_ALERT_SPECS),
+      /* #6875: identity column capacity, one read feeding two panels (the columns, then each database's scan state). */
+      ...identityCapacityPanels(server),
     ],
   },
 
@@ -4364,7 +4388,7 @@ function deadlockProcessKey(server, row) {
    page is a server page (dbScopeChip's own rule, so the chip and the rows always agree). */
 function deadlockRowFilter(server) {
   const filter = getActiveDatabaseFilter();
-  const hash = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  const hash = routeHash();
   return filter && filter.server === server && hash.startsWith("#/server/") ? filter : null;
 }
 
@@ -4668,12 +4692,21 @@ const SERVER_TRENDS = {
   },
 };
 
+/* #6793: the hand-built chart panels below read with `ctx.signal`, but the server page's ctx carries none, so leaving the page (or a redraw)
+   cancelled none of their reads. A panel takes the batch's signal when it is built, the one setPanelSignal holds while redrawPanels calls
+   build(), and keeps it in its own ctx, so a later picker draw reads on the batch it belongs to and not on whatever batch is current by then. */
+function withPanelSignal(ctx) {
+  return ctx && ctx.signal ? ctx : { ...ctx, signal: getPanelSignal() };
+}
+
 /** A get_server_trend line panel for `kind` (a key of SERVER_TRENDS), over the page's range and its `as_of`. */
 export function serverTrendPanel(server, ctx, kind) {
+  ctx = withPanelSignal(ctx);
   const spec = SERVER_TRENDS[kind];
   const { panel, body } = panelShell(spec.title + " Trend", ctx.label, 2, "get_server_trend");
   (async () => {
     const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: spec.metric, hours: ctx.hours }, ctx && ctx.signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(emptyHeadline(spec, res) || spec.emptyText)]);
     const points = res.data.trend || [];
@@ -4753,10 +4786,12 @@ const SERIES_TRENDS = {
 
 /** A get_server_trend panel for a named-series metric (a key of SERIES_TRENDS): one chart per spec chart over one read. */
 export function seriesTrendPanel(server, ctx, kind) {
+  ctx = withPanelSignal(ctx);
   const spec = SERIES_TRENDS[kind];
   const { panel, body } = panelShell(spec.title, spec.subtitle + ", " + ctx.label, 2, "get_server_trend");
   (async () => {
     const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: kind, hours: ctx.hours }, ctx && ctx.signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(emptyHeadline(spec, res) || spec.emptyText)]);
     const series = (res.data.series || []).filter((s) => s && s[spec.seriesKey] != null);
@@ -4807,9 +4842,11 @@ const DEFAULT_CLERKS_CHECKED = 5;
  * so the 60 s rebuild keeps them.
  */
 export function memoryClerksTrendPanel(server, ctx) {
+  ctx = withPanelSignal(ctx);
   const { panel, body } = panelShell("Memory Clerks Trend", ctx.label + ", with a trend for the clerks you check", 2, "get_memory_clerks");
   (async () => {
     const res = await readToolWithinKeptHistory("get_memory_clerks", { server }, ctx && ctx.signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
     const options = (res.data.clerks || []).map((c) => c.clerk_type);
@@ -4854,7 +4891,7 @@ export async function drawClerkTrends(slot, server, ctx, checked) {
     { server, metric: "memory_clerks", hours: ctx.hours, clerk_types: clerkTypes.join(",") },
     signal
   );
-  if (clerkDraws.get(server) !== mine || mine.signal.aborted) return;
+  if (clerkDraws.get(server) !== mine || mine.signal.aborted || trend.kind === "aborted") return;
 
   if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
   const missingOf = (data) => (data && Array.isArray(data.missing_clerk_types) ? data.missing_clerk_types : []);
@@ -4936,10 +4973,12 @@ const MAX_NAMES_CHARTED = 10;
 const DEFAULT_NAMES_CHECKED = 5;
 
 export function namedTrendPanel(server, ctx, kind) {
+  ctx = withPanelSignal(ctx);
   const spec = NAMED_TRENDS[kind];
   const { panel, body } = panelShell(spec.title, ctx.label + ", with a trend for the " + spec.plural + " you check", 2, spec.optionsTool);
   (async () => {
     const res = await readToolWithinKeptHistory(spec.optionsTool, { server, hours: ctx.hours, top: MAX_NAMES_CHARTED }, ctx && ctx.signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message || spec.noOptions)]);
     const options = (res.data[spec.rowsKey] || []).map((r) => r[spec.nameKey]).filter(Boolean);
@@ -4981,7 +5020,7 @@ export async function drawNamedTrends(slot, server, ctx, kind, checked) {
   mount(slot, loadingStrip());
   const signal = ctx && ctx.signal && typeof AbortSignal !== "undefined" && AbortSignal.any ? AbortSignal.any([mine.signal, ctx.signal]) : mine.signal;
   const trend = await readToolWithinKeptHistory("get_server_trend", { server, metric: kind, hours: ctx.hours, names: names.join(",") }, signal);
-  if (namedDraws.get(drawKey) !== mine || mine.signal.aborted) return;
+  if (namedDraws.get(drawKey) !== mine || mine.signal.aborted || trend.kind === "aborted") return;
 
   if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
   /* The read names the series it found no samples for under missing_names at the top level on a partial match and
@@ -5036,9 +5075,11 @@ const SESSION_TREND_SERIES = [
 
 /** Session Stats trend: the server-wide session counts per bucket, with the newest bucket's top application and host as text. */
 export function sessionStatsTrendPanel(server, ctx) {
+  ctx = withPanelSignal(ctx);
   const { panel, body } = panelShell("Session Stats Trend", ctx.label, 2, "get_server_trend");
   (async () => {
     const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: "session_stats", hours: ctx.hours }, ctx && ctx.signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message || "No session samples in this window.")]);
     const points = res.data.trend || [];
@@ -5077,8 +5118,10 @@ export function sessionStatsTrendPanel(server, ctx) {
 export function memoryPressurePanels(server, ctx) {
   const chart = panelShell("Memory Pressure Events per Hour", ctx.label, 2, "get_memory_pressure_events");
   const grid = panelShell("Memory Pressure Events", ctx.label, 1, "get_memory_pressure_events");
+  const signal = getPanelSignal();
   (async () => {
-    const res = await readToolWithinKeptHistory("get_memory_pressure_events", { server, hours: ctx.hours });
+    const res = await readToolWithinKeptHistory("get_memory_pressure_events", { server, hours: ctx.hours }, signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") {
       mount(chart.body, readErrorStrip(res.message));
       return mount(grid.body, readErrorStrip(res.message));
@@ -5185,8 +5228,10 @@ const SCOPED_CONFIG_COLUMNS = [
    rows live in the panel's closure, not module state, so the 60 s repaint rebuilds them from the read. */
 function scopedConfigPanel(server) {
   const { panel, body } = panelShell("Database Scoped Configuration", "sys.database_scoped_configurations, newest connect-time snapshot", 2, "get_database_scoped_config");
+  const signal = getPanelSignal();
   (async () => {
-    const res = await readTool("get_database_scoped_config", { server });
+    const res = await readTool("get_database_scoped_config", { server }, signal);
+    if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
     const rows = [];
@@ -5276,6 +5321,199 @@ const JOB_COLUMNS = [
   { key: "percent_of_average", label: "% of avg", format: "num1" },
   { key: "is_running_long", label: "Long", format: "bool" },
   { key: "successful_run_count", label: "Successes", format: "int" },
+];
+
+/* #6875: the identity column capacity panels on the Configuration tab. The band, the percent, the values left and the days to
+   exhaustion are the service's (IdentityCapacityMath through get_identity_capacity), the same figures the Viewer shows. values_remaining
+   and the other bigint and decimal values arrive as text, so the figure is formatted from the digits and never through a JS number. */
+function identityDigits(value) {
+  if (value == null || value === "") return "—";
+  try {
+    return BigInt(value).toLocaleString();
+  } catch (e) {
+    return String(value);
+  }
+}
+function identityTable(r) {
+  return [r.schema, r.table].filter((x) => x != null && x !== "").join(".");
+}
+function identityType(r) {
+  return (r.data_type === "decimal" || r.data_type === "numeric") && r.type_precision > 0 ? r.data_type + "(" + r.type_precision + ")" : r.data_type || "—";
+}
+function identityScanState(r) {
+  if (!r || r.scanned !== true) return r && r.scan_note ? r.scan_note.charAt(0).toUpperCase() + r.scan_note.slice(1) : "Not yet scanned";
+  const n = r.columns_above_10_percent;
+  return n > 0 ? "Scanned, " + n + (n === 1 ? " column" : " columns") + " above 10 percent" : "Scanned, clean";
+}
+function identityLastScanned(r) {
+  const at = r.scanned_at || r.last_scanned_at;
+  return at ? localTime(at) : "—";
+}
+const IDENTITY_COLUMNS = [
+  { key: "database", label: "Database" },
+  { key: "table", label: "Table", render: (r) => el("span", { text: identityTable(r) }), sortValue: identityTable },
+  { key: "column", label: "Column" },
+  { key: "data_type", label: "Type", render: (r) => el("span", { text: identityType(r) }), sortValue: identityType },
+  { key: "percent_used", label: "Percent used", format: "num1" },
+  { key: "values_remaining", label: "Values remaining", render: (r) => el("span", { text: identityDigits(r.values_remaining) }), sortValue: (r) => (r.values_remaining == null ? -1 : Number(r.values_remaining)) },
+  { key: "rate_per_day", label: "Rate per day", format: "num1" },
+  { key: "days_to_exhaustion", label: "Days to exhaustion", format: "num1" },
+  { key: "band", label: "Band", format: "text", small: true },
+];
+const IDENTITY_SCAN_COLUMNS = [
+  { key: "database", label: "Database" },
+  { key: "scan_state", label: "Scan state", render: (r) => el("span", { text: identityScanState(r) }), sortValue: identityScanState },
+  /* A database not yet scanned has no scan in the window: its last scan before the window (if any) is shown instead. */
+  { key: "scanned_at", label: "Last scanned", format: "time", small: true, render: (r) => el("span", { text: identityLastScanned(r) }), sortValue: (r) => r.scanned_at || r.last_scanned_at || "" },
+];
+function identityCapacityPanels(server) {
+  const columnsShell = panelShell("Identity Capacity", "identity_capacity collector, every 6 hours", 2, "get_identity_capacity");
+  const scanShell = panelShell("Identity Scan State", "per database, newest scan", 2, "get_identity_capacity");
+  const signal = getPanelSignal();
+  (async () => {
+    const res = await readToolWithinKeptHistory("get_identity_capacity", { server }, signal);
+    if (res.kind === "aborted") return;
+    if (res.kind === "error") {
+      mount(columnsShell.body, readErrorStrip(res.message));
+      mount(scanShell.body, readErrorStrip(res.message));
+      return;
+    }
+    const data = res.data;
+    try {
+      /* "empty" is the one true negative: databases were scanned and none has a column above 10 percent, so the scan list still draws.
+         unavailable, precondition and not_collected carry the read's own sentence in both panels. */
+      if (res.kind === "empty" && res.status !== "empty") {
+        mount(columnsShell.body, [emptyStrip(res.message)]);
+        mount(scanShell.body, [emptyStrip(res.message)]);
+        return;
+      }
+      const spec = { read: "get_identity_capacity" };
+      const truncated = data && data.truncated === true ? noticeStrip("Showing the " + data.columns_returned + " fullest columns. Pick a database to narrow the list.") : null;
+      mount(columnsShell.body, [
+        truncated,
+        res.kind === "empty"
+          ? emptyStrip(res.message)
+          : VIZ.table(data, { ...spec, rowsKey: "columns", columns: IDENTITY_COLUMNS, emptyText: "No identity column is above 10 percent used." }),
+      ]);
+      mount(scanShell.body, [VIZ.table(data, { ...spec, rowsKey: "databases", columns: IDENTITY_SCAN_COLUMNS, emptyText: "No database has been scanned yet." })]);
+    } catch (e) {
+      const message = "Could not render this panel: " + (e && e.message ? e.message : String(e));
+      mount(columnsShell.body, errorStrip(message));
+      mount(scanShell.body, errorStrip(message));
+    }
+  })();
+  return [columnsShell.panel, scanShell.panel];
+}
+/* #6874: the Agent alert panels on the Configuration tab. The status words and the gap sentences are the service's (AgentAlertStatus),
+   the same ones the Viewer shows. A gap names either the alerts it is about or the severities and errors that have no alert. */
+function agentAlertGapWhich(r) {
+  const alerts = Array.isArray(r && r.alerts) ? r.alerts : [];
+  const missing = Array.isArray(r && r.missing) ? r.missing : [];
+  return alerts.length ? alerts.join(", ") : missing.join(", ");
+}
+const AGENT_ALERT_STAT_COLUMNS = [
+  { key: "instance_status", label: "Alert setup", format: "text", small: true },
+  { key: "alert_count", label: "Alerts defined", format: "int" },
+  { key: "captured_at", label: "Captured", format: "time", small: true },
+];
+const AGENT_ALERT_GAP_COLUMNS = [
+  { key: "message", label: "What is wrong" },
+  { key: "which", label: "Which", render: (r) => el("span", { text: agentAlertGapWhich(r) }), sortValue: agentAlertGapWhich },
+];
+const AGENT_ALERT_COLUMNS = [
+  { key: "name", label: "Alert" },
+  { key: "enabled", label: "Enabled", format: "bool" },
+  { key: "severity", label: "Severity", format: "int" },
+  { key: "message_id", label: "Error", format: "int" },
+  { key: "database_name", label: "Database" },
+  { key: "operator_count", label: "Operators", format: "int" },
+  { key: "fired_in_window", label: "Fired in the window", format: "bool" },
+  { key: "occurrence_count", label: "Times fired", format: "int" },
+  { key: "last_occurrence", label: "Last fired (server clock)" },
+];
+const AGENT_ALERT_SPECS = [
+  {
+    title: "Agent Alerts",
+    subtitle: "msdb.dbo.sysalerts, collected every 15 minutes",
+    span: 2,
+    viz: "stat",
+    stats: AGENT_ALERT_STAT_COLUMNS,
+    emptyText: "No SQL Server Agent alert capture yet.",
+  },
+  {
+    title: "Alert Setup Gaps",
+    subtitle: "severities 19 to 25, errors 823 to 825, operators",
+    span: 2,
+    viz: "table",
+    rowsKey: "gaps",
+    columns: AGENT_ALERT_GAP_COLUMNS,
+    emptyText: "No gaps. Every severity from 19 to 25 and every error from 823 to 825 has an enabled alert that tells an operator.",
+  },
+  {
+    title: "Alert Definitions",
+    subtitle: "newest capture, fired judged over the last 24 hours",
+    span: 2,
+    viz: "table",
+    rowsKey: "alerts",
+    columns: AGENT_ALERT_COLUMNS,
+    emptyText: "No SQL Server Agent alert is defined on this instance.",
+  },
+];
+
+/* #6873: the Health Checks panels on the Configuration tab. One fact is the age and the state word the service gives it. A platform-managed
+   target (and a native-only target's two backup facts) shows the platform's label beside the age and is never overdue. Overdue databases sort first. */
+function protectionFactText(f) {
+  if (!f) return "-";
+  const state = f.state === "overdue" || f.state === "ok" ? "" : String(f.state).replace(/_/g, " ");
+  const overdue = f.overdue ? " - overdue" : "";
+  if (f.age) return f.age + (state ? " (" + state + ")" : "") + overdue;
+  return (state || "-") + overdue;
+}
+function protectionFact(key, label) {
+  return {
+    key,
+    label,
+    display: (r) => protectionFactText(r[key]),
+    sortValue: (r) => (r[key] && r[key].overdue ? 0 : 1),
+    cellClass: (r) => (r[key] && r[key].overdue ? "sev-High" : null),
+  };
+}
+const DATABASE_PROTECTION_COLUMNS = [
+  { key: "database", label: "Database" },
+  { key: "state", label: "State", small: true },
+  protectionFact("full_backup", "Last full backup"),
+  protectionFact("log_backup", "Last log backup"),
+  protectionFact("checkdb", "Last good CHECKDB"),
+  { key: "platform", label: "Platform", display: (r) => (r.platform && r.platform !== "native" ? String(r.platform).replace(/_/g, " ") : ""), small: true },
+  { key: "excluded_reason", label: "Not judged because", small: true },
+];
+const DATABASE_PROTECTION_STATS = [
+  { key: "summary.text", label: "Overdue", format: "text", small: true },
+  { key: "captured_at", label: "Captured", format: "time", small: true },
+];
+const overdueFirst = (rows) => [...rows].sort((a, b) => {
+  const score = (r) => ["full_backup", "log_backup", "checkdb"].filter((k) => r[k] && r[k].overdue).length;
+  return score(b) - score(a);
+});
+const DATABASE_PROTECTION_SPECS = [
+  {
+    title: "Health Checks",
+    subtitle: "full backup 7 days, log backup 60 minutes, CHECKDB 14 days, collected hourly",
+    span: 2,
+    viz: "stat",
+    stats: DATABASE_PROTECTION_STATS,
+    emptyText: "No database protection capture yet.",
+  },
+  {
+    title: "Backups and CHECKDB by Database",
+    subtitle: "newest capture, overdue first",
+    span: 2,
+    viz: "table",
+    rowsKey: "databases",
+    columns: DATABASE_PROTECTION_COLUMNS,
+    orderRows: overdueFirst,
+    emptyText: "No databases in the newest capture.",
+  },
 ];
 
 /* The Job History grid on the Activity tab: the cross-server page's columns less Server, since the tab is one server's. */

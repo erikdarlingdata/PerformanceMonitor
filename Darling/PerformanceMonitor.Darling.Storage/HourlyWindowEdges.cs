@@ -47,7 +47,7 @@ public static class HourlyWindowEdges
         var startMoved = served != requestedStart;
         if (startHour != requestedStart)
         {
-            parts.Add($"hourly buckets start on the hour: no bucket before {Utc(served)}: the data from {Utc(requestedStart)} to {Utc(served)} is not included");
+            parts.Add(StartSentence(requestedStart, served));
         }
 
         var endHour = FloorHour(requestedEnd);
@@ -67,6 +67,31 @@ public static class HourlyWindowEdges
 
         return string.Join("; ", parts);
     }
+
+    /// <summary>#6831: the edges <see cref="Note"/> words, as fields a page can say in its own clock and words. <c>StartDroppedFrom</c> is the
+    /// requested start when the first partial hour was not read (null when the start was on the hour). <c>MaterializedTo</c> is the rollup's
+    /// build limit, set only when it ended the read at or before the window's end. <c>EndCountedWhole</c> is true when an unaligned end counted
+    /// its whole last bucket, so the data runs past the window's end. <c>ServedEnd</c> is null when the rollup's ceiling is not known.</summary>
+    public readonly record struct Edges(DateTime ServedStart, DateTime? ServedEnd, DateTime? StartDroppedFrom, DateTime? MaterializedTo, bool EndCountedWhole);
+
+    /// <summary>The structured twin of <see cref="Note"/>: the same cases, as values.</summary>
+    public static Edges Describe(DateTime requestedStart, DateTime? firstBucket, DateTime requestedEnd, DateTime? ceiling)
+    {
+        var (served, servedEnd) = ServedSpan(requestedStart, firstBucket, requestedEnd, ceiling);
+        DateTime? dropped = FloorHour(requestedStart) != requestedStart ? requestedStart : null;
+        DateTime? cut = ceiling is DateTime c && c <= requestedEnd ? c : null;
+        var whole = ceiling is DateTime c2 && c2 > requestedEnd && FloorHour(requestedEnd) != requestedEnd;
+        return new Edges(served, servedEnd, dropped, cut, whole);
+    }
+
+    /// <summary>The start edge's sentence alone, for a read whose END is exact (the Query Store route reads the wide table up to the window end,
+    /// #6800), so <see cref="Note"/>'s end clauses, which describe an hourly rollup's end bucket, do not apply. Null when the start is on the hour.
+    /// The words are <see cref="Note"/>'s own.</summary>
+    public static string? StartNote(DateTime requestedStart, DateTime firstBucket) =>
+        FloorHour(requestedStart) == requestedStart ? null : StartSentence(requestedStart, firstBucket);
+
+    private static string StartSentence(DateTime requestedStart, DateTime served) =>
+        $"hourly buckets start on the hour: no bucket before {Utc(served)}: the data from {Utc(requestedStart)} to {Utc(served)} is not included";
 
     /// <summary>
     /// An instant as <c>McpHelpers.FormatEffectiveStart</c> prints it: UTC, with the Z. Only the kind is set; the instant is

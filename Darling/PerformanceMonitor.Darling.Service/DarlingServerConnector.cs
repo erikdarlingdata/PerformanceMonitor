@@ -83,6 +83,10 @@ public sealed class ServerRuntime
     /// </summary>
     public int EngineEdition { get; init; }
 
+    /// <summary>#6893: <c>SERVERPROPERTY('Edition')</c> (for example <c>Web Edition (64-bit)</c>), or null when the probe did not read it. Web and Standard
+    /// share EngineEdition 2, so the add-server result line names the edition from this text.</summary>
+    public string? EditionName { get; init; }
+
     /// <summary>
     /// What the PostgreSQL detection query saw in <c>pg_extension</c> for <c>pg_stat_statements</c>, in the
     /// database this connection landed in (#3830) - the ROW, not a verdict drawn from it. Default
@@ -119,7 +123,7 @@ public static class DarlingServerConnector
        depend on it (#1535). sqlserver_start_time - the one column that needs the DMV - is not read
        here (the service never surfaces a start time), so unlike Lite/Dashboard no best-effort
        start-time read is needed. Columns: 0 sql_version, 1 major_version, 2 utc_offset,
-       3 engine_edition, 4 is_aws_rds, 5 has_msdb_access, 6 connected_database (#2228), 7 server_name (#6285).
+       3 engine_edition, 4 is_aws_rds, 5 has_msdb_access, 6 connected_database (#2228), 7 server_name (#6285), 8 edition_name (#6893).
 
        #2228 — connected_database is DB_NAME(): the database this connection ACTUALLY reached, which is not
        necessarily the one the registration names. An Initial Catalog that is absent, misspelled or overridden
@@ -141,7 +145,9 @@ SELECT /* PerformanceMonitorLite */
     /* #2228: which database this connection actually landed in. Appended; see the comment above. */
     DB_NAME() AS connected_database,
     /* #6285: the machine and instance the server calls itself, appended like the column above. */
-    CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')) AS server_name";
+    CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')) AS server_name,
+    /* #6893: Web and Standard share EngineEdition 2, so RDS Web and Express is told apart by the edition name. */
+    CONVERT(nvarchar(128), SERVERPROPERTY('Edition')) AS edition_name";
 
     /// <summary>
     /// The tripwire's verdict: the message to raise when a registration is connected to a database it does not
@@ -390,7 +396,26 @@ SELECT
     /// <para>#6143: <c>{0}</c> is the schema, quoted, from <see cref="ResolveAuroraFunctionSchemaAsync"/>. For
     /// <c>aurora_version</c> that is always pg_catalog: the pg_stat_statements extension does not ship it, so a function
     /// of that name in any other schema is never called. Whether the target is Aurora is still decided by the call.</para>
-    public const string PostgresAuroraProbeQueryText = @"SELECT {0}.aurora_version()";
+    /// <para>#6888: the call runs inside a DO block that catches <c>undefined_function</c>, and hands the answer back
+    /// through a transaction-local setting read by the second statement. PostgreSQL writes a failed statement to the
+    /// server's own log, so the bare call put <c>function pg_catalog.aurora_version() does not exist</c> into every
+    /// stock target's log on every connect, where a DBA read it as an error from the monitor. An error that PL/pgSQL
+    /// catches is not written to the log. The setting is <c>off</c> unless the call returned a value, so the answer is
+    /// the same one the bare call gave. Read-only (set_config with is_local touches no catalog), and plpgsql is a
+    /// trusted language every role may run a DO block in.</para>
+    public const string PostgresAuroraProbeQueryText = @"DO $aurora_probe$
+BEGIN
+    PERFORM pg_catalog.set_config('performance_monitor.is_aurora', 'off', true);
+    BEGIN
+        IF {0}.aurora_version() IS NOT NULL THEN
+            PERFORM pg_catalog.set_config('performance_monitor.is_aurora', 'on', true);
+        END IF;
+    EXCEPTION WHEN undefined_function THEN
+        NULL;
+    END;
+END
+$aurora_probe$;
+SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
 
     /// <summary>
     /// Whether this target is Aurora, decided by CALLING <c>aurora_version()</c> (#2340). True when the call
@@ -415,8 +440,27 @@ SELECT
             var schema = await ResolveAuroraFunctionSchemaAsync(connection, "aurora_version", cancellationToken);
             using var command = new NpgsqlCommand(
                 PostgresAuroraProbeQueryText.Replace("{0}", schema, StringComparison.Ordinal), connection) { CommandTimeout = 15 };
-            var version = await command.ExecuteScalarAsync(cancellationToken);
-            return version is not null and not DBNull;
+            /* Both statements go in one batch, so they share one implicit transaction and the is_local setting the DO
+               block wrote is still there for the SELECT. The DO block returns no rows: the answer is the SELECT's.
+               That holds only because Npgsql sends both statements before ONE Sync, and the server runs everything up
+               to a Sync in one implicit transaction, so set_config(..., true) persists from the DO block to the SELECT.
+               Two NpgsqlCommands, or anything else that ends the transaction between them, would make current_setting
+               return NULL here with no error, and every Aurora cluster would silently read as stock PostgreSQL (#2340:
+               pg_wait_stats and pg_statement_stats dropped). Keep them one command. */
+            string? answer = null;
+            using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                do
+                {
+                    if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0))
+                    {
+                        answer = reader.GetString(0);
+                    }
+                }
+                while (await reader.NextResultAsync(cancellationToken));
+            }
+
+            return string.Equals(answer, "on", StringComparison.Ordinal);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -513,7 +557,7 @@ SELECT
 
         int majorVersion = 0, engineEdition = 0;
         bool isAwsRds = false, hasMsdbAccess = true;
-        string? connectedDatabase = null, machineIdentity = null;
+        string? connectedDatabase = null, machineIdentity = null, editionName = null;
         if (await reader.ReadAsync(cancellationToken))
         {
             // Column indices per DetectionQueryText: 1 major_version, 3 engine_edition,
@@ -526,7 +570,11 @@ SELECT
             /* #6285: the server's own name, for the add and edit tools' same-machine check. An Azure SQL Database has no
                machine of its own to name, so it reports none. */
             machineIdentity = reader.IsDBNull(7) || engineEdition == 5 ? null : reader.GetString(7);
+            editionName = reader.IsDBNull(8) ? null : reader.GetString(8);   /* #6893 */
         }
+
+        /* #6893: Amazon RDS refuses every Extended Events session create on the Web and Express editions. */
+        var isAwsRdsWebOrExpress = isAwsRds && CollectorEngineCapability.IsWebOrExpressEditionName(editionName);
 
         return new ServerRuntime
         {
@@ -538,6 +586,7 @@ SELECT
                 IsAzureSqlDb = engineEdition == 5,
                 IsAzureManagedInstance = engineEdition == 8,
                 IsAwsRds = isAwsRds,
+                IsAwsRdsWebOrExpress = isAwsRdsWebOrExpress,
                 SqlMajorVersion = majorVersion,
                 /* Already probed above via HAS_DBACCESS(N'msdb'); wiring it into the gate is the fix —
                    before this it rode only on ServerRuntime and never reached the collectors' AppliesTo,
@@ -553,6 +602,7 @@ SELECT
             HasMsdbAccess = hasMsdbAccess,
             IsAwsRds = isAwsRds,
             EngineEdition = engineEdition,
+            EditionName = editionName,
             ConnectedDatabase = connectedDatabase,
             MachineIdentity = machineIdentity,
         };
@@ -705,6 +755,17 @@ SELECT s.system_identifier::text AS system_identifier,
        pg_catalog.current_setting('port') AS port
 FROM pg_catalog.pg_control_system() AS s";
 
+    /// <summary>
+    /// #6888: asked first, on its own round trip, whether this role may call <c>pg_control_system()</c>. PostgreSQL checks a
+    /// function's privilege when the statement starts, so a <c>CASE</c> or <c>WHERE</c> around the call in <see cref="PostgresIdentityQueryText"/>
+    /// would still raise 42501 on a role that is refused, and the server would write <c>permission denied for function
+    /// pg_control_system</c> into its own log on every connect. <c>has_function_privilege</c> is callable by any role and
+    /// <c>to_regprocedure</c> makes a missing function read as NULL, so the answer is false either way.
+    /// </summary>
+    internal const string PostgresIdentityPrivilegeQueryText =
+        "SELECT COALESCE(pg_catalog.has_function_privilege(current_user, "
+        + "pg_catalog.to_regprocedure('pg_catalog.pg_control_system()'), 'EXECUTE'), false)";
+
     internal static async Task<string?> ProbePostgresIdentityAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken, bool isAurora = false)
     {
         /* #6340 round 2 (N4): none on Aurora. No AWS documentation shows system_identifier to be unique per Aurora cluster (the control
@@ -717,6 +778,16 @@ FROM pg_catalog.pg_control_system() AS s";
 
         try
         {
+            /* #6888: a refused role is told apart BEFORE the call, so the server never raises (and logs) 42501 for it. */
+            using (var privilege = new NpgsqlCommand(PostgresIdentityPrivilegeQueryText, connection) { CommandTimeout = 30 })
+            {
+                if (await privilege.ExecuteScalarAsync(cancellationToken) is not true)
+                {
+                    logger?.LogDebug("pg_control_system() is not callable by this role; the target is matched by host text alone");
+                    return null;
+                }
+            }
+
             using var command = new NpgsqlCommand(PostgresIdentityQueryText, connection) { CommandTimeout = 30 };
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) && !reader.IsDBNull(1))
@@ -773,7 +844,7 @@ FROM pg_catalog.pg_control_system() AS s";
             var checksTheWrongPrincipal = runsAsConsoleUser && !config.UsesSqlAuth && !config.UsesEntra;
             var missingGrants = isPostgres || checksTheWrongPrincipal
                 ? null
-                : await ProbeMissingGrantsAsync(runtime.ConnectionString, runtime.Target.IsAzureSqlDb, logger, cancellationToken);
+                : await ProbeMissingGrantsAsync(runtime.ConnectionString, runtime.Target.IsAzureSqlDb, logger, cancellationToken, isAwsRds: runtime.Target.IsAwsRds);
 
             return new ConnectionProbeResult(
                 Success: true,
@@ -782,7 +853,7 @@ FROM pg_catalog.pg_control_system() AS s";
                 /* No edition on a PostgreSQL target, and DescribeEngineEdition(0) would say
                    "Unknown (0)" — which reads as a probe that half-failed rather than one that
                    succeeded against a different engine. */
-                EngineEditionDescription: isPostgres ? null : DescribeEngineEdition(runtime.EngineEdition),
+                EngineEditionDescription: isPostgres ? null : DescribeEditionForProbe(runtime.EngineEdition, runtime.EditionName),
                 IsAzureSqlDb: runtime.Target.IsAzureSqlDb,
                 IsAzureManagedInstance: runtime.Target.IsAzureManagedInstance,
                 IsAwsRds: runtime.IsAwsRds,
@@ -829,13 +900,19 @@ FROM pg_catalog.pg_control_system() AS s";
     /// names each missing one with the statement that adds it, or null when none is missing. It never throws except for cancellation and
     /// says nothing when it cannot read the answer (an old version that does not know a permission name answers NULL, which is no claim):
     /// the connection worked, and a missing grant is a warning beside that result, not a failure of it.
-    /// <paramref name="createConnection"/> is a test seam; null opens a SqlConnection.
+    /// <paramref name="createConnection"/> is a test seam; null opens a SqlConnection. <paramref name="isAwsRds"/> leaves out the grants RDS refuses (#6889).
     /// </summary>
     internal static async Task<string?> ProbeMissingGrantsAsync(
         string connectionString, bool isAzureSqlDatabase, ILogger? logger, CancellationToken cancellationToken,
-        Func<string, System.Data.Common.DbConnection>? createConnection = null)
+        Func<string, System.Data.Common.DbConnection>? createConnection = null,
+        bool isAwsRds = false)
     {
-        var entries = isAzureSqlDatabase ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.RequiredAzureGrants : PerformanceMonitor.Darling.Storage.MonitoringGrantScript.RequiredServerGrants;
+        /* #6889: Amazon RDS refuses CONNECT ANY DATABASE to its master user, so asking for it there names a statement that cannot succeed. */
+        var entries = isAzureSqlDatabase
+            ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.RequiredAzureGrants
+            : isAwsRds
+                ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.RequiredRdsServerGrants
+                : PerformanceMonitor.Darling.Storage.MonitoringGrantScript.RequiredServerGrants;
         try
         {
             await using var connection = createConnection is null ? new SqlConnection(connectionString) : createConnection(connectionString);
@@ -856,7 +933,17 @@ FROM pg_catalog.pg_control_system() AS s";
             }
 
             var who = reader.IsDBNull(entries.Count) ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.PlaceholderLogin : reader.GetString(entries.Count);
-            return PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeMissingGrants(PerformanceMonitor.Darling.Storage.MonitoringGrantScript.MissingGrants(entries, held, who));
+            var missingText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeMissingGrants(PerformanceMonitor.Darling.Storage.MonitoringGrantScript.MissingGrants(entries, held, who));
+
+            /* #6889: the count of online user databases the login cannot enter rides after the login name (server scope only). */
+            long noUserDatabases = 0;
+            if (reader.FieldCount > entries.Count + 1 && !reader.IsDBNull(entries.Count + 1))
+            {
+                noUserDatabases = Convert.ToInt64(reader.GetValue(entries.Count + 1), System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            var noUserText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeNoUserDatabases(noUserDatabases, who, isAwsRds);
+            return missingText is null ? noUserText : noUserText is null ? missingText : missingText + " " + noUserText;
         }
         catch (OperationCanceledException)
         {
@@ -1009,6 +1096,29 @@ FROM pg_catalog.pg_control_system() AS s";
     /// </summary>
     public static string DescribeEngineEdition(int engineEdition) =>
         CollectorEngineCapability.DescribeEngineEdition(engineEdition);
+
+    /// <summary>
+    /// #6893: the edition the add-server result line names. EngineEdition 2 is Standard AND Web, so a box that says <c>Web Edition</c> or
+    /// <c>Express Edition</c> in <c>SERVERPROPERTY('Edition')</c> is named from that text. Anything else keeps the engine edition's description.
+    /// </summary>
+    public static string DescribeEditionForProbe(int engineEdition, string? editionName)
+    {
+        if (!string.IsNullOrWhiteSpace(editionName))
+        {
+            var trimmed = editionName.TrimStart();
+            if (trimmed.StartsWith("Web Edition", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Web";
+            }
+
+            if (trimmed.StartsWith("Express Edition", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Express";
+            }
+        }
+
+        return DescribeEngineEdition(engineEdition);
+    }
 }
 
 /// <summary>

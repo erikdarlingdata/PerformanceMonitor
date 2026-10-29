@@ -13,6 +13,7 @@ using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -93,10 +94,11 @@ public partial class DatabaseStateOverridesWindow : Window
     /// that is not in <paramref name="picks"/>. This editor lists every server in the fleet, so a PostgreSQL target shows the
     /// sentence too (the collector reads sys.databases, which PostgreSQL does not have) in place of a count of zero databases.
     /// Looked up by the server id a load captured, not by re-reading the combo. Static, with the <c>collection_log</c> read
-    /// passed in, so a test drives the same path a load takes without a window or a store.
+    /// passed in, and the latest-run read too, so a database_states run that recorded a named skip such as PERMISSIONS is explained here like on every other surface (#6861). A test drives the same path a load takes without a window or a store.
     /// </summary>
     internal static async System.Threading.Tasks.Task<string?> GapNoteForAsync(
-        IEnumerable<ServerPick> picks, ViewerServerTab.CollectorLastRunReader readLastRun, int serverId, int rowCount)
+        IEnumerable<ServerPick> picks, ViewerServerTab.CollectorLastRunReader readLastRun,
+        ViewerServerTab.CollectorOutcomeReader readLatestOutcome, int serverId, int rowCount)
     {
         var pick = picks.FirstOrDefault(p => p.ServerId == serverId);
         if (pick is null)
@@ -105,7 +107,7 @@ public partial class DatabaseStateOverridesWindow : Window
         }
 
         var (text, visibility) = await ViewerServerTab.ReadEngineGapStateAsync(
-            readLastRun, null, pick.ServerId, pick.ServerName, pick.EngineEdition, pick.EngineKind, "database_states", rowCount);
+            readLastRun, null, pick.ServerId, pick.ServerName, pick.EngineEdition, pick.EngineKind, "database_states", rowCount, readLatestOutcome, awsRdsKind: AwsRdsKind.None);
 
         return visibility == Visibility.Visible ? text : null;
     }
@@ -160,7 +162,9 @@ public partial class DatabaseStateOverridesWindow : Window
                every paint stays below them. */
             var rowCount = rows.Count;
             var gap = rowCount == 0
-                ? await GapNoteForAsync(_picks, (id, collector) => _dataService.GetCollectorLastRunAsync(id, collector), serverId, rowCount)
+                ? await GapNoteForAsync(
+                    _picks, (id, collector) => _dataService.GetCollectorLastRunAsync(id, collector),
+                    (id, collector) => _dataService.GetLatestCollectorOutcomeAsync(id, collector), serverId, rowCount)
                 : null;
 
             /* A newer load for this grid has started, so this answer is not the one the operator is

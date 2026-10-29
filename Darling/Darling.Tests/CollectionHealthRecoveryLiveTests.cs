@@ -120,7 +120,7 @@ public sealed class CollectionHealthRecoveryLiveTests
                     if (reader.GetString(0) == name)
                     {
                         found = true;
-                        Assert.Equal(expected, Convert.ToInt64(reader.GetValue(reader.FieldCount - 1)));
+                        Assert.Equal(expected, Convert.ToInt64(reader.GetValue(reader.GetOrdinal("trailing_success_runs"))));
                     }
                 }
 

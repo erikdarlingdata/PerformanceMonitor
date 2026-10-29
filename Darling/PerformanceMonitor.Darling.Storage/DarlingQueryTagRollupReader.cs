@@ -55,9 +55,13 @@ public static class DarlingQueryTagRollupReader
         StorageVersion.SchemaVersion >= QueryStoreTableMinSchemaVersion && endUtc - startUtc >= QueryStoreMinWindow;
 
     /// <summary>What <see cref="ReadQueryStoreAsync"/> decided and read: the servers the gate allowed with the start the table provably holds
-    /// for them, the servers it refused with why, the facts read for the allowed ones, and whether the interval table itself was missing.</summary>
+    /// for them, the servers it refused with why, the facts read for the allowed ones, and whether the interval table itself was missing.
+    /// <paramref name="UsedHashHourly"/>: the fleet route read built hours from <c>collect.query_store_hash_hourly</c> (#6800), so the section's source is both tables.
+    /// Then <paramref name="RoutedStarts"/> is each server's start rounded up to the hour, the first instant it read (<paramref name="Allowed"/> keeps the gate's
+    /// own starts), and <paramref name="WindowEdgesNote"/> says the partial first hour was not read (null when the start was on the hour). <paramref name="UsedHashDaily"/>: the route also read whole UTC days from <c>collect.query_store_hash_daily</c> (step 3c). <paramref name="StartDroppedFrom"/> (#6831) is the requested start the note names, null when the start was on the hour. <paramref name="BacklogHoursWaiting"/> (#6865) is above 0 when the route left out the hours still waiting for the hourly builder: the read starts after them (<paramref name="RoutedStarts"/> is the span's start) and the count is how many of those hours are backlog. <paramref name="BacklogHoursLeftOut"/> is how many whole hours the read leaves out, from the window's first whole hour to where it starts. When only backlog hours let the route answer, <paramref name="UsedHashHourly"/> is false: the wide table's tail served it alone.</summary>
     public readonly record struct QueryStoreRead(
-        Dictionary<int, DateTime> Allowed, Dictionary<int, string> Refused, List<QueryTagRollupFact> Facts, bool TableMissing);
+        Dictionary<int, DateTime> Allowed, Dictionary<int, string> Refused, List<QueryTagRollupFact> Facts, bool TableMissing, bool UsedHashHourly = false,
+        Dictionary<int, DateTime>? RoutedStarts = null, string? WindowEdgesNote = null, bool UsedHashDaily = false, DateTime? StartDroppedFrom = null, int BacklogHoursWaiting = 0, int BacklogHoursLeftOut = 0);
 
     /// <summary>
     /// The Query Store gate and the read it authorizes, per server: the interval table is read only where the same gate every other reader of
@@ -92,11 +96,20 @@ public static class DarlingQueryTagRollupReader
             await readOnly.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        /* #6807: the gate's per-server table floor in one statement for the servers that reach the floor step, and the store-wide raw
+           floor once, inside this same snapshot, instead of one floor statement per server. Each server's answer is the one it got
+           before. The statement runs under a savepoint, so if it fails or passes its short deadline only it is undone, and each server
+           reads its own floor on the snapshot as before. */
+        var storeWide = new QueryStoreIntervalWide.StoreWideInputsCache();
+        storeWide.ReadTableFloorsTogether(serverIds, inTransaction: true);
+
+        /* The gate decides per server, on the shared snapshot; the read is then ONE statement over every allowed server (#6794), each
+           bound to its own ReadStart, so a server's rows are the rows a per-server statement would read. */
         foreach (var serverId in serverIds)
         {
             var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                 connection, serverId, windowStart, windowEnd, windowEnd, QueryStoreMinWindow,
-                readSeconds, logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
+                readSeconds, logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken, storeWide: storeWide);
             if (!plan.UseTable)
             {
                 refused[serverId] = plan.DecisionFailed
@@ -106,19 +119,69 @@ public static class DarlingQueryTagRollupReader
             }
 
             allowed[serverId] = plan.ReadStart;
-            try
-            {
-                await using var command = Command(connection, QueryTagRollupSql.QueryStoreSql, [serverId], plan.ReadStart, windowEnd, readSeconds);
-                facts.AddRange(await ReadFactsFromAsync(command, QueryTagRollupSection.QueryStore, cancellationToken));
-            }
-            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
-            {
-                /* The failed statement aborted the transaction: nothing more can be read on it. */
-                return new QueryStoreRead(allowed, refused, [], true);
-            }
         }
 
-        return new QueryStoreRead(allowed, refused, facts, false);
+        if (allowed.Count == 0)
+        {
+            return new QueryStoreRead(allowed, refused, facts, false);
+        }
+
+        return await ReadAllowedAsync(connection, allowed, refused, windowStart, windowEnd, readSeconds, cancellationToken);
+    }
+
+    /// <summary>
+    /// The read after the gate: the facts for the servers it allowed, each from its own read start, on the gate's connection and snapshot.
+    /// Split out so a test can hand it servers with different read starts (the gate gives them only where a server's below-floor start is
+    /// allowed, which takes a raw chunk, a collection log and a table floor per server) and see whether the batched commands pair each
+    /// start, and each stale pair, with its own server (#6800 part 2, step 2b).
+    /// </summary>
+    internal static async Task<QueryStoreRead> ReadAllowedAsync(
+        NpgsqlConnection connection, Dictionary<int, DateTime> allowed, Dictionary<int, string> refused, DateTime windowStart, DateTime windowEnd, int readSeconds, CancellationToken cancellationToken)
+    {
+        var facts = new List<QueryTagRollupFact>();
+        /* #6800 part 2: a fleet read takes the hours the hourly builder has done from collect.query_store_hash_hourly and the rest from the
+           wide table (QueryTagRollupHashRoute). One server, a store without the table, or no hour the table can answer yet: today's
+           statement. The route's two small reads and the statement share this snapshot. */
+        var route = await QueryTagRollupHashRoute.TryPlanAsync(connection, allowed, windowStart, windowEnd, readSeconds, cancellationToken);
+        try
+        {
+            await using var command = route is null
+                ? QueryStoreCommand(connection, allowed, windowEnd, readSeconds)
+                : QueryTagRollupHashRoute.Command(connection, route, windowEnd, readSeconds);
+            facts.AddRange(await ReadFactsFromAsync(command, QueryTagRollupSection.QueryStore, cancellationToken));
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+        {
+            /* The failed statement aborted the transaction: nothing more can be read on it. */
+            return new QueryStoreRead(allowed, refused, [], true);
+        }
+
+        /* #6865: UsedHashHourly is whether a hash table served the answer. A route that answers only because backlog hours were left out reads the wide
+           table's tail alone, so the section's tier and source must not name the hash tables. */
+        return new QueryStoreRead(allowed, refused, facts, false, route?.ReadsHashTables ?? false, route?.Starts, route?.EdgesNote, route?.UsesDays ?? false,
+            route?.EdgesNote is null ? null : route.RequestedStart, route?.BacklogHoursWaiting ?? 0, route?.BacklogHoursLeftOut ?? 0);
+    }
+
+    /// <summary>The batched Query Store statement's command (<see cref="QueryTagRollupSql.QueryStoreSql"/>): the allowed servers and each one's
+    /// read start as two parallel arrays, the window end, and the earliest read start.</summary>
+    private static NpgsqlCommand QueryStoreCommand(NpgsqlConnection connection, Dictionary<int, DateTime> allowed, DateTime windowEnd, int readSeconds)
+    {
+        var ordered = allowed.OrderBy(a => a.Key).ToArray();
+        var command = new NpgsqlCommand(QueryTagRollupSql.QueryStoreSql, connection);
+        command.CommandTimeout = readSeconds;
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = ordered.Select(a => a.Key).ToArray() });
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp,
+            Value = ordered.Select(a => DateTime.SpecifyKind(a.Value, DateTimeKind.Unspecified)).ToArray(),
+        });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Timestamp,
+            Value = DateTime.SpecifyKind(ordered.Min(a => a.Value), DateTimeKind.Unspecified),
+        });
+        return command;
     }
 
     /* The deadline is set HERE, on the name the construction is bound to, so the read-surface deadline scan certifies each site itself. */

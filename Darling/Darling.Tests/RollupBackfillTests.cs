@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -178,6 +179,190 @@ public sealed class RollupBackfillTests
         var (missingFree, missingError) = DarlingCliCommands.ResolveDirectoryFreeSpace(missing, mustNotRead);
         Assert.Equal(0L, missingFree);
         Assert.Contains("does not exist on this machine", missingError, StringComparison.Ordinal);
+    }
+
+    /// <summary>#6791: the reporter's pod. The data directory has its own volume (41G free) and / is a
+    /// different one (25G free). The free space is the data volume's, not the root's.</summary>
+    [Fact]
+    public void ChooseMountRoot_TheReportersLayout_PicksTheDataVolumeNotRoot()
+    {
+        var mounts = new[] { "/", "/var/lib/postgresql/data", "/etc/hosts", "/proc" };
+
+        Assert.Equal("/var/lib/postgresql/data", DarlingCliCommands.ChooseMountRoot(mounts, "/var/lib/postgresql/data/pgdata"));
+        Assert.Equal("/var/lib/postgresql/data", DarlingCliCommands.ChooseMountRoot(mounts, "/var/lib/postgresql/data"));
+        Assert.Equal("/var/lib/postgresql/data", DarlingCliCommands.ChooseMountRoot(mounts, "/var/lib/postgresql/data/"));
+    }
+
+    /// <summary>A mount claims a path only on a separator boundary, so /var/lib/pg does not own /var/lib/pgdata.
+    /// The longest matching root wins when mounts nest.</summary>
+    [Fact]
+    public void ChooseMountRoot_MatchesOnSeparatorBoundaries_AndTheLongestRootWins()
+    {
+        Assert.Equal("/", DarlingCliCommands.ChooseMountRoot(new[] { "/", "/var/lib/pg" }, "/var/lib/pgdata/base"));
+        Assert.Equal("/data/pg", DarlingCliCommands.ChooseMountRoot(new[] { "/", "/data", "/data/pg" }, "/data/pg/pgdata"));
+        Assert.Equal("/data", DarlingCliCommands.ChooseMountRoot(new[] { "/", "/data", "/data/pg" }, "/data/pgdata"));
+        Assert.Equal("/data/", DarlingCliCommands.ChooseMountRoot(new[] { "/", "/data/" }, "/data/x"));
+    }
+
+    /// <summary>A path no mount contains but the root gets the root; with no root at all there is no answer.</summary>
+    [Fact]
+    public void ChooseMountRoot_NoMatchingMountButRoot_PicksRoot_AndNothingMatchesNothing()
+    {
+        Assert.Equal("/", DarlingCliCommands.ChooseMountRoot(new[] { "/", "/mnt/other" }, "/opt/pgdata"));
+        Assert.Null(DarlingCliCommands.ChooseMountRoot(new[] { "/mnt/other", "" }, "/opt/pgdata"));
+    }
+
+    [Theory]
+    [InlineData("1024", 1024L)]
+    [InlineData("512", 512L)]
+    [InlineData("1K", 1024L)]
+    [InlineData("1KB", 1024L)]
+    [InlineData("1kib", 1024L)]
+    [InlineData("2M", 2L * 1024 * 1024)]
+    [InlineData("41G", 41L * 1024 * 1024 * 1024)]
+    [InlineData("41g", 41L * 1024 * 1024 * 1024)]
+    [InlineData("41GiB", 41L * 1024 * 1024 * 1024)]
+    [InlineData("41 GB", 41L * 1024 * 1024 * 1024)]
+    [InlineData("1T", 1024L * 1024 * 1024 * 1024)]
+    [InlineData("1.5G", 1536L * 1024 * 1024)]
+    [InlineData("100B", 100L)]
+    public void ParseFreeSpaceSize_AcceptsBytesAndTheOneKilobyteBasedSuffixes(string text, long expected)
+    {
+        var (bytes, error) = DarlingCliCommands.ParseFreeSpaceSize(text);
+
+        Assert.Null(error);
+        Assert.Equal(expected, bytes);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("0G")]
+    [InlineData("-5")]
+    [InlineData("-41G")]
+    [InlineData("abc")]
+    [InlineData("41X")]
+    [InlineData("G")]
+    [InlineData("")]
+    [InlineData("41GG")]
+    [InlineData("1e3")]
+    [InlineData("99999999999999T")]
+    public void ParseFreeSpaceSize_RefusesZeroNegativeAndUnreadableSizes(string text)
+    {
+        var (bytes, error) = DarlingCliCommands.ParseFreeSpaceSize(text);
+
+        Assert.Null(bytes);
+        Assert.Contains("--free-space", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ParseBackfillArgs_TakesFreeSpaceWithDryRunAndAConfigPath_InAnyOrder()
+    {
+        var parsed = DarlingCliCommands.ParseBackfillArgs(new[] { "--free-space", "41G", "--dry-run", "/etc/darling.json" });
+        Assert.Null(parsed.Error);
+        Assert.Equal(41L * 1024 * 1024 * 1024, parsed.FreeBytes);
+        Assert.True(parsed.DryRun);
+        Assert.Equal("/etc/darling.json", parsed.ConfigPath);
+
+        var plain = DarlingCliCommands.ParseBackfillArgs(new[] { "--dry-run" });
+        Assert.Null(plain.Error);
+        Assert.Null(plain.FreeBytes);
+        Assert.Null(plain.ConfigPath);
+    }
+
+    [Theory]
+    [InlineData("--free-space")]
+    [InlineData("--free-space --dry-run")]
+    [InlineData("--free-space 0")]
+    [InlineData("--free-space -1G")]
+    [InlineData("--free-space lots")]
+    [InlineData("--free-space 10G --free-space 20G")]
+    [InlineData("--free-spce 10G")]
+    public void ParseBackfillArgs_RefusesAMissingBadOrRepeatedFreeSpace(string argLine)
+    {
+        var rest = argLine.Split(" ");
+        var parsed = DarlingCliCommands.ParseBackfillArgs(rest);
+
+        Assert.NotNull(parsed.Error);
+        Assert.Null(parsed.FreeBytes);
+    }
+
+    [Fact]
+    public void ParseRecompressArgs_TakesFreeSpace_AndRefusesItsBadForms()
+    {
+        var parsed = DarlingCliCommands.ParseRecompressArgs(new[] { "--vacuum-full", "--free-space", "41G" });
+        Assert.Null(parsed.Error);
+        Assert.Equal(41L * 1024 * 1024 * 1024, parsed.FreeBytes);
+        Assert.Equal(DarlingCliCommands.RecompressVacuumMode.Force, parsed.Mode);
+
+        foreach (var bad in new[]
+        {
+            new[] { "--free-space" },
+            new[] { "--free-space", "--dry-run" },
+            new[] { "--free-space", "0" },
+            new[] { "--free-space", "nope" },
+            new[] { "--free-space", "1G", "--free-space", "2G" },
+        })
+        {
+            Assert.NotNull(DarlingCliCommands.ParseRecompressArgs(bad).Error);
+        }
+    }
+
+    /// <summary>#6791: with the operator's number the step neither asks the store for data_directory nor looks
+    /// for the directory here, and the number reaches the comparison unchanged.</summary>
+    [Fact]
+    public async Task ResolveFreeSpaceAsync_WithAGivenNumber_ReadsNothingAndReturnsIt()
+    {
+        var read = false;
+
+        var (freeBytes, error) = await DarlingCliCommands.ResolveFreeSpaceAsync(
+            41L * 1024 * 1024 * 1024,
+            _ =>
+            {
+                read = true;
+                return Task.FromResult<string?>("/never");
+            },
+            _ => throw new InvalidOperationException("must not measure"),
+            TestContext.Current.CancellationToken);
+
+        Assert.Null(error);
+        Assert.Equal(41L * 1024 * 1024 * 1024, freeBytes);
+        Assert.False(read);
+    }
+
+    /// <summary>Without the option the store is asked and its directory measured, as before.</summary>
+    [Fact]
+    public async Task ResolveFreeSpaceAsync_WithoutAGivenNumber_AsksTheStoreAndMeasuresItsDirectory()
+    {
+        var dataDirectory = Directory.CreateTempSubdirectory("pm-free-space-").FullName;
+        try
+        {
+            var (freeBytes, error) = await DarlingCliCommands.ResolveFreeSpaceAsync(
+                null, _ => Task.FromResult<string?>(dataDirectory), _ => 4242, TestContext.Current.CancellationToken);
+
+            Assert.Null(error);
+            Assert.Equal(4242L, freeBytes);
+
+            var (_, unreadable) = await DarlingCliCommands.ResolveFreeSpaceAsync(
+                null, _ => Task.FromResult<string?>(null), _ => 1, TestContext.Current.CancellationToken);
+            Assert.Contains("--free-space", unreadable, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(dataDirectory);
+        }
+    }
+
+    /// <summary>Both refusals that stop the measured path say how to get past them.</summary>
+    [Fact]
+    public void ResolveDirectoryFreeSpace_TheTwoRefusals_NameFreeSpaceAsTheWayOut()
+    {
+        var (_, unreadable) = DarlingCliCommands.ResolveDirectoryFreeSpace(null);
+        var (_, missing) = DarlingCliCommands.ResolveDirectoryFreeSpace(
+            Path.Combine(Path.GetTempPath(), "pm-free-space-missing-" + Guid.NewGuid().ToString("N")));
+
+        Assert.Contains("pg_read_all_settings", unreadable, StringComparison.Ordinal);
+        Assert.Contains("--free-space <size>", unreadable, StringComparison.Ordinal);
+        Assert.Contains("--free-space <size>", missing, StringComparison.Ordinal);
     }
 
     /// <summary>Sizes are formatted invariantly — this text goes to an operator's console and into a refusal, so

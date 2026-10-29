@@ -44,7 +44,8 @@ internal static class McpEngineCapability
         LocalDataService dataService,
         int serverId,
         string serverName,
-        string collectorName)
+        string collectorName,
+        AwsRdsKind awsRdsKind)
     {
         var engineEdition = await EngineEditionAsync(dataService, serverId);
 
@@ -55,8 +56,8 @@ internal static class McpEngineCapability
            the compiler could not find on the day that changes; null is behaviour-identical here (a SQL
            Server collector on a SQL Server target makes no kind claim either way) and cannot become wrong.
            The parameter is REQUIRED rather than defaulted so that decision is visible at the call site
-           instead of being made by omission. */
-        var engineEnvelope = Envelope(serverName, engineEdition, collectorName);
+           instead of being made by omission. awsRdsKind is required for the same reason (#6894). */
+        var engineEnvelope = Envelope(serverName, engineEdition, collectorName, awsRdsKind);
         if (engineEnvelope is not null || collectorName is not ("query_store" or "plan_correction"))
         {
             return engineEnvelope;
@@ -66,12 +67,88 @@ internal static class McpEngineCapability
         return await McpRuntimePrecondition.QueryStoreReadableSecondaryStatusAsync(dataService, serverId, serverName);
     }
 
+    /// <summary>
+    /// #6894, #6893: the same answer for a read of a collector Amazon RDS gates off (running_jobs, and on the Web and Express editions the four
+    /// Extended Events captures). The RDS facts are not in the store, so this takes the server manager and reads them from the server's connection
+    /// status; the edition axis cannot show them, because RDS reports an ordinary edition and the collected edition is the real one.
+    /// </summary>
+    public static Task<string?> NotCollectedStatusAsync(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        int serverId,
+        string serverName,
+        string collectorName)
+    {
+        var awsRdsKind = AwsRdsKindOf(serverManager, serverId);
+        return NotCollectedStatusAsync(dataService, serverId, serverName, collectorName, awsRdsKind: awsRdsKind);
+    }
+
     /// <summary>The <c>not_collected</c> envelope for this engine and collector, or <c>null</c> when the collector can run there.
     /// No engine-kind claim, for the reason given in <see cref="NotCollectedStatusAsync"/>.</summary>
-    private static string? Envelope(string serverName, int engineEdition, string collectorName)
+    private static string? Envelope(string serverName, int engineEdition, string collectorName, AwsRdsKind awsRdsKind)
     {
-        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, collectorName);
-        return message is null ? null : McpHelpers.Status("not_collected", message);
+        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, collectorName, awsRdsKind);
+        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.NotCollectedStatusWord, message);
+    }
+
+    /// <summary>
+    /// #6912: splits a server's collection-health rows into those its engine runs and the ones it does not. A collector the engine does
+    /// not run writes no new row, so what it logged before the gate existed (an Amazon RDS Web or Express server's SESSION_MISSING runs
+    /// for <c>attention</c>, after #6893) keeps its FAILING band for the whole window. Those read <c>not_collected</c> whatever they
+    /// logged, through the same gate the reads use. A failed edition read makes no claim, so the log-driven rows stand.
+    /// </summary>
+    public static async Task<(List<CollectorHealthRow> Running, List<object> NotCollected)> SplitCollectionHealthByEngineAsync(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        int serverId,
+        string serverName,
+        List<CollectorHealthRow> rows)
+    {
+        var engineEdition = await EngineEditionAsync(dataService, serverId);
+        var awsRdsKind = AwsRdsKindOf(serverManager, serverId);
+        return SplitCollectionHealthByEngine(serverName, engineEdition, awsRdsKind, rows);
+    }
+
+    /// <summary>The pure half of <see cref="SplitCollectionHealthByEngineAsync"/>: the engine facts are given.</summary>
+    internal static (List<CollectorHealthRow> Running, List<object> NotCollected) SplitCollectionHealthByEngine(
+        string serverName, int engineEdition, AwsRdsKind awsRdsKind, List<CollectorHealthRow> rows)
+    {
+        var running = new List<CollectorHealthRow>();
+        var notCollected = new List<object>();
+        foreach (var row in rows)
+        {
+            var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, row.CollectorName, awsRdsKind);
+            if (message is null)
+            {
+                running.Add(row);
+            }
+            else
+            {
+                notCollected.Add(new { collector = row.CollectorName, status = CollectorRuntimePrecondition.NotCollectedStatusWord, message });
+            }
+        }
+
+        return (running, notCollected);
+    }
+
+    /// <summary>
+    /// #6894, #6893: what the connection check found this server to be: an Amazon RDS for SQL Server instance (the <c>rdsadmin</c> database),
+    /// and on the Web or Express edition. Lite keeps the facts in memory on the server's connection status, and a tool holds only the storage
+    /// id, so the server is found the way the collectors name it. <see cref="AwsRdsKind.None"/> for a server that is not registered, was never
+    /// checked, or whose check failed: no RDS claim, which leaves the read on its own precondition answer.
+    /// </summary>
+    public static AwsRdsKind AwsRdsKindOf(ServerManager serverManager, int storageServerId)
+    {
+        foreach (var server in serverManager.GetEnabledServers())
+        {
+            if (RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server)) == storageServerId)
+            {
+                var status = serverManager.GetConnectionStatus(server.Id);
+                return CollectorEngineCapability.AwsRdsKindOf(status.IsAwsRds, status.IsAwsRdsWebOrExpress);
+            }
+        }
+
+        return AwsRdsKind.None;
     }
 
     /// <summary>
@@ -90,7 +167,7 @@ internal static class McpEngineCapability
         foreach (var (serverId, serverName) in fleet)
         {
             /* The same answer NotCollectedStatusAsync gives one server; a store read that fails makes no claim. */
-            var envelope = Envelope(serverName, await EngineEditionAsync(dataService, serverId), collectorName);
+            var envelope = Envelope(serverName, await EngineEditionAsync(dataService, serverId), collectorName, awsRdsKind: AwsRdsKind.None);
             if (envelope is null) return null;
             first ??= envelope;
         }

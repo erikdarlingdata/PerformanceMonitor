@@ -19,6 +19,7 @@
 
 import { el, mount, bandClass } from "./util.js";
 import { navigateServer } from "./panels.js";
+import { healthBandClass, healthLabel } from "./store-picker.js";
 import {
   favoritesFirst, isFavorite, isSidebarGrouped, setSidebarGrouped, isSidebarGroupCollapsed, toggleSidebarGroup,
 } from "./viewer-local.js";
@@ -64,7 +65,10 @@ export function sidebarSearchTerm() {
   return searchTerm;
 }
 
-function serverItem(c, depth, activeParam, grouped) {
+/* `store` is the store the row belongs to (front door only; undefined keeps the link to the one store there is). `own` says the row's
+   store is the one in use: the favourite star and the alert badge read ids and counts that belong to the current store, so a row of
+   another store carries neither. */
+function serverItem(c, depth, activeParam, grouped, store, own = true) {
   const target = c.server_name || c.display_name;
   const active = activeParam != null && (activeParam === c.server_name || activeParam === c.display_name);
   return el(
@@ -73,13 +77,13 @@ function serverItem(c, depth, activeParam, grouped) {
       class: "server-item" + (active ? " active" : ""),
       dataset: { server: target, display: c.display_name },
       style: grouped ? "padding-left:" + (BASE_PAD_REM + depth * INDENT_REM) + "rem" : null,
-      onActivate: () => navigateServer(target),
+      onActivate: () => navigateServer(target, store),
     },
     [
       el("span", { class: "dot " + bandClass(c.band) }),
       el("span", { class: "name", text: c.display_name }),
-      alertBadge(c.server_id),
-      favoriteStar(c.server_id),
+      own ? alertBadge(c.server_id) : null,
+      own ? favoriteStar(c.server_id) : null,
     ]
   );
 }
@@ -111,7 +115,55 @@ function groupHeader(g) {
 export function paintServerList(container, fleet, activeParam) {
   rememberFleet(fleet.cards);
   const refocus = focusedGroupId(container);
-  const grouped = isSidebarGrouped();
+  const rows = serverNodes(fleet, activeParam, undefined, true, false);
+  if (rows.empty) {
+    mount(container, searchTerm.trim() ? el("div", { class: "muted sidebar-no-match", text: "No servers match" }) : []);
+    return;
+  }
+  mount(container, rows.nodes);
+  restoreGroupFocus(container, refocus);
+}
+
+/**
+ * The front door's list: one block per store, each a header (the store's name and health) and that store's servers, built
+ * from the store's own /api/fleet. `groups` is [{ store: { name, health }, res }] where `res` is apiGetFleet's answer: a store
+ * whose read failed shows its own line and the others still draw. `current` is the store in use; only its rows carry the
+ * favourite star and alert badge. The search box filters every store's rows. The lists are flat: a tag's id means a different
+ * tag in each store, so the group-by-tag collapse state cannot be shared between them.
+ */
+export function paintStoreServerLists(container, groups, activeParam, current) {
+  const refocus = focusedGroupId(container);
+  const nodes = [];
+  let anyRow = false;
+  let anyRead = false;
+  for (const g of groups) {
+    const name = g.store.name;
+    const header = el("div", { class: "sidebar-store-header", dataset: { store: name } }, [
+      el("span", { class: "dot " + healthBandClass(g.store.health) }),
+      el("span", { class: "sidebar-store-name", text: name }),
+      g.store.health === "ok" ? null : el("span", { class: "sidebar-store-health", text: healthLabel(g.store.health) }),
+    ]);
+    if (g.res.kind !== "data") {
+      nodes.push(header, el("div", { class: "muted sidebar-store-error", style: "padding:0.25rem 1.25rem", text: g.res.message || "Fleet unavailable" }));
+      continue;
+    }
+    anyRead = true;
+    if (name === current) rememberFleet(g.res.data.cards);
+    const rows = serverNodes(g.res.data, name === current ? activeParam : null, name, name === current, true);
+    nodes.push(header);
+    if (rows.empty) continue;
+    anyRow = true;
+    nodes.push(...rows.nodes);
+  }
+  /* A store whose read failed has already said so on its own line, and says nothing about whether a search matched. */
+  if (anyRead && !anyRow && searchTerm.trim()) nodes.push(el("div", { class: "muted sidebar-no-match", text: "No servers match" }));
+  mount(container, nodes);
+  restoreGroupFocus(container, refocus);
+}
+
+/* The rows (group headers and server rows) for one /api/fleet payload, under the search term and the grouping choice. */
+function serverNodes(fleet, activeParam, store, own, flat) {
+  const grouped = flat ? false : isSidebarGrouped();
   const model = sidebarRows(fleet.cards || [], fleet.tags || [], {
     term: searchTerm,
     grouped,
@@ -119,15 +171,11 @@ export function paintServerList(container, fleet, activeParam) {
     isFavorite: (c) => isFavorite(c.server_id),
     isCollapsed: isSidebarGroupCollapsed,
   });
-  if (model.empty) {
-    mount(container, searchTerm.trim() ? el("div", { class: "muted sidebar-no-match", text: "No servers match" }) : []);
-    return;
-  }
-  mount(
-    container,
-    model.rows.map((r) => (r.kind === "group" ? groupHeader(r) : serverItem(r.card, r.depth, activeParam, grouped)))
-  );
-  restoreGroupFocus(container, refocus);
+  if (model.empty) return { empty: true, nodes: [] };
+  return {
+    empty: false,
+    nodes: model.rows.map((r) => (r.kind === "group" ? groupHeader(r) : serverItem(r.card, r.depth, activeParam, grouped, store, own))),
+  };
 }
 
 /* A repaint replaces every row, which destroys the element a keyboard user just activated. When that was a group

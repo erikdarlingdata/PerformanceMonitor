@@ -19,7 +19,7 @@
  * descriptions, server names) reaches the DOM through el()/textContent (R4 — never innerHTML).
  */
 
-import { el, mount, loadingStrip, errorStrip, emptyStrip, relTime } from "../util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, relTime, storeHash } from "../util.js";
 import * as api from "../alerts-api.js";
 
 /** The scalar operator's human symbol for a condition chip (mirrors CustomAlertRuleDefinition.OpSymbol); the range
@@ -67,7 +67,7 @@ function listHead(canEdit, templates) {
     el("h2", { text: "Alert Rules" }),
     el("div", { class: "spacer" }),
     canEdit ? templateMenu(templates) : null,
-    canEdit ? el("a", { class: "btn primary", href: "#/alert-rule/new", text: "New rule" }) : null,
+    canEdit ? el("a", { class: "btn primary", href: storeHash("#/alert-rule/new"), text: "New rule" }) : null,
   ]);
 }
 
@@ -95,7 +95,7 @@ function firstRunHero(canEdit, templates) {
         "few. Start from a conservative template and tune it, or build one from scratch. No SQL to write.",
     }),
     el("div", { class: "hero-ctas" }, [
-      el("a", { class: "btn primary hero-cta", href: "#/alert-rule/new", text: "New rule" }),
+      el("a", { class: "btn primary hero-cta", href: storeHash("#/alert-rule/new"), text: "New rule" }),
       templateMenu(templates),
     ]),
   ]);
@@ -113,7 +113,7 @@ function templateMenu(templates) {
     ]);
   }
   const items = templates.map((t) =>
-    el("a", { class: "template-item", href: "#/alert-rule/new/" + encodeURIComponent(t.key), title: t.description }, [
+    el("a", { class: "template-item", href: storeHash("#/alert-rule/new/") + encodeURIComponent(t.key), title: t.description }, [
       el("span", { class: "template-label", text: t.name }),
       el("span", { class: "template-desc", text: t.description }),
     ])
@@ -137,7 +137,7 @@ function ruleCard(r) {
      excluded) into one field. Non-null -> a relative time via the shared relTime helper; null -> "never fired". */
   const fired = r.last_fired ? "Last fired " + relTime(r.last_fired) : "Never fired";
   const chips = el("div", { class: "vc-chips" });
-  const card = el("a", { class: "view-card card", href: "#/alert-rule/" + encodeURIComponent(r.id) }, [
+  const card = el("a", { class: "view-card card", href: storeHash("#/alert-rule/") + encodeURIComponent(r.id) }, [
     el("div", { class: "vc-name" }, [
       el("span", { class: "vc-name-text", text: r.name }),
       r.enabled === false ? el("span", { class: "paused-badge", text: "Paused" }) : null,

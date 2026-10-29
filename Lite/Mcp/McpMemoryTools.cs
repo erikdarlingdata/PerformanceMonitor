@@ -25,7 +25,7 @@ public sealed class McpMemoryTools
             var stats = await dataService.GetLatestMemoryStatsAsync(resolved.ServerId);
             if (stats == null)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_stats", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("unavailable", "No memory stats available.");
             }
 
@@ -118,7 +118,7 @@ public sealed class McpMemoryTools
                     a server the collector has never touched wants somebody to go look at collection, and
                     widening will never fill it. Probed only here, against the SAME source the trend read.
                 */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_stats");
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_stats", awsRdsKind: AwsRdsKind.None);
                 if (gated != null)
                 {
                     return gated;
@@ -176,7 +176,7 @@ public sealed class McpMemoryTools
                     NEVER a quiet period, because on a live SQL Server it cannot be. Same words as Darling's
                     twin.
                 */
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_clerks")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_clerks", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No memory-clerk snapshot is available for {resolved.DisplayName}. This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks. It means nothing the memory_clerks collector stored is still retained, either because it has not run for this server or because its rows have aged out. Check get_collection_health and get_collection_log for the memory_clerks collector.");
@@ -220,7 +220,7 @@ public sealed class McpMemoryTools
             var rows = await dataService.GetMemoryPressureEventsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_pressure_events")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_pressure_events", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("empty", "No memory pressure events found in the requested time range.",
                         (await McpQueryTools.WindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.MemoryPressureEvents, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
@@ -279,7 +279,7 @@ public sealed class McpMemoryTools
             var rows = await dataService.GetResourceSemaphoreSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_grant_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_grant_stats", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("unavailable", "No memory grant data available.");
             }
 
@@ -355,7 +355,7 @@ public sealed class McpMemoryTools
             var rows = await dataService.GetMemoryGrantChartDataAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_grant_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_grant_stats", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("unavailable", "No memory grant data available.");
             }
 

@@ -288,6 +288,42 @@ public sealed class SystemHealthEventFileTests
         Assert.Equal(SystemHealthEventsCollector.MaxEventsPerPass, query.Parameters.Single(p => p.Name == "@max_events").Value);
     }
 
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    public void OnManagedInstance_TheEventFileIsReadByTheBarePattern_AndTheBookmarkFileIsPassedUnchanged(
+        bool managedInstance, bool withBookmark)
+    {
+        /* #6897: Managed Instance refuses a directory path and the _0_ pattern (error 40538) and accepts the bare pattern
+           for the fresh read and the bookmark resume alike. Every other engine keeps the usual paths. */
+        var state = withBookmark
+            ? new Dictionary<string, string>
+            {
+                [SystemHealthEventsCollector.BookmarkStateKey] =
+                    SystemHealthEventsCollector.FormatBookmark(s_watermark.AddMinutes(-5), 4_096, FileB),
+            }
+            : null;
+        var context = MakeContext(state, watermark: s_watermark);
+        var query = SystemHealthEventsCollector.Instance.BuildQuery(new CollectorContext
+        {
+            ServerId = context.ServerId,
+            ServerName = context.ServerName,
+            CollectionTime = context.CollectionTime,
+            Deltas = new RecordingCollectorDeltaCalculator(),
+            Target = new CollectorTargetInfo { IsAzureManagedInstance = managedInstance },
+            Watermark = s_watermark,
+            State = context.State,
+        });
+
+        Assert.Equal(
+            managedInstance ? "system_health*.xel" : null,
+            query.Parameters.Single(p => p.Name == "@read_path_override").Value);
+        Assert.Equal(withBookmark ? FileB : null, query.Parameters.Single(p => p.Name == "@bookmark_file").Value);
+        Assert.Equal(withBookmark ? 4_096L : null, query.Parameters.Single(p => p.Name == "@bookmark_offset").Value);
+    }
+
     [Fact]
     public async Task APassIsReadFromTheBookmarkItLeftBehind_AndTheStoredRowsAreUnchanged()
     {

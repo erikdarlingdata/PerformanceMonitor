@@ -856,7 +856,7 @@ HAVING SUM(delta_reads) > 1000";
                     Category = "Storage",
                     Severity = "Low",
                     Confidence = "Medium",
-                    Finding = $"{lowLatencyDbs.Count} database(s) with low IO latency — standard storage may suffice",
+                    Finding = $"{lowLatencyDbs.Count} {(lowLatencyDbs.Count == 1 ? "database" : "databases")} with low IO latency, so standard storage may suffice",
                     Detail = $"These databases have avg read latency under 5ms and write under 3ms across {storageWindow}: {detail}" +
                              (lowLatencyDbs.Count > 10 ? $" and {lowLatencyDbs.Count - 10} more" : "") +
                              ". Premium/high-performance storage may not be needed."

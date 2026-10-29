@@ -33,7 +33,7 @@ public sealed class McpToolGuideHeadsPgATests
     [
         ("get_pg_log_events", "Each family is gated by its own logging setting"),
         ("get_pg_log_events", "an off family is EMPTY here, unaudited"),
-        ("get_pg_log_events", "log_timezone = UTC (else refused whole)"),
+        ("get_pg_log_events", "log_timezone = UTC or a named zone (else refused whole)"),
         ("get_pg_log_events", "min_severity ranks by SERIOUSNESS, not log_min_messages' order"),
         ("get_pg_log_events", "times_seen is a sighting count, not an occurrence count"),
         ("get_pg_index_bloat", "ESTIMATED"),

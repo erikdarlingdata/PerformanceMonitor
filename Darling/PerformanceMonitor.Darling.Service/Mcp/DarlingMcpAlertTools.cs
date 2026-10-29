@@ -586,6 +586,15 @@ public sealed partial class DarlingMcpAlertTools
         long_running_job = new { enabled = s.LongRunningJobEnabled, multiplier = s.LongRunningJobMultiplier },
         failed_job = new { enabled = s.FailedJobEnabled, lookback_minutes = s.FailedJobLookbackMinutes },
         database_state = new { enabled = s.DatabaseStateEnabled },
+        /* #6875: the Identity Capacity alert (an identity column is nearly out of values). Off by default. The two bars are percent used; a threshold override
+           (identity_capacity.warning_percent, identity_capacity.critical_percent) replaces them for one server or one database. */
+        identity_capacity = new { enabled = s.IdentityCapacityEnabled, warning_percent = s.IdentityCapacityWarningPercent, critical_percent = s.IdentityCapacityCriticalPercent },
+        /* #6874: the Agent Alert Gaps alert (SQL Server Agent alert setup has a gap). Off by default. */
+        agent_alert_gaps = new { enabled = s.AgentAlertGapsEnabled },
+        /* #6873: the database protection alerts (a full backup, a log backup or a CHECKDB older than its threshold). Off by default. */
+        backup_overdue = new { enabled = s.BackupOverdueEnabled },
+        log_backup_overdue = new { enabled = s.LogBackupOverdueEnabled },
+        checkdb_overdue = new { enabled = s.CheckDbOverdueEnabled },
         /* #2417: the AG family, read out of the store since V35/V37 and emitted to nobody until now -- so
            an agent asked why nothing alerted when a replica fell behind could not see the lag threshold,
            could not see whether AG notification was on at all, and had no way to tell "configured not to
@@ -2827,6 +2836,39 @@ public sealed partial class DarlingMcpAlertTools
             {
                 case "alerts_enabled": AddBool("enabled", prop.Value, "alerts_enabled"); break;
                 case "notify_connection_changes": AddBool("notify_connection_changes", prop.Value, "notify_connection_changes"); break;
+                case "backup_overdue":
+                    Group(prop.Value, "backup_overdue", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("backup_overdue_enabled", n, "backup_overdue.enabled"); break;
+                            default: error = $"Unknown field 'backup_overdue.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "log_backup_overdue":
+                    Group(prop.Value, "log_backup_overdue", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("log_backup_overdue_enabled", n, "log_backup_overdue.enabled"); break;
+                            default: error = $"Unknown field 'log_backup_overdue.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "checkdb_overdue":
+                    Group(prop.Value, "checkdb_overdue", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("checkdb_overdue_enabled", n, "checkdb_overdue.enabled"); break;
+                            default: error = $"Unknown field 'checkdb_overdue.{k}'."; break;
+                        }
+                    });
+                    break;
+
                 /* #2417: bounds mirror DarlingAlertSettings' clamps EXACTLY -- Clamp(0, 1440) on the
                    refire, nothing to clamp on the at-startup opt-in. Zero is IN range because 0 is the
                    shipped configuration (one alert per outage, no re-fire), not an invalid one. */
@@ -3146,6 +3188,19 @@ public sealed partial class DarlingMcpAlertTools
                     });
                     break;
 
+                case "identity_capacity":
+                    Group(prop.Value, "identity_capacity", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("identity_capacity_enabled", n, "identity_capacity.enabled"); break;
+                            case "warning_percent": AddInt("identity_capacity_warning_percent", n, "identity_capacity.warning_percent", 1, 100); break;
+                            case "critical_percent": AddInt("identity_capacity_critical_percent", n, "identity_capacity.critical_percent", 1, 100); break;
+                            default: error = $"Unknown field 'identity_capacity.{k}'."; break;
+                        }
+                    });
+                    break;
+
                 case "database_state":
                     Group(prop.Value, "database_state", (k, n) =>
                     {
@@ -3153,6 +3208,17 @@ public sealed partial class DarlingMcpAlertTools
                         {
                             case "enabled": AddBool("database_state_enabled", n, "database_state.enabled"); break;
                             default: error = $"Unknown field 'database_state.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "agent_alert_gaps":
+                    Group(prop.Value, "agent_alert_gaps", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("agent_alert_gaps_enabled", n, "agent_alert_gaps.enabled"); break;
+                            default: error = $"Unknown field 'agent_alert_gaps.{k}'."; break;
                         }
                     });
                     break;

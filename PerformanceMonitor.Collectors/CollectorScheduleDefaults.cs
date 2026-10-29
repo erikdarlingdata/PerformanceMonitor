@@ -123,6 +123,16 @@ public static class CollectorScheduleDefaults
         /* #6581 Query Store hints (SQL Server 2022 and later). A hint changes a plan as a force does, so it is read on the forced-plans
            cadence and kept as long: Change Watch compares two complete captures. */
         ["query_store_hints"] = new(5, 30),
+        /* #6873 last good CHECKDB and last full and log backup per database. Hours-to-days facts read from catalog views and one grouped msdb read,
+           so hourly is plenty and 90 days shows a protection gap growing. */
+        ["database_protection"] = new(60, 90),
+        /* #6874 SQL Server Agent alert definitions and counters (SQL Server only). Tens of rows from msdb, and the counters are
+           read twice a day or more to see which alert fired, so 15 minutes is fine-grained enough. The alert-setup status looks back
+           24 hours and the fleet chip 2 hours; 30 days is the retention, so get_agent_alerts can be asked for a wider hours_back. */
+        ["agent_alerts"] = new(15, 30),
+        /* #6875 identity column capacity. A column fills over months, so a read every six hours is plenty and costs little: catalog views only,
+           at most 21 rows per database. 90 days keeps enough samples for the time-to-exhaustion estimate. */
+        ["identity_capacity"] = new(360, 90),
         /* #1951 ADR persistent version store. Cadence and retention deliberately MATCH
            database_size_stats (60/90) rather than the per-minute health tier: PVS size is the same
            kind of slow-moving disk-pressure telemetry, it is read beside database sizes, and pairing

@@ -16,7 +16,7 @@
  * this string. pages/deadlock-graph.js keeps its own copy for the same reason (it does not import this file).
  */
 
-import { el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked } from "./util.js";
+import { storeHash, el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked } from "./util.js";
 import { gapThresholdMs, splitAtGaps } from "./chart-gaps.js";
 import { focusSnapshotAt } from "./snapshot-pick.js";
 
@@ -1394,7 +1394,7 @@ export async function openServerTabAt(server, tMs, item, { beforeRoute = null, s
     }
     /* A full render, not a panel redraw, so the range picker in the page head shows the new range too (#5230). Setting
        the hash to the tab already open fires no hashchange, so then the event is raised here. */
-    const target = "#/server/" + encodeURIComponent(server) + "/" + g.tab;
+    const target = storeHash("#/server/" + encodeURIComponent(server) + "/" + g.tab);
     if (location.hash === target) window.dispatchEvent(new Event("hashchange"));
     else location.hash = target;
     return null;

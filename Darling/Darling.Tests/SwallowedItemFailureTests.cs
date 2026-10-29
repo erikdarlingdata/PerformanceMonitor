@@ -315,7 +315,7 @@ public sealed class SwallowedItemFailureTests
             Assert.Contains(name, catalog);
         }
 
-        foreach (var described in new[] { "deadlocks", "blocked_process_report", "pg_blocking", "pg_xmin_horizon", "long_query_completions", "pg_deadlocks" })
+        foreach (var described in new[] { "deadlocks", "blocked_process_report", "pg_blocking", "pg_xmin_horizon", "long_query_completions", "pg_deadlocks", "attention" })
         {
             Assert.True(CollectorHealthClassifier.IsEventCollector(described), described);
         }

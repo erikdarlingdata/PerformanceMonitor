@@ -2371,6 +2371,48 @@ CREATE INDEX IF NOT EXISTS idx_query_store_hints_markers
     ON collect.query_store_hints (server_id, database_name, collection_time) WHERE query_hint_id IS NULL;";
 
     /// <summary>
+    /// V222 (#6874) - <c>collect.agent_alerts</c>: the SQL Server Agent alert definitions and their counters, read from
+    /// <c>msdb.dbo.sysalerts</c> (with the operator count from <c>msdb.dbo.sysnotifications</c>) by <c>AgentAlertsCollector</c> every 15
+    /// minutes. One row per alert per pass, so the change in <c>occurrence_count</c> between two passes says which alert fired in a window.
+    /// An instance with no alerts writes ONE marker row whose <c>alert_id</c> is NULL, so "collected, none defined" differs from "never
+    /// collected". A PLAIN table on every store (<c>StaysPlainTable</c>, tens of rows per pass), 30-day time-sliced DELETE. Columns and the
+    /// (server_id, collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a fresh store (V1's catalog walk) and an upgraded
+    /// one agree. New table, no data moves, no grant (the <c>collect</c> schema carries blanket SELECT). Every statement is idempotent. An
+    /// older build never reads the table and is unaffected.
+    /// The same rung adds <c>config.config_alert_settings.agent_alert_gaps_enabled</c> (<c>boolean NOT NULL DEFAULT FALSE</c>, catalog-only): the "Agent Alert Gaps"
+    /// alert ships OFF. An older build never reads the column.
+    /// </summary>
+    private const string V222Sql = @"
+CREATE TABLE IF NOT EXISTS collect.agent_alerts (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    alert_id integer,
+    alert_name text,
+    enabled boolean,
+    event_source text,
+    message_id integer,
+    severity integer,
+    database_name text,
+    event_description_keyword text,
+    performance_condition text,
+    delay_between_responses integer,
+    last_occurrence timestamp,
+    last_response timestamp,
+    occurrence_count integer,
+    count_reset timestamp,
+    has_notification integer,
+    operator_count integer,
+    response_job_id text
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_alerts_time ON collect.agent_alerts(server_id, collection_time);
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS agent_alert_gaps_enabled boolean NOT NULL DEFAULT FALSE;";
+
+    /// <summary>
     /// V218 (#6569): <c>ck_config_server_actions_action</c> also allows <c>recompile_module</c> (the switch of the Level 3 action that
     /// runs <c>sys.sp_recompile</c> on a procedure, function or trigger), <c>create_plan_guide</c> and <c>drop_plan_guide</c> (the plan guide actions). The CHECK is replaced in place under its own name, only when
     /// the stored definition does not already name the newest action (V196's guard shape), so a second run replaces nothing. It inserts no row:
@@ -2388,6 +2430,149 @@ BEGIN
             ADD CONSTRAINT ck_config_server_actions_action CHECK (action IN ('force_plan', 'evict_plan', 'kill_session', 'recompile_module', 'create_plan_guide', 'drop_plan_guide'));
     END IF;
 END $do$;";
+
+    /// <summary>
+    /// V219 (#6750 part 3): <c>collect.query_store_self_keys</c>, the keys of the monitor's own Query Store statements, and
+    /// <c>collect.query_store_self_keys_state</c>, the one-row record that their backfill has run (<see cref="QueryStoreSelfKeys"/>),
+    /// plus two row triggers on <c>collect.query_store_text</c> that keep the key table current for every writer of text, an older
+    /// build's included (<see cref="QueryStoreSelfKeys.TriggerSql"/>). The keys of text stored earlier are backfilled in the background
+    /// after start, because that is one scan of the TOAST-heavy text table and could pass the migration silence limit inside the startup
+    /// transaction. Both tables are new and empty, and <c>CREATE TRIGGER</c> reads no row, so the rung moves no data. The lock timeout
+    /// is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V173's, because <c>CREATE TRIGGER</c> needs a SHARE ROW EXCLUSIVE
+    /// lock on the text table, which an older instance sharing the store can be writing. Plain tables, no GRANT (the <c>collect</c>
+    /// schema's blanket SELECT and its default privileges cover a table a migration introduces, as V168 notes). Every statement is
+    /// idempotent. <b>No Lite twin:</b> Lite keeps the text inline and the collector drops the monitor's own row there.
+    /// </summary>
+    private static readonly string V219Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreSelfKeys.CreateSql + "\n" + QueryStoreSelfKeys.TriggerSql;
+
+    /// <summary>
+    /// V220 (#6798): <c>idx_job_history_job_success</c> on <c>collect.job_history (server_id, job_id, run_datetime DESC) INCLUDE
+    /// (run_duration_seconds, collection_time) WHERE step_id = 0 AND run_status = 1</c>, for the Job History read's per-job statistics
+    /// (<see cref="DarlingJobHistoryReader.BuildJobHistorySql"/>'s <c>job_stats</c>). That part averages each listed job's successful
+    /// outcomes and finds its last one. Through V150's <c>idx_job_history_server_run</c> it read the server's whole run-time range and
+    /// dropped the step rows and the other jobs after fetching them from scattered heap pages: on a 210-server copy of a production
+    /// store, 13.2 s of a 16.3 s cold read. This partial index holds only the successful outcomes (about 23% of the rows on one
+    /// production store), and its INCLUDE columns cover the aggregate and the <c>collection_time</c> floor, so the read seeks the listed
+    /// jobs and never visits the heap. A compressed chunk keeps no rows in this index (past 7 days for <c>job_history</c>), so the read
+    /// takes those chunks through the compressed batches' <c>server_id</c> segment-by index, once per listed server, as it did before.
+    ///
+    /// <para><b>Cost, measured on PostgreSQL 17 with TimescaleDB 2.31</b> (42 servers, 9.8M rows in 101 twelve-hour chunks, 98 of them
+    /// compressed, the step and status mix of one production store): the build took 0.18 s, because a compressed chunk's index is an
+    /// empty shell and only the three uncompressed chunks hold rows. The index is 20 MB on those chunks against V150's 69 MB. A 93,000-row
+    /// insert into the newest chunk went from 0.24 s to 0.28 s (median of three), one more btree that only the 23% of rows that are
+    /// successful outcomes enter. Compressing a chunk drops its rows from the index, so the size stays bounded by the uncompressed
+    /// window. Plain <c>CREATE INDEX IF NOT EXISTS</c>, V150's shape: <c>MigrateAsync</c> runs the rung in one transaction, where
+    /// <c>timescaledb.transaction_per_chunk</c> cannot run. The build holds a SHARE lock on the uncompressed chunks, which blocks the
+    /// collector's inserts for the build's length, so the lock timeout is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as
+    /// V173's. A fresh store runs every rung, so it gets the index too. Additive: an older build never reads it, and no GRANT is needed
+    /// for an index.</para>
+    /// </summary>
+    private static readonly string V220Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+CREATE INDEX IF NOT EXISTS idx_job_history_job_success
+    ON collect.job_history (server_id, job_id, run_datetime DESC)
+    INCLUDE (run_duration_seconds, collection_time)
+    WHERE step_id = 0 AND run_status = 1;";
+
+    /// <summary>
+    /// V221 (#6800): <c>collect.query_store_hash_hourly</c>, the narrow hourly source of the fleet tag roll-up, its <c>(hour, server_id)</c>
+    /// index, and <c>hash_built_seq</c> on <c>collect.query_store_compose_stamp_built</c>. The text, the column map and the reasoning are on
+    /// <see cref="QueryStoreComposeStamp.HashHourlyCreateSql"/>. The service's hourly tick (V173's builder) fills the table in the stamp's
+    /// transaction and the planner rebuilds every hour whose <c>hash_built_seq</c> differs from <c>late_seq</c>, which is every hour built
+    /// before this rung (NULL), so the backfill is the ordinary tick, newest first, six hours a tick. The same text also creates the day
+    /// table <c>collect.query_store_hash_daily</c> (#6800, the 7 and 30 day windows), its <c>(day, server_id)</c> index, its ledger
+    /// <c>query_store_hash_daily_built</c> and its failure record; <see cref="QueryStoreHashDaily"/> builds the days after the hours of a
+    /// tick. <b>The rung scans nothing</b>: four new empty tables, two indexes on them, and a nullable column with no default on the small ledger. The column needs an ACCESS EXCLUSIVE lock
+    /// on that ledger, which the wide table's late-row triggers take row locks on, so the lock timeout is
+    /// <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V173's. Additive: an older build never reads the table, and a build
+    /// that rebuilds a stamp hour without writing it leaves the pair stale for the table, which this build then rebuilds.
+    /// </summary>
+    private static readonly string V221Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.HashHourlyCreateSql;
+
+    /// <summary>
+    /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
+    /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
+    /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
+    /// word for each of the three facts (never, unknown, none_in_window, not_expected, unavailable), so a reader can tell "no backup in 60
+    /// days" from "the platform owns this". The overdue judgment is the reader's. A PLAIN table on every store (<c>StaysPlainTable</c>),
+    /// 90-day time-sliced DELETE. Columns and the (server_id, collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a
+    /// fresh store (V1's catalog walk) and an upgraded one agree. New table, no data moves, no grant (the <c>collect</c> schema carries
+    /// blanket SELECT). Every statement is idempotent.
+    /// The same rung adds three <c>config.config_alert_settings</c> columns (<c>boolean NOT NULL DEFAULT FALSE</c>, catalog-only):
+    /// <c>backup_overdue_enabled</c>, <c>log_backup_overdue_enabled</c> and <c>checkdb_overdue_enabled</c>. The three overdue alerts ship OFF.
+    /// An older build never reads the columns.
+    /// </summary>
+    private const string V223Sql = @"
+CREATE TABLE IF NOT EXISTS collect.database_protection (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    state_desc text,
+    recovery_model_desc text,
+    create_date timestamp,
+    replica_role text,
+    platform text,
+    last_good_checkdb_time timestamp,
+    checkdb_state text,
+    last_full_backup_time timestamp,
+    full_backup_state text,
+    last_log_backup_time timestamp,
+    log_backup_state text
+);
+
+CREATE INDEX IF NOT EXISTS idx_database_protection_time ON collect.database_protection(server_id, collection_time);
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS backup_overdue_enabled boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS log_backup_overdue_enabled boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS checkdb_overdue_enabled boolean NOT NULL DEFAULT FALSE;";
+
+    /// <summary>
+    /// V224 (#6875) - <c>collect.identity_capacity</c>: how full the identity columns are, read from <c>sys.identity_columns</c> by
+    /// <c>IdentityCapacityCollector</c> every six hours, per database: the top 20 columns above 10 percent used (value, seed, increment,
+    /// type, precision and the percent) plus ONE all-NULL marker row (<c>column_name</c> NULL) per scanned database, so a database with no
+    /// high column reads as scanned and clean, and one that was not scanned has no marker. A PLAIN table on every store
+    /// (<c>StaysPlainTable</c>), 90-day time-sliced DELETE, at most 21 rows per database per pass. Columns and the (server_id,
+    /// collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a fresh store (V1's catalog walk) and an upgraded one
+    /// agree. The marker index finds a database's newest scan by one seek. New table, no data moves, no grant (the <c>collect</c> schema
+    /// carries blanket SELECT). Every statement is idempotent.
+    /// The same rung adds three <c>config.config_alert_settings</c> columns for the "Identity Capacity" alert (catalog-only): <c>identity_capacity_enabled</c>
+    /// (<c>boolean NOT NULL DEFAULT FALSE</c>, the alert ships OFF) and the warning and critical bars <c>identity_capacity_warning_percent</c> (70) and
+    /// <c>identity_capacity_critical_percent</c> (90), the global values a per-server or per-database threshold override replaces. An older build never
+    /// reads the columns.
+    /// </summary>
+    private const string V224Sql = @"
+CREATE TABLE IF NOT EXISTS collect.identity_capacity (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    table_name text,
+    column_name text,
+    data_type text,
+    type_precision integer,
+    last_value numeric(38,0),
+    seed_value numeric(38,0),
+    increment_value numeric(38,0),
+    percent_used double precision,
+    skip_reason text
+);
+
+CREATE INDEX IF NOT EXISTS idx_identity_capacity_time ON collect.identity_capacity(server_id, collection_time);
+
+CREATE INDEX IF NOT EXISTS idx_identity_capacity_markers
+    ON collect.identity_capacity (server_id, database_name, collection_time) WHERE column_name IS NULL;
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS identity_capacity_enabled boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS identity_capacity_warning_percent integer NOT NULL DEFAULT 70,
+    ADD COLUMN IF NOT EXISTS identity_capacity_critical_percent integer NOT NULL DEFAULT 90;";
 
     /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
@@ -2782,7 +2967,40 @@ $rung$;";
         new Migration(216, "client-timeouts-on-by-default", V216Sql),
         new Migration(217, "query-store-hints", V217Sql),
         new Migration(218, "server-action-recompile-module", V218Sql),
+        new Migration(219, "query-store-self-keys", V219Sql),
+        new Migration(220, "job-history-success-index", V220Sql),
+        new Migration(221, "query-store-hash-hourly", V221Sql),
+        new Migration(222, "agent-alerts", V222Sql),
+        new Migration(223, "database-protection", V223Sql),
+        new Migration(224, "identity-capacity", V224Sql),
+        new Migration(225, "server-aws-rds", V225Sql),
+        new Migration(226, "server-aws-rds-web-or-express", V226Sql),
     };
+
+    /// <summary>
+    /// V225 (#6894): <c>collect.servers.is_aws_rds</c>, whether the target is an Amazon RDS for SQL Server instance (the connect query's
+    /// <c>DB_ID('rdsadmin') IS NOT NULL</c>), written on every connect. The collectors that RDS gates off (running jobs, Agent status, Agent alerts)
+    /// never run there, so nothing in the store could tell the read side why they have no data, and an RDS target was answered as if a setup
+    /// step on the server could fix it. NULL means no connect has stamped it yet (and a PostgreSQL target, where it is not a SQL Server fact),
+    /// which makes no claim. No backfill: a registration fills its own on its next connect. No view refresh: <c>collect.servers</c> is a
+    /// registry, not a hypertable.
+    /// </summary>
+    private const string V225Sql = @"
+ALTER TABLE collect.servers
+    ADD COLUMN IF NOT EXISTS is_aws_rds boolean;";
+
+    /// <summary>
+    /// V226 (#6893): <c>collect.servers.is_aws_rds_web_or_express</c>, whether that Amazon RDS for SQL Server instance is on the Web or Express
+    /// edition (the connect query's <c>SERVERPROPERTY('Edition')</c> together with the RDS flag), written on every connect. RDS refuses every
+    /// Extended Events session create on those editions, so the deadlock, blocked-process, client-timeout and long-query captures never run
+    /// there, and <c>SERVERPROPERTY('EngineEdition')</c> is 2 for both Web and Standard, so <c>sql_engine_edition</c> cannot say it. The read
+    /// side needs this column to answer those reads with the edition limit instead of a setup step that cannot help. NULL means no connect has
+    /// stamped it yet (and a PostgreSQL target), which makes no claim. No backfill: a registration fills its own on its next connect. No view
+    /// refresh: <c>collect.servers</c> is a registry, not a hypertable.
+    /// </summary>
+    private const string V226Sql = @"
+ALTER TABLE collect.servers
+    ADD COLUMN IF NOT EXISTS is_aws_rds_web_or_express boolean;";
 
     /// <summary>
     /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c>, the failure record of the Query Store compose builder: one row

@@ -113,7 +113,7 @@ public sealed class GatedCollectorRowsTests
         {
             var listed = Decode(DarlingGatedCollectorRows.Rows(
                 CollectorCatalog.All, kind, new HashSet<string>(),
-                n => CollectorEngineCapability.NotCollectedMessage("alpha-a", 0, kind, n))).Select(r => r.Collector).ToArray();
+                n => CollectorEngineCapability.NotCollectedMessage("alpha-a", 0, kind, n, awsRdsKind: AwsRdsKind.None))).Select(r => r.Collector).ToArray();
             var expected = CollectorCatalog.All
                 .Where(d => d.TargetEngine == CollectorTargetEngine.PostgreSql && !CollectorEngineCapability.IsCollectedOnEngineKind(d, kind))
                 .Select(d => d.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
@@ -302,7 +302,8 @@ public sealed class GatedCollectorRowsLiveTests
             const int id = 524_901;
             const string server = "gated-alpha-a";
             await RegisterAsync(connection, id, server, MonitoredEngineKind.Postgres, 15, ct);
-            // Log order is today's order (the read sorts it); pg_wait_stats is gated on stock PostgreSQL but DID log here.
+            // pg_wait_stats is gated on stock PostgreSQL but DID log here. Since #6912 a collector the engine never runs reads
+            // not_collected whatever it logged, so it is listed after the running rows and not counted among them.
             foreach (var name in new[] { "pg_database_stats", "pg_lock_stats", "pg_wait_stats" })
                 await LogAsync(connection, id, server, name, 5, ct);
 
@@ -318,18 +319,18 @@ public sealed class GatedCollectorRowsLiveTests
                 {
                     var collectors = doc.RootElement.GetProperty("collectors");
                     var names = Names(collectors);
-                    var logged = names.Take(3).ToArray();
-                    Assert.Equal(new[] { "pg_database_stats", "pg_lock_stats", "pg_wait_stats" }.OrderBy(n => n, StringComparer.Ordinal).ToArray(), logged.OrderBy(n => n, StringComparer.Ordinal).ToArray());
-                    Assert.Equal(expectedGated, names.Skip(3).ToArray());
+                    var logged = names.Take(2).ToArray();
+                    Assert.Equal(new[] { "pg_database_stats", "pg_lock_stats" }, logged.OrderBy(n => n, StringComparer.Ordinal).ToArray());
+                    Assert.Equal(expectedGated.Append("pg_wait_stats").ToArray(), names.Skip(2).ToArray());
                     Assert.Equal(1, names.Count(n => n == "pg_wait_stats"));
 
-                    foreach (var row in collectors.EnumerateArray().Skip(3))
+                    foreach (var row in collectors.EnumerateArray().Skip(2))
                     {
                         // The same three keys in the full, compact and partial shapes alike: no counts, no times.
                         Assert.Equal(new[] { "collector", "status", "message" }, row.EnumerateObject().Select(p => p.Name).ToArray());
                         Assert.Equal("not_collected", row.GetProperty("status").GetString());
                         var name = row.GetProperty("collector").GetString()!;
-                        Assert.Equal(CollectorEngineCapability.NotCollectedMessage(server, 0, MonitoredEngineKind.Postgres, name), row.GetProperty("message").GetString());
+                        Assert.Equal(CollectorEngineCapability.NotCollectedMessage(server, 0, MonitoredEngineKind.Postgres, name, awsRdsKind: AwsRdsKind.None), row.GetProperty("message").GetString());
                     }
                 }
             }

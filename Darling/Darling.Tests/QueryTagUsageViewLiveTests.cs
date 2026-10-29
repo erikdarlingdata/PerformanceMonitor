@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -27,6 +28,17 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class QueryTagUsageViewLiveTests
 {
+    /// <summary>The sentence each section must say when its source is missing: the same words in Lite and the Viewer (#6850).</summary>
+    private static readonly IReadOnlyDictionary<string, string> Expected = new Dictionary<string, string>
+    {
+        ["plan_cache"] = "This store has no query stats data yet.",
+        ["query_store"] = "This store has no Query Store data yet.",
+        ["procedures"] = "This store has no procedure stats data yet.",
+        ["blocking_reports"] = "This store has no blocked process report data yet.",
+        ["blocking_snapshots"] = "This store has no blocking snapshot data yet.",
+        ["deadlocks"] = "This store has no deadlock data yet.",
+    };
+
     private const int ServerOne = 7801;
     private const int ServerTwo = 7802;
 
@@ -106,9 +118,9 @@ public sealed class QueryTagUsageViewLiveTests
             var result = QueryTagUsageView.Build(data, [(ServerOne, "srv-one")], allServers: false, tagFilter: null);
 
             var plan = result.Tables.Single(t => t.Section == "plan_cache");
-            var tagSum = plan.Rows.Where(r => r.Kind == "tag").Sum(r => Cell(r, plan, "cpu_ms"));
-            var untagged = Cell(plan.Rows.Single(r => r.Kind == "untagged"), plan, "cpu_ms");
-            var total = Cell(plan.Rows.Single(r => r.Kind == "total"), plan, "cpu_ms");
+            var tagSum = plan.Rows.Where(r => r.Kind == "tag").Sum(r => Cell(r, plan, "CPU (ms)"));
+            var untagged = Cell(plan.Rows.Single(r => r.Kind == "untagged"), plan, "CPU (ms)");
+            var total = Cell(plan.Rows.Single(r => r.Kind == "total"), plan, "CPU (ms)");
             Assert.Equal(["A", "B"], plan.Rows.Where(r => r.Kind == "tag").Select(r => r.Label).Order().ToArray());
             Assert.Equal(2_000, untagged);
             Assert.Equal(10_000, total);
@@ -116,7 +128,7 @@ public sealed class QueryTagUsageViewLiveTests
 
             /* Query Store holds nothing here: its table stays its own, so the plan cache's figures are not carried into it. */
             var queryStore = result.Tables.Single(t => t.Section == "query_store");
-            Assert.Equal(0, Cell(queryStore.Rows.Single(r => r.Kind == "total"), queryStore, "cpu_ms"));
+            Assert.Equal(0, Cell(queryStore.Rows.Single(r => r.Kind == "total"), queryStore, "CPU (ms)"));
         });
     }
 
@@ -136,14 +148,55 @@ public sealed class QueryTagUsageViewLiveTests
             var result = QueryTagUsageView.Build(data, scope, allServers: true, tagFilter: null);
 
             var plan = result.Tables.Where(t => t.Section == "plan_cache").ToList();
-            Assert.Equal(["plan_cache - srv-one", "plan_cache - srv-two", "plan_cache - all servers"], plan.Select(t => t.Title).ToArray());
+            Assert.Equal(["Plan cache - srv-one", "Plan cache - srv-two", "Plan cache - all servers"], plan.Select(t => t.Title).ToArray());
             var one = plan[0];
             var two = plan[1];
             var fleet = plan[2];
-            Assert.Equal(4_000, Cell(one.Rows.Single(r => r.Kind == "total"), one, "cpu_ms"));
+            Assert.Equal(4_000, Cell(one.Rows.Single(r => r.Kind == "total"), one, "CPU (ms)"));
             /* A key tagged on one server is untagged on the other. */
-            Assert.Equal(6_000, Cell(two.Rows.Single(r => r.Kind == "untagged"), two, "cpu_ms"));
-            Assert.Equal(10_000, Cell(fleet.Rows.Single(), fleet, "cpu_ms"));
+            Assert.Equal(6_000, Cell(two.Rows.Single(r => r.Kind == "untagged"), two, "CPU (ms)"));
+            Assert.Equal(10_000, Cell(fleet.Rows.Single(), fleet, "CPU (ms)"));
+        });
+    }
+
+    /// <summary>#6850: with every source table dropped, the Viewer and the get_resource_use_by_tag tool each say each section's missing source in the
+    /// same words Lite uses, never the table's name.</summary>
+    [Fact]
+    public async Task EverySection_WithItsSourceMissing_IsSaidInWords_InTheViewerAndTheTool()
+    {
+        await WithViewAsync(async (store, viewer, ct) =>
+        {
+            foreach (var table in new[]
+            {
+                "query_stats", "query_store_interval_wide", "procedure_stats", "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks",
+            })
+            {
+                await ExecAsync(store, $"DROP TABLE IF EXISTS collect.{table} CASCADE", ct);
+            }
+
+            var end = DateTime.UtcNow;
+            var data = await viewer.GetQueryTagRollupDataAsync([ServerOne], end.AddHours(-24), end, ct);
+            /* Query Store is the one section the gate answers first: with its table gone no server passes the gate, so the reason is the gate's
+               refusal, which names no table either. The "no ... data yet" sentence there is only for a table that vanishes after the gate passed. */
+            var queryStore = QueryTagRollupSection.QueryStore.Name;
+            foreach (var (section, sentence) in Expected.Where(e => e.Key != queryStore))
+            {
+                Assert.True(data.Unavailable.TryGetValue(section, out var reason), $"the viewer served {section} with its source dropped");
+                Assert.Equal(sentence, reason);
+            }
+
+            Assert.DoesNotContain("query_store_interval_wide", data.Unavailable[queryStore], StringComparison.Ordinal);
+
+            await using var source = NpgsqlDataSource.Create(store.ConnectionString);
+            var tool = await PerformanceMonitor.Darling.Service.Mcp.DarlingMcpQueryTagRollupTools.GetResourceUseByTagCore(source, null, 24, null, 25, null, null, ct);
+            foreach (var (section, sentence) in Expected.Where(e => e.Key != queryStore))
+            {
+                Assert.Contains($"{section} is unavailable: {sentence}", tool, StringComparison.Ordinal);
+            }
+
+            Assert.DoesNotContain("query_store_interval_wide", tool, StringComparison.Ordinal);
+
+            Assert.DoesNotContain("does not exist", tool, StringComparison.OrdinalIgnoreCase);
         });
     }
 }

@@ -448,23 +448,15 @@ if (args.Length > 0 && DarlingCliCommands.IsDropXeSessionsVerb(args[0]))
    Linux too, --dry-run included. Same posture as --drop-xe-sessions above. */
 if (args.Length > 0 && DarlingCliCommands.IsBackfillRollupsVerb(args[0]))
 {
-    var rest = args.AsSpan(1);
-    var dryRun = false;
-    string? backfillConfigPath = null;
-    foreach (var arg in rest)
+    var (backfillConfigPath, dryRun, backfillFreeBytes, backfillParseError) = DarlingCliCommands.ParseBackfillArgs(args.AsSpan(1));
+    if (backfillParseError is not null)
     {
-        if (string.Equals(arg, "--dry-run", StringComparison.OrdinalIgnoreCase))
-        {
-            dryRun = true;
-        }
-        else
-        {
-            backfillConfigPath = arg;
-        }
+        Console.Error.WriteLine(backfillParseError);
+        return 1;
     }
 
     return await DarlingCliCommands.BackfillRollupsAsync(
-        backfillConfigPath, dryRun, Console.Out, Console.Error, CancellationToken.None);
+        backfillConfigPath, dryRun, Console.Out, Console.Error, CancellationToken.None, backfillFreeBytes);
 }
 
 /* #1912 — repair the pre-#1907 Query Store split slices still in stored rows, then re-materialize what they
@@ -494,7 +486,7 @@ if (args.Length > 0 && DarlingCliCommands.IsCollapseLegacySlicesVerb(args[0]))
    the service runs. Same managed-credential-only platform check (inside the verb) and same --dry-run shape as the verbs above. */
 if (args.Length > 0 && DarlingCliCommands.IsRecompressPlanDimVerb(args[0]))
 {
-    var (recompressConfigPath, dryRun, vacuumMode, parseError) = DarlingCliCommands.ParseRecompressArgs(args.AsSpan(1));
+    var (recompressConfigPath, dryRun, vacuumMode, recompressFreeBytes, parseError) = DarlingCliCommands.ParseRecompressArgs(args.AsSpan(1));
     if (parseError is not null)
     {
         Console.Error.WriteLine(parseError);
@@ -502,7 +494,7 @@ if (args.Length > 0 && DarlingCliCommands.IsRecompressPlanDimVerb(args[0]))
     }
 
     return await DarlingCliCommands.RecompressPlanDimAsync(
-        recompressConfigPath, dryRun, vacuumMode, Console.Out, Console.Error, CancellationToken.None);
+        recompressConfigPath, dryRun, vacuumMode, Console.Out, Console.Error, CancellationToken.None, recompressFreeBytes);
 }
 
 var builder = Host.CreateApplicationBuilder(args);

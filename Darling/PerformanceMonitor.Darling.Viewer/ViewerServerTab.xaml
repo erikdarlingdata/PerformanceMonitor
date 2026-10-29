@@ -1743,7 +1743,7 @@
                     <!-- Query Store Regressions (Dashboard parity — report.query_store_regressions): the
                          regressed-query grid comparing each (database, query_id) group's RECENT-window
                          Query Store averages to its BASELINE (everything captured before the window), kept
-                         when CPU regressed > 25% and ranked by execution-count-weighted added duration.
+                         when CPU regressed > 25% with at least 1 s of added CPU (#6781) and ranked by execution-count-weighted added duration.
                          Inserted right after Query Store by Duration, matching the Dashboard's Query Store ->
                          Query Store Regressions adjacency. No slicer / comparison. The read aggregates across
                          plans and carries no plan XML, so there is no single stored plan to VIEW — but each row's
@@ -1759,13 +1759,13 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
-                            <TextBlock Grid.Row="0" Margin="8,4,0,4" FontSize="11"
+                            <TextBlock Grid.Row="0" Margin="8,4,8,4" FontSize="11" TextWrapping="Wrap"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"
-                                       Text="Queries whose Query Store performance regressed — recent-window averages vs. the baseline captured before the window, kept when Regular CPU regressed more than 25% (cost compares Regular runs only), or when timeouts (Aborted runs) or errors (Exception runs) per hour at least doubled (Why). The Aborted and Exception counts, CPU and duration per execution sit beside the Regular figures, ranked by total added duration. Double-click a row for its execution history."/>
+                                       Text="Queries whose Query Store performance regressed — recent-window averages vs. the baseline captured before the window, kept when Regular CPU regressed more than 25% and the query added at least 1 s of CPU over the window (cost compares Regular runs only), or when timeouts (Aborted runs) or errors (Exception runs) per hour at least doubled (Why). The Aborted and Exception counts, CPU and duration per execution sit beside the Regular figures, ranked by total added duration. Double-click a row for its execution history."/>
                             <!-- "Showing since <start>" when this server's Query Store history starts after the BASELINE window does: the read
                                  compares the range with the 7 days before it, so the notice keys on that earlier window (#4966). -->
                             <TextBlock Grid.Row="1" x:Name="QueryStoreRegressionsTruncationBanner" Visibility="Collapsed"
-                                       Padding="8,4" FontWeight="Bold"
+                                       Padding="8,4" FontWeight="Bold" TextWrapping="Wrap"
                                        Foreground="{DynamicResource ForegroundBrush}"
                                        Background="#22FFAA00"/>
                             <!-- Databases the read left out (#6654): the dropped ones, named so an empty grid is not read as "nothing regressed". -->
@@ -2588,6 +2588,19 @@
 
                 <Border Grid.Row="2" Margin="0,4,0,0">
                     <scottplot:WpfPlot x:Name="TempDbFileIoChart"/>
+                </Border>
+
+                <!-- Shown over the usage and size charts when tempdb_stats recorded a named skip such as PERMISSIONS for this server and the window has no tempdb rows (#6861). -->
+                <Border Grid.Row="0" Grid.RowSpan="2" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"
+                        Background="{DynamicResource BackgroundDarkBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="16,12"
+                        Visibility="{Binding Visibility, ElementName=TempDbNoDataMessage}">
+                    <TextBlock x:Name="TempDbNoDataMessage" Style="{StaticResource EmptyHint}"/>
+                </Border>
+                <!-- Shown over the file latency chart on an Azure SQL Database, whose file I/O view never returns tempdb's files (#6861). -->
+                <Border Grid.Row="2" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"
+                        Background="{DynamicResource BackgroundDarkBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="16,12"
+                        Visibility="{Binding Visibility, ElementName=TempDbFileIoNoDataMessage}">
+                    <TextBlock x:Name="TempDbFileIoNoDataMessage" Style="{StaticResource EmptyHint}"/>
                 </Border>
             </Grid>
             </ScrollViewer>
@@ -4059,8 +4072,8 @@
                                 <DataGridTextColumn Binding="{Binding CollectorName}" Width="180" MinWidth="180">
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectorName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collector" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding HealthStatus}" Width="90" MinWidth="90">
-                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HealthStatus" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding DisplayStatus}" Width="100" MinWidth="100">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DisplayStatus" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding TotalRuns, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80" MinWidth="80">
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalRuns" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Runs" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
@@ -5197,8 +5210,9 @@
                         <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         <DataGridTextColumn Header="Backends" Binding="{Binding BackendCount}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         <!-- Zero means the wait belonged to no statement - a background process -
-                             rather than an unknown query. Joins pg_statement_stats.queryid. -->
-                        <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="180"/>
+                             rather than an unknown query. Joins pg_statement_stats.queryid. A dash is a target that
+                             does not report a query id (PostgreSQL 10 to 13, #6836). -->
+                        <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId, TargetNullValue='—'}" Width="180"/>
                         <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="110"/>
                         <DataGridTextColumn Header="Last Seen" Binding="{Binding CaptureTime}" Width="*" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>

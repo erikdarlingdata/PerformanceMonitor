@@ -1123,6 +1123,9 @@
                                                         <RowDefinition Height="Auto"/>
                                                         <RowDefinition Height="Auto"/>
                                                         <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
                                                     </Grid.RowDefinitions>
 
                                                     <!-- CPU -->
@@ -1159,11 +1162,41 @@
                                                     <Ellipse Grid.Row="5" Grid.Column="0" Width="9" Height="9" Fill="{Binding CollectorSeverityBrush}" VerticalAlignment="Center" Margin="0,2,6,2"/>
                                                     <TextBlock Grid.Row="5" Grid.Column="1" Text="Collectors:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
                                                     <TextBlock Grid.Row="5" Grid.Column="2" Text="{Binding CollectorDisplay}" FontSize="11" Foreground="{Binding CollectorSeverityBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
-                                                    <TextBlock Grid.Row="5" Grid.Column="3" Text="{Binding CollectorDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
+                                                    <TextBlock Grid.Row="5" Grid.Column="3" Text="{Binding CollectorDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,2"/>
+
+                                                    <!-- Agent alerts (#6874): shown only when the SQL Server Agent alert setup has a gap, the way the web
+                                                         fleet card's chip is. Not a band: nothing above reads it. -->
+                                                    <Ellipse Grid.Row="6" Grid.Column="0" Width="9" Height="9" Fill="{Binding AgentAlertsBrush}" VerticalAlignment="Center" Margin="0,2,6,2"
+                                                             Visibility="{Binding HasAgentAlertGaps, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="6" Grid.Column="1" Text="Agent alerts:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"
+                                                               Visibility="{Binding HasAgentAlertGaps, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="6" Grid.Column="2" Text="{Binding AgentAlertsDisplay}" FontSize="11" Foreground="{Binding AgentAlertsBrush}" FontWeight="SemiBold" Margin="0,2,8,2"
+                                                               Visibility="{Binding HasAgentAlertGaps, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="6" Grid.Column="3" Text="{Binding AgentAlertsDetail}" ToolTip="{Binding AgentAlertsDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"
+                                                               Visibility="{Binding HasAgentAlertGaps, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <!-- Identity capacity (#6875): shown only when a column is at the warning bar or past it, the way the web
+                                                         fleet card's chip is. Not a band: nothing above reads it. -->
+                                                    <Ellipse Grid.Row="8" Grid.Column="0" Width="9" Height="9" Fill="{Binding IdentityCapacityBrush}" VerticalAlignment="Center" Margin="0,2,6,2"
+                                                             Visibility="{Binding HasIdentityCapacity, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="8" Grid.Column="1" Text="Identity capacity:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"
+                                                               Visibility="{Binding HasIdentityCapacity, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="8" Grid.Column="2" Text="{Binding IdentityCapacityDisplay}" FontSize="11" Foreground="{Binding IdentityCapacityBrush}" FontWeight="SemiBold" Margin="0,2,8,2"
+                                                               Visibility="{Binding HasIdentityCapacity, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="8" Grid.Column="3" Text="{Binding IdentityCapacityDetail}" ToolTip="{Binding IdentityCapacityDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"
+                                                               Visibility="{Binding HasIdentityCapacity, Converter={StaticResource BoolToVisibility}}"/>
 
                                                     <!-- Last Collect (footer row, no severity dot) -->
-                                                    <TextBlock Grid.Row="6" Grid.Column="1" Text="Last Collect:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
-                                                    <TextBlock Grid.Row="6" Grid.Column="2" Text="{Binding LastCollectionDisplay}" FontSize="11" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
+                                                    <!-- #6873: shown only when a full backup, a log backup or a CHECKDB is overdue. Not a band. -->
+                                                    <Ellipse Grid.Row="7" Grid.Column="0" Width="9" Height="9" Fill="{Binding DatabaseProtectionBrush}" VerticalAlignment="Center" Margin="0,2,6,2"
+                                                             Visibility="{Binding HasDatabaseProtectionOverdue, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="7" Grid.Column="1" Text="Protection:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"
+                                                               Visibility="{Binding HasDatabaseProtectionOverdue, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="7" Grid.Column="2" Text="{Binding DatabaseProtectionChipValue}" FontSize="11" Foreground="{Binding DatabaseProtectionBrush}" FontWeight="SemiBold" Margin="0,2,8,2"
+                                                               Visibility="{Binding HasDatabaseProtectionOverdue, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="7" Grid.Column="3" Text="{Binding DatabaseProtectionChipDetail}" ToolTip="{Binding DatabaseProtectionChipDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                                                               Visibility="{Binding HasDatabaseProtectionOverdue, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="9" Grid.Column="1" Text="Last Collect:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
+                                                    <TextBlock Grid.Row="9" Grid.Column="2" Text="{Binding LastCollectionDisplay}" FontSize="11" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
                                                 </Grid>
                                             </StackPanel>
                                             <!-- Offline overlay -->
@@ -1203,10 +1236,31 @@
                     <local:JobHistoryTab x:Name="JobHistoryContent" Margin="0,8,0,0"/>
                 </TabItem>
 
+                <!-- Agent Alerts (#6874): one server's SQL Server Agent alerts and the gaps in them, read only, the same
+                     content and words as the Configuration tab on the web. Self-loading (not scoped by the sidebar selection),
+                     beside Job History. -->
+                <TabItem x:Name="AgentAlertsTabItem" Header="Agent Alerts">
+                    <local:AgentAlertsTab x:Name="AgentAlertsContent" Margin="0,8,0,0"/>
+                </TabItem>
+
+                <!-- Database Protection (#6873): one server's last full backup, log backup and CHECKDB per database and which are
+                     overdue, read only, the same content and words as the Health Checks panels on the web. Self-loading (not scoped
+                     by the sidebar selection), beside Job History. -->
+                <TabItem x:Name="DatabaseProtectionTabItem" Header="Database Protection">
+                    <local:DatabaseProtectionTab x:Name="DatabaseProtectionContent" Margin="0,8,0,0"/>
+                </TabItem>
+
                 <!-- Fleet Sweeps (#6390): the fleet sweep engine's runs, their watch items and the timeline, read only, the
                      same as the web's Fleet Sweeps page. Self-loading (not scoped by the sidebar selection), beside Job History. -->
                 <TabItem x:Name="FleetSweepsTabItem" Header="Fleet Sweeps">
                     <local:FleetSweepsTab x:Name="FleetSweepsContent" Margin="0,8,0,0"/>
+                </TabItem>
+
+                <!-- Identity Capacity (#6875): one server's identity columns above 10 percent used, how long until each runs out
+                     and each database's scan state, read only, the same figures and words as the Identity Capacity panels on the
+                     web Configuration tab. Self-loading (not scoped by the sidebar selection), beside Fleet Sweeps. -->
+                <TabItem x:Name="IdentityCapacityTabItem" Header="Identity Capacity">
+                    <local:IdentityCapacityTab x:Name="IdentityCapacityContent" Margin="0,8,0,0"/>
                 </TabItem>
 
                 <!-- Availability Groups (#991): fleet-wide AG topology, one card per (reporting server, AG).

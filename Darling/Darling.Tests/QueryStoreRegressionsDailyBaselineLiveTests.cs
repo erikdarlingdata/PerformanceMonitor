@@ -41,6 +41,11 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
     private const int ServerId = QueryStoreIntervalWideBelowFloorLiveTests.ServerId;
     private const string Db = "qsDaily";
 
+    /// <summary>#6781: every interval's CPU and duration are the seeded microseconds times this, so each regressing query's rise
+    /// adds at least 1 s of CPU over the window (<see cref="PerformanceMonitor.Common.QueryStoreRegressionRules.CostMinAddedCpuMs"/>).
+    /// The hand-worked figures below scale by it too.</summary>
+    private const long CpuScale = 1_000;
+
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>The re-collected interval of the extra fixture (query 41): its identity, so the second snapshot upserts the first.</summary>
@@ -92,8 +97,8 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
                 QueryText = text ?? "SELECT " + queryId.ToString(CultureInfo.InvariantCulture),
                 ReplicaRole = replicaRole,
                 ExecutionCount = executions,
-                AvgCpuTimeUs = cpuUs,
-                AvgDurationUs = cpuUs * 2,
+                AvgCpuTimeUs = cpuUs * CpuScale,
+                AvgDurationUs = cpuUs * 2 * CpuScale,
                 IsForcedPlan = false,
                 ForceFailureCount = 0,
                 RuntimeStatsIntervalId = reuseIntervalId ?? intervalId,
@@ -216,8 +221,8 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
             QueryPlanHash = "0x" + 531.ToString("X8", CultureInfo.InvariantCulture),
             QueryText = "SELECT 53",
             ExecutionCount = 25,
-            AvgCpuTimeUs = 3_000,
-            AvgDurationUs = 6_000,
+            AvgCpuTimeUs = 3_000 * CpuScale,
+            AvgDurationUs = 6_000 * CpuScale,
             IsForcedPlan = false,
             ForceFailureCount = 0,
             RuntimeStatsIntervalId = RecentRecollectedIntervalId,
@@ -253,8 +258,8 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
             QueryPlanHash = "0x" + 411.ToString("X8", CultureInfo.InvariantCulture),
             QueryText = "SELECT 41",
             ExecutionCount = 25,
-            AvgCpuTimeUs = 1_000,
-            AvgDurationUs = 2_000,
+            AvgCpuTimeUs = 1_000 * CpuScale,
+            AvgDurationUs = 2_000 * CpuScale,
             IsForcedPlan = false,
             ForceFailureCount = 0,
             RuntimeStatsIntervalId = RecollectedIntervalId,
@@ -434,10 +439,10 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         var only = Assert.Single(reference);
         var fields = only.Split('|');
         Assert.Equal("10", fields[1]);
-        Assert.Equal(200_000.0 / 143 / 1000, double.Parse(fields[4], CultureInfo.InvariantCulture), 5);
+        Assert.Equal(200_000.0 * CpuScale / 143 / 1000, double.Parse(fields[4], CultureInfo.InvariantCulture), 5);
         Assert.Equal(143L, long.Parse(fields[7], CultureInfo.InvariantCulture));
         Assert.Equal(60L, long.Parse(fields[8], CultureInfo.InvariantCulture));
-        Assert.Equal(290_000.0 / 60 / 1000, double.Parse(fields[5], CultureInfo.InvariantCulture), 5);
+        Assert.Equal(290_000.0 * CpuScale / 60 / 1000, double.Parse(fields[5], CultureInfo.InvariantCulture), 5);
 
         async Task<List<string>> ServedAsync()
         {
@@ -876,5 +881,39 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
             earlyLive.Where(r => !r.StartsWith(q55, StringComparison.Ordinal)).ToList(),
             earlyForced.Where(r => !r.StartsWith(q55, StringComparison.Ordinal)).ToList());
         Assert.Equal("9", Row(earlyForced, 55)[10]);
+    }
+    /// <summary>
+    /// #6750 part 3, review round 2: the recent-days tier with the self-statement keys. Query 50 regresses on the recent days read from
+    /// the daily totals. Once its stored text carries the monitor's marker, the MCP read hides it with the gate closed (the text probe,
+    /// with the recent days' sample from latest) and with it open (the keys), and lists it again when the key is taken away, so it is
+    /// the key that hides it on this tier.
+    /// </summary>
+    [Fact]
+    public async Task TheRecentDaysTier_HidesTheMonitorsOwnStatement_WithTheSelfKeyGateClosedAndOpen()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #6750 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var f = await BuildFixtureAsync(extra: false, timescale: false, ct, recent: true);
+        var start = RecentStart(f.Today);
+        var baselineStart = f.Today.AddDays(-10).AddHours(12);
+        Assert.NotEmpty((await ResolveAsync(f.Postgres, baselineStart, start, ct, f.End)).RecentDays);
+
+        async Task<List<long>> ServedIdsAsync() =>
+            (await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(f.Postgres, ServerId, start, f.End, DatabaseFilter.One(Db), 50, baselineStart, ct)).Rows.Select(r => r.QueryId).ToList();
+        Assert.Contains(50L, await ServedIdsAsync());
+
+        await QueryStoreTextWriter.WriteAsync(f.Connection, ServerId, Db,
+            [new FetchedQueryText(50, "SELECT /* " + QueryStoreCollector.SelfQueryMarker + " */ 50", null)],
+            DateTime.SpecifyKind(LiveClock.Now().AddMinutes(1), DateTimeKind.Utc), 30, cancellationToken: ct);
+        Assert.False(await QueryStoreSelfKeys.ReadyAsync(f.Connection, null, 30, ct));
+        var closed = await ServedIdsAsync();
+        Assert.DoesNotContain(50L, closed);
+
+        Assert.NotNull(await QueryStoreSelfKeys.BackfillAsync(f.Connection, ct));
+        Assert.True(await QueryStoreSelfKeys.ReadyAsync(f.Connection, null, 30, ct));
+        Assert.Equal(closed, await ServedIdsAsync());
+
+        await ExecAsync(f.Connection, "DELETE FROM collect.query_store_self_keys", ct);
+        Assert.Contains(50L, await ServedIdsAsync());
     }
 }

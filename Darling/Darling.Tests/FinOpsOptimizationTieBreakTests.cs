@@ -35,8 +35,10 @@ public sealed class FinOpsOptimizationTieBreakTests
     public void DarlingStatement_EndsItsOrderWithEveryGroupingKey()
     {
         var sql = DarlingFinOpsOptimizationReader.ExpensiveQueriesSql;
-        Assert.Contains("GROUP BY\n    database_name,\n    sql_handle,\n    query_text\n" + TieBreak + "\nLIMIT $3",
+        /* #6803: the cut sits in the statement's top CTE, over the resolved text, and the final order repeats the keys. */
+        Assert.Contains("GROUP BY\n        database_name,\n        sql_handle,\n        query_text\n    ORDER BY SUM(cpu) DESC, database_name, sql_handle, query_text\n    LIMIT $3",
             sql.ReplaceLineEndings("\n"), StringComparison.Ordinal);
+        Assert.EndsWith("ORDER BY t.cpu DESC, t.database_name, t.sql_handle, t.query_text", sql.ReplaceLineEndings("\n"), StringComparison.Ordinal);
     }
 
     [Fact]

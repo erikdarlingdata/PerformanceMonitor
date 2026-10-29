@@ -59,7 +59,7 @@ Lite keeps each log file for 7 days. To open the logs, click **View Log** or **O
 
 All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a different folder from the install directory (`%LOCALAPPDATA%\PerformanceMonitorLite\`), so neither an in-app update nor re-running `Setup.exe` can disturb it. Data from an older install is moved into the new folder automatically the first time this version starts.
 
-- **Hot data** in DuckDB 1.5.5 — non-blocking checkpoints, free block reuse, stable file size without periodic resets
+- **Hot data** in DuckDB 1.5.6: non-blocking checkpoints, free block reuse, stable file size without periodic resets
 - **Archive** to Parquet with ZSTD compression (~10x reduction) — automatic monthly compaction keeps file count low (~75 files vs thousands)
 - **Retention**: 3-month calendar-month rolling window. Retention is fixed at 3 months and cannot be changed.
 - **Memory limit**: DuckDB's memory limit is a setting (Settings, Dashboard Defaults, "DuckDB memory limit"). The default is 2 GB, and it can go from 1 GB up to 80% of memory. A change applies after a restart.
@@ -200,6 +200,6 @@ More than 40 collectors run on independent, configurable schedules (the long-run
 | database_scoped_config | On connect | Database-scoped configurations |
 | trace_flags | On connect | `DBCC TRACESTATUS` |
 
-Darling runs these same collectors across a fleet of servers, plus `query_store_forced_plans`, which reads each database's forced plans, and `query_store_hints`, which reads each database's Query Store hints (SQL Server 2022 and later). Lite has neither. Darling also runs more than 25 PostgreSQL collectors. See the [Darling collector reference](../Darling/README.md).
+Darling runs these same collectors across a fleet of servers, plus `query_store_forced_plans`, which reads each database's forced plans, and `query_store_hints`, which reads each database's Query Store hints (SQL Server 2022 and later), and `identity_capacity`, which reads how full each database's identity columns are. Lite has none of these. Darling also runs more than 25 PostgreSQL collectors. See the [Darling collector reference](../Darling/README.md).
 
 The Extended Events sessions that Lite creates on a monitored server, and how to remove them, are on their own page: [The Extended Events Sessions Lite Creates](lite-extended-events.md).

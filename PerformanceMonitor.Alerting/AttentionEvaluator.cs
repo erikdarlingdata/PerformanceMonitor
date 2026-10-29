@@ -94,8 +94,23 @@ public sealed record AttentionReading(
     /// <summary>All sampled events in the span.</summary>
     public long SampleTotal => Groups.Sum(g => g.Samples);
 
-    /// <summary>Sampled events in the span from the application <see cref="AttentionEvaluator.IsExcludedApp"/> leaves out (#6552).</summary>
+    /// <summary>Sampled events in the span from the applications <see cref="AttentionEvaluator.IsExcludedApp"/> leaves out: SSMS IntelliSense (#6552) and the VS Code mssql extension's metadata connections (#6856).</summary>
     public long ExcludedSamples => Groups.Where(g => AttentionEvaluator.IsExcludedApp(g.ClientAppName)).Sum(g => g.Samples);
+
+    /// <summary>Sampled events in the span from SSMS IntelliSense, the part of <see cref="ExcludedSamples"/> that names that tool (#6856).</summary>
+    public long ExcludedSsmsSamples => Groups.Where(g => AttentionEvaluator.IsSsmsIntelliSense(g.ClientAppName)).Sum(g => g.Samples);
+
+    /// <summary>Sampled events in the span from the VS Code mssql extension's metadata connections, the other part of <see cref="ExcludedSamples"/> (#6856).</summary>
+    public long ExcludedVsCodeSamples => Groups.Where(g => AttentionEvaluator.IsVsCodeMssqlMetadata(g.ClientAppName)).Sum(g => g.Samples);
+
+    /// <summary>The distinct <c>client_app_name</c> strings the rule left out of the span, exactly as stored, most sampled events first (#6856).</summary>
+    public IReadOnlyList<string> ExcludedApps => Groups
+        .Where(g => g.Samples > 0 && AttentionEvaluator.IsExcludedApp(g.ClientAppName))
+        .GroupBy(g => g.ClientAppName!, StringComparer.Ordinal)
+        .OrderByDescending(x => x.Sum(g => g.Samples))
+        .ThenBy(x => x.Key, StringComparer.Ordinal)
+        .Select(x => x.Key)
+        .ToList();
 }
 
 /// <summary>
@@ -151,15 +166,73 @@ public static class AttentionEvaluator
     public const string IntelliSenseClientApp = "Microsoft SQL Server Management Studio - Transact-SQL IntelliSense";
 
     /// <summary>
-    /// True for a sampled event whose client application is SSMS IntelliSense (#6552): the alert judges the count without it, and
-    /// <c>get_client_timeouts</c> marks it excluded. The filter lives at READ time (here and in <see cref="ClientTimeoutsRead"/>); the
-    /// collector still stores every event, so a mute rule, the sampled-event list and the history keep seeing them. Matches
-    /// "Microsoft SQL Server Management Studio" followed by anything and ending in "IntelliSense", so a renamed SSMS build still matches.
+    /// True for a sampled event whose client application is SSMS IntelliSense (#6552) or one of the VS Code mssql extension's metadata
+    /// connections (#6856): the alert judges the count without it, and <c>get_client_timeouts</c> marks it excluded. The filter lives at
+    /// READ time (here and in <see cref="ClientTimeoutsRead"/>); the collector still stores every event, so a mute rule, the sampled-event
+    /// list and the history keep seeing them. SSMS matches "Microsoft SQL Server Management Studio" followed by anything and ending in
+    /// "IntelliSense", so a renamed SSMS build still matches. VS Code matches a closed list, see <see cref="IsVsCodeMssqlMetadata"/>.
     /// </summary>
     public static bool IsExcludedApp(string? clientAppName) =>
+        IsSsmsIntelliSense(clientAppName) || IsVsCodeMssqlMetadata(clientAppName);
+
+    /// <summary>True for the SSMS IntelliSense application name (#6552).</summary>
+    public static bool IsSsmsIntelliSense(string? clientAppName) =>
         clientAppName is not null
         && clientAppName.StartsWith("Microsoft SQL Server Management Studio", StringComparison.OrdinalIgnoreCase)
         && clientAppName.TrimEnd().EndsWith("IntelliSense", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The tool-naming part of every sentence that says where the left-out cancels came from (#6856): the alert summary, the alert context
+    /// line and the <c>get_client_timeouts</c> note all call this, so a tool added to the rule is named in one place. Names only the tools
+    /// whose flag is set, so an SSMS-only server is not told about VS Code. With neither flag set there is nothing to name, so it throws. The one exception is the <c>get_client_timeouts</c> note, which
+    /// describes the rule in general rather than one window, so it passes both flags.
+    /// </summary>
+    public static string ExcludedToolNames(bool ssmsIntelliSense, bool vsCodeMetadata) =>
+        (ssmsIntelliSense, vsCodeMetadata) switch
+        {
+            (true, true) => "SSMS IntelliSense and VS Code mssql metadata connections",
+            (false, true) => "VS Code mssql metadata connections",
+            (true, false) => "SSMS IntelliSense",
+            /* No caller reaches this: each guards on left-out samples above zero, and those come from one of the two tools. A tool added to the rule
+               must get its own arm here rather than be named as SSMS. */
+            (false, false) => throw new ArgumentException("At least one excluded tool must be set.", nameof(ssmsIntelliSense)),
+        };
+
+    /// <summary>The VS Code mssql extension's metadata connections (#6856). The SQL Tools Service it runs appends the connection purpose to
+    /// the application name "vscode-mssql" (ConnectionService.GetApplicationNameWithFeature), and the language service adds "-languageService".
+    /// Metadata work is the General connection and Object Explorer, each with or without that suffix, plus the language service alone.
+    /// Four of the five names were seen in the field, in the client application names a production store recorded (the report in #6856),
+    /// the two double-suffix names among them. Only "vscode-mssql-languageService" rests on the extension's source alone. No source line
+    /// names the query editor's application, so the rule is a closed list: any name not on it, "vscode-mssql" included, stays counted,
+    /// the way SSMS "- Query" does, and shows in the alert's top client apps.</summary>
+    private static readonly string[] VsCodeMetadataApps =
+    {
+        "vscode-mssql-GeneralConnection",
+        "vscode-mssql-GeneralConnection-languageService",
+        "vscode-mssql-ObjectExplorer",
+        "vscode-mssql-ObjectExplorer-languageService",
+        "vscode-mssql-languageService",
+    };
+
+    /// <summary>True for one of the VS Code mssql extension's metadata application names (#6856).</summary>
+    public static bool IsVsCodeMssqlMetadata(string? clientAppName)
+    {
+        if (clientAppName is null)
+        {
+            return false;
+        }
+
+        var name = clientAppName.Trim();
+        foreach (var known in VsCodeMetadataApps)
+        {
+            if (string.Equals(name, known, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>How far back the read looks, in minutes. Equal to <see cref="RunnableQueueEvaluator.ReadLookbackMinutes"/>
     /// (a test pins it): the shared freshness rule caps its window there.</summary>
@@ -397,6 +470,8 @@ public static class AttentionEvaluator
 
         var sampleTotal = reading.SampleTotal;
         var excludedSamples = reading.ExcludedSamples;
+        var excludedSsms = reading.ExcludedSsmsSamples;
+        var excludedVsCode = reading.ExcludedVsCodeSamples;
         var judgedCount = (double)reading.TotalCount;
         var estimated = false;
         if (sampleTotal == 0 && isGroupMuted is not null && isGroupMuted(null, null))
@@ -405,12 +480,12 @@ public static class AttentionEvaluator
                applies. A rule with a database or app pattern never matches a null database and app, so only a rule on the
                server and metric alone is asked here and can mute. The finding is Muted at the full count's grade. */
             return new Finding(fullSeverity, fullRate, fullBar, reading.TotalCount, judgedCount, reading.CoveredMinutes,
-                reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime, bars, excludedSamples);
+                reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime, bars, excludedSamples, excludedSsms, excludedVsCode);
         }
 
         if (sampleTotal > 0 && (isGroupMuted is not null || excludedSamples > 0))
         {
-            /* #6552: SSMS IntelliSense's own cancels are left out the way a muted group is, by the same proportion of the sampled events. */
+            /* #6552, #6856: the own cancels of SSMS IntelliSense and the VS Code mssql metadata connections are left out the way a muted group is, by the same proportion of the sampled events. */
             var unmuted = reading.Groups
                 .Where(g => !IsExcludedApp(g.ClientAppName) && (isGroupMuted is null || !isGroupMuted(g.DatabaseName, g.ClientAppName)))
                 .Sum(g => g.Samples);
@@ -425,12 +500,12 @@ public static class AttentionEvaluator
         if (Grade(judgedRate, warning, critical, out var judgedSeverity, out var judgedBar))
         {
             return new Finding(judgedSeverity, judgedRate, judgedBar, reading.TotalCount, judgedCount, reading.CoveredMinutes,
-                reading.RunCount, sampleTotal, estimated, Muted: false, reading.NewestRunTime, bars, excludedSamples);
+                reading.RunCount, sampleTotal, estimated, Muted: false, reading.NewestRunTime, bars, excludedSamples, excludedSsms, excludedVsCode);
         }
 
         /* The exact count crossed a bar, the unmuted share did not: the fire is recorded Muted at the exact count's grade. */
         return new Finding(fullSeverity, fullRate, fullBar, reading.TotalCount, judgedCount, reading.CoveredMinutes,
-            reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime, bars, excludedSamples);
+            reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime, bars, excludedSamples, excludedSsms, excludedVsCode);
     }
 
     private static bool Grade(double rate, int warning, int critical, out AlertSeverityLevel severity, out int bar)
@@ -472,7 +547,7 @@ public static class AttentionEvaluator
         if (finding.ExcludedSamples > 0)
         {
             text += string.Create(CultureInfo.InvariantCulture,
-                $" {finding.ExcludedSamples:N0} of the {finding.SampledEvents:N0} sampled events came from SSMS IntelliSense cancelling its own queries and are left out of the rate judged.");
+                $" {finding.ExcludedSamples:N0} of the {finding.SampledEvents:N0} sampled events came from {ExcludedToolNames(finding.ExcludedSsmsSamples > 0, finding.ExcludedVsCodeSamples > 0)} cancelling their own queries and are left out of the rate judged.");
         }
 
         if (finding.Bars is not null)
@@ -540,7 +615,9 @@ public static class AttentionEvaluator
     /// <param name="Muted">True when the exact count crossed a bar and the judged count did not: record the fire as Muted.</param>
     /// <param name="NewestRunTime">The newest run's time (naive UTC).</param>
     /// <param name="Bars">Where the bars came from (#5736), null when the grading used fixed bars only.</param>
-    /// <param name="ExcludedSamples">Sampled events in the span from SSMS IntelliSense (<see cref="IsExcludedApp"/>), left out of the judged count (#6552).</param>
+    /// <param name="ExcludedSamples">Sampled events in the span from SSMS IntelliSense and the VS Code mssql metadata connections (<see cref="IsExcludedApp"/>), left out of the judged count (#6552, #6856).</param>
+    /// <param name="ExcludedSsmsSamples">The part of <paramref name="ExcludedSamples"/> from SSMS IntelliSense (#6856).</param>
+    /// <param name="ExcludedVsCodeSamples">The part of <paramref name="ExcludedSamples"/> from the VS Code mssql extension's metadata connections (#6856).</param>
     public sealed record Finding(
         AlertSeverityLevel Severity,
         double RatePerMinute,
@@ -554,7 +631,9 @@ public static class AttentionEvaluator
         bool Muted,
         DateTime NewestRunTime,
         BarBasis? Bars = null,
-        long ExcludedSamples = 0)
+        long ExcludedSamples = 0,
+        long ExcludedSsmsSamples = 0,
+        long ExcludedVsCodeSamples = 0)
     {
         /// <summary>The summary sentence for the alert.</summary>
         public string Summary => AttentionEvaluator.Summary(this);

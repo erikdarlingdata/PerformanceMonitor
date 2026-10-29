@@ -35,6 +35,11 @@ public static class DarlingThresholdKeys
     public const string PgBlockingCount = "blocking.pg_count_threshold";
     public const string PgDeadlockCount = "deadlocks.pg_count_threshold";
 
+    /// <summary>The Identity Capacity alert's two bars, percent used (#6875). Darling's own, so no engine key. A per-server or per-database override
+    /// (the database is the column's database) replaces the global bar for that scope.</summary>
+    public const string IdentityCapacityWarning = "identity_capacity.warning_percent";
+    public const string IdentityCapacityCritical = "identity_capacity.critical_percent";
+
     private static readonly Entry[] All =
     [
         new("cpu.threshold_percent", AlertThresholdKey.CpuThresholdPercent, AlertThresholdScope.Server, 1, 100, "cpu_threshold_percent", 100),
@@ -60,6 +65,8 @@ public static class DarlingThresholdKeys
         new("failed_job.lookback_minutes", AlertThresholdKey.FailedJobLookbackMinutes, AlertThresholdScope.Server, 1, 1440, "failed_job_lookback_minutes", 1),
         new(PgBlockingCount, null, AlertThresholdScope.Server, PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue, "pg_blocking_count_threshold", int.MaxValue),
         new(PgDeadlockCount, null, AlertThresholdScope.Server, PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue, "pg_deadlock_count_threshold", int.MaxValue),
+        new(IdentityCapacityWarning, null, AlertThresholdScope.ServerAndDatabase, 1, 100, "identity_capacity_warning_percent", 100),
+        new(IdentityCapacityCritical, null, AlertThresholdScope.ServerAndDatabase, 1, 100, "identity_capacity_critical_percent", 100),
     ];
 
     private static readonly Dictionary<string, Entry> ByWire = BuildByWire();

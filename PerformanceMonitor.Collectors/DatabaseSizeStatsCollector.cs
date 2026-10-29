@@ -109,8 +109,7 @@ DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
     FROM sys.databases AS d
     WHERE d.state_desc = N'ONLINE'
     AND   d.database_id > 0
-    AND   HAS_DBACCESS(d.name) = 1
-    /*EXCLUSION_FILTER_CURSOR*/
+        /*EXCLUSION_FILTER_CURSOR*/
     ORDER BY
         d.name;
 
@@ -118,7 +117,7 @@ OPEN db_cursor;
 FETCH NEXT FROM db_cursor INTO @db_name;
 
 WHILE @@FETCH_STATUS = 0
-BEGIN
+BEGIN" + NoDatabaseAccessNote.LoopGuardDbCursor + @"
     BEGIN TRY
         SET @sql = N'EXECUTE ' + QUOTENAME(@db_name) + N'.sys.sp_executesql N''
 INSERT #file_space (database_id, file_id, used_size_mb, current_size_mb)

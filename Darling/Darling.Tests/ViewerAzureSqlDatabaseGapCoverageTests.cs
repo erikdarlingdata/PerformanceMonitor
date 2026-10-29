@@ -68,6 +68,9 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     private const string JobsReason =
         "Fleet-wide Job History tab; an Azure SQL Database server has no SQL Server Agent, so it has no rows and no filter entry.";
 
+    private const string AgentAlertsReason =
+        "The Agent Alerts tab is its own control, not a server-tab surface; its status line says so through ViewerDataService.ReadAgentAlertsAsync (the engine gap answer first, as get_agent_alerts does).";
+
     private const string AvailabilityGroupsReason =
         "Fleet-wide Availability Groups tab, hidden until rows exist; its empty state already says these collectors do not run on Azure SQL Database.";
 
@@ -88,6 +91,7 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         ["default_trace_events"] = Says(OnServerTab("ViewerServerTab.SystemEvents.cs", "DefaultTraceNoDataMessage", Wiring.OwnHelper)),
         ["job_history"] = Needs(JobsReason),
         ["agent_status"] = Needs(JobsReason),
+        ["agent_alerts"] = Needs(AgentAlertsReason),
         ["ag_replica_states"] = Needs(AvailabilityGroupsReason),
         ["ag_database_replica_states"] = Needs(AvailabilityGroupsReason),
     };
@@ -192,12 +196,12 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     public void EngineGapNote_SaysTheCollectorDoesNotRun_OnAzureSqlDatabaseOnly()
     {
         var note = ViewerServerTab.EngineGapNote(
-            ServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs");
+            ServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", awsRdsKind: AwsRdsKind.None);
 
         Assert.NotNull(note);
         Assert.Equal(
             CollectorEngineCapability.NotCollectedMessage(
-                ServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs"),
+                ServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", awsRdsKind: AwsRdsKind.None),
             note);
         Assert.Contains(ServerName, note, StringComparison.Ordinal);
         Assert.Contains("Azure SQL Database", note, StringComparison.Ordinal);
@@ -210,9 +214,9 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         Assert.DoesNotContain("collector does not run", note, StringComparison.Ordinal);
         Assert.Contains("and never will.", note, StringComparison.Ordinal);
 
-        Assert.Null(ViewerServerTab.EngineGapNote(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs"));
+        Assert.Null(ViewerServerTab.EngineGapNote(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", awsRdsKind: AwsRdsKind.None));
         Assert.Null(ViewerServerTab.EngineGapNote(
-            ServerName, CollectorEngineCapability.AzureManagedInstanceEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs"));
+            ServerName, CollectorEngineCapability.AzureManagedInstanceEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", awsRdsKind: AwsRdsKind.None));
     }
 
     /// <summary>
@@ -225,24 +229,24 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     public void EngineGapState_ShowsTheSentence_OnlyOnAnAzureSqlDatabaseWithNoRows()
     {
         var azure = CollectorEngineCapability.AzureSqlDatabaseEngineEdition;
-        var sentence = CollectorEngineCapability.NotCollectedMessage(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs");
+        var sentence = CollectorEngineCapability.NotCollectedMessage(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs", awsRdsKind: AwsRdsKind.None);
         Assert.NotNull(sentence);
 
-        var noRows = ViewerServerTab.EngineGapState(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs", 0);
+        var noRows = ViewerServerTab.EngineGapState(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs", 0, awsRdsKind: AwsRdsKind.None);
         Assert.Equal(Visibility.Visible, noRows.Visibility);
         Assert.Equal(sentence, noRows.Text);
 
-        var withRows = ViewerServerTab.EngineGapState(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs", 3);
+        var withRows = ViewerServerTab.EngineGapState(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs", 3, awsRdsKind: AwsRdsKind.None);
         Assert.Equal(Visibility.Collapsed, withRows.Visibility);
 
         foreach (var edition in new[] { OnPremEngineEdition, CollectorEngineCapability.AzureManagedInstanceEngineEdition })
         {
-            var runs = ViewerServerTab.EngineGapState(ServerName, edition, MonitoredEngineKind.SqlServer, "running_jobs", 0);
+            var runs = ViewerServerTab.EngineGapState(ServerName, edition, MonitoredEngineKind.SqlServer, "running_jobs", 0, awsRdsKind: AwsRdsKind.None);
             Assert.Equal(Visibility.Collapsed, runs.Visibility);
             Assert.Equal("", runs.Text);
         }
 
-        var unread = ViewerServerTab.EngineGapState(ServerName, NoEngineEdition, null, "running_jobs", 0);
+        var unread = ViewerServerTab.EngineGapState(ServerName, NoEngineEdition, null, "running_jobs", 0, awsRdsKind: AwsRdsKind.None);
         Assert.Equal(Visibility.Collapsed, unread.Visibility);
         Assert.Equal("", unread.Text);
     }
@@ -265,24 +269,48 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
             Pick(4, OnPremEngineEdition, MonitoredEngineKind.SqlServer),
         };
 
-        var postgres = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 1, 0);
+        var postgres = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, NoOutcome, 1, 0);
         Assert.NotNull(postgres);
         Assert.Contains("database_states", postgres, StringComparison.Ordinal);
 
-        var azure = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 2, 0);
+        var azure = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, NoOutcome, 2, 0);
         Assert.NotNull(azure);
         Assert.Contains("database_states", azure, StringComparison.Ordinal);
 
         Assert.Equal(0, reader.Calls);
 
-        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 3, 0));
-        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 4, 0));
-        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 4, 3));
-        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 99, 0));
+        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, NoOutcome, 3, 0));
+        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, NoOutcome, 4, 0));
+        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, NoOutcome, 4, 3));
+        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, NoOutcome, 99, 0));
 
         var never = new LastRunReader(null);
-        var neverRan = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, never.ReadAsync, 4, 0);
+        var neverRan = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, never.ReadAsync, NoOutcome, 4, 0);
         Assert.Equal(ViewerServerTab.NeverRanNote(ServerName, "database_states"), neverRan);
+    }
+
+    /// <summary>
+    /// #6861: the database-state editor explains a database_states run that recorded a named skip such as PERMISSIONS, in the
+    /// reader's wording (no closing paragraph for an MCP client), like every other surface.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseStateEditor_GapNote_ExplainsANamedSkip()
+    {
+        const string refused = "The SELECT permission was denied on the object 'databases'.";
+        var ran = ServerLastCollected.AddMinutes(-1);
+        var reader = new LastRunReader(ran);
+        var picks = new[] { Pick(4, OnPremEngineEdition, MonitoredEngineKind.SqlServer) };
+
+        var note = await DatabaseStateOverridesWindow.GapNoteForAsync(
+            picks, reader.ReadAsync,
+            (_, _) => Task.FromResult<(string? Status, string? ErrorMessage, DateTime? ObservedUtc)>(
+                (CollectorRuntimePrecondition.DegradedStatus, refused, ran)),
+            4, 0);
+
+        Assert.NotNull(note);
+        Assert.Contains("database_states", note, StringComparison.Ordinal);
+        Assert.Contains(refused, note, StringComparison.Ordinal);
+        Assert.DoesNotContain("This is a runtime PRECONDITION", note, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -327,24 +355,24 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     public void EngineGapState_SaysTheCollectorNeverRan_OnlyOnAnEmptySurface_AndTheEditionSentenceWins()
     {
         var azure = CollectorEngineCapability.AzureSqlDatabaseEngineEdition;
-        var editionSentence = CollectorEngineCapability.NotCollectedMessage(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs");
+        var editionSentence = CollectorEngineCapability.NotCollectedMessage(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs", awsRdsKind: AwsRdsKind.None);
 
-        var azureNeverRan = ViewerServerTab.EngineGapState(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs", 0, collectorNeverRan: true);
+        var azureNeverRan = ViewerServerTab.EngineGapState(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs", 0, collectorNeverRan: true, awsRdsKind: AwsRdsKind.None);
         Assert.Equal(Visibility.Visible, azureNeverRan.Visibility);
         Assert.Equal(editionSentence, azureNeverRan.Text);
 
-        var ran = ViewerServerTab.EngineGapState(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 0, collectorNeverRan: false);
+        var ran = ViewerServerTab.EngineGapState(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 0, collectorNeverRan: false, awsRdsKind: AwsRdsKind.None);
         Assert.Equal(Visibility.Collapsed, ran.Visibility);
         Assert.Equal("", ran.Text);
 
-        var neverRan = ViewerServerTab.EngineGapState(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 0, collectorNeverRan: true);
+        var neverRan = ViewerServerTab.EngineGapState(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 0, collectorNeverRan: true, awsRdsKind: AwsRdsKind.None);
         Assert.Equal(Visibility.Visible, neverRan.Visibility);
         Assert.Equal(ViewerServerTab.NeverRanNote(ServerName, "server_config"), neverRan.Text);
         Assert.Contains(ServerName, neverRan.Text, StringComparison.Ordinal);
         Assert.Contains("server_config", neverRan.Text, StringComparison.Ordinal);
         Assert.Contains("not collected", neverRan.Text, StringComparison.Ordinal);
 
-        var neverRanWithRows = ViewerServerTab.EngineGapState(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 4, collectorNeverRan: true);
+        var neverRanWithRows = ViewerServerTab.EngineGapState(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 4, collectorNeverRan: true, awsRdsKind: AwsRdsKind.None);
         Assert.Equal(Visibility.Collapsed, neverRanWithRows.Visibility);
     }
 
@@ -357,7 +385,7 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     public void RunningJobs_NeverRan_ShowsTheShortFormOfTheMcpAnswer()
     {
         var state = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, ServerLastCollected, null);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, ServerLastCollected, null, awsRdsKind: AwsRdsKind.None);
 
         var mcp = CollectorRuntimePrecondition.GatedOffMessage(
             ServerName, "running_jobs", CollectorRuntimePrecondition.RunningJobsPossibleCauses, null, ServerLastCollected, null);
@@ -374,12 +402,12 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         Assert.NotEqual(ViewerServerTab.NeverRanNote(ServerName, "running_jobs"), state.Text);
 
         var ran = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, ServerLastCollected.AddMinutes(-5), ServerLastCollected, null);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, ServerLastCollected.AddMinutes(-5), ServerLastCollected, null, awsRdsKind: AwsRdsKind.None);
         Assert.Equal(Visibility.Collapsed, ran.Visibility);
         Assert.Equal("", ran.Text);
 
         var nothingCollected = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, null, null);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, null, null, awsRdsKind: AwsRdsKind.None);
         Assert.Equal(Visibility.Collapsed, nothingCollected.Visibility);
     }
 
@@ -394,10 +422,10 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     {
         var state = ViewerServerTab.EngineGapStateFromRuns(
             ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0,
-            ServerLastCollected.AddDays(-3), ServerLastCollected, ServerLastCollected.AddDays(-10));
+            ServerLastCollected.AddDays(-3), ServerLastCollected, ServerLastCollected.AddDays(-10), awsRdsKind: AwsRdsKind.None);
         var withRows = ViewerServerTab.EngineGapStateFromRuns(
             ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 3,
-            ServerLastCollected.AddDays(-3), ServerLastCollected, ServerLastCollected.AddDays(-10));
+            ServerLastCollected.AddDays(-3), ServerLastCollected, ServerLastCollected.AddDays(-10), awsRdsKind: AwsRdsKind.None);
 
         var mcp = CollectorRuntimePrecondition.GatedOffMessage(
             ServerName, "running_jobs", CollectorRuntimePrecondition.RunningJobsPossibleCauses,
@@ -426,13 +454,13 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         foreach (var collector in new[] { "server_config", "trace_flags" })
         {
             var state = ViewerServerTab.EngineGapStateFromRuns(
-                ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, collector, 0, lastRun, ServerLastCollected, null);
+                ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, collector, 0, lastRun, ServerLastCollected, null, awsRdsKind: AwsRdsKind.None);
             Assert.Equal(Visibility.Collapsed, state.Visibility);
             Assert.Equal("", state.Text);
         }
 
         var jobs = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, lastRun, ServerLastCollected, null);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, lastRun, ServerLastCollected, null, awsRdsKind: AwsRdsKind.None);
         Assert.Equal(Visibility.Visible, jobs.Visibility);
     }
 
@@ -445,29 +473,29 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     public void CollectorWithNoRow_OnAServerThatCollects_ShowsTheNote_AndNothingElseDoes()
     {
         var never = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 0, null, ServerLastCollected, null);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 0, null, ServerLastCollected, null, awsRdsKind: AwsRdsKind.None);
         Assert.Equal(Visibility.Visible, never.Visibility);
         Assert.Equal(ViewerServerTab.NeverRanNote(ServerName, "server_config"), never.Text);
 
         var emptyLog = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 0, null, null, null);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 0, null, null, null, awsRdsKind: AwsRdsKind.None);
         Assert.Equal(Visibility.Collapsed, emptyLog.Visibility);
 
         var withRows = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 3, null, ServerLastCollected, null);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 3, null, ServerLastCollected, null, awsRdsKind: AwsRdsKind.None);
         Assert.Equal(Visibility.Collapsed, withRows.Visibility);
 
         var azure = CollectorEngineCapability.AzureSqlDatabaseEngineEdition;
         var onAzure = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, ServerLastCollected, null);
+            ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, ServerLastCollected, null, awsRdsKind: AwsRdsKind.None);
         Assert.Equal(
-            CollectorEngineCapability.NotCollectedMessage(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs"),
+            CollectorEngineCapability.NotCollectedMessage(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs", awsRdsKind: AwsRdsKind.None),
             onAzure.Text);
     }
 
     /// <summary>
-    /// The first-run grace on every surface. Each collector a SQL Server can show, on by default, other than running_jobs (whose
-    /// note is the MCP sentence, pinned above), says it has not run yet one second before it is due. Once it is due and still
+    /// The first-run grace on every surface. Each collector a SQL Server can show, on by default, other than running_jobs and agent_alerts (whose
+    /// notes are the MCP sentences, running_jobs pinned above and agent_alerts in AgentAlertsSurfacesLiveTests), says it has not run yet one second before it is due. Once it is due and still
     /// has no run, the never-ran note comes back.
     /// </summary>
     [Fact]
@@ -475,8 +503,8 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     {
         var collectors = CollectorScheduleDefaults.All
             .Where(entry => entry.Value.DefaultEnabled
-                            && entry.Key != "running_jobs"
-                            && ViewerServerTab.EngineGapNote(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, entry.Key) is null)
+                            && ViewerServerTab.SwitchedOffReasonsFor(entry.Key) is null
+                            && ViewerServerTab.EngineGapNote(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, entry.Key, awsRdsKind: AwsRdsKind.None) is null)
             .ToList();
 
         Assert.Contains(collectors, entry => entry.Key == "server_config");
@@ -489,13 +517,13 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
             var first = due.AddMinutes(-(schedule.FrequencyMinutes + CollectorRuntimePrecondition.FirstRunSlackMinutes));
 
             var notYet = ViewerServerTab.EngineGapStateFromRuns(
-                ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, collector, 0, null, due.AddSeconds(-1), first);
+                ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, collector, 0, null, due.AddSeconds(-1), first, awsRdsKind: AwsRdsKind.None);
             Assert.Equal(Visibility.Visible, notYet.Visibility);
             Assert.Equal(CollectorRuntimePrecondition.NotYetRunMessage(ServerName, collector, due.AddSeconds(-1), first), notYet.Text);
             Assert.Contains("has not run against", notYet.Text, StringComparison.Ordinal);
 
             var overdue = ViewerServerTab.EngineGapStateFromRuns(
-                ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, collector, 0, null, due, first);
+                ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, collector, 0, null, due, first, awsRdsKind: AwsRdsKind.None);
             Assert.Equal(Visibility.Visible, overdue.Visibility);
             Assert.Equal(ViewerServerTab.NeverRanNote(ServerName, collector), overdue.Text);
         }
@@ -511,7 +539,7 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         var reader = new LastRunReader(null) { ServerFirstCollected = ServerLastCollected.AddMinutes(-2) };
         var picks = new[] { Pick(4, OnPremEngineEdition, MonitoredEngineKind.SqlServer) };
 
-        var editor = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 4, 0);
+        var editor = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, NoOutcome, 4, 0);
         Assert.Equal(
             CollectorRuntimePrecondition.NotYetRunMessage(ServerName, "database_states", ServerLastCollected, reader.ServerFirstCollected),
             editor);
@@ -530,10 +558,10 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     [Fact]
     public void NeedsCollectorRunRead_OnlyWhenTheSurfaceIsEmptyAndTheEditionRuleIsSilent()
     {
-        Assert.True(ViewerServerTab.NeedsCollectorRunRead(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0));
-        Assert.False(ViewerServerTab.NeedsCollectorRunRead(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 5));
+        Assert.True(ViewerServerTab.NeedsCollectorRunRead(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, awsRdsKind: AwsRdsKind.None));
+        Assert.False(ViewerServerTab.NeedsCollectorRunRead(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 5, awsRdsKind: AwsRdsKind.None));
         Assert.False(ViewerServerTab.NeedsCollectorRunRead(
-            ServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0));
+            ServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, awsRdsKind: AwsRdsKind.None));
     }
 
     /// <summary>
@@ -561,13 +589,17 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         }
     }
 
+    /// <summary>A latest-run read that finds no run, for the tests that are about the engine and never-ran rules.</summary>
+    private static Task<(string? Status, string? ErrorMessage, DateTime? ObservedUtc)> NoOutcome(int serverId, string collector) =>
+        Task.FromResult<(string? Status, string? ErrorMessage, DateTime? ObservedUtc)>((null, null, null));
+
     private static DatabaseStateOverridesWindow.ServerPick Pick(int serverId, int engineEdition, string? engineKind) =>
         new() { ServerId = serverId, ServerName = ServerName, EngineEdition = engineEdition, EngineKind = engineKind };
 
     private static Task<(string Text, Visibility Visibility)> ReadGapAsync(
         LastRunReader reader, ISet<string>? seenToRun, string collector, int rowCount,
         int engineEdition = OnPremEngineEdition, string? engineKind = MonitoredEngineKind.SqlServer) =>
-        ViewerServerTab.ReadEngineGapStateAsync(reader.ReadAsync, seenToRun, 7, ServerName, engineEdition, engineKind, collector, rowCount);
+        ViewerServerTab.ReadEngineGapStateAsync(reader.ReadAsync, seenToRun, 7, ServerName, engineEdition, engineKind, collector, rowCount, NoOutcome, awsRdsKind: AwsRdsKind.None);
 
     /// <summary>
     /// <c>collection_log</c> only gains rows, so once a read has seen a collector run, the refresh after it makes no read for that
@@ -634,7 +666,7 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         var onAzure = await ReadGapAsync(reader, null, "running_jobs", 0, azure);
         Assert.Equal(Visibility.Visible, onAzure.Visibility);
         Assert.Equal(
-            CollectorEngineCapability.NotCollectedMessage(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs"),
+            CollectorEngineCapability.NotCollectedMessage(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs", awsRdsKind: AwsRdsKind.None),
             onAzure.Text);
 
         var onPostgres = await ReadGapAsync(reader, null, "database_states", 0, NoEngineEdition, MonitoredEngineKind.Postgres);

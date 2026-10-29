@@ -338,32 +338,103 @@ ORDER BY bc.total_wait_time_ms DESC";
         return items;
     }
 
-    /// <summary>Top-N most expensive queries by total CPU over the window. $1 server_id, $2 cutoff, $3 topN.</summary>
+    /// <summary>
+    /// Top-N most expensive queries by total CPU over the window. $1 server_id, $2 cutoff, $3 topN.
+    ///
+    /// <para>#6803: the statements are grouped by the RESOLVED text and carry the plan, so the old form joined the text and plan
+    /// dimensions onto every row of the window (220,000 rows on a busy server) and sorted them, text and all, by the grouping keys:
+    /// a 380 MB temp spill per call. This form reads the base table and groups by the narrow keys (the text and plan DIGESTS), so
+    /// the grouping holds a few hundred rows; the text of those groups is looked up by its primary key (a probe per group, not a scan and hash of the whole dimension), the groups are merged on the resolved text
+    /// and cut to the top N, and the plan dimension is joined for the kept statements only. The answer is the same: the digest is a hash
+    /// of the text, so two digests never hold one text, and a row that carries its text inline (written before the dimensions) groups by
+    /// that text as before. The plan of a row is its inline plan, else its dimension plan, and the statement keeps the greatest of them,
+    /// as <c>MAX(query_plan_xml)</c> over the view did.</para>
+    /// </summary>
     public const string ExpensiveQueriesSql = $@"
+WITH grp AS (
+    SELECT
+        f.database_name,
+        f.sql_handle,
+        f.query_text AS inline_text,
+        f.query_text_digest AS text_digest,
+        f.query_plan_digest AS plan_digest,
+        SUM(f.delta_worker_time) AS cpu,
+        SUM(f.delta_logical_reads) AS reads,
+        SUM(f.delta_execution_count) AS execs,
+        MAX(f.query_hash) AS query_hash,
+        MAX(f.query_plan_xml) AS inline_plan,
+        BOOL_OR(f.query_plan_xml IS NULL) AS has_row_without_inline_plan
+    FROM query_stats AS f
+    WHERE f.server_id = $1
+    AND   f.collection_time >= $2
+    AND   f.delta_worker_time IS NOT NULL
+    AND   f.delta_worker_time > 0
+    AND   f.{TimescaleSupport.IntervalHonestSourceFilter}
+    GROUP BY
+        f.database_name,
+        f.sql_handle,
+        f.query_text,
+        f.query_text_digest,
+        f.query_plan_digest
+),
+resolved AS (
+    SELECT
+        g.database_name,
+        g.sql_handle,
+        COALESCE(g.inline_text, (SELECT d.query_text FROM query_text_dim AS d WHERE d.digest = g.text_digest)) AS query_text,
+        g.cpu,
+        g.reads,
+        g.execs,
+        g.query_hash,
+        g.plan_digest,
+        g.inline_plan,
+        g.has_row_without_inline_plan
+    FROM grp AS g
+),
+top AS (
+    SELECT
+        database_name,
+        sql_handle,
+        query_text,
+        SUM(cpu) AS cpu,
+        SUM(reads) AS reads,
+        SUM(execs) AS executions,
+        MAX(query_hash) AS query_hash
+    FROM resolved
+    GROUP BY
+        database_name,
+        sql_handle,
+        query_text
+    ORDER BY SUM(cpu) DESC, database_name, sql_handle, query_text
+    LIMIT $3
+)
 SELECT
-    database_name,
-    SUM(delta_worker_time) / 1000.0 AS total_cpu_ms,
-    CAST(SUM(delta_worker_time) / 1000.0 / NULLIF(SUM(delta_execution_count), 0) AS DECIMAL(19,2)) AS avg_cpu_ms,
-    SUM(delta_logical_reads) AS total_reads,
-    CAST(SUM(delta_logical_reads) * 1.0 / NULLIF(SUM(delta_execution_count), 0) AS DECIMAL(19,0)) AS avg_reads,
-    SUM(delta_execution_count) AS executions,
-    LEFT(query_text, 200) AS query_preview,
-    query_text AS full_query_text,
-    MAX(query_plan_xml) AS query_plan_xml,
-    MAX(query_plan_gz) AS query_plan_gz,
-    MAX(query_hash) AS query_hash
-FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   delta_worker_time IS NOT NULL
-AND   delta_worker_time > 0
-AND   {TimescaleSupport.IntervalHonestSourceFilter}
+    t.database_name,
+    t.cpu / 1000.0 AS total_cpu_ms,
+    CAST(t.cpu / 1000.0 / NULLIF(t.executions, 0) AS DECIMAL(19,2)) AS avg_cpu_ms,
+    t.reads AS total_reads,
+    CAST(t.reads * 1.0 / NULLIF(t.executions, 0) AS DECIMAL(19,0)) AS avg_reads,
+    t.executions,
+    LEFT(t.query_text, 200) AS query_preview,
+    t.query_text AS full_query_text,
+    MAX(GREATEST(r.inline_plan, CASE WHEN r.has_row_without_inline_plan THEN p.query_plan_xml END)) AS query_plan_xml,
+    MAX(p.query_plan_gz) AS query_plan_gz,
+    t.query_hash
+FROM top AS t
+JOIN resolved AS r
+    ON  r.database_name IS NOT DISTINCT FROM t.database_name
+    AND r.sql_handle IS NOT DISTINCT FROM t.sql_handle
+    AND r.query_text IS NOT DISTINCT FROM t.query_text
+LEFT JOIN query_plan_dim AS p ON p.digest = r.plan_digest
 GROUP BY
-    database_name,
-    sql_handle,
-    query_text
-ORDER BY SUM(delta_worker_time) DESC, database_name, sql_handle, query_text
-LIMIT $3";
+    t.database_name,
+    t.sql_handle,
+    t.query_text,
+    t.cpu,
+    t.reads,
+    t.executions,
+    t.query_hash
+ORDER BY t.cpu DESC, t.database_name, t.sql_handle, t.query_text";
 
     /// <summary>Reads the top-N statements. The caller clamps <paramref name="cutoffUtc"/> to the horizon that still
     /// retains query text, because no rollup carries per-row text.</summary>

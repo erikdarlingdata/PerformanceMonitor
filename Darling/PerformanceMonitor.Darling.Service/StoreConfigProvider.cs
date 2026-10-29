@@ -1429,11 +1429,13 @@ INSERT INTO config_alert_settings (
     runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler,
     client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute,
     excluded_volumes,
-    client_timeouts_warning_multiple, client_timeouts_critical_multiple)
+    client_timeouts_warning_multiple, client_timeouts_critical_multiple,
+    agent_alert_gaps_enabled, backup_overdue_enabled, log_backup_overdue_enabled, checkdb_overdue_enabled,
+    identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
         $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63,
-        $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79)
+        $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -1553,6 +1555,16 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         /* #5736, bound last in the same order the V211 columns were appended. Seeded RAW like every sibling: the clamp lives on DarlingAlertSettings. */
         command.Parameters.AddWithValue(a.ClientTimeoutsWarningMultiple);
         command.Parameters.AddWithValue(a.ClientTimeoutsCriticalMultiple);
+        /* #6874, bound last in the order the V222 column was appended. The switch seeds FALSE: the alert ships off. */
+        command.Parameters.AddWithValue(a.AgentAlertGapsEnabled);
+        /* #6873, bound last in the order the V223 columns were appended. The three switches seed FALSE: the alerts ship off. */
+        command.Parameters.AddWithValue(a.BackupOverdueEnabled);
+        command.Parameters.AddWithValue(a.LogBackupOverdueEnabled);
+        command.Parameters.AddWithValue(a.CheckDbOverdueEnabled);
+        /* #6875, bound last in the order the V224 columns were appended. The switch seeds FALSE: the alert ships off. The bars are seeded RAW, the clamp lives on DarlingAlertSettings. */
+        command.Parameters.AddWithValue(a.IdentityCapacityEnabled);
+        command.Parameters.AddWithValue(a.IdentityCapacityWarningPercent);
+        command.Parameters.AddWithValue(a.IdentityCapacityCriticalPercent);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -2190,7 +2202,9 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler,
        client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute,
        excluded_volumes,
-       client_timeouts_warning_multiple, client_timeouts_critical_multiple
+       client_timeouts_warning_multiple, client_timeouts_critical_multiple,
+       agent_alert_gaps_enabled, backup_overdue_enabled, log_backup_overdue_enabled, checkdb_overdue_enabled,
+       identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent
 FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -2351,6 +2365,16 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
             /* #5736 (V211): the relative Client Timeouts bars' multiples, appended at 77-78 (same reachability rule as every appended knob). */
             ClientTimeoutsWarningMultiple = reader.GetInt32(77),
             ClientTimeoutsCriticalMultiple = reader.GetInt32(78),
+            /* #6874 (V222): the Agent Alert Gaps switch at 79 (same reachability rule as every appended knob). */
+            AgentAlertGapsEnabled = reader.GetBoolean(79),
+            /* #6873 (V223): the three database protection alert switches at 80-82 (same reachability rule as every appended knob). */
+            BackupOverdueEnabled = reader.GetBoolean(80),
+            LogBackupOverdueEnabled = reader.GetBoolean(81),
+            CheckDbOverdueEnabled = reader.GetBoolean(82),
+            /* #6875 (V224): the Identity Capacity switch and its two bars at 83-85 (same reachability rule as every appended knob). */
+            IdentityCapacityEnabled = reader.GetBoolean(83),
+            IdentityCapacityWarningPercent = reader.GetInt32(84),
+            IdentityCapacityCriticalPercent = reader.GetInt32(85),
         };
         var analysis = new AnalysisConfig
         {

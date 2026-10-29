@@ -22,7 +22,7 @@
  * A day with no row is "no data", never Healthy: the range lists a day when ANY collection happened, so a missing day is a
  * collection gap. A day the store purged comes back as band NoData and is drawn the same way, with the read's own note.
  */
-import { el, errorStrip, emptyStrip, noticeStrip } from "../util.js";
+import { el, errorStrip, emptyStrip, noticeStrip, storeHash } from "../util.js";
 
 const DAY_MS = 86400000;
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -155,7 +155,7 @@ export async function openServerTabOnDay(server, iso, target) {
       },
       { once: true }
     );
-    const hash = "#/server/" + encodeURIComponent(server) + "/" + drill.tab;
+    const hash = storeHash("#/server/" + encodeURIComponent(server) + "/" + drill.tab);
     if (location.hash === hash) window.dispatchEvent(new Event("hashchange"));
     else location.hash = hash;
     return null;
@@ -219,6 +219,8 @@ export function dailyHealthCalendar({ server, initial, read, renderTable, openDa
     const key = keyOf(month);
     if (loaded.has(key)) return loaded.get(key);
     const res = await read("get_daily_summary_range", monthReadParams(server, month, todayIso));
+    /* A read cancelled because the page was left says nothing about the month: nothing is cached, and nothing is drawn. */
+    if (res.kind === "aborted") return { aborted: true };
     let entry;
     if (res.kind === "error") entry = { failure: res.message };
     /* "empty" is a month with no collected day while the server has history elsewhere: a month of "no data" cells, which is the
@@ -259,7 +261,7 @@ export function dailyHealthCalendar({ server, initial, read, renderTable, openDa
     swap(detail, title, el("div", { class: "muted", text: "Loading the day..." }));
     const mine = generation;
     const res = await read("get_daily_summary", { server, summary_date: iso });
-    if (mine !== generation || selected !== iso) return;
+    if (mine !== generation || selected !== iso || res.kind === "aborted") return;
     if (res.kind === "error") return swap(detail, title, errorStrip(res.message));
     if (res.kind === "empty") {
       /* No row, or a purged day: said in the page's words for the first, the service's for the second (it names the horizon). */
@@ -327,7 +329,7 @@ export function dailyHealthCalendar({ server, initial, read, renderTable, openDa
     const key = keyOf(view);
     if (!loaded.has(key)) swap(grid, el("div", { class: "muted", text: "Loading " + MONTH_NAMES[view.month0] + " " + view.year + "..." }));
     const entry = await load(view);
-    if (mine !== generation) return;
+    if (mine !== generation || entry.aborted) return;
     if (entry.failure) {
       swap(detail);
       return swap(grid, errorStrip(entry.failure));

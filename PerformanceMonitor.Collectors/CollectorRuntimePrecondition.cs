@@ -214,6 +214,15 @@ public static class CollectorRuntimePrecondition
         "collector: it runs and reports a permission error instead, and a grant takes effect on its next run.";
 
     /// <summary>
+    /// What could stop the agent_alerts collector from running, as <c>get_agent_alerts</c> words it (#6874). The engine edition is
+    /// answered before this is asked (Azure SQL Database and Managed Instance are <c>not_collected</c>), so AWS RDS is the one
+    /// remaining candidate: it reports an ordinary edition, so the registry cannot tell it from a plain SQL Server.
+    /// </summary>
+    public const string AgentAlertsPossibleCauses =
+        "Possible cause: this is an AWS RDS instance, where this collector does not run. A login without msdb access " +
+        "does not stop this collector: it runs and reports a permission error instead, and a grant takes effect on its next run.";
+
+    /// <summary>
     /// The closing sentence every precondition message ends on. One copy, for the same reason
     /// <c>CollectorEngineCapability.PermanentGapEpilogue</c> is one copy: the messages have to agree about
     /// what a precondition IS, and a second wording would eventually disagree about whether it is worth
@@ -270,7 +279,26 @@ public static class CollectorRuntimePrecondition
         string collectorName,
         string? status,
         string? errorMessage,
-        DateTime? observedUtc)
+        DateTime? observedUtc) =>
+        BuildCollectionOutcome(serverName, collectorName, status, errorMessage, observedUtc, forReader: false);
+
+    /// <summary>
+    /// The sentence the DEGRADED answer closes on for an MCP client (#6869): it tells a caller what to do with the stored sentence, which a
+    /// person reading a panel or the web page has no use for. <see cref="CollectionOutcomeReaderMessage"/> leaves it out, and so does
+    /// <c>runtimePreconditionText</c> in plain-text.js.
+    /// </summary>
+    public const string DegradedClientSentence =
+        "Act on that sentence — it is what the monitored server itself answered, and it distinguishes the states this " +
+        "one status carries: a grant the login was refused, a source object that does not exist " +
+        "on this target, and a feature the platform does not implement or has switched off.";
+
+    private static string? BuildCollectionOutcome(
+        string serverName,
+        string collectorName,
+        string? status,
+        string? errorMessage,
+        DateTime? observedUtc,
+        bool forReader)
     {
         if (string.IsNullOrWhiteSpace(status))
         {
@@ -308,14 +336,34 @@ public static class CollectorRuntimePrecondition
         {
             return $"The {collectorName} collector is running against {serverName} but cannot read its " +
                    $"source: its last run{observed} was recorded as a non-fatal skip rather than a failure, " +
-                   $"so {CapturePathOf(collectorName)} is not being stored.{said} Act on that sentence — it " +
-                   "is what the monitored server itself answered, and it distinguishes the states this " +
-                   "one status carries: a grant the login was refused, a source object that does not exist " +
-                   "on this target, and a feature the platform does not implement or has switched off. " +
+                   $"so {CapturePathOf(collectorName)} is not being stored.{said} " +
+                   (forReader ? "" : DegradedClientSentence + " ") +
                    PreconditionEpilogue;
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// <see cref="CollectionOutcomeMessage"/> as a person reading a desktop panel or the web page should see it (#6861, the rule
+    /// #6764 set for <see cref="GatedOffReaderMessage"/>): the same classification, so the panel and the MCP tool decide from the
+    /// same facts, without the closing paragraph that labels itself a runtime PRECONDITION and says the read re-derives on every
+    /// call, and without the DEGRADED answer's <see cref="DegradedClientSentence"/> (#6869), which only an MCP client can use. The web page cuts
+    /// the MCP answer the same way (<c>runtimePreconditionText</c> in plain-text.js). Null where <see cref="CollectionOutcomeMessage"/> is null.
+    /// <see cref="CollectionOutcomeMessage"/> itself is unchanged: it is the MCP answer.
+    /// </summary>
+    public static string? CollectionOutcomeReaderMessage(
+        string serverName,
+        string collectorName,
+        string? status,
+        string? errorMessage,
+        DateTime? observedUtc)
+    {
+        var message = BuildCollectionOutcome(serverName, collectorName, status, errorMessage, observedUtc, forReader: true);
+
+        return message is not null && message.EndsWith(PreconditionEpilogue, StringComparison.Ordinal)
+            ? message[..^PreconditionEpilogue.Length].TrimEnd()
+            : message;
     }
 
     /// <summary>
@@ -464,7 +512,9 @@ public static class CollectorRuntimePrecondition
 
     /// <summary>
     /// #6453: the sentence for a read that found no stored rows while the collector serving it is HEALTHY, or null when it is
-    /// not. Healthy here is the newest <c>collection_log</c> run being <c>SUCCESS</c> with no note: the monitored server
+    /// not. Healthy here is the newest <c>collection_log</c> run being <c>SUCCESS</c> with no note, or a note that is only measurement counts
+    /// (<see cref="CollectorMeasurementNote.IsMeasurementsOnly"/>, #6903: every query_stats run on SQL Server writes
+    /// <c>plans_rendered=0 plans_rendered_bytes=0 plan_fetch_ms=31</c>, a fact about the run and never a reason for zero rows). Counts-only notes are benign except the ring-buffer truncation counts, which mean the read was blind, so those do not qualify: the monitored server
     /// answered and had nothing for the collector, which <c>get_collection_health</c> reports as "every run completed and its
     /// source returned no rows". The caller answers it with <c>empty</c>, a true negative; a read that said <c>unavailable</c>
     /// beside that health verdict sent the reader in a circle. Null for no run, a fault, a denial, a missing session, or a
@@ -487,7 +537,7 @@ public static class CollectorRuntimePrecondition
     {
         if (observedUtc is not DateTime at
             || !string.Equals(status, "SUCCESS", StringComparison.OrdinalIgnoreCase)
-            || !string.IsNullOrWhiteSpace(errorMessage))
+            || (!string.IsNullOrWhiteSpace(errorMessage) && !CollectorMeasurementNote.IsMeasurementsOnly(errorMessage)))
         {
             return null;
         }
@@ -495,7 +545,7 @@ public static class CollectorRuntimePrecondition
         return string.Format(
             CultureInfo.InvariantCulture,
             "No {0} are stored for {1}, and that is a true negative rather than missing data: the {2} collector's newest run "
-            + "({3:yyyy-MM-dd HH:mm:ss} UTC) completed without a fault or a note and its source returned no rows. "
+            + "({3:yyyy-MM-dd HH:mm:ss} UTC) completed without a fault and its source returned no rows. "
             + "get_collection_health shows the run history.",
             what, serverName, collectorName, at);
     }

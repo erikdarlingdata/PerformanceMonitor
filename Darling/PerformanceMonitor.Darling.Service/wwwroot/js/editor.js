@@ -27,7 +27,7 @@
  * never clobbered by a background refresh.
  */
 
-import { el, mount, apiGetFleet, readToolWithinKeptHistory } from "./util.js";
+import { el, mount, apiGetFleet, readToolWithinKeptHistory, storeHash } from "./util.js";
 import { renderPanel, VIZ } from "./panels.js";
 import { orderServers } from "./server-order.js";
 import { SERIES_COLORS, normalizeColor } from "./charts.js";
@@ -440,7 +440,7 @@ function buildEditor(main, ctx) {
   });
   const cancelBtn = el("button", { class: "btn", type: "button", text: "Cancel" });
 
-  const backHash = ctx.editingId != null ? "#/view/" + encodeURIComponent(ctx.editingId) : "#/views";
+  const backHash = storeHash(ctx.editingId != null ? "#/view/" + encodeURIComponent(ctx.editingId) : "#/views");
   cancelBtn.addEventListener("click", () => {
     location.hash = backHash;
   });
@@ -521,7 +521,7 @@ function buildEditor(main, ctx) {
     }
 
     if (res.kind === "data" && res.data) {
-      location.hash = "#/view/" + encodeURIComponent(res.data.id);
+      location.hash = storeHash("#/view/") + encodeURIComponent(res.data.id);
       return;
     }
 
@@ -2292,7 +2292,7 @@ export function labeledBlock(label, node) {
 
 function backHead(id) {
   return el("div", { class: "page-head" }, [
-    el("a", { href: id != null && id !== "new" ? "#/view/" + encodeURIComponent(id) : "#/views", text: "← Back" }),
+    el("a", { href: storeHash(id != null && id !== "new" ? "#/view/" + encodeURIComponent(id) : "#/views"), text: "← Back" }),
     el("h2", { text: "Composer" }),
   ]);
 }

@@ -145,6 +145,54 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,$12,0)",
         });
     }
 
+    /// <summary>
+    /// #6833: the forced-plan list over the field shape (many forces captured every cycle). The order is failing forces first, then the other
+    /// forces of the newest capture, then the removed ones, each by plan id, the first seen of a force is the start of its current run of
+    /// captures, and a cap cuts the last rows of that order and says so.
+    /// </summary>
+    [Fact]
+    public async Task TheListOverManyForcesCapturedEveryCycle_KeepsItsOrderFirstSeenAndCap()
+    {
+        await WithStoreAsync(async (rig, ct) =>
+        {
+            const string db = "FieldDb";
+            const int captures = 24, forces = 40;
+            for (var c = 0; c < captures; c++)
+            {
+                var forced = new List<(long Plan, long Query, long Failures, string? Reason)>();
+                for (long plan = 1; plan <= forces; plan++)
+                {
+                    if (plan is >= 10 and <= 12 && c is >= 5 and <= 8) continue; /* absent for four captures: first seen is capture 9 */
+                    if (plan == 39 && c >= 12) continue; /* in the first twelve captures only: REMOVED */
+                    var failing = plan is 7 or 30;
+                    forced.Add((plan, plan + 100, failing ? 2 : 0, failing ? "GENERAL_FAILURE" : null));
+                }
+
+                await CaptureAsync(rig.Connection, ct, db, T0.AddMinutes(5 * c), forced.ToArray());
+            }
+
+            var read = await DarlingForcedPlanStateReader.ReadAsync(rig.Postgres, ServerId, DatabaseFilter.All, null, T0.AddHours(-1), AsOf, 50, null, 30, null, ct);
+            Assert.False(read.ReadCapped);
+            var expected = new List<long> { 7, 30 };
+            expected.AddRange(Enumerable.Range(1, forces).Select(p => (long)p).Where(p => p is not (7 or 30 or 39)));
+            expected.Add(39);
+            Assert.Equal(expected, read.Plans.Select(p => p.PlanId).ToList());
+            var facts = read.Plans.ToDictionary(p => p.PlanId);
+            Assert.Equal(T0, facts[1].FirstSeen);
+            Assert.Equal(T0.AddMinutes(5 * 9), facts[10].FirstSeen);
+            Assert.Equal(T0.AddMinutes(5 * 9), facts[12].FirstSeen);
+            Assert.Equal(T0.AddMinutes(5 * (captures - 1)), facts[1].LastSeen);
+            Assert.Equal(ForcedPlanState.Failing, facts[7].State);
+            Assert.Equal(ForcedPlanState.Removed, facts[39].State);
+
+            /* A cap of 5 keeps the two failing forces and the first three others, and reads one row past it to know it cut. */
+            var capped = await DarlingForcedPlanStateReader.ReadAsync(rig.Postgres, ServerId, DatabaseFilter.All, null, T0.AddHours(-1), AsOf, 5, null, 30, null, ct);
+            Assert.True(capped.ReadCapped);
+            Assert.Equal(new long[] { 7, 30, 1, 2, 3 }, capped.Plans.Select(p => p.PlanId).ToArray());
+            return 0;
+        });
+    }
+
     [Fact]
     public async Task EachState_IsReadFromItsOwnSeededRows_AndADatabaseReadsItsOwnNewestCapture()
     {

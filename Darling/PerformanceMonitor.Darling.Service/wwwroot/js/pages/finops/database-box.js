@@ -56,9 +56,9 @@ export function newBoxChoice() {
 /**
  * Builds the box. `choice` is the page's per-server state (db is the name the page reads with), `onCommit()` runs after the reader
  * commits a name (choice.db is set), `server` turns on the route reads. Returns { nodes, input, setNames }: `nodes` are the label and
- * the suggestion list to put in the page's controls row.
+ * the suggestion list to put in the page's controls row. `signal` (#6793) is the tab's render signal: leaving the page aborts the names read.
  */
-export function databaseBox(choice, { onCommit, server = null }) {
+export function databaseBox(choice, { onCommit, server = null, signal = undefined }) {
   const listId = "finops-database-box-" + (++listCounter);
   const datalist = el("datalist", { id: listId });
   const input = el("input", { type: "text", list: listId, class: "sort-select", autocomplete: "off", placeholder: "All databases" });
@@ -120,7 +120,7 @@ export function databaseBox(choice, { onCommit, server = null }) {
   }
 
   async function load() {
-    const res = await apiGet("/api/server-databases?server=" + encodeURIComponent(server));
+    const res = await apiGet("/api/server-databases?server=" + encodeURIComponent(server), signal);
     if (res.kind === "data" && res.data && Array.isArray(res.data.databases)) {
       choice.loadFailed = "";
       choice.names = res.data.databases.filter((d) => typeof d === "string");

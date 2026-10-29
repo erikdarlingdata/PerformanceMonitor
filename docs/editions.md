@@ -39,7 +39,7 @@ All editions include real-time alerts (email + webhooks), charts and graphs, Dar
 | Themes | Dark, Light and Cool Breeze, with per-color overrides | Dark, Light and Cool Breeze, with per-color overrides (viewer) | Dark, Light and Cool Breeze |
 | Web dashboard | Not available | Optional, off by default (port 5153) | Not available |
 | Portability | Single executable | Portable service + viewer zip (Windows), service tarball (Linux) | Server-bound |
-| SQL Server collectors | More than 40 (the long-running-query trace is opt-in) | Lite's set, plus a forced-plan collector and a Query Store hint collector | Its own set, installed on the target |
+| SQL Server collectors | More than 40 (the long-running-query trace is opt-in) | Lite's set, plus a forced-plan collector, a Query Store hint collector and an identity column capacity collector | Its own set, installed on the target |
 | PostgreSQL collectors | None | More than 25 | None |
 | Agent investigations (your own AI agent picks up an alert and reports) | Level 1: the agent reads and reports | Level 1 to 3: reports, plus agent-made alert changes and server actions, each behind its own switch | Not available |
 | Agent changes on a monitored server (force or unforce a Query Store plan, evict a cached plan, kill a session) | Not available | Yes, one switch per server and action, all off until you turn them on | Not available |

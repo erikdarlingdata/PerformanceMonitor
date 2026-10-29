@@ -128,10 +128,11 @@ public partial class ServerTab : UserControl
     /// so they all say the same thing about a new server.
     /// </summary>
     internal static (string Text, Visibility Visibility) EngineGapStateFromRuns(
-        string serverName, bool isAzureSqlDatabase, string collectorName, int rowCount, string? skipped, CollectorRunHistory runs)
+        string serverName, bool isAzureSqlDatabase, string collectorName, int rowCount, string? skipped, CollectorRunHistory runs,
+        AwsRdsKind awsRdsKind)
     {
         var noRun = NoRunNote(serverName, collectorName, skipped, runs);
-        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, noRun);
+        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, awsRdsKind, noRun);
     }
 
     /// <summary>
@@ -150,9 +151,10 @@ public partial class ServerTab : UserControl
         bool collectorNeverRan,
         string collectorName,
         int rowCount,
+        AwsRdsKind awsRdsKind,
         string? neverRanNote = null)
     {
-        var text = EngineGapNote(serverName, isAzureSqlDatabase, collectorName)
+        var text = EngineGapNote(serverName, isAzureSqlDatabase, collectorName, awsRdsKind)
             ?? (collectorNeverRan ? neverRanNote ?? NeverCollectedNote(serverName, collectorName) : null);
 
         return text is not null && rowCount == 0 ? (text, Visibility.Visible) : ("", Visibility.Collapsed);
@@ -177,11 +179,97 @@ public partial class ServerTab : UserControl
         }
 
         _skippedNotes.TryGetValue(collectorName, out var skipped);
-        var gap = EngineGapStateFromRuns(_server.DisplayName, _isAzureSqlDatabase, collectorName, rowCount, skipped, _collectorRuns);
+        var gap = EngineGapStateFromRuns(_server.DisplayName, _isAzureSqlDatabase, collectorName, rowCount, skipped, _collectorRuns, _awsRdsKind);
         var gapShows = gap.Visibility == Visibility.Visible;
 
         message.Text = gapShows ? gap.Text : ownText;
         message.Visibility = gapShows || (keepsOwnEmptyText && rowCount == 0) ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// The note a chart shows when its collector's latest run recorded a named skip such as PERMISSIONS, or when the collector
+    /// has no run, and the window has no rows (#6861). The named skip's sentence is
+    /// <see cref="CollectorRuntimePrecondition.CollectionOutcomeReaderMessage"/>: the MCP tools' <c>precondition</c> answer worded
+    /// for a reader, without its closing paragraph for an MCP client, which the Darling viewer and the web page show too. A
+    /// collector with no run takes the same sentences as <see cref="NoRunNote"/>: the shared "not run yet" sentence inside the
+    /// first-run grace, then <see cref="NeverCollectedNote"/>, and only on a server that has collected something. The engine note
+    /// wins, as it does in <see cref="EngineGapState"/>, and a collector with a latest run has run, so a named skip displaces the
+    /// no-run sentences. With rows, or for any other status, the note stays hidden and the chart looks as it always did.
+    /// </summary>
+    internal static (string Text, Visibility Visibility) CollectorOutcomeState(
+        string serverName, bool isAzureSqlDatabase, string collectorName, int rowCount,
+        string? status, string? errorMessage, DateTime? observedUtc,
+        DateTime? collectorLastRunUtc, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc)
+    {
+        string? noRun = null;
+
+        if (CollectorRuntimePrecondition.IsNamedSkip(status))
+        {
+            noRun = CollectorRuntimePrecondition.CollectionOutcomeReaderMessage(serverName, collectorName, status, errorMessage, observedUtc);
+        }
+        else if (collectorLastRunUtc is null && serverLastCollectedUtc is not null)
+        {
+            noRun = CollectorRuntimePrecondition.NotYetRunMessage(serverName, collectorName, serverLastCollectedUtc, serverFirstCollectedUtc)
+                ?? NeverCollectedNote(serverName, collectorName);
+        }
+
+        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, awsRdsKind: AwsRdsKind.None, noRun);
+    }
+
+    /// <summary>
+    /// What the tempdb file latency chart's note shows (#6861): the Azure SQL Database sentence from
+    /// <see cref="CollectorEngineCapability.TempDbFileIoNotCollectedMessage"/> while the chart has no points, and nothing on any
+    /// other engine or once points exist. The Darling viewer shows the same sentence.
+    /// </summary>
+    internal static (string Text, Visibility Visibility) TempDbFileIoGapState(string serverName, bool isAzureSqlDatabase, int pointCount)
+    {
+        var note = CollectorEngineCapability.TempDbFileIoNotCollectedMessage(
+            serverName,
+            isAzureSqlDatabase ? CollectorEngineCapability.AzureSqlDatabaseEngineEdition : CollectorEngineCapability.UnknownEngineEdition);
+
+        return (note ?? "", note is not null && pointCount == 0 ? Visibility.Visible : Visibility.Collapsed);
+    }
+
+    /// <summary>
+    /// Fills the tempdb tab's note (#6861). It reads the collector's last run and then its latest tempdb_stats run only when the
+    /// window has no tempdb rows and the engine does not rule the collector out. A collector with no run has no status to read.
+    /// A failed read leaves no note.
+    /// </summary>
+    private async System.Threading.Tasks.Task ShowTempDbOutcomeAsync(int rowCount)
+    {
+        string? status = null;
+        string? errorMessage = null;
+        DateTime? observedUtc = null;
+        DateTime? collectorLastRunUtc = null;
+        DateTime? serverLastCollectedUtc = null;
+        DateTime? serverFirstCollectedUtc = null;
+
+        if (rowCount == 0 && EngineGapNote(_server.DisplayName, _isAzureSqlDatabase, "tempdb_stats", awsRdsKind: AwsRdsKind.None) is null)
+        {
+            try
+            {
+                (collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc) =
+                    await System.Threading.Tasks.Task.Run(() => _dataService.GetCollectorLastRunAsync(_serverId, "tempdb_stats"));
+
+                if (collectorLastRunUtc is not null)
+                {
+                    (status, errorMessage, observedUtc) =
+                        await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestCollectorOutcomeAsync(_serverId, "tempdb_stats"));
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Info("ServerTab", $"[{_server.DisplayName}] tempdb_stats outcome read failed: {ex.Message}");
+                status = null;
+                collectorLastRunUtc = serverLastCollectedUtc = serverFirstCollectedUtc = null;
+            }
+        }
+
+        var (text, visibility) = CollectorOutcomeState(
+            _server.DisplayName, _isAzureSqlDatabase, "tempdb_stats", rowCount, status, errorMessage, observedUtc,
+            collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
+        TempDbNoDataMessage.Text = text;
+        TempDbNoDataMessage.Visibility = visibility;
     }
 
     /// <summary>
@@ -196,12 +284,29 @@ public partial class ServerTab : UserControl
     /// msdb access and the running_jobs collector can run here. On an Azure SQL Database or an AWS RDS instance the
     /// collector does not run at all, so no grant could help, and the not-collected note is all the tab says.
     /// </summary>
-    internal static Visibility RunningJobsMsdbWarningVisibility(bool hasMsdbAccess, bool isAzureSqlDatabase, bool isAwsRds)
+    internal static Visibility RunningJobsMsdbWarningVisibility(bool hasMsdbAccess, bool isAzureSqlDatabase, AwsRdsKind awsRdsKind)
     {
         var edition = isAzureSqlDatabase ? CollectorEngineCapability.AzureSqlDatabaseEngineEdition : CollectorEngineCapability.UnknownEngineEdition;
 
-        return !hasMsdbAccess && !isAwsRds && CollectorEngineCapability.IsCollectedOnEngineEdition("running_jobs", edition)
+        return !hasMsdbAccess && awsRdsKind == AwsRdsKind.None && CollectorEngineCapability.IsCollectedOnEngineEdition("running_jobs", edition)
             ? Visibility.Visible
             : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// #6912: marks the rows of the collectors this server's engine does not run, so the Status column reads <c>not_collected</c> and the
+    /// Note column carries the engine's sentence, as <c>get_collection_health</c> lists them
+    /// (<see cref="PerformanceMonitorLite.Mcp.McpEngineCapability.SplitCollectionHealthByEngine"/>, the same <see cref="CollectorEngineCapability.NotCollectedMessage"/> gate).
+    /// What such a collector logged before the gate existed (an Amazon RDS Web or Express server's SESSION_MISSING runs for <c>attention</c>)
+    /// stays in the window and bands FAILING, and a collector that does not run can never replace it. An engine not read yet makes no claim.
+    /// </summary>
+    internal static void ApplyEngineGate(List<CollectorHealthRow> health, string serverName, int engineEdition, AwsRdsKind awsRdsKind)
+    {
+        foreach (var row in health)
+        {
+            var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, row.CollectorName, awsRdsKind);
+            row.EngineGated = message is not null;
+            row.EngineNotCollectedMessage = message;
+        }
     }
 }

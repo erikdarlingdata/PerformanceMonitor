@@ -51,6 +51,9 @@ if ($Mode -eq 'Env') {
         DARLING_TEST_PG_LOGROTATE           = & $c 5546
         DARLING_TEST_PG_LOGROTATE_CSV       = & $c 5547
         DARLING_TEST_PG_LOGROTATE_JSON      = & $c 5548
+        # #6866: log_timezone is a named local zone (5549 Europe/Berlin on stderr, 5550 America/Los_Angeles on csvlog).
+        DARLING_TEST_PG_LOGZONE_BERLIN      = & $c 5549
+        DARLING_TEST_PG_LOGZONE_LA          = & $c 5550
     }
     foreach ($k in $vars.Keys) { Write-Output "$k=$($vars[$k])" }
     exit 0
@@ -74,7 +77,7 @@ if ($Mode -eq 'Stop') {
     if (Test-Path (Join-Path $bin 'pg_ctl.exe')) {
         foreach ($name in 'darling-pgdata', 'darling-pgdata-csvlog', 'darling-pgdata-jsonlog', 'darling-pgdata-stderrcsvlog',
                           'darling-pgdata-logtarget', 'darling-pgdata-rotate-stderr', 'darling-pgdata-rotate-csvlog',
-                          'darling-pgdata-rotate-jsonlog') {
+                          'darling-pgdata-rotate-jsonlog', 'darling-pgdata-logzone-berlin', 'darling-pgdata-logzone-la') {
             $dataDir = Join-Path $TempDir $name
             if (Test-Path $dataDir) { & (Join-Path $bin 'pg_ctl.exe') -D $dataDir -m fast -w stop }
         }
@@ -116,6 +119,8 @@ if ($LASTEXITCODE -ne 0) { throw "createdb failed ($LASTEXITCODE)" }
 #     of each family (error, connection, lock_wait) in its log before the tests read it.
 #   5546 stderr, 5547 csvlog, 5548 jsonlog: the #4699 log-rotation pins. They call pg_rotate_logfile(), so each gets its
 #     own cluster: a rotation on 5542/5543/5545 would move the file under the other log classes reading them (#4702).
+#   5549 stderr in Europe/Berlin, 5550 csvlog in America/Los_Angeles: PgLogNamedZoneLiveTests (#6866), a log written in a
+#     named local zone, whose lines Darling has to store at the true UTC instant.
 # clusterDataDir, not dataDir: CiClusterWorkerSizingTests' ConfAppend regex is keyed on the literal path
 # "$dataDir\postgresql.conf" the 5541 cluster's block writes, and these clusters' own worker counts (8/16, not the
 # hypertable-derived 74/85) would fail that guard as drift if this function reused the same variable name.
@@ -179,6 +184,16 @@ Start-LogFormatCluster (Get-TempPath 'darling-pgdata-rotate-jsonlog') (Get-TempP
     "log_destination = 'jsonlog'",
     "log_timezone = 'UTC'",
     "log_lock_waits = on"
+)
+Start-LogFormatCluster (Get-TempPath 'darling-pgdata-logzone-berlin') (Get-TempPath 'darling-pg-logzone-berlin.log') 5549 @(
+    "logging_collector = on",
+    "log_destination = 'stderr'",
+    "log_timezone = 'Europe/Berlin'"
+)
+Start-LogFormatCluster (Get-TempPath 'darling-pgdata-logzone-la') (Get-TempPath 'darling-pg-logzone-la.log') 5550 @(
+    "logging_collector = on",
+    "log_destination = 'csvlog'",
+    "log_timezone = 'America/Los_Angeles'"
 )
 
 # The workload the first 5545 test's doc comment promises: one real event of each family (error, connection, lock_wait)

@@ -10,6 +10,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
 using System.Text.Json;
+using PerformanceMonitor.Common;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -26,6 +27,7 @@ public sealed class QueryTagUsageBehaviourTests
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "query-tag-usage-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
+        psi.Environment["HARNESS_CUT_WINDOW_MESSAGE"] = McpHelpers.CutWindowNothingMessage;
         Process proc;
         try
         {
@@ -92,11 +94,88 @@ public sealed class QueryTagUsageBehaviourTests
     }
 
     [Fact]
+    public void AnHourlyFleetSection_ShowsTheReadsEdgesNote_AndARawSectionShowsNone()
+    {
+        // #6794: the hourly rollup leaves out the hours past its ceiling, so the page says so beside the heading.
+        var run = Run();
+        var hourly = string.Join(" ", run.GetProperty("fleetHourlyNote").EnumerateArray().Select(n => n.GetString()));
+        Assert.Contains("Hourly data from ", hourly);
+        Assert.Contains("The 10 minutes before the first full hour are not included.", hourly);
+        Assert.Contains("The hourly rollup is built only up to ", hourly);
+        Assert.Empty(run.GetProperty("rawMutedNotes").EnumerateArray());
+        // #6800: the Query Store section of a routed fleet read carries the same kind of note, and the page shows it as it does the plan cache's.
+        var queryStore = string.Join(" ", run.GetProperty("fleetQueryStoreNote").EnumerateArray().Select(n => n.GetString()));
+        Assert.Contains("Daily and hourly data, with the raw intervals for the edges, from ", queryStore);
+        Assert.Contains("The 43 minutes before the first full hour are not included.", queryStore);
+    }
+
+    [Fact]
+    public void TheEmptyRegressionsPanel_NamesTheTimeTheStoresDataStarts_NotTheFieldAndThePointerToHints()
+    {
+        // #6831: "starts at effective_start (see hints)" sent a reader to a field the page never shows.
+        var run = Run();
+        Assert.Equal("empty", run.GetProperty("regressionsEmptyKind").GetString());
+        var message = run.GetProperty("regressionsEmptyMessage").GetString()!;
+        Assert.StartsWith("Nothing in the part of the window the store covers; the store's data for this read starts at ", message);
+        Assert.Contains("2026", message);
+        Assert.EndsWith(", so the stretch before it is not a report that nothing happened.", message);
+        foreach (var pattern in new[] { @"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", "effective_start", @"\(see hints\)", @"collect\." })
+        {
+            Assert.DoesNotMatch(pattern, message);
+        }
+    }
+
+    [Fact]
+    public void TheEdgeNotes_AreWordedFromFields_NotRawStampsOrRelationNames()
+    {
+        // #6831: the page's own words for every edge case, and none of the MCP text's raw UTC stamps, field names or relation names.
+        var run = Run();
+        var edges = run.GetProperty("edgeCases").EnumerateArray().Select(n => n.ValueKind == JsonValueKind.Null ? null : n.GetString()).ToArray();
+        Assert.Contains("The 1 minute before the first full hour is not included.", edges[0]);
+        Assert.Contains("The last hour is counted whole, so the data runs to ", edges[0]);
+        Assert.Contains("How far the hourly rollup is built is not known", edges[1]);
+        Assert.Null(edges[2]);
+        Assert.Contains("Less than a minute before the first full hour is not included.", edges[3]);
+        Assert.DoesNotContain("under a minute", edges[3]);
+        // The first bucket came 5.5 hours after the window start: the missing span is named, never "the 330 minutes before the first full hour".
+        Assert.StartsWith("Hourly data from ", edges[4]);
+        Assert.Contains(" is not included.", edges[4]);
+        Assert.Contains("The data from ", edges[4]);
+        Assert.DoesNotContain("before the first full hour", edges[4]);
+        var sources = run.GetProperty("sources").EnumerateArray().Select(n => n.GetString()).ToArray();
+        Assert.Equal(["raw collections", "hourly rollup", "Query Store intervals", "hourly Query Store table, raw intervals for the edges", "dmv blocking snapshots"], sources);
+
+        var page = run.GetProperty("fleetPageText").GetString()!;
+        foreach (var pattern in new[] { @"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", "effective_start", @"\(see hints\)", @"collect\." })
+        {
+            Assert.DoesNotMatch(pattern, page);
+        }
+    }
+
+    [Fact]
     public void TheFleetSections_NameEachServerByDisplayName_AndKeepTheKeyWhenThereIsNone()
     {
         // #6157: the read names a server by its connection key; the heading is the display name list_servers gives it.
         var headings = Run().GetProperty("fleetHeadings").EnumerateArray().Select(h => h.GetString()).ToArray();
         Assert.Equal(new[] { "Server A", "b" }, headings);
+    }
+
+    [Fact]
+    public void TheQueryStoreCard_InTheBacklogState_DrawsTheGapAndTheBacklogAsTwoNumbers_AndWithoutBacklogDrawsNothing()
+    {
+        // #6865: the section starts after the newest hour still waiting for the hourly builder. The gap (hours_left_out) and the backlog hours inside it
+        // (backlog_hours_waiting) are different numbers, and the page words them as the MCP and Viewer notes do (QueryTagRollupHashRoute.BacklogNote).
+        var run = Run();
+        var start = run.GetProperty("backlogStart").GetString()!;
+        Assert.False(string.IsNullOrWhiteSpace(start));
+        var drawn = run.GetProperty("backlogNotes").EnumerateArray().Select(n => n.GetString()).ToArray();
+        Assert.Equal([PerformanceMonitor.Darling.Storage.QueryTagRollupHashRoute.BacklogNote(start, 8, 4)], drawn);
+        Assert.Contains("leaves out the first 8 hours of the window, because 4 hours in that part are still being built", drawn[0]);
+        var one = run.GetProperty("backlogOneNotes").EnumerateArray().Select(n => n.GetString()).ToArray();
+        Assert.Equal([PerformanceMonitor.Darling.Storage.QueryTagRollupHashRoute.BacklogNote(start, 1, 1)], one);
+        Assert.Contains("the first 1 hour of the window, because 1 hour in that part is still being built", one[0]);
+        Assert.Empty(run.GetProperty("noBacklogNotes").EnumerateArray());
+        Assert.Empty(run.GetProperty("zeroBacklogNotes").EnumerateArray());
     }
 
     [Fact]
@@ -142,5 +221,32 @@ public sealed class QueryTagUsageBehaviourTests
         var byText = first.EnumerateArray().ToDictionary(r => r.GetProperty("text").GetString()!.Contains("select 2") ? "none" : r.GetProperty("text").GetString()!.Contains("select 1") ? "web" : "batch");
         Assert.Equal(0, byText["none"].GetProperty("pills").GetArrayLength());
         Assert.Equal("Prod / Web", byText["web"].GetProperty("pills")[0].GetString());
+    }
+
+    private static string[] StripClasses(JsonElement strips) =>
+        strips.EnumerateArray().Select(s => s.GetProperty("cls").GetString()!).ToArray();
+
+    /// <summary>#6800: the fleet read can be refused busy (429, Retry-After) once its learned p90 makes it a long read. The page shows a
+    /// notice, not an error, while it waits, sends the read once more after the Retry-After, and draws the answer.</summary>
+    [Fact]
+    public void ARefusedBusyRead_ShowsANoticeNotAnError_AndIsSentOnceMoreAfterTheRetryAfter()
+    {
+        var busy = Run().GetProperty("busyOnce");
+        Assert.Equal(1, busy.GetProperty("readsBefore").GetInt32());
+        Assert.Contains("strip notice", StripClasses(busy.GetProperty("stripsBefore")));
+        Assert.DoesNotContain("strip error", StripClasses(busy.GetProperty("stripsBefore")));
+        Assert.Equal(2, busy.GetProperty("readsAfter").GetInt32());
+        Assert.True(busy.GetProperty("planCardAfter").GetBoolean());
+        Assert.DoesNotContain("strip error", StripClasses(busy.GetProperty("stripsAfter")));
+    }
+
+    /// <summary>#6800: a second refusal is shown as the error it is, and the page does not ask a third time.</summary>
+    [Fact]
+    public void ASecondBusyRefusal_IsShownAsAnError_AndNotRetriedAgain()
+    {
+        var busy = Run().GetProperty("busyTwice");
+        Assert.Equal(2, busy.GetProperty("readsAfter").GetInt32());
+        Assert.Contains("strip error", StripClasses(busy.GetProperty("stripsAfter")));
+        Assert.False(busy.GetProperty("planCardAfter").GetBoolean());
     }
 }

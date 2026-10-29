@@ -64,7 +64,9 @@ public sealed class DarlingMcpJobTools
                        remove, surviving in the one case that records nothing to read.
 
                        The gate is !IsAzureSqlDb && !IsAwsRds. The engine half is already answered above,
-                       so AWS RDS is the only remaining candidate (#2559 removed HasMsdbAccess from this gate).
+                       so AWS RDS is the only remaining candidate (#2559 removed HasMsdbAccess from this gate). Since #6894 the registry records the RDS fact on
+                       every connect and the capability read above answers not_collected for it, so this route is reached only by a server no
+                       connect has stamped yet (or a read that failed).
                        The message still names it as a possible cause: a run that is merely late looks the same
                        from here. The text is shared with Lite, so the two tools cannot drift. */
                     ?? await DarlingRuntimePrecondition.GatedOffStatusAsync(
@@ -139,14 +141,16 @@ public sealed class DarlingMcpJobTools
         {
             /* Fleet-wide when no server is named: the resolver would auto-pick or refuse, and neither is the
                answer to "every server". A named server resolves through the registry as everywhere else. */
-            (int ServerId, string ServerName)? scope = null;
+            (int ServerId, string DisplayName)? scope = null;
+            /* #6860: the registry is read in both forms: the one rule for the name an answer shows (AnswerNameOf, #6179) names every row. */
+            var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
+            if (fault != null) return fault;
             if (!string.IsNullOrWhiteSpace(server_name))
             {
-                var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
-                if (fault != null) return fault;
-                var (resolved, error) = DarlingServerResolver.ResolveOrError(servers, server_name);
+                /* #6860: the answer names the server by its display name (#6179), not the registry connection key. */
+                var (resolved, error) = DarlingServerResolver.ResolveOrErrorForAnswer(servers, server_name);
                 if (error != null) return error;
-                scope = resolved;
+                scope = (resolved.ServerId, resolved.DisplayName);
             }
 
             var filter = new JobHistoryFilter(
@@ -160,7 +164,31 @@ public sealed class DarlingMcpJobTools
             var fetched = await DarlingJobHistoryReader.GetAsync(
                 postgres, requestedStart, scope?.ServerId, limit + 1, McpCommandDeadlines.ReadSeconds, filter, cancellationToken);
             var truncated = fetched.Count > limit;
-            var rows = fetched.Take(limit).ToList();
+            /* The reader's SQL label is the Viewer's column: COALESCE(display_name, collected name) over every registered server, enabled
+               or not. The answer must not take it. A row of an enabled server answers AnswerNameOf (the clash check is over the enabled
+               registry). Every other row (a disabled server, a removed one, or one with no servers row) answers its connection key,
+               servers.server_name when a servers row exists, else the collected name, and never a display name: a disabled server that
+               still carries a display name an enabled server also carries would otherwise show two servers under one name. */
+            var answerNames = servers.ToDictionary(x => x.ServerId, x => DarlingServerResolver.AnswerNameOf(servers, x));
+            var shown = fetched.Take(limit).ToList();
+            var otherIds = shown.Select(r => r.ServerId).Where(id => !answerNames.ContainsKey(id)).Distinct().ToArray();
+            var keys = new Dictionary<int, string>();
+            if (otherIds.Length > 0)
+            {
+                await using var keyCommand = postgres.CreateCommand("SELECT server_id, server_name FROM servers WHERE server_id = ANY($1)");
+                keyCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                keyCommand.Parameters.AddWithValue(otherIds);
+                await using var keyReader = await keyCommand.ExecuteReaderAsync(cancellationToken);
+                while (await keyReader.ReadAsync(cancellationToken))
+                {
+                    keys[keyReader.GetInt32(0)] = keyReader.GetString(1);
+                }
+            }
+
+            var rows = shown
+                .Select(r => answerNames.TryGetValue(r.ServerId, out var named) ? r with { ServerName = named }
+                    : keys.TryGetValue(r.ServerId, out var key) ? r with { ServerName = key } : r)
+                .ToList();
 
             var source = DataWindowFloor.Source.ForCollectorTable("job_history");
             var floor = scope is { } one
@@ -177,7 +205,7 @@ public sealed class DarlingMcpJobTools
             {
                 if (scope is { } s1)
                 {
-                    var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, s1.ServerId, s1.ServerName, "job_history", cancellationToken);
+                    var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, s1.ServerId, s1.DisplayName, "job_history", cancellationToken);
                     if (notCollected != null) return notCollected;
                 }
                 else
@@ -192,7 +220,7 @@ public sealed class DarlingMcpJobTools
                 var emptyHints = new Dictionary<string, object?>();
                 emptyHints["effective_start"] = McpHelpers.FormatEffectiveStart(effectiveStart);
                 emptyHints["window_truncated"] = windowTruncated;
-                AddAgentState(emptyHints, scope, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));
+                AddAgentState(emptyHints, scope, answerNames, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));
                 return McpHelpers.Status("empty", "No job runs matched in the requested time range.", emptyHints);
             }
 
@@ -213,13 +241,13 @@ public sealed class DarlingMcpJobTools
             }).ToList();
 
             var envelope = new Dictionary<string, object?>();
-            envelope["server"] = scope?.ServerName;
+            envelope["server"] = scope?.DisplayName;
             envelope["hours_back"] = hours_back;
             envelope["effective_start"] = McpHelpers.FormatEffectiveStart(effectiveStart);
             envelope["window_truncated"] = windowTruncated;
             envelope["shown"] = runs.Count;
             envelope["truncated"] = truncated;
-            AddAgentState(envelope, scope, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));
+            AddAgentState(envelope, scope, answerNames, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));
             envelope["runs"] = runs;
             return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
         }
@@ -258,7 +286,8 @@ public sealed class DarlingMcpJobTools
     /// as one whose snapshot is stale at that instant. A null <paramref name="states"/> (the read failed) adds nothing.
     /// </summary>
     private static void AddAgentState(
-        Dictionary<string, object?> envelope, (int ServerId, string ServerName)? scope, List<DarlingJobReader.AgentState>? states)
+        Dictionary<string, object?> envelope, (int ServerId, string DisplayName)? scope,
+        IReadOnlyDictionary<int, string> answerNames, List<DarlingJobReader.AgentState>? states)
     {
         if (states is null) return;
         if (scope is null)
@@ -267,22 +296,25 @@ public sealed class DarlingMcpJobTools
                a few bytes however many servers it has, and a stopped or unknown Agent is named. */
             envelope["agents_total"] = states.Count;
             envelope["agents_running"] = states.Count(a => a.AgentRunning == true);
-            envelope["agents_not_running"] = states.Where(a => a.AgentRunning != true).Select(a => AgentFields(a)).ToList();
+            envelope["agents_not_running"] = states.Where(a => a.AgentRunning != true).Select(a => AgentFields(a, answerNames)).ToList();
             return;
         }
 
         var one = states.Count > 0
             ? states[0]
-            : new DarlingJobReader.AgentState(scope.Value.ServerName, null, DarlingJobReader.AgentUnknownDescription, null, default);
+            : new DarlingJobReader.AgentState(scope.Value.DisplayName, null, DarlingJobReader.AgentUnknownDescription, null, default);
         envelope["agent_running"] = one.AgentRunning;
         envelope["agent_status_desc"] = one.AgentStatusDesc;
         envelope["next_run"] = McpHelpers.FormatEffectiveStart(one.NextRunUtc);
         envelope["captured_at"] = states.Count > 0 ? McpHelpers.FormatEffectiveStart(one.CapturedAtUtc) : null;
     }
 
-    private static Dictionary<string, object?> AgentFields(DarlingJobReader.AgentState a) => new()
+    /* #6860: the server is named by the same answer-name rule as runs[] (answerNames, built from AnswerNameOf over the enabled
+       registry, which is the population the Agent read covers), so one payload names a server one way and the name resolves
+       back as server_name. The reader's SQL label is the fallback for a state with no id. */
+    private static Dictionary<string, object?> AgentFields(DarlingJobReader.AgentState a, IReadOnlyDictionary<int, string> answerNames) => new()
     {
-        ["server"] = a.Server,
+        ["server"] = answerNames.GetValueOrDefault(a.ServerId, a.Server),
         ["agent_running"] = a.AgentRunning,
         ["agent_status_desc"] = a.AgentStatusDesc,
         ["captured_at"] = McpHelpers.FormatEffectiveStart(a.CapturedAtUtc)

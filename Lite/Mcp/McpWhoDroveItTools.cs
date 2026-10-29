@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Collectors;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -71,7 +72,7 @@ public sealed class McpWhoDroveItTools
 
             if (page.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("empty",
                         $"No statement CPU for {resolved.DisplayName} in the last {hours_back} hour(s): the plan cache collector wrote no interval with executions in the window. "
                         + "Procedure stats are not a substitute, because they count the same work.",
@@ -184,7 +185,7 @@ public sealed class McpWhoDroveItTools
 
             if (page.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_snapshots")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_snapshots", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("empty",
                         $"No active-query snapshots for {resolved.DisplayName} in the last {hours_back} hour(s): nothing was running at a capture, or the collector did not run in the window.",
                         notice.AsHints());
@@ -285,7 +286,7 @@ public sealed class McpWhoDroveItTools
 
             if (page.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_snapshots")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_snapshots", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("empty",
                         $"No capture in the last {hours_back} hour(s) on {resolved.DisplayName} had {min_sessions} or more sessions running the same query_hash. "
                         + "A pile-up between two captures is not seen; a lower min_sessions or a longer window may find one.",
@@ -293,7 +294,7 @@ public sealed class McpWhoDroveItTools
             }
 
             /* The head blocker of each pile-up, from the DMV blocking snapshot nearest its time. */
-            var blockingGate = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "dmv_blocking_snapshot");
+            var blockingGate = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "dmv_blocking_snapshot", awsRdsKind: AwsRdsKind.None);
             Dictionary<DateTime, DateTime> nearest = [];
             var pairsBySnapshot = new Dictionary<DateTime, List<LocalDataService.BlockingPair>>();
             if (blockingGate is null)

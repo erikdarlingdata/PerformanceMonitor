@@ -12,6 +12,10 @@ This section moved to [MCP server](../mcp-server.md#darling).
 
 This section moved to [MCP server](../mcp-server.md#darling).
 
+## Fronting several stores
+
+One service can sit in front of several stores. It adds a `store` argument to every tool. See [The front door](front-door.md) and [How MCP calls route](front-door.md#how-mcp-calls-route).
+
 ## Connect from another machine
 
 This section moved to [MCP server](../mcp-server.md#mcp-network-access-darling).

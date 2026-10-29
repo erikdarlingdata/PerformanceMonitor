@@ -82,7 +82,8 @@ public sealed class QueryStoreRegressionsBudgetTests : IClassFixture<SharedDuckD
         {
             var queryId = 1000 + i;
             await SeedAsync(baseNow.AddHours(-40), executions: 50, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 2 * i + 1, queryId: queryId, text: "SELECT 1");
-            await SeedAsync(baseNow.AddMinutes(-30), executions: 200, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 2 * i + 2, queryId: queryId, text: queryText);
+            /* #6781: enough recent runs that the rise adds at least 1 s of CPU (QueryStoreRegressionRules.CostMinAddedCpuMs). */
+            await SeedAsync(baseNow.AddMinutes(-30), executions: 500, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 2 * i + 2, queryId: queryId, text: queryText);
         }
 
         var defaultJson = await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName);

@@ -269,7 +269,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$2,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
                     foreach (var (at, executions, avg, interval, text) in new[]
                     {
                         (now.AddHours(-40), 50L, 1000L, 2L * i + 1, "SELECT 1"),
-                        (now.AddMinutes(-30), 200L, 4000L, 2L * i + 2, texts[i].Text),
+                        /* #6781: 500 recent runs, so the 3 ms rise adds at least 1 s of CPU (QueryStoreRegressionRules.CostMinAddedCpuMs). */
+                        (now.AddMinutes(-30), 500L, 4000L, 2L * i + 2, texts[i].Text),
                     })
                     {
                         await DarlingMcpTestData.ExecAsync(connection, ct, @"

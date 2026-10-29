@@ -564,15 +564,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 /* #5506 part 3: a heavy cacheable read is answered from the read cache, joins an identical read running now,
                    or runs once and is stored (the text before the statement sweep, which ToHttpResult runs on every answer).
                    The key is the query string as sent, before the read below adds its own as_of. A hit skips admission. */
-                if (readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand))
+                /* #6800: a whole-fleet read of get_resource_use_by_tag (no server) over a window of 24 hours or more is cached for its own TTL. */
+                var fleetRead = ReadAdmission.IsFleetRead(name, Server(context), WebWindowHours(name, key => First(context, key)));
+                if (readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand, fleetRead))
                 {
                     var cache = admission.Cache;
-                    var ttl = ReadResultCache.TtlOf(admissionBand);
+                    var ttl = ReadResultCache.TtlFor(name, admissionBand, fleetRead);
                     /* Round 2, L4: each value of a repeated name is passed apart (StringValues.ToString() joins them with a comma,
                        which ?database=x%2Cy also gives); the key escapes every name and value. */
                     var key = ReadCacheKey.ForWeb(name,
                         context.Request.Query.SelectMany(q => q.Value.Select(v => new KeyValuePair<string, string?>(q.Key, v))),
-                        cache.Generation, cache, ttl);
+                        cache.Generation, cache, ttl, heldFromStore: ReadAdmission.FleetTtlApplies(name, fleetRead));
                     if (cache.TryGet(key, out var stored))
                     {
                         /* Round 2, L3: a hit runs no read, so it does not count as one in flight. */
@@ -656,6 +658,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     }
 
                     stopwatch.Restart();
+
+                    /* #6795: a read the browser abandoned is still a read that held the store. It is recorded as one cancelled
+                       read_latency sample, the way the MCP filter's cancelled arm does, so get_read_latency and get_slow_reads
+                       agree about it. Over the slow-read threshold it is also offered, with its route, the time it ran and the
+                       statements it had run, as cancelled; under the threshold the log declines it. Both happen here, before the
+                       rethrow the #4276 backstop needs, because that rethrow is the end of this read. */
+                    void RecordAndOfferCancelledWebRead()
+                    {
+                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.Cancelled, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
+                        OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, ReadOutcome.Cancelled, stopwatch.ElapsedMilliseconds, context, null);
+                    }
+
                     try
                     {
                         /* A newest-first capped read is judged against the window it read: with no anchor sent, the end is
@@ -686,12 +700,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                         /* #4276: the browser left. Not a failure — no log line, and rethrown so the #4276
                            top-of-pipeline backstop (which already owns this exact classification) sees the same
                            exception rather than this catch turning it into a written body for a caller who is gone. */
+                        RecordAndOfferCancelledWebRead();
                         throw;
                     }
                     catch (Exception ex)
                     {
                         /* #5678: the browser left and the store's connect timed out before it could raise a cancellation
                            (Npgsql can do that for an already-cancelled token): still the #4276 not-a-failure case. */
+                        if (context.RequestAborted.IsCancellationRequested)
+                        {
+                            RecordAndOfferCancelledWebRead();
+                        }
+
                         context.RequestAborted.ThrowIfCancellationRequested();
 
                         /* #4276/#4283: a binding-layer throw (the tools normally swallow their own into
@@ -5678,7 +5698,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// the default <see cref="CatalogDescriptors"/> declares for that read, else <c>none</c>. Internal so a test can pin a
     /// request that sends no window against the catalog's default.</summary>
     internal static string WebWindowBand(string name, Func<string, string?> sent) =>
-        ReadWindowBand.OrFixed(ReadWindowBand.Of(ReadWindowBand.HoursOf(sent, key => CatalogDefaultText(name, key))), name);
+        ReadWindowBand.OrFixed(ReadWindowBand.Of(WebWindowHours(name, sent)), name);
+
+    /// <summary>The window in hours of web read <paramref name="name"/>: the one the query string sent, else the default the catalog
+    /// row declares (the number <see cref="WebWindowBand"/> bands); null when there is none.</summary>
+    internal static double? WebWindowHours(string name, Func<string, string?> sent) =>
+        ReadWindowBand.HoursOf(sent, key => CatalogDefaultText(name, key));
 
     /// <summary>The default the catalog row of read <paramref name="name"/> declares for parameter <paramref name="key"/>,
     /// as text; null when the read is not in the catalog, does not take that parameter, or declares no default.</summary>
@@ -6131,6 +6156,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_database_config"] = R(CatConfig, "Database-level configuration for a server.", PServer(), PDatabases()),
             ["get_server_config"] = R(CatConfig, "Server-level configuration (sp_configure) for a server.", PServer()),
             ["get_trace_flags"] = R(CatConfig, "Active trace flags for a server.", PServer()),
+            ["get_database_protection"] = R(CatConfig, "Per database, the last good CHECKDB, the last full backup and the last log backup with their ages, and which databases are overdue (full backup 7 days, log backup 60 minutes, CHECKDB 14 days). Azure SQL Database and Managed Instance show the age and are never overdue. RDS shows the backup ages and is never overdue on them, but its CHECKDB is judged.", PServer(), PHours(24), PAsOf(), PBool("overdue_only", false)),
+            ["get_identity_capacity"] = R(CatConfig, "How full each identity column is and how long until it runs out, per scanned database (the fullest columns above 10 percent used).", PServer(), PHours(168), PAsOf(), PDatabases(), PLimit(200)),
             ["get_database_config_changes"] = R(CatConfig, "Database-configuration changes over time.", PServer(), PHours(168), PAsOf(), PDatabases()),
             ["get_database_scoped_config"] = R(CatConfig, "Database-scoped configuration for a database.", PServer(), PDatabases()),
             ["get_query_store_health"] = R(CatConfig, "Per-database Query Store health: actual vs desired state, readonly_reason, storage vs cap, and the two capture modes (query_capture_mode ALL / AUTO / CUSTOM / NONE, wait_stats_capture_mode ON / OFF; null on a pre-rung row or a pre-2017 engine).", PServer(), PDatabases()),
@@ -6265,6 +6292,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── jobs (DarlingMcpJobTools) ── */
             ["get_running_jobs"] = R(CatJobs, "Currently-running SQL Agent jobs.", PServer()),
+            ["get_agent_alerts"] = R(CatJobs, "The SQL Server Agent alerts defined on an instance, and the gaps in them (no alert for severities 19 to 25 or errors 823 to 825, an alert that notifies no one, a disabled alert, an alert that fired and told no one).", PServer(), PHours(24), PAsOf()),
             ["get_job_history"] = R(CatJobs, "Retained SQL Agent job runs, newest first; omit server for every server.", PServer(), PHours(24), PText("job_name"), PText("status"), PText("category"), PLimit(100), PInt("min_duration_seconds"), PAsOf()),
 
             /* ── stored plan XML (DarlingMcpPlanTools; the analyze_*_plan compute family stays excluded) ── */
@@ -7166,6 +7194,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : DatabaseNamesRefusal(c),
             ["get_server_config"] = (c, pg, an) => DarlingMcpConfigTools.GetServerConfig(pg, Server(c), c.RequestAborted),
             ["get_trace_flags"] = (c, pg, an) => DarlingMcpConfigTools.GetTraceFlags(pg, Server(c), c.RequestAborted),
+            ["get_database_protection"] = (c, pg, an) => DarlingMcpDatabaseProtectionTools.GetDatabaseProtection(pg, Server(c), Hours(c, 24), AsOf(c), QueryBool(c, "overdue_only", false), c.RequestAborted),
+            ["get_identity_capacity"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpIdentityCapacityTools.GetIdentityCapacity(pg, Server(c), Hours(c, DarlingMcpIdentityCapacityTools.DefaultHoursBack), AsOf(c), databases, Rows(c, "limit", DarlingMcpIdentityCapacityTools.MaxListed), c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_database_config_changes"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpConfigHistoryTools.GetDatabaseConfigChanges(pg, Server(c), Hours(c, 168), databases, AsOf(c), null, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
@@ -7439,6 +7471,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── jobs ── */
             ["get_running_jobs"] = (c, pg, an) => DarlingMcpJobTools.GetRunningJobs(pg, Server(c), c.RequestAborted),
+            ["get_agent_alerts"] = (c, pg, an) => DarlingMcpAgentAlertTools.GetAgentAlerts(pg, Server(c), Hours(c, 24), AsOf(c), c.RequestAborted),
             ["get_job_history"] = (c, pg, an) => OptionalInt(c, "min_duration_seconds", out var minDurationSeconds)
                 ? DarlingMcpJobTools.GetJobHistory(pg, Server(c), Hours(c, 24), Str(c, "job_name"), Str(c, "status"), Str(c, "category"), Rows(c, "limit", 100), as_of: AsOf(c), min_duration_seconds: minDurationSeconds, cancellationToken: c.RequestAborted)
                 : UnparseableParam("min_duration_seconds"),

@@ -147,6 +147,60 @@ internal static class DarlingSystemHealthReader
         LIMIT 1
         """;
 
+    /// <summary>
+    /// #6827: the candidate truncated ring-buffer runs of the collector that read one read's window [$3, $4] (inclusive,
+    /// naive UTC), oldest first: each run's collection_time and note. A window is blind if ANY run that read it was
+    /// truncated, however clean the run at its end, and a clean past window is not made blind by today's run. Those runs
+    /// are the ones inside the window PLUS the first SUCCESS run after $4: a truncated run hides events, and the hidden
+    /// ones can fall in the window's last minutes, so the run just after the window end has to be asked too. A live read
+    /// has no run after its end, so it asks the runs inside the window only. Only SUCCESS runs count, as in
+    /// <see cref="LatestRunNoteSql"/>.
+    /// <para>The regex is only a pre-filter, built from <see cref="RingBufferTruncationNote.TruncatedLabel"/>: a note
+    /// carrying the label with a value above zero somewhere. It is looser than
+    /// <see cref="RingBufferTruncationNote.TryParse"/> (a substring, not a whole token), so
+    /// <see cref="RingBufferTruncationNote.TruncatedStretch.FromRuns"/> decides every returned row by TryParse.</para>
+    /// Rides the same <c>idx_collection_log_watermark</c> range.
+    /// <para>$1 server_id, $2 collector_name, $3 window start, $4 window end.</para>
+    /// </summary>
+    public const string TruncatedRunsInWindowSql = $$"""
+        SELECT collection_time,
+               error_message
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collector_name = $2
+        AND   collection_time >= $3
+        AND   collection_time <= COALESCE(
+              (
+                  SELECT MIN(a.collection_time)
+                  FROM v_collection_log AS a
+                  WHERE a.server_id = $1
+                  AND   a.collector_name = $2
+                  AND   a.collection_time > $4
+                  AND   a.status = 'SUCCESS'
+              ), $4)
+        AND   status = 'SUCCESS'
+        AND   error_message ~ '{{RingBufferTruncationNote.TruncatedLabel}}=0*[1-9]'
+        ORDER BY collection_time
+        """;
+
+    /// <summary>Runs <see cref="TruncatedRunsInWindowSql"/>: null when no run that read the window logged a truncated ring buffer.</summary>
+    public static async Task<RingBufferTruncationNote.TruncatedStretch?> GetTruncatedRunsInWindowAsync(
+        NpgsqlDataSource postgres, int serverId, string collectorName, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(TruncatedRunsInWindowSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddText(command, collectorName);
+        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var runs = new List<(DateTime CollectionTime, string? Note)>();
+        while (await reader.ReadAsync(cancellationToken))
+            runs.Add((reader.GetDateTime(0), reader.IsDBNull(1) ? null : reader.GetString(1)));
+        return RingBufferTruncationNote.TruncatedStretch.FromRuns(runs);
+    }
+
     /// <summary>Runs <see cref="LatestRunNoteSql"/>: null when the collector never ran or its newest run left no note.</summary>
     public static async Task<string?> GetLatestRunNoteAsync(
         NpgsqlDataSource postgres, int serverId, string collectorName, CancellationToken cancellationToken = default)

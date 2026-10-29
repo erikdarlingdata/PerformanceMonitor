@@ -38,7 +38,7 @@ public sealed class McpClientTimeoutTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var unmet = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, Collector);
+            var unmet = await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, Collector);
             if (unmet != null)
             {
                 return unmet;

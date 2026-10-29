@@ -90,6 +90,25 @@ public sealed class WebPlainTextTests
         }
     }
 
+    /* #6869: a collector that cannot read its source (the DEGRADED status) says the same words on the page as in the two desktop apps. */
+    [Theory]
+    [InlineData(CollectorRuntimePrecondition.DegradedStatus)]
+    [InlineData(CollectorRuntimePrecondition.CaptureSessionMissingStatus)]
+    [InlineData(CollectorRuntimePrecondition.ExtensionMissingStatus)]
+    public void ThePagesRuntimePreconditionText_IsTheDesktopReaderMessage_ForACollectorOutcome(string status)
+    {
+        const string refused = "VIEW DATABASE PERFORMANCE STATE permission denied in database 'tempdb'.";
+        var ran = new DateTime(2026, 10, 25, 12, 0, 0, DateTimeKind.Utc);
+        var mcp = CollectorRuntimePrecondition.CollectionOutcomeMessage("srv", "tempdb_stats", status, refused, ran)!;
+        var reader = CollectorRuntimePrecondition.CollectionOutcomeReaderMessage("srv", "tempdb_stats", status, refused, ran)!;
+
+        var page = Run([mcp], out _)[0];
+
+        /* The page also turns the collector's key into its display name, which the desktop text does not. */
+        Assert.Equal(reader.Replace("tempdb_stats", "Tempdb Stats", StringComparison.Ordinal), page);
+        Assert.DoesNotContain("Act on that sentence", page, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheHintsPointer_AndHoursBack_AreDroppedOrSaidInWords()
     {
@@ -235,6 +254,57 @@ public sealed class WebPlainTextTests
         Assert.Equal("No blocking was recorded in the last 1 hour. 288 collector runs did execute; 1 collector run failed.", o[5]);
         /* a noun ending in a consonant plus y takes "ies", not a bare "s" */
         Assert.Equal("3 queries failed, 1 query retried, 2 policies skipped.", o[6]);
+    }
+
+    /* #6831: System Events says what was captured in words, with the count's own plural, for every event type the health parser reads. */
+    [Fact]
+    public void TheSystemHealthEventNames_AreSaidInWords_WithTheCountsPlural()
+    {
+        /* Every event type the parser names, read from its public constants, so a seventh type fails here until the page says it in words. */
+        var types = typeof(SystemHealthParser)
+            .GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.EndsWith("Event", StringComparison.Ordinal))
+            .Select(f => (string)f.GetRawConstantValue()!)
+            .ToArray();
+        Assert.Equal(6, types.Length);
+        var inputs = types.SelectMany(t => new[]
+        {
+            $"1431 {t} event(s) were captured for SQL2025 in the last 24 hour(s) and none qualified.",
+            $"1 {t} event(s) were captured for SQL2025 in the last 1 hour(s) and none qualified.",
+            $"No {t} events were captured for SQL2025 in the last 24 hour(s).",
+        }).ToArray();
+        var o = Run(inputs, out _);
+        for (var i = 0; i < types.Length; i++)
+        {
+            var word = types[i] switch
+            {
+                SystemHealthParser.SchedulerMonitorEvent => "scheduler monitor",
+                SystemHealthParser.SpServerDiagnosticsEvent => "server diagnostics",
+                SystemHealthParser.MemoryBrokerEvent => "memory broker",
+                SystemHealthParser.MemoryNodeOomEvent => "memory node out-of-memory",
+                SystemHealthParser.ErrorReportedEvent => "error",
+                SystemHealthParser.WaitInfoEvent => "wait",
+                _ => throw new InvalidOperationException("an event type the page has no words for: " + types[i]),
+            };
+            Assert.StartsWith($"1431 {word} events were captured for SQL2025 in the last 24 hours", o[i * 3]);
+            Assert.StartsWith($"1 {word} event was captured", o[i * 3 + 1]);
+            Assert.StartsWith($"No {word} events were captured", o[i * 3 + 2]);
+        }
+        foreach (var line in o)
+        {
+            Assert.DoesNotContain("_", line);
+            Assert.DoesNotContain("event(s)", line);
+        }
+    }
+
+    /* #6831: the cut-window sentence with no instant to name (util.js puts the time in when the answer carries one). */
+    [Fact]
+    public void TheCutWindowSentence_WithNoInstantToName_DoesNotPointAtHints()
+    {
+        var o = Run([McpHelpers.CutWindowNothingMessage], out _);
+        Assert.DoesNotContain("effective_start", o[0]);
+        Assert.DoesNotContain("see hints", o[0]);
+        Assert.Contains("starts partway into the window, so", o[0]);
     }
 
     /* #5644 W8: the clauses that point an MCP caller at a parameter the page has no control for. */
@@ -469,7 +539,7 @@ public sealed class WebPlainTextTests
     {
         var o = Run(
         [
-            "example-pg-01 runs PostgreSQL. The pg_cpu_utilization collector does not run on that engine — its own AppliesTo gate excludes it — so this server does not collect the data, and never will. This is a permanent engine capability gap, not a collection outage.",
+            "example-pg-01 runs PostgreSQL. The pg_cpu_utilization collector does not run on this engine, so this server does not collect the data, and never will. This is a permanent engine capability gap, not a collection outage.",
             "No stored plan for this query. pg_stat_statements has none.",
         ], out var line);
         Assert.Equal(line, o[0]);
@@ -482,7 +552,7 @@ public sealed class WebPlainTextTests
     [Fact]
     public void TheEngineGateSentence_NamesAzureSqlDatabase_WhenThatIsTheEngine()
     {
-        var azure = PerformanceMonitor.Collectors.CollectorEngineCapability.NotCollectedMessage("example-azure-db", 5, null, "cpu_scheduler_stats")!;
+        var azure = PerformanceMonitor.Collectors.CollectorEngineCapability.NotCollectedMessage("example-azure-db", 5, null, "cpu_scheduler_stats", awsRdsKind: AwsRdsKind.None)!;
         var o = Run([azure], out var generic);
         Assert.Equal("Azure SQL Database does not have this data.", o[0]);
         Assert.NotEqual(generic, o[0]);

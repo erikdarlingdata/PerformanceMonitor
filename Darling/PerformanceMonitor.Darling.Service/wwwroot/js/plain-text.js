@@ -20,18 +20,18 @@
     get_ word that is no tool (a procedure dbo.get_orders, a server get_prod), and it must reach the page as written.
     WebPlainTextTests checks this list against the MCP tool registry both ways, so it cannot drift. */
 export const MCP_TOOL_NAMES = [
-  "get_active_queries", "get_active_query_plan_xml", "get_ag_health", "get_alert_history", "get_alert_settings",
+  "get_active_queries", "get_active_query_plan_xml", "get_ag_health", "get_agent_alerts", "get_alert_history", "get_alert_settings",
   "get_analysis_facts", "get_analysis_findings", "get_blocked_process_xml", "get_blocking", "get_blocking_plan_xml",
   "get_blocking_stats", "get_blocking_trend", "get_change_watches", "get_known_patterns", "get_client_timeouts", "get_collection_health", "get_collection_log", "get_collection_state", "get_collector_cost", "get_collector_schedules",
   "get_collector_stall_probes", "get_agent_changes", "get_command_result", "get_compiles_after_evict", "get_cpu_by_database", "get_cpu_scheduler_pressure", "get_cpu_utilization", "get_current_waits_trend",
   "get_custom_alert_rule", "get_custom_view", "get_daily_summary", "get_daily_summary_range", "get_database_config",
-  "get_database_config_changes", "get_database_scoped_config", "get_database_state_expectations", "get_database_sizes", "get_deadlock_detail",
+  "get_database_config_changes", "get_database_protection", "get_database_scoped_config", "get_database_state_expectations", "get_database_sizes", "get_deadlock_detail",
   "get_deadlock_plan_xml", "get_deadlock_trend", "get_deadlocks", "get_default_trace_events", "get_file_io_stats",
   "get_file_io_trend", "get_finops", "get_finops_inventory", "get_finops_recommendations", "get_fleet_overview", "get_forced_plans", "get_query_store_hints",
   "get_health_parser_cpu_tasks", "get_health_parser_io_issues", "get_health_parser_memory_broker",
   "get_health_parser_memory_conditions", "get_health_parser_memory_node_oom", "get_health_parser_scheduler_issues",
   "get_health_parser_severe_errors", "get_health_parser_significant_waits", "get_health_parser_system_health",
-  "get_index_usage", "get_investigation_evidence", "get_investigation_reports", "get_job_history", "get_latch_stats", "get_load_by_caller", "get_lock_wait_trend", "get_long_query_completions",
+  "get_identity_capacity", "get_index_usage", "get_investigation_evidence", "get_investigation_reports", "get_job_history", "get_latch_stats", "get_load_by_caller", "get_lock_wait_trend", "get_long_query_completions",
   "get_memory_clerks", "get_memory_grants", "get_memory_pressure_events", "get_memory_stats", "get_memory_trend",
   "get_mute_rules", "get_notification_routes", "get_object_locking", "get_oversized_plan_backlog",
   "get_perfmon_stats", "get_perfmon_trend", "get_pg_autovacuum_health", "get_pg_blocking", "get_pg_buffer_usage",
@@ -160,6 +160,20 @@ const FIELD_WORDS = [
 /* The rewrites that name one known internal token each (a hints pointer, a window parameter, a denial flag). They are the
    parameter names the service's own sentences write, never a field or table name: those can be real object names in a
    store error (pg_wraparound_stats, last_error), so they stay out of this list and are rewritten only by plainText. */
+/* #6831: what each system_health event type the health parser reads is called on the page. */
+const SYSTEM_HEALTH_EVENT_WORDS = {
+  sp_server_diagnostics_component_result: "server diagnostics",
+  scheduler_monitor_system_health_ring_buffer_recorded: "scheduler monitor",
+  memory_broker_ring_buffer_recorded: "memory broker",
+  memory_node_oom_ring_buffer_recorded: "memory node out-of-memory",
+  error_reported: "error",
+  wait_info: "wait",
+};
+/* The two rules in namedTokenText match exactly the names the table above holds, so a name is added in one place. */
+const SYSTEM_HEALTH_EVENT_NAMES = Object.keys(SYSTEM_HEALTH_EVENT_WORDS).join("|");
+const SYSTEM_HEALTH_EVENT_COUNTED = new RegExp("(?<![\\w.])(\\d[\\d,]*) (" + SYSTEM_HEALTH_EVENT_NAMES + ") event\\(s\\)( were)?", "g");
+const SYSTEM_HEALTH_EVENT_BARE = new RegExp("\\b(" + SYSTEM_HEALTH_EVENT_NAMES + ")\\b", "g");
+
 function namedTokenText(text) {
   let t = text;
 
@@ -356,6 +370,15 @@ export function plainText(text) {
     /\btop_application_name, top_application_connections, top_host_name and top_host_connections are\b/g,
     "the top application, its connection count, the top host and its connection count are",
   );
+  /* #6831: the system_health event names ("1431 scheduler_monitor_system_health_ring_buffer_recorded event(s) were captured") in words, with
+     the count's own plural. The same words say the name inside "No ... events were captured". */
+  t = t.replace(
+    SYSTEM_HEALTH_EVENT_COUNTED,
+    (m, n, type, were) => n + " " + SYSTEM_HEALTH_EVENT_WORDS[type] + (n === "1" ? " event" + (were ? " was" : "") : " events" + (were || "")),
+  );
+  t = t.replace(SYSTEM_HEALTH_EVENT_BARE, (m, type) => SYSTEM_HEALTH_EVENT_WORDS[type]);
+  /* #6831: the empty cut-window sentence's pointer at hints.effective_start, when the page has no instant to put there (util.js names it when it has one). */
+  t = t.replace(/\bstarts at effective_start \(see hints\)/g, "starts partway into the window");
   /* "24 hour(s)", "288 collector run(s)": the count is known, so the word agrees with it ("1 hour", "24 hours", "2 queries"). */
   t = t.replace(/(?<![\w.])(\d[\d,]*) ((?:[a-z]+ )?[a-z]+)\(s\)/g, (m, n, word) => n + " " + (n === "1" ? word : /[^aeiou]y$/.test(word) ? word.slice(0, -1) + "ies" : word + "s"));
 
@@ -424,6 +447,10 @@ const SWITCHED_OFF_CAUSES = /(?:never|no longer) permitted to look\.\s*(.*?)\s*T
     that gates them is read once when the service connects (ConnectScopedEpilogue), so fixing a cause is not enough by itself. */
 const RECONNECT_STEP = " After you fix the cause, the service must reconnect to this server before collection starts again. Restart the service, or change this server's settings.";
 
+/** The sentence the DEGRADED answer (a collector that cannot read its source) closes on for an MCP client (#6869): it says what to do with the
+    stored sentence, which a reader of the page cannot use. CollectorRuntimePrecondition.DegradedClientSentence, with the space before it. */
+const DEGRADED_CLIENT_SENTENCE = " Act on that sentence — it is what the monitored server itself answered, and it distinguishes the states this one status carries: a grant the login was refused, a source object that does not exist on this target, and a feature the platform does not implement or has switched off.";
+
 /**
  * A runtime-precondition answer (CollectorRuntimePrecondition.cs) the way the page shows it. The server's text is written for
  * an MCP client: it labels itself a runtime PRECONDITION and says to retry, which a reader of the page cannot use. Without
@@ -438,7 +465,7 @@ function runtimePreconditionText(text) {
   if (never) return "The " + toolWords(never[1]) + " collector has never run for this server, so there is nothing to show." + tail;
   const dark = GONE_DARK_OPENING.exec(text);
   if (dark) return "The " + toolWords(dark[1]) + " collector has not run for this server for over " + dark[2] + " hours, so there is nothing current to show." + tail;
-  return text.slice(0, text.indexOf(RUNTIME_PRECONDITION_MARK)).trimEnd();
+  return text.slice(0, text.indexOf(RUNTIME_PRECONDITION_MARK)).replace(DEGRADED_CLIENT_SENTENCE, "").trimEnd();
 }
 
 /** The one short line the page shows where the server says a collector can never run on this kind of server. The

@@ -39,6 +39,7 @@ public sealed class QueryStoreRegressionsEmptyBaselineLiveTests
     private const int ServerId = QueryStoreIntervalWideBelowFloorLiveTests.ServerId;
     private const string Db = "qsEmpty";
     private const string ServerName = "qsempty";
+    private const string OtherDb = "qsEmptyOther";
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -60,7 +61,7 @@ public sealed class QueryStoreRegressionsEmptyBaselineLiveTests
     /// <summary>A hypertable store with one query: Regular runs from nine days back (the table's floor) and one just inside the
     /// three days raw keeps, then Aborted runs 30, 20 and 10 hours back. Raw's chunks older than three days are dropped, so raw's
     /// floor is after the 168-hour window's start.</summary>
-    private static async Task<Rig> StartAsync(CancellationToken ct)
+    private static async Task<Rig> StartAsync(CancellationToken ct, bool withOtherDatabase = false)
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #6750 live tests.");
@@ -93,20 +94,20 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         };
 
         long intervalId = 7000;
-        async Task IntervalAsync(DateTime first, string outcome, long cpuUs)
+        async Task IntervalAsync(DateTime first, string outcome, long cpuUs, string database = Db, long queryId = 10)
         {
             intervalId++;
             QueryStoreCollector.Row Row(long k) => new()
             {
-                DatabaseName = Db,
-                QueryId = 10,
-                PlanId = 101,
+                DatabaseName = database,
+                QueryId = queryId,
+                PlanId = queryId * 10 + 1,
                 ExecutionTypeDesc = outcome,
                 FirstExecutionTime = first,
                 LastExecutionTime = first.AddMinutes(30),
                 QueryHash = "0x0000000A",
                 QueryPlanHash = "0x00000065",
-                QueryText = "SELECT 10",
+                QueryText = "SELECT " + queryId,
                 ExecutionCount = 10 * k,
                 AvgCpuTimeUs = cpuUs,
                 AvgDurationUs = cpuUs * 2,
@@ -138,6 +139,12 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
             await IntervalAsync(now.AddHours(-hoursBack), "Aborted", 40_000);
         }
 
+        if (withOtherDatabase)
+        {
+            /* #6829: a second database that began 20 hours ago, so it has a recent side and no baseline while the server has one. */
+            await IntervalAsync(now.AddHours(-20), "Regular", 1_000, OtherDb, 20);
+        }
+
         await QueryStoreIntervalWideBelowFloorLiveTests.SeedQueryStoreLogAsync(connection, ServerId, now.AddDays(-20), now.AddHours(1), null, null, ct);
         await QueryStoreIntervalWideBelowFloorLiveTests.ForceFilledSinceAsync(connection, now.AddDays(-16), ct);
         await QueryStoreIntervalWideBelowFloorLiveTests.DropRawChunksOlderThanAsync(
@@ -145,6 +152,34 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         rig.RawFloor = (DateTime)(await QueryStoreIntervalWideBelowFloorLiveTests.ScalarAsync(connection, QueryStoreIntervalWideBelowFloorLiveTests.ChunkFloorSql, ct))!;
         Assert.True(rig.RawFloor > now.AddDays(-7), $"raw's floor {rig.RawFloor:o} should be after the 168-hour window's start");
         return rig;
+    }
+
+    /// <summary>
+    /// #6829 on the table path: a 24 hour read whose baseline window starts 8 days back is served from the per-interval tables, whose
+    /// history starts a little under 8 days back, after the baseline window's start. A database that began inside the window has no
+    /// baseline, and the answer names where the table history starts, in the same date form as effective_start, not a retention figure.
+    /// </summary>
+    [Fact]
+    public async Task ADatabaseWithNoBaseline_OnTheTablePath_NamesWhereTheTableHistoryStarts()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await StartAsync(ct, withOtherDatabase: true);
+        /* The collector's successful runs that stored rows, from before the baseline window: the log the cause reads. */
+        await QueryStoreIntervalWideBelowFloorLiveTests.ExecAsync(rig.Connection, @"
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, status, rows_collected)
+VALUES (900000001, @server_id, 'qsempty', 'query_store', now() - INTERVAL '19 days', 'SUCCESS', 5)", null, ct);
+
+        var root = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, ServerName, 24, database_name: OtherDb)).RootElement;
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var hints = root.GetProperty("hints");
+        Assert.StartsWith("The window reaches further back", hints.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
+        var effective = DateTime.Parse(hints.GetProperty("effective_start").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains($"Query Store history starts {effective.ToString("MMM d", CultureInfo.InvariantCulture)} and the baseline window", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("raw Query Store data", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("keeps", message, StringComparison.Ordinal);
+        Assert.Contains("dropped by retention", message, StringComparison.Ordinal);
     }
 
     /// <summary>

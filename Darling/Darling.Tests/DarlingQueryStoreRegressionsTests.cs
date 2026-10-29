@@ -309,7 +309,8 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             */
             await SeedAsync(connection, ct, baseNow.AddHours(-40), 50, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 3, queryId: 7);
             await SeedAsync(connection, ct, baseNow.AddHours(-39), 90, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 3, queryId: 7);
-            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 200, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 4, queryId: 7);
+            /* #6781: 500 recent runs at +3 ms add 1.5 s of CPU, over the 1 s floor (QueryStoreRegressionRules.CostMinAddedCpuMs). The three reseeds below do the same. */
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 500, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 4, queryId: 7);
 
             var hit = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
             Assert.Equal(ServerName, hit.GetProperty("server").GetString());
@@ -329,13 +330,13 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.Equal(300.0, row.GetProperty("duration_regression_percent").GetDouble(), 6);
 
             /*
-                The ranking key: 3 ms per execution across the 200 recent executions. If the dedup had
+                The ranking key: 3 ms per execution across the 500 recent executions. If the dedup had
                 failed, the baseline exec_count would be 140 (50 + 90) rather than 90 and the baseline
                 averages would be an avg-of-avgs over two snapshots of one interval.
             */
-            Assert.Equal(600.0, row.GetProperty("additional_duration_ms").GetDouble(), 6);
+            Assert.Equal(1500.0, row.GetProperty("additional_duration_ms").GetDouble(), 6);
             Assert.Equal(90, row.GetProperty("baseline_exec_count").GetInt64());
-            Assert.Equal(200, row.GetProperty("recent_exec_count").GetInt64());
+            Assert.Equal(500, row.GetProperty("recent_exec_count").GetInt64());
 
             /* ── the cap REFUSES out of range rather than quietly rewriting it ── */
             var refused = await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24, null, 5000);
@@ -399,7 +400,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
         await WithServerAsync(async (connection, postgres, baseNow, ct) =>
         {
             await SeedAsync(connection, ct, baseNow.AddHours(-40), 90, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 3, queryId: 7);
-            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 200, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 4, queryId: 7);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 500, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 4, queryId: 7);
 
             var hit = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
 
@@ -464,7 +465,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
         {
             await SeedAsync(connection, ct, baseNow.AddDays(-9), 10, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 2, queryId: 9);
             await SeedAsync(connection, ct, baseNow.AddHours(-40), 90, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 3, queryId: 7);
-            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 200, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 4, queryId: 7);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 500, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 4, queryId: 7);
 
             var hit = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
 
@@ -485,7 +486,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
         await WithServerAsync(async (connection, postgres, baseNow, ct) =>
         {
             await SeedAsync(connection, ct, baseNow.AddHours(-40), 90, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 3, queryId: 7);
-            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 200, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 4, queryId: 7);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 500, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 4, queryId: 7);
 
             var bodySucceeded = false;
             DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
@@ -521,10 +522,11 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
 
     /// <summary>
     /// #4966: every <c>empty</c> answer carries the three keys under <c>hints</c>, the all-clear included (a clean comparison
-    /// over a baseline the store only partly holds is not a true negative), and every <c>unavailable</c> answer carries none.
+    /// over a baseline the store only partly holds is not a true negative). #6829: the two no-baseline <c>unavailable</c> answers carry
+    /// them too, since the data start is what says whether a missing baseline is retention. The "nothing ever collected" answer stays bare.
     /// </summary>
     [Fact]
-    public async Task TheEmptyAnswers_CarryTheDataStartHints_AndTheUnavailableOnesStayBare_AgainstDevPostgres()
+    public async Task TheEmptyAnswers_AndTheNoBaselineAnswers_CarryTheDataStartHints_AndTheNeverCollectedOneStaysBare_AgainstDevPostgres()
     {
         await WithServerAsync(async (connection, postgres, baseNow, ct) =>
         {
@@ -551,10 +553,12 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.True(clearHints.GetProperty("window_truncated").GetBoolean());
             Assert.Equal(McpHelpers.FormatEffectiveStart(baseNow.AddHours(-40)), clearHints.GetProperty("effective_start").GetString());
 
-            /* No baseline: the whole history sits inside the window. The unavailable answer stays bare. */
+            /* No baseline: the whole history sits inside the window. #6829: the unavailable answer carries the data-start hints. */
             var noBaseline = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 48));
             Assert.Equal("unavailable", noBaseline.GetProperty("status").GetString());
-            Assert.False(noBaseline.TryGetProperty("hints", out _));
+            var noBaselineHints = noBaseline.GetProperty("hints");
+            Assert.True(noBaselineHints.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(baseNow.AddHours(-40)), noBaselineHints.GetProperty("effective_start").GetString());
         });
     }
 

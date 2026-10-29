@@ -13,7 +13,8 @@
  * API reports it (band = Warning, status text verbatim) — never the red offline treatment.
  */
 
-import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId, tagPill } from "../util.js";
+import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId, tagPill, frontDoor, currentStore } from "../util.js";
+import { frontDoorStores, healthBandClass, healthLabel } from "../store-picker.js";
 import { VIZ, navigateServer } from "../panels.js";
 import { favoritesFirst, onChange as onLocalChange } from "../viewer-local.js";
 import { buildTagGroups, cardMatches } from "../fleet-groups.js";
@@ -254,7 +255,60 @@ function silenceButton(c) {
   return btn;
 }
 
+/**
+ * Front door (#6840): one section per store, each with the store's name and health and the roll-up and cards of that
+ * store's own /api/fleet. The sections fill independently: a store whose read fails shows its error inside its own section
+ * and the others still draw. Search, the needs-attention filter, grouping by tag and Silence are the single-store page's
+ * controls over one fleet; here they are left out (a server's Silence is on its own page), and the cards sort worst first.
+ */
+async function renderStoreFleets(main) {
+  silenceNotice = null;
+  canEditSilence = false;
+  const current = currentStore();
+  const listed = frontDoorStores();
+  if (!listed.length) {
+    mount(main, [pageHead(null), emptyStrip("The front door lists no stores.")]);
+    return;
+  }
+  const parts = listed.map((st) => {
+    const body = el("div", { class: "fleet-store-body" }, [loadingStrip("Loading " + st.name + "…")]);
+    const head = el("h3", { class: "section-title fleet-store-head" }, [
+      el("span", { class: "dot " + healthBandClass(st.health) }),
+      el("span", { class: "fleet-store-name", text: st.name }),
+      el("span", { class: "fleet-store-health", text: healthLabel(st.health) }),
+      st.server_count != null ? el("span", { class: "muted", text: st.server_count + " server" + (st.server_count === 1 ? "" : "s") }) : null,
+    ]);
+    return { st, body, section: el("section", { class: "fleet-store", dataset: { store: st.name } }, [head, body]) };
+  });
+  mount(main, [pageHead(null), ...parts.map((x) => x.section)]);
+
+  await Promise.all(
+    parts.map(async (x) => {
+      try {
+        const res = await apiGetFleet(x.st.name);
+        if (res.kind !== "data") {
+          mount(x.body, [errorStrip(res.message || "This store's fleet could not be read.")]);
+          return;
+        }
+        mount(x.body, storeFleetBody(res.data, x.st.name, x.st.name === current));
+      } catch (e) {
+        mount(x.body, [errorStrip("This store's fleet could not be drawn: " + (e && e.message ? e.message : String(e)))]);
+      }
+    })
+  );
+}
+
+function storeFleetBody(d, store, own) {
+  if (!d.total_servers) return [emptyStrip("No servers are enabled in this store yet.")];
+  const cards = (d.cards || []).slice().sort(SORTS.severity);
+  return [rollup(d), el("div", { class: "grid server-grid" }, cards.map((c) => serverCard(c, store, own)))];
+}
+
 export async function renderFleet(main) {
+  if (frontDoor()) {
+    await renderStoreFleets(main);
+    return;
+  }
   silenceNotice = null; /* a notice lasts until the next rebuild (the 60 s poll) */
   canEditSilence = !!(await api.getSession()).can_edit;
   mount(main, [pageHead(null), loadingStrip("Loading fleet…")]);
@@ -654,7 +708,10 @@ export function rollup(d) {
   ]);
 }
 
-function serverCard(c) {
+/* `store` (front door only) is the store the card's server is in: the click opens the server in that store. `own` is false for a
+   card of a store other than the one in use, which carries no alert badge, favourite star or Silence button (their ids and
+   state belong to the current store). */
+function serverCard(c, store, own = true) {
   const cls = bandClass(c.band);
   /* #3528: the band's fold skips Unknown, so a card can read Healthy off one measured metric of six —
      say so instead of rendering an unqualified green. The counts are the server's own (R1: read the
@@ -678,7 +735,7 @@ function serverCard(c) {
 
   return el(
     "div",
-    { class: "server-card " + cls, onActivate: () => navigateServer(c.server_name || c.display_name) },
+    { class: "server-card " + cls, onActivate: () => navigateServer(c.server_name || c.display_name, store) },
     [
       el("div", { class: "head" }, [
         el("span", { class: "dot " + cls }),
@@ -686,9 +743,9 @@ function serverCard(c) {
            server stops looking healthy-quiet. The Silence / Unsilence button beside it shows for an editing seat. */
         effectiveSilenced(c) ? el("span", { class: "silenced-bell", title: "Alerts silenced for this server", role: "img", "aria-label": "Alerts silenced" }) : null,
         el("span", { class: "title", text: c.display_name }),
-        alertBadge(c.server_id),
-        favoriteStar(c.server_id),
-        silenceButton(c),
+        own ? alertBadge(c.server_id) : null,
+        own ? favoriteStar(c.server_id) : null,
+        own ? silenceButton(c) : null,
       ]),
       statusLine,
       tagPills(c),
@@ -789,7 +846,7 @@ export function metricBands(c) {
   const collectorsDetail = collectorsStale
     ? "no recent collection · " + (c.last_collection ? "last " + relTime(c.last_collection) : DARK_PAST_WINDOW)
     : c.collector_count > 0
-    ? fmtInt(c.healthy_collector_count) + " healthy · " + fmtInt(c.failed_collector_count) + " failing"
+    ? fmtInt(c.healthy_collector_count) + " healthy · " + (c.warning_collector_count > 0 ? fmtInt(c.warning_collector_count) + " warning · " : "") + fmtInt(c.failed_collector_count) + " failing" + (c.not_collected_collector_count > 0 ? " · " + fmtInt(c.not_collected_collector_count) + " not collected" : "")
     : "no collector banded yet";
   const collectorsSeverity = collectorsStale ? "Unknown" : c.collector_severity;
 
@@ -819,11 +876,39 @@ export function metricBands(c) {
     chip("Blocking", fmtInt(c.blocking_count), c.blocking_severity, blockingDetail),
     chip("Deadlocks", fmtInt(c.deadlock_count), c.deadlock_severity, deadlockDetail),
     chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail),
+    /* #6875: a chip only when a column is at the warning bar or past it. It is not a band: nothing above reads it, and a server without one shows no extra chip. */
+    ...identityCapacityChip(c),
+    /* #6874: a chip only when the server's Agent alert setup has a gap. It is not a band: nothing above reads it, and a
+       server without a gap shows no extra chip. */
+    ...agentAlertChip(c),
+    /* #6873: a chip only when a full backup, a log backup or a CHECKDB is overdue. It is not a band: nothing above reads it, and a
+       server with nothing overdue (or a platform-managed one) shows no extra chip. The words come from the server. */
+    ...databaseProtectionChip(c),
   ]);
+}
+
+function agentAlertChip(c) {
+  const gaps = c.agent_alert_gaps;
+  if (!Array.isArray(gaps) || gaps.length === 0) return [];
+  return [chip("Agent alerts", fmtInt(gaps.length) + (gaps.length === 1 ? " gap" : " gaps"), "Warning", gaps.map((g) => g.message).join(" "))];
+}
+
+function databaseProtectionChip(c) {
+  const overdue = c.database_protection_overdue;
+  if (!Array.isArray(overdue) || overdue.length === 0) return [];
+  return [chip("Protection", fmtInt(overdue.length) + " overdue", "Warning", overdue.map((o) => o.text).join(", "))];
 }
 
 /* A short non-color severity cue so severity isn't conveyed by border color alone (M2). */
 const SEV_BADGE = { Critical: "CRIT", Warning: "WARN" };
+
+function identityCapacityChip(c) {
+  const ic = c.identity_capacity;
+  if (!ic || !ic.columns_at_bar) return [];
+  const n = ic.columns_at_bar;
+  return [chip("Identity capacity", fmtInt(n) + (n === 1 ? " column" : " columns"), ic.worst_band === "critical" ? "Critical" : "Warning",
+    "At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is " + ic.worst_band + ".")];
+}
 
 function chip(label, value, sev, detail) {
   const badge = SEV_BADGE[sev];
@@ -833,6 +918,6 @@ function chip(label, value, sev, detail) {
       badge ? el("span", { class: "sev-badge", text: badge }) : null,
     ]),
     el("div", { class: "value", text: value }),
-    detail ? el("div", { class: "detail", text: detail }) : null,
+    detail ? el("div", { class: "detail", text: detail, title: detail }) : null,
   ]);
 }

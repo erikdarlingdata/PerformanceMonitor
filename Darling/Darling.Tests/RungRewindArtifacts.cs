@@ -533,6 +533,50 @@ DO $$ BEGIN IF to_regclass('config.config_server_actions') IS NOT NULL THEN
   ALTER TABLE config.config_server_actions DROP CONSTRAINT IF EXISTS ck_config_server_actions_action;
   ALTER TABLE config.config_server_actions ADD CONSTRAINT ck_config_server_actions_action CHECK (action IN ('force_plan', 'evict_plan', 'kill_session'));
 END IF; END $$;"),
+        // V219 (#6750): the Query Store self-statement key tables and the two triggers on the text table that fill the key table. The state
+        // table is the probe's newest sentinel. The rewind drops the triggers and their function first (a trigger left behind would write to a
+        // dropped table on the next marked text), then both tables, so a re-run of V219 creates them again. Safe on a store that never had them.
+        new(219, "hasQueryStoreSelfKeys",
+            @"
+DROP TRIGGER IF EXISTS trg_query_store_self_keys_ins ON collect.query_store_text;
+DROP TRIGGER IF EXISTS trg_query_store_self_keys_upd ON collect.query_store_text;
+DROP FUNCTION IF EXISTS collect.query_store_self_keys_track();
+DROP TABLE IF EXISTS collect.query_store_self_keys_state, collect.query_store_self_keys;"),
+        // V220 (#6798): the Job History statistics index on collect.job_history. The index is the probe's newest sentinel. The rewind drops
+        // it, so a re-run of V220 builds it again. Safe on a store that never had it.
+        new(220, "hasJobHistorySuccessIndex",
+            "DROP INDEX IF EXISTS collect.idx_job_history_job_success;"),
+        // V221 (#6800): the Query Store hash-hourly table, the day tables and the ledger's hash_built_seq column. The table is the probe's newest sentinel.
+        // The rewind drops both, so a re-run of V221 builds them again. Safe on a store that never had them.
+        new(221, "hasQueryStoreHashHourly",
+            @"DROP TABLE IF EXISTS collect.query_store_hash_hourly, collect.query_store_hash_daily, collect.query_store_hash_daily_built, collect.query_store_hash_daily_failures;
+ALTER TABLE collect.query_store_compose_stamp_built DROP COLUMN IF EXISTS hash_built_seq;"),
+        // V222 (#6874): the Agent alerts table. The table is the probe's newest sentinel. The rewind drops it (its index goes with it), so a
+        // re-run of V222 builds it again. Safe on a store that never had it.
+        new(222, "hasAgentAlerts",
+            @"DROP TABLE IF EXISTS collect.agent_alerts;
+ALTER TABLE config.config_alert_settings DROP COLUMN IF EXISTS agent_alert_gaps_enabled;"),
+        // V223 (#6873): the database protection table. The table is the probe's newest sentinel. The rewind drops it (its index goes with it), so a
+        // re-run of V223 does everything again. Safe on a store that never had it.
+        new(223, "hasDatabaseProtection",
+            @"DROP TABLE IF EXISTS collect.database_protection;
+ALTER TABLE config.config_alert_settings DROP COLUMN IF EXISTS backup_overdue_enabled, DROP COLUMN IF EXISTS log_backup_overdue_enabled, DROP COLUMN IF EXISTS checkdb_overdue_enabled;"),
+        // V224 (#6875): the identity capacity table. The table is the probe's newest sentinel. The rewind drops it (its indexes go with it), so a
+        // re-run of V224 does everything again. Safe on a store that never had it.
+        new(224, "hasIdentityCapacity",
+            @"DROP TABLE IF EXISTS collect.identity_capacity;
+ALTER TABLE config.config_alert_settings
+    DROP COLUMN IF EXISTS identity_capacity_enabled,
+    DROP COLUMN IF EXISTS identity_capacity_warning_percent,
+    DROP COLUMN IF EXISTS identity_capacity_critical_percent;"),
+        // V225 (#6894): the AWS RDS fact on the server registry. The column is the probe's newest sentinel. The rewind drops it, so a re-run of
+        // V225 does everything again. Safe on a store that never had it.
+        new(225, "hasServerAwsRds",
+            @"ALTER TABLE collect.servers DROP COLUMN IF EXISTS is_aws_rds;"),
+        // V226 (#6893): the AWS RDS Web or Express fact on the server registry. The column is the probe's newest sentinel. The rewind drops it,
+        // so a re-run of V226 does everything again. Safe on a store that never had it.
+        new(226, "hasServerAwsRdsWebOrExpress",
+            @"ALTER TABLE collect.servers DROP COLUMN IF EXISTS is_aws_rds_web_or_express;"),
     ];
 
     /// <summary>

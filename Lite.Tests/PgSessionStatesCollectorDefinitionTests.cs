@@ -608,7 +608,7 @@ public class PgSessionStatesCollectorDefinitionTests
     public void TheCapabilityMessageNamesWhatIsNotCollected()
     {
         var message = CollectorEngineCapability.NotCollectedMessage(
-            "sql-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.SqlServer, "pg_session_states");
+            "sql-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.SqlServer, "pg_session_states", awsRdsKind: AwsRdsKind.None);
 
         Assert.NotNull(message);
         Assert.Contains("idle in transaction", message, StringComparison.Ordinal);

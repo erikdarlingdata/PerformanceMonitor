@@ -118,6 +118,16 @@ public interface ICollectorSchemaInfo
     TimeSpan? PerItemWallClockBudget { get; }
 
     /// <summary>
+    /// Wall-clock ceiling for one whole per-database pass (#6875), on top of <see cref="PerItemWallClockBudget"/>'s
+    /// ceiling for one database. A pass that has spent it starts no further database, and the next pass resumes at
+    /// the database after the last one started and wraps, so a server with hundreds of databases is covered over
+    /// several passes instead of the first databases being read every time. See <see cref="PassBudget"/>. Null
+    /// (the default) is no pass ceiling and no rotation, which is every collector but <c>identity_capacity</c>.
+    /// Declared on <see cref="CollectorDefinitionBase{TRow}"/> too, the <see cref="IsDarlingOnly"/> pair.
+    /// </summary>
+    TimeSpan? PassWallClockBudget => null;
+
+    /// <summary>
     /// Named pieces of per-server collector state the host loads from its own store before the query is
     /// built (exposed as <see cref="CollectorContext.State"/>) and persists back after the cycle (from
     /// <see cref="CollectorContext.PendingState"/>) — the sibling of
@@ -194,4 +204,15 @@ public interface ICollectorSchemaInfo
     /// <see cref="StaysPlainTable"/> made.
     /// </summary>
     bool ReadsAuroraFunctions => false;
+
+    /// <summary>
+    /// Whether the query <see cref="ICollectorDefinition{TRow}.BuildQuery"/> builds for <paramref name="context"/> reads an
+    /// object of <paramref name="extension"/> (#6888). True for every declared extension except where the collector
+    /// runs without it on this target: the Aurora-native source in place of pg_stat_statements, the service-side
+    /// sampler in place of pg_wait_sampling. The host answers a declared extension that is not created in the
+    /// connected database with the missing-extension outcome WITHOUT sending the query, but only for an extension the
+    /// query reads: a collector that runs without it keeps running. A default interface implementation, the choice
+    /// <see cref="ReadsAuroraFunctions"/> made.
+    /// </summary>
+    bool ReadsPgExtension(PgExtensionDependency extension, CollectorContext context) => true;
 }

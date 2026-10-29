@@ -29,7 +29,7 @@
  */
 
 import { getSession } from "../views-api.js";
-import { el, apiGet, apiWrite, listOnlyNote, readToolWithinKeptHistory, keptWindowStrip, noticeStrip, readErrorStrip, emptyStrip, loadingStrip, localTime, bandClass, dbScopeChip } from "../util.js";
+import { el, apiGet, apiWrite, listOnlyNote, readToolWithinKeptHistory, keptWindowStrip, noticeStrip, readErrorStrip, emptyStrip, loadingStrip, localTime, bandClass, dbScopeChip, storeHash } from "../util.js";
 
 /** The desktop's severity cutoffs: >= 1.5 Critical, >= 0.75 Warning, else Info. */
 export function severityLabel(severity) {
@@ -289,7 +289,7 @@ function card(server, f, showTitle) {
   if (f.remediation_command) actions.push(copyButton(f.remediation_command));
   actions.push(askAiButton(server, f));
   if (showsActiveQueriesLink(f)) {
-    actions.push(el("a", { class: "btn small", href: "#/server/" + encodeURIComponent(server) + "/queries", text: "Open in Active Queries" }));
+    actions.push(el("a", { class: "btn small", href: storeHash("#/server/") + encodeURIComponent(server) + "/queries", text: "Open in Active Queries" }));
   }
   if (actions.length) kids.push(el("div", { class: "reco-actions" }, actions));
   return el("div", { class: "card reco-card" }, kids);

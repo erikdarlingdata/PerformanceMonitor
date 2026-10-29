@@ -164,6 +164,26 @@ public sealed class ProductiveZeroBandingTests
     }
 
     /// <summary>
+    /// #6828: the <c>attention</c> capture stores a row only when a client times out, so rows then a quiet
+    /// stretch is its normal answer and bands HEALTHY, while the same history on a polled collector still
+    /// bands WARNING. Both rows are built by the same helper, so the collector name is the only difference.
+    /// </summary>
+    [Fact]
+    public void AnAttentionCapture_ProducedThenQuiet_BandsHealthy_WhileAPolledCollectorStillBandsWarning()
+    {
+        var attention = ProducedThenStopped(trailingZeroRuns: 645);
+        attention.CollectorName = "attention";
+        Assert.False(attention.ProducedThenStopped);
+        Assert.False(attention.AnyRegression);
+        Assert.Equal(CollectorHealthClassifier.Healthy, attention.HealthStatus);
+        Assert.Null(attention.AnyRegressionFinding);
+
+        var polled = ProducedThenStopped(trailingZeroRuns: 645);
+        Assert.True(polled.ProducedThenStopped);
+        Assert.Equal(CollectorHealthClassifier.Warning, polled.HealthStatus);
+    }
+
+    /// <summary>
     /// #3819's class, unchanged: a productive collector that flips to a named SKIP still bands WARNING
     /// through its own predicate, and this widening did not absorb or alter it.
     /// </summary>
@@ -359,7 +379,7 @@ public sealed class ProductiveZeroBandingTests
 
         /* ONE count over both classes, off the predicate rather than the band - so a collector that
            stopped PRODUCING reaches the same number an install countersign already reads. */
-        Assert.Contains("existing.Regressed + (health.AnyRegression ? 1 : 0)", fleet, StringComparison.Ordinal);
+        Assert.Contains("existing.Regressed + (health.AnyRegression && !engineGated ? 1 : 0)", fleet, StringComparison.Ordinal);
 
         /* And the rollup has to READ the instant the estimate is built from, or the arm is asked of a
            default and answers false for the whole fleet - silently, and in the reassuring direction. */

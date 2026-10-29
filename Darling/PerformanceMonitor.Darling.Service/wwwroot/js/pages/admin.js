@@ -27,7 +27,7 @@
    it reaches a row. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, listOnlyNote, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText } from "../util.js";
+import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, listOnlyNote, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText, storeHash } from "../util.js";
 import { getSession } from "../views-api.js";
 import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
@@ -114,6 +114,7 @@ const GROUP_LABELS = {
   poison_wait: "Poison wait",
   runnable_queue: "Runnable queue",
   client_timeouts: "Client timeouts",
+  identity_capacity: "Identity capacity",
   long_running_query: "Long-running query",
   tempdb_space: "TempDB space",
   low_disk: "Low disk",
@@ -123,6 +124,10 @@ const GROUP_LABELS = {
   long_running_job: "Long-running job",
   failed_job: "Failed job",
   database_state: "Database state",
+  backup_overdue: "Backup overdue",
+  log_backup_overdue: "Log backup overdue",
+  checkdb_overdue: "CHECKDB overdue",
+  agent_alert_gaps: "Agent alert gaps",
   ag: "Availability Groups",
   delivery: "Delivery",
   health_bands: "Health bands",
@@ -167,7 +172,7 @@ export const SETTING_SECTIONS = [
   {
     title: "Alert thresholds",
     groups: ["cpu", "blocking", "deadlocks", "poison_wait", "runnable_queue", "client_timeouts", "long_running_query", "tempdb_space", "low_disk",
-      "self_alerts", "pvs", "file_growth", "long_running_job", "failed_job", "database_state", "ag", "delivery"],
+      "self_alerts", "pvs", "file_growth", "long_running_job", "failed_job", "database_state", "agent_alert_gaps", "backup_overdue", "log_backup_overdue", "checkdb_overdue", "identity_capacity", "ag", "delivery"],
     top: ["alerts_enabled", "notify_connection_changes", "notify_connection_down_at_startup", "connection_refire_minutes",
       "cooldown_minutes"],
     groupFields: { long_running_query: ["enabled", "threshold_minutes", "max_results"] },
@@ -195,6 +200,7 @@ export const GROUP_FIELDS = {
   poison_wait: ["enabled", "threshold_ms"],
   runnable_queue: ["enabled", "warning_per_scheduler", "critical_per_scheduler"],
   client_timeouts: ["enabled", "warning_per_minute", "critical_per_minute", "warning_multiple", "critical_multiple"],
+  identity_capacity: ["enabled", "warning_percent", "critical_percent"],
   long_running_query: ["enabled", "threshold_minutes", "max_results", "exclude_sp_server_diagnostics", "exclude_wait_for",
     "exclude_backups", "exclude_misc_waits", "exclude_cdc", "excluded_program_name_prefixes", "excluded_logins"],
   tempdb_space: ["enabled", "threshold_percent"],
@@ -206,6 +212,10 @@ export const GROUP_FIELDS = {
   long_running_job: ["enabled", "multiplier"],
   failed_job: ["enabled", "lookback_minutes"],
   database_state: ["enabled"],
+  backup_overdue: ["enabled"],
+  log_backup_overdue: ["enabled"],
+  checkdb_overdue: ["enabled"],
+  agent_alert_gaps: ["enabled"],
   ag: ["enabled", "lag_threshold_seconds", "redo_queue_threshold_kb", "disconnect_refire_minutes"],
   delivery: ["mode", "per_event_max", "cooldown_minutes", "send_resolutions"],
   analysis: ["enabled", "interval_minutes", "notifications_enabled", "notify_severity", "notify_cooldown_minutes",
@@ -709,7 +719,7 @@ function tabBar(active) {
   return el("nav", { class: "subtabs", "aria-label": "Admin sections" },
     TABS.map((t) => el("a", {
       class: "subtab" + (t.id === active.id ? " active" : ""),
-      href: "#/admin/" + t.id,
+      href: storeHash("#/admin/") + t.id,
       "aria-current": t.id === active.id ? "page" : null,
       text: t.label,
     })));
@@ -2025,7 +2035,7 @@ function showsServers(hash) {
    another one is seen by nothing else, because no render of this page follows it. A hash that no longer shows the Servers
    tab discards the open form, password first, and drops a by-id read still in flight. Discarding twice is harmless. */
 function onHashChange() {
-  if (!showsServers(String(window.location.hash || ""))) closeEdit();
+  if (!showsServers(routeHash())) closeEdit();
 }
 
 export function renderAdmin(main, tabId) {

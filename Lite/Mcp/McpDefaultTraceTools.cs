@@ -4,6 +4,7 @@ using ModelContextProtocol.Server;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -65,7 +66,7 @@ public sealed class McpDefaultTraceTools
             var rows = await dataService.GetDefaultTraceEventsAsync(
                 resolved.ServerId, hours_back, databaseNames: database is null ? null : new[] { database }, asOfUtc: windowEnd, serverClock: serverClock);
             if (rows.Count == 0)
-                return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "default_trace_events"), database)
+                return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "default_trace_events", awsRdsKind: AwsRdsKind.None), database)
                     ?? McpHelpers.StatusForDatabase("empty",
                         $"No significant default trace events found in the requested time range{McpDatabaseSelection.ForChosen(database is null ? null : new[] { database })}.",
                         database,

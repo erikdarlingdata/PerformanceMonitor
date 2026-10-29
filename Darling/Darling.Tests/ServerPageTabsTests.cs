@@ -844,7 +844,7 @@ public sealed class ServerPageTabsTests
         Assert.Contains("function subtabBar(server, active, tabs) {", ServerJs, StringComparison.Ordinal);
         Assert.Contains("tabs.map((t) =>", ServerJs, StringComparison.Ordinal);
         Assert.DoesNotContain("SERVER_TABS.map(", ServerJs, StringComparison.Ordinal);
-        Assert.Contains("\"#/server/\" + encodeURIComponent(server) + \"/\" + t.id", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("storeHash(\"#/server/\") + encodeURIComponent(server) + \"/\" + t.id", ServerJs, StringComparison.Ordinal);
 
         /* And the router parses that second segment back out and hands it to the page. (#4190/#4191 added a
            trailing opts argument — the poll flag renderServer uses to decide whether to re-fetch /api/fleet —

@@ -156,8 +156,27 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, DateTime> _lastCollectionStoppedAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeCaptureDown = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastCaptureDownAlert = new();
+    /* #6912: the captures named by the last pass that found any down, so a recovery can say which came back. */
+    private readonly ConcurrentDictionary<string, string> _lastCaptureDownList = new();
     private readonly ConcurrentDictionary<string, bool> _activeAgentDown = new();
+    /* #6875: the Identity Capacity alert's standing state, the same two maps as Agent Not Running. */
+    private readonly ConcurrentDictionary<string, bool> _activeIdentityCapacity = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastIdentityCapacityAlert = new();
+    private readonly Func<bool> _identityCapacityEnabled;
+    private readonly Func<int> _identityCapacityWarningPercent;
+    private readonly Func<int> _identityCapacityCriticalPercent;
+    private readonly Func<string, string, string?, int, int> _resolveThreshold;
     private readonly ConcurrentDictionary<string, DateTime> _lastAgentDownAlert = new();
+    /* #6874: the Agent alert setup's standing state, the same two maps as Agent Not Running. */
+    private readonly ConcurrentDictionary<string, bool> _activeAgentAlertGaps = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastAgentAlertGapAlert = new();
+    private readonly Func<bool> _agentAlertSetupEnabled;
+    /* #6873: the database protection alerts' standing state, keyed by StateRetryKey(metric, server key) so the three alerts of one server stand and clear on their own. */
+    private readonly ConcurrentDictionary<string, bool> _activeDatabaseProtection = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastDatabaseProtectionAlert = new();
+    private readonly Func<bool> _backupOverdueEnabled;
+    private readonly Func<bool> _logBackupOverdueEnabled;
+    private readonly Func<bool> _checkDbOverdueEnabled;
 
     /// <summary>The failed-send streaks behind <see cref="AfterSelfFire"/> (#4795): per (alert metric, key), how
     /// many sends in a row reached no channel. In memory only, like the stamps it back-dates; a restart starts
@@ -1277,7 +1296,15 @@ internal sealed class DarlingSelfAlertEvaluator
         string? storeName = null,
         ISelfAlertDeliveryStampStore? deliveryStamps = null,
         Func<TimeSpan, CancellationToken, Task>? retryDelay = null,
-        Func<IReadOnlyList<WebhookChannelFailureCount>>? webhookChannelFailures = null)
+        Func<IReadOnlyList<WebhookChannelFailureCount>>? webhookChannelFailures = null,
+        Func<bool>? agentAlertSetupEnabled = null,
+        Func<bool>? backupOverdueEnabled = null,
+        Func<bool>? logBackupOverdueEnabled = null,
+        Func<bool>? checkDbOverdueEnabled = null,
+        Func<bool>? identityCapacityEnabled = null,
+        Func<int>? identityCapacityWarningPercent = null,
+        Func<int>? identityCapacityCriticalPercent = null,
+        Func<string, string, string?, int, int>? resolveThreshold = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
@@ -1292,6 +1319,18 @@ internal sealed class DarlingSelfAlertEvaluator
         /* Unsupplied AG seams fall back to the V35 DDL defaults (master switch on, 5-minute lag, redo queue
            off) so an evaluator built without them behaves like a store at its shipped defaults. */
         _notifyAgHealth = notifyAgHealth ?? (() => true);
+        /* #6874: an evaluator built without the seam behaves like a store at its shipped default: the Agent alert setup alert is off. */
+        _agentAlertSetupEnabled = agentAlertSetupEnabled ?? (() => false);
+        /* #6873: an evaluator built without the seams behaves like a store at its shipped default: the three database protection alerts are off. */
+        _backupOverdueEnabled = backupOverdueEnabled ?? (() => false);
+        _logBackupOverdueEnabled = logBackupOverdueEnabled ?? (() => false);
+        _checkDbOverdueEnabled = checkDbOverdueEnabled ?? (() => false);
+        /* #6875: an evaluator built without these seams behaves like a store at its shipped defaults: the Identity Capacity alert is off, its bars are 70 and
+           90 percent, and no override applies. */
+        _identityCapacityEnabled = identityCapacityEnabled ?? (() => false);
+        _identityCapacityWarningPercent = identityCapacityWarningPercent ?? (() => 70);
+        _identityCapacityCriticalPercent = identityCapacityCriticalPercent ?? (() => 90);
+        _resolveThreshold = resolveThreshold ?? ((_, _, _, global) => global);
         _agLagAlertSeconds = agLagAlertSeconds ?? (() => 300);
         _agRedoQueueAlertKb = agRedoQueueAlertKb ?? (() => 0);
         _agDisconnectRefireMinutes = agDisconnectRefireMinutes ?? (() => 0);
@@ -1468,7 +1507,36 @@ internal sealed class DarlingSelfAlertEvaluator
                 ? (IReadOnlyList<string>)Array.Empty<string>()
                 : await (CaptureDownReadOverride ?? ReadMissingCaptureSessionsAsync)(postgres, serverId, cancellationToken);
             captureReadClock.Restart();
-            await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken, sweepGeneration: generation);
+            /* #6912: a capture whose collector does not run on this server's engine writes no new row, so its last
+               SESSION_MISSING row stays the newest forever. Drop those. The engine facts are read only when the
+               read named a capture, so the common empty answer costs nothing. */
+            IReadOnlyList<string> notRunOnEngine = Array.Empty<string>();
+            if (missing.Count > 0)
+            {
+                /* A failed engine read makes no claim, as DarlingGatedCollectorRows.ReadEngineGateAsync and
+                   FleetEngineGatedCollectors.ReadAsync do: the unknown edition gates nothing, so the pre-#6912 answer
+                   stands. Letting it reach the catch below would silence Capture Down for the pass, in the very store
+                   episode where the alert matters. The adapter has already recorded the failure. */
+                (int EngineEdition, string? EngineKind, AwsRdsKind AwsRdsKind) facts;
+                try
+                {
+                    facts = await ReadCaptureDownEngineFactsAsync(postgres, serverId, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning("[{Server}] Capture-down engine facts read failed, so no capture is dropped as not run on the engine: {Message}", serverName, ex.Message);
+                    facts = (CollectorEngineCapability.UnknownEngineEdition, null, AwsRdsKind.None);
+                }
+
+                (missing, notRunOnEngine) = SplitCapturesByEngine(serverName, missing, facts.EngineEdition, facts.EngineKind, facts.AwsRdsKind);
+            }
+
+            captureReadClock.Restart();
+            await ApplyCaptureDownAsync(serverId, serverName, missing, notRunOnEngine, cancellationToken, sweepGeneration: generation);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1523,6 +1591,74 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             _logger?.LogError("[{Server}] Agent-not-running self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(Key(serverId), AgentStatusReadName, agentReadClock.ElapsedMilliseconds);
+        }
+
+        /* Agent Alert Gaps (#6874): off by default, so a fleet that never turned it on pays no read here. The collector only
+           writes rows on SQL Server (not Azure SQL Database, Managed Instance or Amazon RDS), so on those a server has no capture
+           and nothing is judged. */
+        if (_agentAlertSetupEnabled())
+        {
+            var agentAlertReadClock = Stopwatch.StartNew();
+            try
+            {
+                var read = await ReadAgentAlertSetupAsync(postgres, serverId, cancellationToken);
+                agentAlertReadClock.Restart();
+                await ApplyAgentAlertSetupAsync(serverId, serverName, read, cancellationToken, sweepGeneration: generation);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("[{Server}] Agent-alert-setup self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentAlertReadClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(Key(serverId), AgentAlertSetupReadName, agentAlertReadClock.ElapsedMilliseconds);
+            }
+        }
+
+        /* Backup Overdue, Log Backup Overdue and CHECKDB Overdue (#6873): off by default, so a fleet that never turned one on pays no read here.
+           One read of the newest database_protection capture serves all three. */
+        if (_backupOverdueEnabled() || _logBackupOverdueEnabled() || _checkDbOverdueEnabled())
+        {
+            var protectionReadClock = Stopwatch.StartNew();
+            try
+            {
+                var read = await ReadDatabaseProtectionAsync(postgres, serverId, cancellationToken);
+                protectionReadClock.Restart();
+                await ApplyDatabaseProtectionAsync(serverId, serverName, read, cancellationToken, sweepGeneration: generation);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("[{Server}] Database-protection self-alert failed after {ElapsedMs} ms: {Message}", serverName, protectionReadClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(Key(serverId), DatabaseProtectionReadName, protectionReadClock.ElapsedMilliseconds);
+            }
+        }
+
+        /* Identity Capacity (#6875): off by default, so a fleet that never turned it on pays no read here. A server with no scan in the window
+           (the collector has not run, or has not reached any database) is judged on nothing: it neither fires nor clears. A PostgreSQL target
+           never writes this table (the collector is SQL Server only), so it pays no read. */
+        if (_identityCapacityEnabled() && engine != CollectorTargetEngine.PostgreSql)
+        {
+            var identityReadClock = Stopwatch.StartNew();
+            try
+            {
+                var read = await ReadIdentityCapacityAsync(postgres, serverId, cancellationToken);
+                identityReadClock.Restart();
+                await ApplyIdentityCapacityAsync(serverId, serverName, read, cancellationToken, sweepGeneration: generation);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("[{Server}] Identity-capacity self-alert failed after {ElapsedMs} ms: {Message}", serverName, identityReadClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(Key(serverId), IdentityCapacityReadName, identityReadClock.ElapsedMilliseconds);
+            }
         }
 
         /* Availability Group health (#991). Skipped entirely when the master AG switch is off, so a fleet that
@@ -1793,7 +1929,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <param name="sweepGeneration">#4795: as on <see cref="ApplyCollectionStoppedAsync"/>: given and out of date,
     /// this judges nothing, sends nothing and leaves no standing-alert flag or cooldown stamp behind.</param>
     internal async Task ApplyCaptureDownAsync(
-        int serverId, string serverName, IReadOnlyList<string> missing, CancellationToken cancellationToken,
+        int serverId, string serverName, IReadOnlyList<string> missing, IReadOnlyList<string> notRunOnEngine, CancellationToken cancellationToken,
         int? sweepGeneration = null)
     {
         /* #4795: before any state is read or written and before any send. */
@@ -1813,17 +1949,18 @@ internal sealed class DarlingSelfAlertEvaluator
         if (missing.Count > 0)
         {
             _activeCaptureDown[key] = true;
+            var list = string.Join(" and ", missing);
+            _lastCaptureDownList[key] = list;
             /* #5493: a state alert, the same policy as "Collection Stopped" (#5489): one alert on entry, a repeat
                only per connection_refire_minutes, a send again only for an alert no channel took (#4795). */
             var decision = DecideStateAlert(_lastCaptureDownAlert, key, CaptureDownMetric, key, now, out var refire);
             if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
             {
                 _lastCaptureDownAlert[key] = now;
-                var list = string.Join(" and ", missing);
                 var delivery = await FireAsync(
                     key, serverName, CaptureDownMetric, list, "session running",
                     detail: StateRepeatNote(decision, refire) + $"The {list} Extended Events {(missing.Count == 1 ? "session is" : "sessions are")} missing and could not be created. " +
-                        "Blocking/deadlock data is NOT being captured, so those alerts can never fire. Check the " +
+                        CaptureDownConsequence(missing) + " Check the " +
                         "collection log for the SESSION_MISSING detail (usually a permissions problem: " +
                         "ALTER ANY EVENT SESSION on-prem, CREATE ANY DATABASE EVENT SESSION on Azure SQL DB).",
                     severity: AlertSeverityLevel.Critical,
@@ -1843,11 +1980,82 @@ internal sealed class DarlingSelfAlertEvaluator
         else if (_activeCaptureDown.TryRemove(key, out var was) && was)
         {
             EndStateAlert(_lastCaptureDownAlert, key, CaptureDownMetric, key);
-            await RecordResolutionAsync(new AlertResolution(
-                key, serverName, CaptureDownMetric,
-                "Capture Restored", $"{serverName}: Blocking/deadlock capture is running again"), cancellationToken);
+            _lastCaptureDownList.TryRemove(key, out var wasDown);
+            if (notRunOnEngine is { Count: > 0 })
+            {
+                /* #6912: the session did not come back. What was down does not run on this server's engine, so
+                   "restored" would be false: this one is a clear, not a recovery. */
+                await RecordResolutionAsync(new AlertResolution(
+                    key, serverName, CaptureDownMetric,
+                    "Capture Cleared",
+                    $"{serverName}: The {string.Join(" and ", notRunOnEngine)} capture does not run on this server's engine, so it is no longer expected"), cancellationToken);
+            }
+            else
+            {
+                await RecordResolutionAsync(new AlertResolution(
+                    key, serverName, CaptureDownMetric,
+                    "Capture Restored", $"{serverName}: The {(string.IsNullOrEmpty(wasDown) ? "Blocking, Deadlock and Client timeouts" : wasDown)} capture is running again"), cancellationToken);
+            }
         }
     }
+
+    /// <summary>#6912: the collector behind each friendly capture name <see cref="ReadMissingCaptureSessionsAsync"/> returns.</summary>
+    private static string CaptureCollectorName(string capture) => capture switch
+    {
+        "Deadlock" => "deadlocks",
+        "Client timeouts" => "attention",
+        _ => "blocked_process_report",
+    };
+
+    /// <summary>
+    /// #6912: splits the captures the read named into those this server's engine can run and those it cannot, with the same
+    /// gate that makes the collector's read answer not_collected (the engine kind, the edition and the Amazon RDS kind).
+    /// </summary>
+    internal static (IReadOnlyList<string> Running, IReadOnlyList<string> NotRunOnEngine) SplitCapturesByEngine(
+        string serverName, IReadOnlyList<string> captures, int engineEdition, string? engineKind, AwsRdsKind awsRdsKind)
+    {
+        var running = new List<string>();
+        var notRun = new List<string>();
+        foreach (var capture in captures)
+        {
+            if (CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, CaptureCollectorName(capture), awsRdsKind) is null)
+            {
+                running.Add(capture);
+            }
+            else
+            {
+                notRun.Add(capture);
+            }
+        }
+
+        return (running, notRun);
+    }
+
+    /// <summary>#6912: what the Capture Down detail says is not captured, built from the captures in the list.</summary>
+    private static string CaptureDownConsequence(IReadOnlyList<string> missing)
+    {
+        var sentences = new List<string>();
+        foreach (var capture in missing)
+        {
+            sentences.Add(capture switch
+            {
+                "Blocking" => "Blocking data is NOT being captured, so blocking alerts can never fire.",
+                "Deadlock" => "Deadlock data is NOT being captured, so deadlock alerts can never fire.",
+                _ => "The client timeouts and cancels capture is NOT recording.",
+            });
+        }
+
+        return string.Join(" ", sentences);
+    }
+
+    /// <summary>Test seam (#6912): replaces the engine-facts read the capture-down pass makes when a capture is down.</summary>
+    internal Func<NpgsqlDataSource, int, CancellationToken, Task<(int EngineEdition, string? EngineKind, AwsRdsKind AwsRdsKind)>>? CaptureDownEngineReadOverride { get; set; }
+
+    private Task<(int EngineEdition, string? EngineKind, AwsRdsKind AwsRdsKind)> ReadCaptureDownEngineFactsAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        => ReadWithOneRetryAsync(
+            token => (CaptureDownEngineReadOverride ?? Mcp.DarlingEngineCapability.ReadServerEngineAsync)(postgres, serverId, token),
+            serverId, CaptureDownEngineReadName, cancellationToken);
 
     /// <summary>
     /// FLEET-level (not per-server): the tool's OWN collectors regressing in cost ON the monitored servers
@@ -4296,6 +4504,286 @@ internal sealed class DarlingSelfAlertEvaluator
             await RecordResolutionAsync(new AlertResolution(
                 key, serverName, AgentDownMetric,
                 "Agent Restarted", $"{serverName}: SQL Server Agent service is running again"), cancellationToken);
+        }
+    }
+
+    /// <summary>How far back the Agent alert setup looks for a firing that told no operator (#6874).</summary>
+    internal static readonly TimeSpan AgentAlertSetupWindow = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// The server's Agent alerts for the last <see cref="AgentAlertSetupWindow"/> (#6874), or null when there is no FRESH capture:
+    /// none in the window, or the newest is older than the collection-stale window. A lagging feed is the collection-stopped
+    /// alert's to report, so it neither fires nor clears this one.
+    /// </summary>
+    internal async Task<AgentAlertRead?> ReadAgentAlertSetupAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var now = _utcNow();
+        var read = await ReadWithOneRetryAsync(
+            token => DarlingAgentAlertReader.ReadAsync(
+                postgres, serverId, now - AgentAlertSetupWindow, now, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, token),
+            serverId, AgentAlertSetupReadName, cancellationToken);
+        if (!read.HasCapture)
+        {
+            return null;
+        }
+
+        var newest = DateTime.SpecifyKind(read.NewestCapture!.Value, DateTimeKind.Utc);
+        return now - newest < SettingsStaleWindow ? read : null;
+    }
+
+    /// <summary>
+    /// Edge-applies "Agent Alert Gaps" (#6874) from the instance status <see cref="AgentAlertStatus.Evaluate"/> gives the newest
+    /// Agent alert capture. Shaped like <see cref="ApplyAgentNotRunningAsync"/>: fires once when a gap appears, re-fires after the
+    /// cooldown while it stands, and writes one "Agent Alert Gaps Cleared" history row when the status is ok again. A null
+    /// <paramref name="read"/> (no fresh capture) judges nothing and leaves the standing state alone. Off unless the
+    /// <c>agent_alert_gaps_enabled</c> setting is on, and gated on the master alerts switch.
+    /// </summary>
+    internal async Task ApplyAgentAlertSetupAsync(
+        int serverId, string serverName, AgentAlertRead? read, CancellationToken cancellationToken, int? sweepGeneration = null)
+    {
+        if (IsStaleSweep(serverId, sweepGeneration) || !_settings.AlertsEnabled || !_agentAlertSetupEnabled() || read is null)
+        {
+            return;
+        }
+
+        var key = Key(serverId);
+        var now = _utcNow();
+        var status = AgentAlertStatus.Evaluate(read.Alerts);
+        if (status.Gaps.Count > 0)
+        {
+            _activeAgentAlertGaps[key] = true;
+            var decision = DecideStateAlert(_lastAgentAlertGapAlert, key, AgentAlertSetupMetric, key, now, out var refire);
+            if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
+            {
+                _lastAgentAlertGapAlert[key] = now;
+                var gapText = string.Join(" ", status.Gaps.Select(g => g.Alerts.Count > 0 ? $"{g.Message} ({string.Join(", ", g.Alerts)})" : g.Message));
+                var delivery = await FireAsync(
+                    key, serverName, AgentAlertSetupMetric, "Gaps", "Complete",
+                    detail: StateRepeatNote(decision, refire) + "The SQL Server Agent alerts on this server have gaps. " + gapText +
+                        " A server without these alerts says nothing when the engine reports corruption or a fatal error.",
+                    severity: AlertSeverityLevel.Warning,
+                    shortMessage: $"SQL Server Agent alerts have {status.Gaps.Count} gap(s): {string.Join(", ", status.Gaps.Select(g => g.Code))}",
+                    numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                    cancellationToken);
+                if (IsStaleSweep(serverId, sweepGeneration))
+                {
+                    return;
+                }
+
+                NoteStateSend(AgentAlertSetupMetric, key, delivery);
+            }
+        }
+        else if (_activeAgentAlertGaps.TryRemove(key, out var was) && was)
+        {
+            EndStateAlert(_lastAgentAlertGapAlert, key, AgentAlertSetupMetric, key);
+            await RecordResolutionAsync(new AlertResolution(
+                key, serverName, AgentAlertSetupMetric,
+                "Agent Alert Gaps Cleared", $"{serverName}: the SQL Server Agent alerts have no gaps"), cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// The server's newest database protection capture (#6873), or null when there is no FRESH one: none within
+    /// <see cref="DatabaseProtectionBands.CaptureFreshness"/>. A lagging feed is the collection-stopped alert's to report, so it
+    /// neither fires nor clears these alerts.
+    /// </summary>
+    internal async Task<DatabaseProtectionRead?> ReadDatabaseProtectionAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var now = _utcNow();
+        var read = await ReadWithOneRetryAsync(
+            token => DarlingDatabaseProtectionReader.ReadAsync(
+                postgres, serverId, now - DatabaseProtectionBands.CaptureFreshness, now, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, token),
+            serverId, DatabaseProtectionReadName, cancellationToken);
+        return read.HasCapture ? read : null;
+    }
+
+    /// <summary>
+    /// Edge-applies "Backup Overdue", "Log Backup Overdue" and "CHECKDB Overdue" (#6873) from the newest capture, judged by
+    /// <see cref="DatabaseProtectionBands.OverdueFacts"/> (the one judgment: a platform-managed database, a native-only database's backups, a database that is not online and a
+    /// SIMPLE-recovery log are never overdue). One alert per server and metric names every overdue database in its detail. Shaped like
+    /// <see cref="ApplyAgentNotRunningAsync"/>: fires once when something becomes overdue, re-fires after the cooldown while it stands, and
+    /// writes one "Cleared" history row when nothing is. A null <paramref name="read"/> (no fresh capture) judges nothing and leaves the
+    /// standing state alone. Each alert is off unless its own setting is on, and all are gated on the master alerts switch.
+    /// </summary>
+    internal async Task ApplyDatabaseProtectionAsync(
+        int serverId, string serverName, DatabaseProtectionRead? read, CancellationToken cancellationToken, int? sweepGeneration = null)
+    {
+        if (IsStaleSweep(serverId, sweepGeneration) || !_settings.AlertsEnabled || read is null || read.NewestCapture is null)
+        {
+            return;
+        }
+
+        var capturedAt = DateTime.SpecifyKind(read.NewestCapture.Value, DateTimeKind.Utc);
+        var overdue = DatabaseProtectionBands.OverdueFacts(read.Databases, capturedAt);
+        var limits = DatabaseProtectionThresholds.Default;
+        if (_backupOverdueEnabled())
+        {
+            await ApplyOverdueMetricAsync(serverId, serverName, BackupOverdueMetric, DatabaseProtectionBands.KindFullBackup, overdue,
+                string.Create(CultureInfo.InvariantCulture, $"{limits.FullBackup.TotalDays} days"), "last full backup",
+                " A database without a recent full backup cannot be restored to a recent point.", sweepGeneration, cancellationToken);
+        }
+
+        if (_logBackupOverdueEnabled())
+        {
+            await ApplyOverdueMetricAsync(serverId, serverName, LogBackupOverdueMetric, DatabaseProtectionBands.KindLogBackup, overdue,
+                string.Create(CultureInfo.InvariantCulture, $"{limits.LogBackup.TotalMinutes} minutes"), "last log backup",
+                " Point-in-time recovery stops at the last log backup, and the log cannot be reused until one runs.", sweepGeneration, cancellationToken);
+        }
+
+        if (_checkDbOverdueEnabled())
+        {
+            await ApplyOverdueMetricAsync(serverId, serverName, CheckDbOverdueMetric, DatabaseProtectionBands.KindCheckDb, overdue,
+                string.Create(CultureInfo.InvariantCulture, $"{limits.CheckDb.TotalDays} days"), "last good CHECKDB",
+                " Corruption can sit unnoticed and be copied into every backup taken meanwhile.", sweepGeneration, cancellationToken);
+        }
+    }
+
+    private async Task ApplyOverdueMetricAsync(
+        int serverId, string serverName, string metric, string kind, IReadOnlyList<DatabaseProtectionOverdue> overdue,
+        string threshold, string factName, string consequence, int? sweepGeneration, CancellationToken cancellationToken)
+    {
+        var key = Key(serverId);
+        var stateKey = StateRetryKey(metric, key);
+        var now = _utcNow();
+        var items = overdue.Where(o => o.Kind == kind).ToList();
+        if (items.Count > 0)
+        {
+            _activeDatabaseProtection[stateKey] = true;
+            var decision = DecideStateAlert(_lastDatabaseProtectionAlert, stateKey, metric, key, now, out var refire);
+            if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
+            {
+                _lastDatabaseProtectionAlert[stateKey] = now;
+                var names = string.Join(", ", items.Select(i => i.Text));
+                var delivery = await FireAsync(
+                    key, serverName, metric, string.Create(CultureInfo.InvariantCulture, $"{items.Count} overdue"), $"older than {threshold}",
+                    detail: StateRepeatNote(decision, refire) + $"The {factName} is older than {threshold} on {items.Count} database(s): {names}." + consequence,
+                    severity: AlertSeverityLevel.Warning,
+                    shortMessage: string.Create(CultureInfo.InvariantCulture, $"{metric}: {items.Count} database(s)") + " - " + string.Join(", ", items.Take(5).Select(i => i.Database)) +
+                        (items.Count > 5 ? ", ..." : string.Empty),
+                    numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                    cancellationToken);
+                if (IsStaleSweep(serverId, sweepGeneration))
+                {
+                    return;
+                }
+
+                NoteStateSend(metric, key, delivery);
+            }
+        }
+        else if (_activeDatabaseProtection.TryRemove(stateKey, out var was) && was)
+        {
+            EndStateAlert(_lastDatabaseProtectionAlert, stateKey, metric, key);
+            await RecordResolutionAsync(new AlertResolution(
+                key, serverName, metric,
+                metric + " Cleared", $"{serverName}: no database has an overdue {factName}"), cancellationToken);
+        }
+    }
+
+    /// <summary>The scans the Identity Capacity alert judges: seven days, the window <c>get_identity_capacity</c> reads by default, so a database
+    /// the pass budget has not reached again keeps the answer of its last scan.</summary>
+    internal static readonly TimeSpan IdentityCapacityWindow = TimeSpan.FromHours(168);
+
+    /// <summary>Longest list of columns the alert's detail names before it says how many more there are.</summary>
+    internal const int IdentityCapacityDetailColumns = 10;
+
+    /// <summary>
+    /// The newest scan of each database in the last <see cref="IdentityCapacityWindow"/> (#6875), or null when no database was scanned in it.
+    /// A database is judged by its own newest marker. The narrow read: this runs every sweep per server and judges only the columns, so it
+    /// skips the listing of databases waiting or skipped that <see cref="DarlingIdentityCapacityReader.ReadAsync"/> adds.
+    /// </summary>
+    internal async Task<IdentityCapacityRead?> ReadIdentityCapacityAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var now = _utcNow();
+        var read = await ReadWithOneRetryAsync(
+            token => DarlingIdentityCapacityReader.ReadNewestScansAsync(
+                postgres, serverId, DatabaseFilter.All, now - IdentityCapacityWindow, now, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, token),
+            serverId, IdentityCapacityReadName, cancellationToken);
+        return read.HasScan ? read : null;
+    }
+
+    /// <summary>
+    /// Edge-applies "Identity Capacity" (#6875) from <see cref="ReadIdentityCapacityAsync"/>. A column is judged by the same percent and the same
+    /// <see cref="IdentityCapacityMath.Band(double, double, double)"/> the tool and the Viewer use, against the bars that apply to its server and
+    /// database (a threshold override replaces the global bar for that scope, the critical bar never below the warning bar). Fires once when a column
+    /// reaches a bar, again when the worst band rises from warning to critical, re-fires after the cooldown while one stands, and writes one
+    /// "Identity Capacity Cleared" history row when no column is at a bar any more. A null <paramref name="read"/> judges nothing. Off unless the
+    /// <c>identity_capacity_enabled</c> setting is on, and gated on the master alerts switch.
+    /// </summary>
+    internal async Task ApplyIdentityCapacityAsync(
+        int serverId, string serverName, IdentityCapacityRead? read, CancellationToken cancellationToken, int? sweepGeneration = null)
+    {
+        if (IsStaleSweep(serverId, sweepGeneration) || !_settings.AlertsEnabled || !_identityCapacityEnabled() || read is null)
+        {
+            return;
+        }
+
+        var key = Key(serverId);
+        var now = _utcNow();
+        var globalWarning = Math.Clamp(_identityCapacityWarningPercent(), 1, 100);
+        var globalCritical = Math.Clamp(_identityCapacityCriticalPercent(), globalWarning, 100);
+        var hits = new List<(IdentityColumnFact Column, double Percent, string Band, int Warning, int Critical)>();
+        foreach (var column in read.Columns)
+        {
+            if (column.PercentUsed is not double percent)
+            {
+                continue;
+            }
+
+            var warning = Math.Clamp(_resolveThreshold(DarlingThresholdKeys.IdentityCapacityWarning, key, column.DatabaseName, globalWarning), 1, 100);
+            var critical = Math.Max(warning, Math.Clamp(_resolveThreshold(DarlingThresholdKeys.IdentityCapacityCritical, key, column.DatabaseName, globalCritical), 1, 100));
+            var band = IdentityCapacityMath.Band(percent, warning, critical);
+            if (band != IdentityCapacityMath.BandOk)
+            {
+                hits.Add((column, percent, band, warning, critical));
+            }
+        }
+
+        if (hits.Count > 0)
+        {
+            hits.Sort((a, b) => b.Percent.CompareTo(a.Percent));
+            var isCritical = hits.Any(h => h.Band == IdentityCapacityMath.BandCritical);
+            _activeIdentityCapacity[key] = true;
+            var decision = DecideStateAlert(_lastIdentityCapacityAlert, key, IdentityCapacityMetric, key, now, out var refire, severityRank: isCritical ? 2 : 1);
+            if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
+            {
+                _lastIdentityCapacityAlert[key] = now;
+                var worst = hits[0];
+                var worstBar = worst.Band == IdentityCapacityMath.BandCritical ? worst.Critical : worst.Warning;
+                var lines = hits.Take(IdentityCapacityDetailColumns).Select(h =>
+                    $"{h.Column.DatabaseName}.{h.Column.SchemaName}.{h.Column.TableName}.{h.Column.ColumnName}: {h.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used ({h.Band}), " +
+                    (h.Column.Exhaustion is { } e
+                        ? $"about {e.DaysLeft.ToString("F0", CultureInfo.InvariantCulture)} days to exhaustion."
+                        : "days to exhaustion unknown."));
+                var more = hits.Count > IdentityCapacityDetailColumns ? $" And {hits.Count - IdentityCapacityDetailColumns} more." : "";
+                var delivery = await FireAsync(
+                    key, serverName, IdentityCapacityMetric,
+                    $"{worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}%",
+                    $"{worstBar.ToString(CultureInfo.InvariantCulture)}%",
+                    detail: StateRepeatNote(decision, refire) +
+                        $"{hits.Count} identity column(s) on this server are near the end of their type. An identity column that runs out stops every insert into its table. " +
+                        string.Join(" ", lines) + more,
+                    severity: isCritical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+                    shortMessage: $"{hits.Count} identity column(s) near the end of their type, fullest {worst.Column.DatabaseName}.{worst.Column.TableName}.{worst.Column.ColumnName} at {worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used",
+                    numericCurrentValue: worst.Percent,
+                    numericThresholdValue: worstBar,
+                    cancellationToken);
+                if (IsStaleSweep(serverId, sweepGeneration))
+                {
+                    return;
+                }
+
+                NoteStateSend(IdentityCapacityMetric, key, delivery);
+            }
+        }
+        else if (_activeIdentityCapacity.TryRemove(key, out var was) && was)
+        {
+            EndStateAlert(_lastIdentityCapacityAlert, key, IdentityCapacityMetric, key);
+            await RecordResolutionAsync(new AlertResolution(
+                key, serverName, IdentityCapacityMetric,
+                "Identity Capacity Cleared", $"{serverName}: no identity column is at its warning bar"), cancellationToken);
         }
     }
 
@@ -8409,10 +8897,24 @@ WHERE c.is_enabled";
         _lastCollectionStoppedAlert.TryRemove(key, out _);
         _activeCaptureDown.TryRemove(key, out _);
         _lastCaptureDownAlert.TryRemove(key, out _);
+        _lastCaptureDownList.TryRemove(key, out _);
         _activeAgentDown.TryRemove(key, out _);
         _lastAgentDownAlert.TryRemove(key, out _);
+        _activeAgentAlertGaps.TryRemove(key, out _);
+        _lastAgentAlertGapAlert.TryRemove(key, out _);
+        _activeIdentityCapacity.TryRemove(key, out _);
+        _lastIdentityCapacityAlert.TryRemove(key, out _);
+        _stateRetries.Clear(StateRetryKey(IdentityCapacityMetric, key));
         _stateRetries.Clear(StateRetryKey(CaptureDownMetric, key));
         _stateRetries.Clear(StateRetryKey(AgentDownMetric, key));
+        _stateRetries.Clear(StateRetryKey(AgentAlertSetupMetric, key));
+        foreach (var protectionMetric in new[] { BackupOverdueMetric, LogBackupOverdueMetric, CheckDbOverdueMetric })
+        {
+            var protectionKey = StateRetryKey(protectionMetric, key);
+            _activeDatabaseProtection.TryRemove(protectionKey, out _);
+            _lastDatabaseProtectionAlert.TryRemove(protectionKey, out _);
+            _stateRetries.Clear(protectionKey);
+        }
         _connectionState.TryRemove(key, out _);
         _hasBeenOnline.TryRemove(key, out _);
         _collectionWatchStart[key] = Unstamped;
@@ -8473,6 +8975,7 @@ WHERE c.is_enabled";
 
     /// <summary>The counter's name for the capture-down condition's read.</summary>
     internal const string MissingCaptureSessionsReadName = "capture-down self-alert";
+    internal const string CaptureDownEngineReadName = "capture-down engine facts";
 
     /// <summary>
     /// The counter's name for the agent-not-running condition's TWO reads — the latest status and the
@@ -9072,6 +9575,14 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
 
     internal const string CaptureDownMetric = "Capture Down";
     internal const string AgentDownMetric = "Agent Not Running";
+    internal const string AgentAlertSetupMetric = "Agent Alert Gaps";
+    internal const string AgentAlertSetupReadName = "agent-alert-setup self-alert";
+    internal const string BackupOverdueMetric = "Backup Overdue";
+    internal const string LogBackupOverdueMetric = "Log Backup Overdue";
+    internal const string CheckDbOverdueMetric = "CHECKDB Overdue";
+    internal const string DatabaseProtectionReadName = "database-protection self-alert";
+    internal const string IdentityCapacityMetric = "Identity Capacity";
+    internal const string IdentityCapacityReadName = "identity-capacity self-alert";
 
     /// <summary>
     /// #5493: retries of the lasting-state self-alerts, keyed by <see cref="StateRetryKey"/>. Collection Stopped and

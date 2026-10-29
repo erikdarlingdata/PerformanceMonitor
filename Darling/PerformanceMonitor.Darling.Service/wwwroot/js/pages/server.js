@@ -45,7 +45,7 @@
  * subtitle rather than inheriting a label that would misdescribe them.
  */
 
-import { el, mount, apiGetFleet, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime } from "../util.js";
+import { el, mount, apiGetFleet, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, storeHash } from "../util.js";
 import { getDatabaseFilter } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
@@ -122,6 +122,17 @@ let renderGeneration = 0;
    fresh renderServer, the loadServerCard callback, and the range-select handler) and every one of them must
    cancel the SAME previous batch, not just the one its own caller happens to remember. */
 let panelAbort = null;
+/* #6793: leaving the page (route() calls beginPageScope) ends this page's render. The panel batch is aborted. The panel signal is
+   cleared, because it is panels.js state shared by every page that renders panels: left aborted, the next page's first grid would
+   short-circuit to "aborted" and stay on its loading strips (views.js clears it only after its first grid). renderGeneration moves
+   on and `current` is emptied, so a fleet read or a catalog read still out (neither can be aborted) cannot start a new panel batch,
+   which would count on the page now on screen. */
+onPageLeave(() => {
+  if (panelAbort) panelAbort.abort();
+  setPanelSignal();
+  renderGeneration++;
+  current = { server: null, tab: null };
+});
 
 /* The last card seen for a server name, so a repeat render can choose its registry without a round trip. Keyed
    on the ROUTE's name (which may be either the server name or the display name — the same key loadServerCard
@@ -293,7 +304,7 @@ export function renderServer(main, server, tabId, opts) {
      id the choice is stored under. */
   const dbSlot = el("span", { class: "db-filter-slot" });
   const head = el("div", { class: "page-head" }, [
-    el("a", { href: "#/fleet", text: "← Fleet" }),
+    el("a", { href: storeHash("#/fleet"), text: "← Fleet" }),
     el("span", { class: "server-title" }, [dot, title]),
     badgeSlot,
     engineSlot,
@@ -442,7 +453,9 @@ function redrawPanels() {
   setPanelSignal(panelAbort.signal);
 
   applyDatabaseFilter();
-  mount(gridNode, current.tab.build(current.server, { ...rangeContext(), offline: serverIsOffline(current.server) }));
+  /* #6793: the batch's signal rides in the tab's ctx too, for the tab files that read `ctx.signal` (the memory-grant charts, the overview strips,
+     the recommendations list, the clerk and named trend draws). Without it each of them read on no signal on this page. */
+  mount(gridNode, current.tab.build(current.server, { ...rangeContext(), offline: serverIsOffline(current.server), signal: panelAbort.signal }));
 }
 
 /* The page's database filter (#5245), set before every panel redraw the way the custom range is: the chosen names for the card's
@@ -479,7 +492,7 @@ function subtabBar(server, active, tabs) {
     tabs.map((t) =>
       el("a", {
         class: "subtab" + (t.id === active.id ? " active" : ""),
-        href: "#/server/" + encodeURIComponent(server) + "/" + t.id,
+        href: storeHash("#/server/") + encodeURIComponent(server) + "/" + t.id,
         role: "tab",
         "aria-selected": t.id === active.id ? "true" : "false",
         text: t.label,

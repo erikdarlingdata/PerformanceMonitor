@@ -98,6 +98,7 @@ public sealed class RdsDeadlockIngestor
         bool pgLogUsesCsvlog = false,
         string? loginConnectionString = null,
         AwsRoleKey? role = null,
+        PgLogZoneCheck? zoneCheck = null,
         CancellationToken cancellationToken = default)
     {
         /* #4708: what the last process saved for this server is loaded once, before its first read, so a
@@ -110,7 +111,7 @@ public sealed class RdsDeadlockIngestor
         /* #4708: a rotated file is finished and the newest file opened in the SAME cycle (bounded), rather than
            the old file on one cycle and the new one on the next. */
         return await RdsLogSource.RunPassesAsync(
-            () => IngestPassAsync(serverId, storageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, loginConnectionString, role, cancellationToken));
+            () => IngestPassAsync(serverId, storageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, loginConnectionString, role, zoneCheck, cancellationToken));
     }
 
     /// <summary>
@@ -126,6 +127,7 @@ public sealed class RdsDeadlockIngestor
         bool pgLogUsesCsvlog,
         string? loginConnectionString,
         AwsRoleKey? role,
+        PgLogZoneCheck? zoneCheck,
         CancellationToken cancellationToken)
     {
         RdsLogSource.LogChunk? chunk;
@@ -194,7 +196,7 @@ public sealed class RdsDeadlockIngestor
 
         var (written, foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped, nextCarry, nextReport) = await StoreAsync(
             serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, pgLogUsesCsvlog,
-            carry, chunk.Value.MoreAvailable, heldReport, abandonedReport, moreCanArrive, cancellationToken);
+            carry, chunk.Value.MoreAvailable, heldReport, abandonedReport, moreCanArrive, zoneCheck, cancellationToken);
 
         /* THE MARKER MOVES HERE AND NOWHERE ELSE. Reaching this line means everything the chunk held is
            either in the store or was nothing to store; anything else threw out of StoreAsync above and
@@ -257,6 +259,7 @@ public sealed class RdsDeadlockIngestor
         string heldReport,
         string abandonedReport,
         bool moreCanArrive,
+        PgLogZoneCheck? zoneCheck,
         CancellationToken cancellationToken)
     {
         List<PgDeadlockLogParser.ParsedDeadlock> deadlocks;
@@ -281,7 +284,10 @@ public sealed class RdsDeadlockIngestor
             /* The SAME foreign-zone rule the stderr path applies below — PgLogEventsCollector's own,
                shared here rather than the private copy PgDeadlocksCollector's SQL route used to keep
                (#4053 part c2 dedupe). */
-            var kept = PgLogEventsCollector.FilterForeignZoneEntries(entries, logTimezoneIsUtc, out foreignZoneLines);
+            /* #6866: a named local log_timezone is proved against the target first, one statement for the portion. */
+            var (kept, keptForeignZoneLines) = await PgLogNamedZone.FilterEntriesAsync(
+                entries, logTimezoneIsUtc, zoneCheck?.Setting, zoneCheck?.Resolver, cancellationToken);
+            foreignZoneLines = keptForeignZoneLines;
 
             deadlocks = new List<PgDeadlockLogParser.ParsedDeadlock>();
             foreach (var entry in kept)
@@ -336,7 +342,11 @@ public sealed class RdsDeadlockIngestor
                     storageName);
             }
 
-            deadlocks = PgDeadlockLogParser.Extract(portion.Text, logTimezoneIsUtc, out foreignZoneLines);
+            /* #6866: the held report is checked in the same statement as the chunk's text. */
+            var zones = await PgLogNamedZone.ResolveBodyAsync(
+                portion.Text + "\n" + abandonedReport, logTimezoneIsUtc, zoneCheck?.Setting, zoneCheck?.Resolver, cancellationToken);
+
+            deadlocks = PgDeadlockLogParser.Extract(portion.Text, logTimezoneIsUtc, zones, out foreignZoneLines);
 
             if (abandonedReport.Length > 0)
             {
@@ -348,7 +358,7 @@ public sealed class RdsDeadlockIngestor
                     + "be finished; storing it as it is (#4735)",
                     storageName);
 
-                deadlocks.InsertRange(0, PgDeadlockLogParser.Extract(abandonedReport, logTimezoneIsUtc, out var abandonedForeignZoneLines));
+                deadlocks.InsertRange(0, PgDeadlockLogParser.Extract(abandonedReport, logTimezoneIsUtc, zones, out var abandonedForeignZoneLines));
                 foreignZoneLines += abandonedForeignZoneLines;
             }
         }

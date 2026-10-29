@@ -66,7 +66,7 @@ public sealed class QueryStoreHealthCollectorDefinitionTests
         Assert.Contains("is_primary_replica = 1", plan.Text, StringComparison.Ordinal);
         /* #1823: a least-privilege login without per-db access must be filtered out up front, the
            same self-skip the sibling per-database collectors carry. */
-        Assert.Contains("HAS_DBACCESS(d.name) = 1", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("s.has_access = 1", plan.Text, StringComparison.Ordinal);
         Assert.Contains("AND d.name NOT IN (@excl_db_0)", plan.Text, StringComparison.Ordinal);
         Assert.Equal("SO", Assert.Single(plan.Parameters).Value);
         /* The system-database screen the per-database body repeats (see the Azure pin below): user

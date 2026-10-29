@@ -76,8 +76,14 @@ public static class InvestigationFamily
         ["Version Store (PVS)"] = Resources,
         ["Volume Free Space"] = Resources,
         ["Database File Growth"] = Resources,
+        /* #6875: an identity column that runs out of values stops every insert into its table, a resource running out like a full volume. */
+        ["Identity Capacity"] = Resources,
 
         ["Database State"] = Availability,
+        /* Not in the draft: a missing backup or CHECKDB is a restorability gap, which sits beside Database State. */
+        ["Backup Overdue"] = Availability,
+        ["Log Backup Overdue"] = Availability,
+        ["CHECKDB Overdue"] = Availability,
         ["AG Failover"] = Availability,
         ["AG Replica Disconnected"] = Availability,
         ["AG Sync Fell Behind"] = Availability,

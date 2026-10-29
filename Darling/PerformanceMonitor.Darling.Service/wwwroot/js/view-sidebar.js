@@ -13,7 +13,7 @@
  * the page as text.
  */
 
-import { el, mount } from "./util.js";
+import { el, mount, storeHash } from "./util.js";
 import { sidebarViewRows } from "./view-folders.js";
 import { isViewGroupCollapsed, toggleViewGroup } from "./viewer-local.js";
 
@@ -25,7 +25,7 @@ function viewLink(v, depth, activeId) {
   const isNotebook = v.kind === "notebook";
   return el("a", {
     class: "view-item" + (active ? " active" : "") + (isNotebook ? " is-notebook" : "") + (v.personal === true ? " is-personal" : ""),
-    href: (isNotebook ? "#/notebook/" : "#/view/") + encodeURIComponent(v.id),
+    href: storeHash((isNotebook ? "#/notebook/" : "#/view/") + encodeURIComponent(v.id)),
     dataset: { view: String(v.id) },
     style: depth > 0 ? "padding-left:" + (1.25 + depth * INDENT_REM) + "rem" : null,
     title: v.description || v.name,
@@ -61,8 +61,8 @@ export function paintViewList(container, views, session, activeId) {
   const items = rows.map((r) => (r.kind === "group" ? groupHeader(r) : viewLink(r.view, r.depth, activeId)));
 
   if (session && session.can_edit) {
-    items.push(el("a", { class: "view-item new-view", href: "#/view/new", text: "＋ New view" }));
-    items.push(el("a", { class: "view-item new-view", href: "#/notebook/new", text: "＋ New notebook" }));
+    items.push(el("a", { class: "view-item new-view", href: storeHash("#/view/new"), text: "＋ New view" }));
+    items.push(el("a", { class: "view-item new-view", href: storeHash("#/notebook/new"), text: "＋ New notebook" }));
   }
 
   if (!items.length) {

@@ -73,7 +73,7 @@ public sealed class ViewerQueryStoreRegressionRow
     public bool CanGetActualPlan => QueryId != 0;
     public DateTime? LastExecutionTime { get; set; }
 
-    /// <summary>#5506: why the row is listed: <c>cost</c> (Regular CPU up more than 25%), <c>timeouts</c> (Aborted runs per hour
+    /// <summary>#5506: why the row is listed: <c>cost</c> (Regular CPU up more than 25%, with at least 1 s of added CPU, #6781), <c>timeouts</c> (Aborted runs per hour
     /// at least doubled), <c>errors</c> (Exception runs per hour at least doubled), or a comma-separated combination.</summary>
     public string RegressionReason { get; set; } = "";
 
@@ -108,6 +108,14 @@ public sealed class ViewerQueryStoreRegressionRow
 
 public sealed partial class ViewerDataService
 {
+    /// <summary>#6750 part 3: <paramref name="sql"/> with the self-statement test on the key table once its backfill has run
+    /// (<see cref="QueryStoreSelfKeys.ReadyAsync"/>, read in this read's snapshot, closed on a store without the state table), else as it
+    /// is, with the text probe. The MCP read's <c>DarlingQueryStoreRegressionReader.WithSelfKeysWhenReadyAsync</c> is the same shape.</summary>
+    private static async Task<string> WithSelfKeysWhenReadyAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, CancellationToken cancellationToken) =>
+        await QueryStoreSelfKeys.ReadyAsync(connection, transaction, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken)
+            ? QueryStoreRegressionBaseline.WithSelfKeys(sql)
+            : sql;
+
     /// <summary>
     /// The baseline's lookback (#4217, the same bound #4195 gave the MCP tool and Lite's copy of this same
     /// read): a fixed 7 days ending at the recent window's start, so the comparison period stops growing with
@@ -145,7 +153,7 @@ public sealed partial class ViewerDataService
     /// projection joins them per (database, query_id), computes the duration and CPU regression percents, the
     /// execution-count-weighted <c>additional_duration_ms</c>
     /// (extra total time = per-exec delta × recent exec count), and a DURATION-driven severity band, keeping
-    /// rows whose Regular CPU regressed > 25% (the TVF's single-metric gate) or whose Aborted or Exception runs per hour at
+    /// rows whose Regular CPU regressed > 25% with at least 1 s of added CPU over the window (the TVF's single-metric gate plus the #6781 floor) or whose Aborted or Exception runs per hour at
     /// least doubled (#5506), ranked by additional_duration_ms (failure-only rows after the cost rows, within a share of the
     /// cap) and capped at the TVF's TOP (50). Logical reads are not part of it (#5506).
     ///
@@ -158,7 +166,7 @@ public sealed partial class ViewerDataService
     /// Darling's text is already decompressed, where the TVF <c>DECOMPRESS()</c>es a compressed
     /// <c>query_sql_text</c>.
     /// (3) The stale INTENT comment on the Dashboard's C# caller does NOT match what the TVF actually runs; this ports the
-    /// ACTUAL gate (CPU-only > 25%, no minimums), with the baseline bounded per #4217.</para>
+    /// ACTUAL gate (CPU-only > 25%, no run-count minimum), plus the 1 s added-CPU floor Darling adds (#6781), with the baseline bounded per #4217.</para>
     ///
     /// <para>Since #5809 this raw form is the fallback: <see cref="QueryStoreRegressionsTableSql"/> serves wherever the
     /// interval table's gate allows.</para>
@@ -291,7 +299,10 @@ public sealed partial class ViewerDataService
             connection, transaction, serverId, baselineStartUtc, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken,
             clampToRawFloor: true);
         plan = QueryStoreRegressionBaseline.WithHoursHeldStart(plan, baselineStartUtc, dataStartUtc);
-        await using var command = new NpgsqlCommand(plan.BuiltDayCount > 0 ? QueryStoreRegressionsSql : s_rawLiveSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+        /* #6750 part 3: the self-statement test on the key table once its backfill has run, read in this snapshot. */
+        var rawSql = await WithSelfKeysWhenReadyAsync(connection, transaction, plan.BuiltDayCount > 0 ? QueryStoreRegressionsSql : s_rawLiveSql, cancellationToken);
+
+        await using var command = new NpgsqlCommand(rawSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
         AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, baselineStartUtc, plan, excludedDatabases);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return new ViewerQueryStoreRegressionsRead(await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken), DatabasesLeftOut.Distinct(excludedDatabases));
@@ -338,8 +349,11 @@ public sealed partial class ViewerDataService
             var baselinePlan = await QueryStoreRegressionBaseline.ResolveAsync(
                 connection, transaction, serverId, spans.RegularStart, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken,
                 windowEnd: endUtc, spans: spans);
+            /* #6750: the cost start the plan chose, as in the MCP read, so the banner and the divisors follow it. */
+            spans = QueryStoreRegressionBaseline.WithPlanStart(spans, baselinePlan);
             baselinePlan = QueryStoreRegressionBaseline.WithArmStarts(baselinePlan, spans, plan.ClampedStart, dataStartUtc);
-            var wideSql = QueryStoreRegressionsTableSqlFor(baselinePlan);
+            /* #6750 part 3: as the MCP read, the key table once its backfill has run. */
+            var wideSql = await WithSelfKeysWhenReadyAsync(connection, transaction, QueryStoreRegressionsTableSqlFor(baselinePlan), cancellationToken);
 
             /* #5506 step 2: the same measured margin as the MCP read (DarlingQueryStoreRegressionReader.TryGetQueryStoreRegressionsFromTableAsync
                explains it): the server's longest interval in place of the 26-hour floor, or the 26 hours where it is not known. */

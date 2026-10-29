@@ -229,7 +229,7 @@ public sealed class ViewTemplatesTests
         Assert.Contains("for (const t of DASHBOARD_TEMPLATES)", js, StringComparison.Ordinal);
         Assert.Contains("onClick: () => createFromTemplate(t, select.value, status)", js, StringComparison.Ordinal);
         Assert.Contains("const res = await api.createView(template.make(server));", js, StringComparison.Ordinal);
-        Assert.Contains("location.hash = \"#/view/\" + encodeURIComponent(res.data.id);", js, StringComparison.Ordinal);
+        Assert.Contains("location.hash = storeHash(\"#/view/\") + encodeURIComponent(res.data.id);", js, StringComparison.Ordinal);
     }
 
     /// <summary>

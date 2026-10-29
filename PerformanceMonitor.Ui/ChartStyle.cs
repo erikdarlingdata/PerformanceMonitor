@@ -135,7 +135,11 @@ namespace PerformanceMonitor.Ui
         {
             if (chart.Plot.Axes.Left.TickGenerator is ScottPlot.TickGenerators.NumericAutomatic)
                 chart.Plot.Axes.Left.TickGenerator = new MinimumTickGenerator();
+            ChartLayout.Attach(chart); // #6832: before the title, whose refit reads what this measured
             ChartAxisTitle.Attach(chart);
+            // #6832: the panel is sized from the tick labels of one pass and drawn with those of the next, and on a short plot the
+            // second pass adds the axis' top tick ("398.17") that the first never measured, so that label ran into the title.
+            chart.Plot.Axes.Left.MinimumSize = (float)ChartAxisTitle.LeftPanelMinWidth;
         }
 
         private static void HandleChartFirstLoaded(object sender, RoutedEventArgs e)

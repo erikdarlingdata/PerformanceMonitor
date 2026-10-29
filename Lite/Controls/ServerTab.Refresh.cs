@@ -275,7 +275,7 @@ public partial class ServerTab : UserControl
         _engineEdition = await ResolveEngineEditionAsync(_engineEdition, () => Task.Run(() => _dataService.GetSqlEngineEditionAsync(_serverId)));
 
         /* The constructor decided the msdb warning from the connection check's edition, which was unknown. */
-        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _isAwsRds);
+        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _awsRdsKind);
     }
 
     private async System.Threading.Tasks.Task RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false, CancellationToken ct = default)
@@ -929,6 +929,9 @@ public partial class ServerTab : UserControl
             UpdateTempDbChart(tempDbTask.Result, hoursBack, fromDate, toDate);
             UpdateTempDbSizeChart(tempDbTask.Result, hoursBack, fromDate, toDate);
             UpdateTempDbFileIoChart(tempDbFileIoTask.Result, hoursBack, fromDate, toDate);
+            await ShowTempDbOutcomeAsync(tempDbTask.Result.Count);
+            (TempDbFileIoNoDataMessage.Text, TempDbFileIoNoDataMessage.Visibility) =
+                TempDbFileIoGapState(_server.DisplayName, _isAzureSqlDatabase, tempDbFileIoTask.Result.Count);
         }
         catch (Exception ex)
         {
@@ -1275,6 +1278,7 @@ public partial class ServerTab : UserControl
                and the stamped one also holds when the display mode flips or another tab is selected first. */
             var tabClock = _serverClock;
             foreach (var row in collectionHealthTask.Result) row.Clock = tabClock;
+            ApplyEngineGate(collectionHealthTask.Result, _server.DisplayName, _engineEdition, _awsRdsKind);
             foreach (var row in collectionLogTask.Result) row.Clock = tabClock;
 
             SkippedCyclesSummary.Text = (await skippedCyclesTask)?.SummaryLine(tabClock) ?? "Skipped cycles in 24 h: could not be read";

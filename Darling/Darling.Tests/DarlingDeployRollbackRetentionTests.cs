@@ -225,6 +225,68 @@ public sealed class DarlingDeployRollbackRetentionTests
     }
 
     /// <summary>
+    /// #6821: a recent backup is reused only when the upgrade that took it did not finish.
+    ///
+    /// <para>Two complete upgrades inside the window used to share the first one's backup, because the rule
+    /// looked only at the backup's age, so the newest backup then held root files from two builds back. The
+    /// install manifest is written only after a successful copy, so a manifest newer than the backup means that
+    /// upgrade finished and this run needs its own backup. A missing, unreadable or older manifest keeps the
+    /// reuse, which is the safe side.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeployScript_ReusesARecentBackupOnlyWhenTheUpgradeThatTookItDidNotFinish()
+    {
+        var backupTime = new DateTime(2026, 10, 27, 5, 38, 0, DateTimeKind.Utc);
+        var now = "[datetime]::new(2026,10,27,6,0,0,[DateTimeKind]::Utc)";
+        var later = "[datetime]::new(2026,10,27,8,0,0,[DateTimeKind]::Utc)";
+
+        string Decide(string nowExpression, Action<string> plantManifest)
+        {
+            var root = Directory.CreateTempSubdirectory("darling-backup-decision-");
+            try
+            {
+                PlantBackup(root.FullName, DarlingRollbackBackups.Prefix + "20261027-053800", backupTime);
+                var manifest = Path.Combine(root.FullName, "darling-install-manifest.txt");
+                plantManifest(manifest);
+
+                var probe = new StringBuilder();
+                probe.AppendLine(ExtractFunction(DeployScript, "Test-DarlingRollbackBackupName"));
+                probe.AppendLine(ExtractFunction(DeployScript, "Get-DarlingRollbackBackups"));
+                probe.AppendLine(ExtractFunction(DeployScript, "Test-DarlingRollbackBackupIsRecent"));
+                probe.AppendLine(ExtractFunction(DeployScript, "Get-DarlingInstallManifestWriteUtc"));
+                probe.AppendLine(ExtractFunction(DeployScript, "Test-DarlingLastUpgradeFinishedAfterBackup"));
+                probe.AppendLine(ExtractFunction(DeployScript, "Get-DarlingRollbackBackupDecision"));
+                probe.AppendLine($"$backups = Get-DarlingRollbackBackups '{root.FullName}'");
+                probe.AppendLine($"Get-DarlingRollbackBackupDecision $backups 60 ({nowExpression}) '{manifest}'");
+
+                return Assert.Single(RunWindowsPowerShell(probe.ToString()));
+            }
+            finally
+            {
+                TryDeleteTree(root.FullName);
+            }
+        }
+
+        void ManifestAt(string path, DateTime whenUtc)
+        {
+            File.WriteAllText(path, "# manifest");
+            File.SetLastWriteTimeUtc(path, whenUtc);
+        }
+
+        /* The reported case: upgrade A finished at 05:39, upgrade B starts at 06:00 inside the window. */
+        Assert.Equal("finished", Decide(now, p => ManifestAt(p, backupTime.AddMinutes(1))));
+        /* The manifest predates the backup: the upgrade that took the backup never reached the manifest write. */
+        Assert.Equal("reuse", Decide(now, p => ManifestAt(p, backupTime.AddDays(-3))));
+        /* No manifest at all: an interrupted first upgrade, or a hand-upgraded box. */
+        Assert.Equal("reuse", Decide(now, _ => { }));
+        /* A manifest that cannot be read as a file (a folder in its place) is treated as no manifest. */
+        Assert.Equal("reuse", Decide(now, p => Directory.CreateDirectory(p)));
+        /* Outside the window the manifest is irrelevant: a new deploy takes its own backup. */
+        Assert.Equal("new", Decide(later, p => ManifestAt(p, backupTime.AddDays(-3))));
+        Assert.Equal("new", Decide(later, _ => { }));
+    }
+
+    /// <summary>
     /// #2671: an install with ZERO existing <c>_rollback_manual_*</c> backups — a hand-upgraded box, or the
     /// first run of this script — must not crash the upgrade before it copies anything.
     ///

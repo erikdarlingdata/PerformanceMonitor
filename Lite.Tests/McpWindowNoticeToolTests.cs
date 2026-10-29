@@ -864,6 +864,44 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #6829: the no-baseline answer is <c>unavailable</c> and carries the window-floor hints the missing-window answers carry, so a caller
+    /// can see the store's data starts inside the window (collection began there, or older data was dropped) instead of guessing.
+    /// </summary>
+    [Fact]
+    public async Task GetQueryStoreRegressions_TheNoBaselineAnswer_CarriesTheWindowFloorHints()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var now = DateTime.UtcNow;
+        var floor = now.AddHours(-40);
+        await SeedRegressionAsync(floor, queryId: 1, avgUs: 1000, intervalId: 1);
+        await SeedRegressionAsync(now.AddHours(-1), queryId: 1, avgUs: 3000, intervalId: 2);
+
+        /* 48 hours: every row sits inside the window, so the 7-day baseline before it holds nothing. */
+        var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 48));
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        Assert.Contains("no baseline", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        AssertTruncatedAt(root.GetProperty("hints"), floor, "query_store_stats");
+    }
+
+    /// <summary>#6829: the same for the database form, where the filtered database has captures in the window and none in the baseline.</summary>
+    [Fact]
+    public async Task GetQueryStoreRegressions_TheFilteredNoBaselineAnswer_CarriesTheWindowFloorHints()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var now = DateTime.UtcNow;
+        var floor = now.AddDays(-3);
+        await SeedRegressionAsync(floor, queryId: 2, avgUs: 1000, intervalId: 1, database: "Other");
+        await SeedRegressionAsync(now.AddHours(-1), queryId: 1, avgUs: 3000, intervalId: 2);
+
+        var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24, database_name: "Db"));
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        Assert.Contains("database_name 'Db'", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        AssertTruncatedAt(root.GetProperty("hints"), floor, "query_store_stats");
+    }
+
     [Fact]
     public async Task GetQueryStoreRegressions_AnEmptyRecentSide_CarriesTheSameKeys()
     {
@@ -1069,13 +1107,14 @@ VALUES ($1, $2, $3, $4, 'Db', $5, $6, $2, 10, 5000, 5000, $7)",
     /// <summary>
     /// One Query Store interval of a query at <paramref name="avgUs"/> CPU and duration: a baseline row or a regressed one.
     /// <paramref name="database"/> is the database it belongs to ("Db" unless a test needs a second one to filter on).
+    /// #6781: 1,000 runs an interval, so a 2 ms rise adds at least 1 s of CPU (QueryStoreRegressionRules.CostMinAddedCpuMs).
     /// </summary>
     private Task SeedRegressionAsync(DateTime at, long queryId, long avgUs, long intervalId, string database = "Db") => ExecuteAsync(@"
 INSERT INTO query_store_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
      execution_type_desc, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads,
      runtime_stats_interval_id, query_text, last_execution_time)
-VALUES ($1, $2, $3, $4, $8, $5, 9, 'Regular', 100, $6, $6, 100, $7, 'SELECT * FROM dbo.Widgets', $2)",
+VALUES ($1, $2, $3, $4, $8, $5, 9, 'Regular', 1000, $6, $6, 100, $7, 'SELECT * FROM dbo.Widgets', $2)",
         _nextId++, Naive(at), _serverId, ServerName, queryId, avgUs, intervalId, database);
 
     /// <summary>The collector's runs in collection_log, every <paramref name="everyMinutes"/> minutes, whether or not anything ran or waited.</summary>

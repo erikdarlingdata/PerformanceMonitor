@@ -24,7 +24,7 @@
  */
 
 import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, disclosure,
-         ALERT_STATE_LABELS, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder } from "../util.js";
+         ALERT_STATE_LABELS, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder, storeHash } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { copyText } from "../grid-tools.js";
 import { pageRangePicker, windowResultOfSpec } from "../page-range.js";
@@ -121,7 +121,7 @@ function selectCell(a) {
 }
 
 function muteCell(a) {
-  const link = (text, params) => el("a", { href: "#/mute-rules" + buildQuery(params), text });
+  const link = (text, params) => el("a", { href: storeHash("#/mute-rules") + buildQuery(params), text });
   return el("span", {}, [
     link("Mute this alert", mutePrefillParams(a)),
     " · ",
@@ -153,7 +153,7 @@ function severityCell(a) {
  * this row's own firing instant, so the in-app path and the delivered link land on an identical page. */
 function triageCell(a) {
   return el("a", {
-    href: "#/triage" + buildQuery({ server: a.server_name, metric: a.metric_name, at: a.alert_time }),
+    href: storeHash("#/triage") + buildQuery({ server: a.server_name, metric: a.metric_name, at: a.alert_time }),
     text: "Open",
   });
 }

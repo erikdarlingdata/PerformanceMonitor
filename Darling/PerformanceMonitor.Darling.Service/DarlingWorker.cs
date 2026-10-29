@@ -1939,6 +1939,14 @@ LIMIT 1";
            hour or at the next reconnect. Written on the pool thread only (INV-2), like the long-query fault. */
         public string? AttentionXePermissionFault { get; set; }
 
+        /* #6893: what the last ensure left for the deadlock and blocked-process runs. A session whose create was refused for permission
+           records PERMISSIONS, one that failed for any other reason records SESSION_MISSING, and neither read happens: the join to the
+           session views returns no rows for an absent session, which a run records as a SUCCESS with zero rows, so collection health
+           read HEALTHY and the Capture Down self-alert could not fire. Replaced by every ensure (at connect, then hourly), so the
+           first one that succeeds clears it. On Azure SQL Database the fault is set only when the create failed in every database; a
+           failure in some leaves a partial note on the run instead. Written on the pool thread only (INV-2). */
+        public DarlingXeSessions.CaptureEnsureOutcome CaptureEnsure { get; set; } = new();
+
         /* #5640 (L5): whether the last ensure ran with the attention collector enabled. An ensure that skipped the client-timeout
            session because the collector was off leaves this false, so turning the collector on makes the next sweep ensure it at
            once and not after the hour. Reset on every (re)connect. */
@@ -1990,8 +1998,10 @@ LIMIT 1";
         /* Stamped before the ensure, so a server that refuses it is asked once an hour and not on every sweep. */
         server.XeSessionsEnsuredAtUtc = utcNow;
         server.AttentionXeEnsuredWhileEnabled = attentionEnabled;
-        var attentionFault = await DarlingXeSessions.EnsureAllAsync(server.Runtime, runner, logger, cancellationToken, attentionEnabled);
+        var captureOutcome = new DarlingXeSessions.CaptureEnsureOutcome();
+        var attentionFault = await DarlingXeSessions.EnsureAllAsync(server.Runtime, runner, logger, cancellationToken, attentionEnabled, captureOutcome);
         server.AttentionXePermissionFault = attentionFault?.Message;
+        server.CaptureEnsure = captureOutcome;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -2139,6 +2149,34 @@ LIMIT 1";
                the per-problem critical log lines just above. */
             _collectorState.PublishConfigurationProblems(config);
             return;
+        }
+
+        /* #6840: a front door has no store of its own, so nothing below applies: no store connection, no migration, no collector,
+           no alerting, no retention and no heartbeat. The MCP and web hosts and the directory service are separate hosted
+           services and keep running; this worker has nothing left to do. Validate runs first (it does not ask a front door for
+           a postgres section) so a broken frontDoor block is reported the same way any other broken block is. */
+        if (config.IsFrontDoor)
+        {
+            foreach (var warning in config.FrontDoor.Warnings())
+            {
+                _logger.LogWarning("{Warning}", warning);
+            }
+
+            _logger.LogInformation(
+                "Front door mode: routing to {StoreCount} store(s). This process holds no store and runs no collectors, alerting, retention or heartbeat.",
+                config.FrontDoor.Stores.Count);
+
+            /* The worker task stays pending until shutdown instead of completing: this is a deliberate rest, not a stand-down
+               after a failure, so it publishes no collector verdict (the ping body keeps its start-up answer). Shutdown
+               cancels the wait, and that is the one silent exit. */
+            try
+            {
+                await Task.Delay(Timeout.Infinite, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
         }
 
         /* #2339: publish the declared peer stores as soon as a VALIDATED config is in hand, so the web
@@ -2994,6 +3032,11 @@ LIMIT 1";
         var queryStoreIndexes = QueryStoreIntervalPartitions.RunDelayedAsync(
             postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, QueryStoreBackgroundIndexes.All, stoppingToken);
 
+        /* #6750 part 3: the keys of the monitor's own Query Store statements stored before V219, one scan of the text table, in the
+           background QueryStoreBackgroundIndexes.StartDelay after start. Until it has run the regressions read keeps the text probe
+           (QueryStoreSelfKeys explains the gate). Once per start, a no-op once the state row exists, and it never throws. */
+        var queryStoreSelfKeys = QueryStoreSelfKeys.RunDelayedAsync(postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, stoppingToken);
+
         /* #4957: one rollup-coverage probe in the background RollupCoverageWarmup.ServiceStartDelay after start, so
            the first MCP or web call finds each rollup's floor already measured and does not wait ~10 s on the
            large stores for the oldest compressed chunk's min(bucket). Launched after migrations, never awaited on
@@ -3600,6 +3643,17 @@ LIMIT 1";
                through the same by-reference alertSettings seam, so a store edit takes effect on the next sweep
                without a restart (and the clamps live on the settings properties, not here). */
             notifyAgHealth: () => alertSettings.NotifyAgHealth,
+            /* #6875: the Identity Capacity switch and bars, read live, and the per-server and per-database override resolution. Off until an operator turns it on. */
+            identityCapacityEnabled: () => alertSettings.IdentityCapacityEnabled,
+            identityCapacityWarningPercent: () => alertSettings.IdentityCapacityWarningPercent,
+            identityCapacityCriticalPercent: () => alertSettings.IdentityCapacityCriticalPercent,
+            resolveThreshold: (wire, serverKey, database, global) => _thresholdOverrides.ResolveWire(wire, serverKey, database, global),
+            /* #6874: the Agent Alert Gaps switch, read live. Off until an operator turns it on. */
+            agentAlertSetupEnabled: () => alertSettings.AgentAlertGapsEnabled,
+            /* #6873: the three database protection switches, read live. Off until an operator turns each on. */
+            backupOverdueEnabled: () => alertSettings.BackupOverdueEnabled,
+            logBackupOverdueEnabled: () => alertSettings.LogBackupOverdueEnabled,
+            checkDbOverdueEnabled: () => alertSettings.CheckDbOverdueEnabled,
             agLagAlertSeconds: () => alertSettings.AgLagAlertSeconds,
             agRedoQueueAlertKb: () => alertSettings.AgRedoQueueAlertKb,
             agDisconnectRefireMinutes: () => alertSettings.AgDisconnectRefireMinutes,
@@ -4729,6 +4783,9 @@ LIMIT 1";
         /* And the Query Store read index ensures (#4605, #4952, #5507), which absorb their own failures. */
         await queryStoreIndexes;
 
+        /* And the self-statement key backfill (#6750), which absorbs its own failures. */
+        await queryStoreSelfKeys;
+
         /* And the rollup-coverage warm (#4957), which also absorbs its own failures. */
         await rollupCoverageWarm;
 
@@ -5121,6 +5178,15 @@ LIMIT 1";
            dropped its session, and a create now would outlive the server. */
         if (server.Runtime is null || server.Retired)
         {
+            return;
+        }
+
+        /* #6893: Amazon RDS Web and Express refuse every session create, and write each refusal into the instance's own error log. The
+           collector does not apply there, so neither the create nor the drop is sent, on any sweep. */
+        if (!CollectorTargetInfo.XeSessionSupported(server.Runtime.Target))
+        {
+            server.LongQueryTraceFault = null;
+            server.LongQueryTracePartialNote = null;
             return;
         }
 
@@ -6457,6 +6523,21 @@ LIMIT 1";
     /// <summary>#5640 (H2): the permission fault the attention run records as PERMISSIONS, or null for any other collector and when the ensure was not denied.</summary>
     internal static string? AttentionPermissionFaultFor(string collectorName, ServerLoopState server) =>
         IsAttentionCollector(collectorName) ? server.AttentionXePermissionFault : null;
+
+    /// <summary>
+    /// #6893: the ensure failure the deadlock or blocked-process run records instead of reading a session that does not exist, or null for
+    /// any other collector and when the last ensure left the session in place.
+    /// </summary>
+    internal static DarlingXeSessions.XeEnsureFailure? CaptureEnsureFaultFor(string collectorName, ServerLoopState server) =>
+        string.Equals(collectorName, DeadlocksCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.Deadlock
+        : string.Equals(collectorName, BlockedProcessReportCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.BlockedProcess
+        : null;
+
+    /// <summary>#6893: the partial note (Azure SQL Database, the create failed in some databases) merged onto a successful deadlock or blocked-process run, or null.</summary>
+    internal static string? CaptureEnsurePartialNoteFor(string collectorName, ServerLoopState server) =>
+        string.Equals(collectorName, DeadlocksCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.DeadlockPartialNote
+        : string.Equals(collectorName, BlockedProcessReportCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.BlockedProcessPartialNote
+        : null;
 
     internal static bool IsAttentionCollector(string collectorName) =>
         string.Equals(collectorName, AttentionCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
@@ -14158,8 +14239,10 @@ AND   j.hypertable_name = '{relation}'", connection))
             if (runtime.Target.Engine == CollectorTargetEngine.SqlServer)
             {
                 var attentionEnabled = StoreConfigProvider.ResolveSchedule("attention", server.Config.ServerId, _scheduleOverrides).Enabled;
-                var attentionFault = await DarlingXeSessions.EnsureAllAsync(runtime, runner, _logger, cancellationToken, attentionEnabled);
+                var captureOutcome = new DarlingXeSessions.CaptureEnsureOutcome();
+                var attentionFault = await DarlingXeSessions.EnsureAllAsync(runtime, runner, _logger, cancellationToken, attentionEnabled, captureOutcome);
                 server.AttentionXePermissionFault = attentionFault?.Message;
+                server.CaptureEnsure = captureOutcome;
                 server.AttentionXeEnsuredWhileEnabled = attentionEnabled;
                 server.XeSessionsEnsuredAtUtc = DateTime.UtcNow;
             }
@@ -16562,6 +16645,19 @@ LIMIT 1";
                 throw new DarlingXeSessionDeniedException(attentionFault);
             }
 
+            /* #6893: the deadlock and blocked-process sessions, the same two outcomes as the two above. The ensure that could not create the
+               session left its failure on the server: PERMISSIONS for a denied create, SESSION_MISSING for anything else. Without this
+               the read joined an absent session and returned zero rows, and the run recorded SUCCESS. */
+            if (CaptureEnsureFaultFor(collectorName, server) is { } captureFault)
+            {
+                if (captureFault.IsPermission)
+                {
+                    throw new DarlingXeSessionDeniedException(captureFault.Message);
+                }
+
+                throw new DarlingXeSessionMissingException(captureFault.Message);
+            }
+
             var result = await run(runner, runtime, cancellationToken);
 
             /* #4964: a run of this collector succeeded, so its run of missing-session failures is over: the next failure
@@ -16578,6 +16674,12 @@ LIMIT 1";
             if (IsLongQueryCompletionsCollector(collectorName) && server.LongQueryTracePartialNote is { } partialNote)
             {
                 result = result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, partialNote) };
+            }
+
+            /* #6893: the same partial case for the deadlock and blocked-process sessions on Azure SQL Database. */
+            if (CaptureEnsurePartialNoteFor(collectorName, server) is { } captureNote)
+            {
+                result = result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, captureNote) };
             }
 
             /* #4004 review, round 3: the first pg_log_events run after a start that replaced a discarded log-hash key
@@ -17446,6 +17548,9 @@ LIMIT 1";
         ["plan_correction"] = (r, s, ct) => r.RunAsync(PlanCorrectionCollector.Instance, s, ct),
         ["query_store_forced_plans"] = (r, s, ct) => r.RunAsync(QueryStoreForcedPlansCollector.Instance, s, ct),
         ["query_store_hints"] = (r, s, ct) => r.RunAsync(QueryStoreHintsCollector.Instance, s, ct),
+        ["identity_capacity"] = (r, s, ct) => r.RunAsync(IdentityCapacityCollector.Instance, s, ct),
+        ["agent_alerts"] = (r, s, ct) => r.RunAsync(AgentAlertsCollector.Instance, s, ct),
+        ["database_protection"] = (r, s, ct) => r.RunAsync(DatabaseProtectionCollector.Instance, s, ct),
         ["pvs_stats"] = (r, s, ct) => r.RunAsync(PvsStatsCollector.Instance, s, ct),
         /* PostgreSQL. Dispatch is by name and engine-agnostic; the engine gate upstream in
            RunDueCollectorsAsync means this lambda is only ever reached for a Postgres target. */

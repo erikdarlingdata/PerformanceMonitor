@@ -499,15 +499,7 @@ public static class ComposeCompiler
            window can end well in the past, and retention drops by actual wall-clock now — a purely historical
            window must reach the tier that still retains it. Fall back to raw when a value expression can't be
            remapped to the CAGG columns (CanRemap; the overlay AND-gate below). */
-        var route = ComposeSourceRouter.Resolve(plan, context.NowUtc, context.StartUtc, context.Rollups, context.Coverage);
-        if (route.IsCagg
-            && (!ComposeCaggValueMapper.CanRemap(plan.Measure, plan.Aggregate)
-                || (plan.Overlay is ComposeOverlay o && !ComposeCaggValueMapper.CanRemap(o.Measure, o.Aggregate))))
-        {
-            /* One route serves BOTH value expressions — if either can't remap to the rollup columns, the whole
-               panel reads raw (#1606: the overlay AND-gate). */
-            route = ComposeRoute.Raw;
-        }
+        var route = ResolveFactRoute(plan, context.NowUtc, context.StartUtc, context.Rollups, context.Coverage);
 
         /* A count-guard verdict that equals the router's candidate for this run swaps a raw route to the
            hourly-raw-edges route. IsCagg stays false, so everything but the FROM item stays on its raw path. */
@@ -1628,6 +1620,26 @@ public static class ComposeCompiler
         }
 
         return partials.Unmapped || partials.Stamped.Count == 0 ? null : new StampPlan(partials.Stamped, primary, overlayValue);
+    }
+
+    /// <summary>
+    /// The route <see cref="Compile"/> reads a panel's fact rows from, before the hourly-raw-edges swap: the router's answer
+    /// (<see cref="ComposeSourceRouter.Resolve"/>), dropped to raw when either value expression cannot be remapped to the rollup's
+    /// columns. One route serves BOTH value expressions: if either cannot remap, the whole panel reads raw (#1606: the overlay AND-gate).
+    /// The runner asks this before it decides how to size a Query Store read (#6807), so it never sizes a table the compile will not read.
+    /// </summary>
+    internal static ComposeRoute ResolveFactRoute(
+        PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, RollupAvailability rollups, RollupCoverage coverage)
+    {
+        var route = ComposeSourceRouter.Resolve(plan, nowUtc, windowStartUtc, rollups, coverage);
+        if (route.IsCagg
+            && (!ComposeCaggValueMapper.CanRemap(plan.Measure, plan.Aggregate)
+                || (plan.Overlay is ComposeOverlay o && !ComposeCaggValueMapper.CanRemap(o.Measure, o.Aggregate))))
+        {
+            return ComposeRoute.Raw;
+        }
+
+        return route;
     }
 
     /// <summary>Whether <see cref="Compile"/> would read the Query Store rollup for this panel and context (#5582 part 3). The runner asks

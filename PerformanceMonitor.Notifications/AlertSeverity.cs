@@ -74,6 +74,8 @@ internal static class AlertSeverity
                live fire carries the tier on Context.SeverityOverride, so this arm styles only an override-less
                replay; it never fired presence-flat red, so WARNING-amber is the faithful replay. */
             "Runnable Queue" => ("#D97706", "WARNING", "\U0001F7E0"),
+            /* #6875: graded at its fire site (Warning, or Critical at the Critical bar), so the replay arm is the Warning one like Runnable Queue. */
+            "Identity Capacity" => ("#D97706", "WARNING", "\U0001F7E0"),
             /* #5640: graded at its fire site like Runnable Queue (Warning, or Critical at the Critical bar) and every live fire
                carries the tier on Context.SeverityOverride, so this arm styles only an override-less replay. */
             AlertFamily.ClientTimeoutsMetric => ("#D97706", "WARNING", "\U0001F7E0"),
@@ -106,8 +108,12 @@ internal static class AlertSeverity
             "Store Disk Pressure" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Store Runtime Upgrade" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Compression Job Stuck" => ("#DC2626", "CRITICAL", "\U0001F534"),
+            /* #6873: the three database protection alerts fire Warning at their one site. */
+            "Backup Overdue" or "Log Backup Overdue" or "CHECKDB Overdue" => ("#D97706", "WARNING", "\U0001F7E0"),
             /* #5450: fires Warning at its one site. */
             "Collection Gap At Start" => ("#D97706", "WARNING", "\U0001F7E0"),
+            /* #6874: fires Warning at its one site. */
+            "Agent Alert Gaps" => ("#D97706", "WARNING", "\U0001F7E0"),
             /* #5450: fires Warning at its one site. */
             "Collection Gaps In History" => ("#D97706", "WARNING", "\U0001F7E0"),
             /* #3816: the other two policy families page under their own names, and each name has exactly ONE

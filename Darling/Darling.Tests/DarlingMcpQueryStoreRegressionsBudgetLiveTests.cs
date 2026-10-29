@@ -66,7 +66,7 @@ public sealed class DarlingMcpQueryStoreRegressionsBudgetLiveTests
             {
                 var queryId = 1000 + i;
                 await SeedAsync(connection, ct, baseNow.AddHours(-40), queryId, executions: 50, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 2 * i + 1, text: "SELECT 1");
-                await SeedAsync(connection, ct, baseNow.AddMinutes(-30), queryId, executions: 200, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 2 * i + 2, text: queryText);
+                await SeedAsync(connection, ct, baseNow.AddMinutes(-30), queryId, executions: 500, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 2 * i + 2, text: queryText);
             }
 
             var defaultJson = await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName);

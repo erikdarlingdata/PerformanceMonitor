@@ -102,7 +102,8 @@ public sealed class QueryStoreReadsDatabaseFilterLiveTests
             {
                 queryId++;
                 await SeedQsAsync(connection, ct, db, baseNow.AddHours(-40), 100, 1000, queryId, intervalId: 2);
-                await SeedQsAsync(connection, ct, db, baseNow.AddMinutes(-30), 200, 4000, queryId, intervalId: 1);
+                /* #6781: enough recent runs that the rise adds at least 1 s of CPU (QueryStoreRegressionRules.CostMinAddedCpuMs). */
+                await SeedQsAsync(connection, ct, db, baseNow.AddMinutes(-30), 500, 4000, queryId, intervalId: 1);
             }
 
             // H and I: both sides collected, flat.

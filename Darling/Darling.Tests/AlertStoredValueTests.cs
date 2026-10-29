@@ -423,7 +423,7 @@ public sealed class AlertStoredValueTests
     public async Task CaptureDown_StoresTheSentinel_AndIsClassifiedStateOnly()
     {
         var rig = new Rig();
-        await rig.Build().ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct);
+        await rig.Build().ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Array.Empty<string>(), Ct);
 
         /* "Blocking and Deadlock" against "session running" — a state on both sides, stored as 0 since
            the day it shipped, and rendered "0.00" the whole time because #1846's list stopped at the

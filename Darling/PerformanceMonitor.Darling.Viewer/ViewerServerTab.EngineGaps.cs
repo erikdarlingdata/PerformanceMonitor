@@ -28,10 +28,12 @@ public partial class ViewerServerTab
     /// <summary>
     /// The note a surface shows where <paramref name="collectorName"/> cannot run on this server's engine: the sentence
     /// <see cref="CollectorEngineCapability.NotCollectedMessage"/> gives. Null anywhere the collector can run, including a
-    /// server whose engine has not been read yet, where the surface keeps its own empty-state text.
+    /// server whose engine has not been read yet, where the surface keeps its own empty-state text. <paramref name="awsRdsKind"/> is
+    /// <see cref="DarlingServer.AwsRdsKind"/> (#6894): on Amazon RDS the Agent collectors are closed by their own gate and never run,
+    /// so the note names RDS, as the MCP tools do, instead of the "possible cause" text that implies a setup step could fix it.
     /// </summary>
-    internal static string? EngineGapNote(string serverName, int engineEdition, string? engineKind, string collectorName) =>
-        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName);
+    internal static string? EngineGapNote(string serverName, int engineEdition, string? engineKind, string collectorName, AwsRdsKind awsRdsKind) =>
+        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, awsRdsKind);
 
     /// <summary>
     /// The text <see cref="CollectorRuntimePrecondition.GatedOffMessage"/> needs for this collector, or null for a collector
@@ -43,7 +45,10 @@ public partial class ViewerServerTab
     /// collection, so a load-time collector would read as switched off a day after it ran.
     /// </summary>
     internal static string? SwitchedOffReasonsFor(string collectorName) =>
-        string.Equals(collectorName, "running_jobs", StringComparison.Ordinal) ? CollectorRuntimePrecondition.RunningJobsPossibleCauses : null;
+        string.Equals(collectorName, "running_jobs", StringComparison.Ordinal) ? CollectorRuntimePrecondition.RunningJobsPossibleCauses
+        /* #6874: agent_alerts has the same AppliesTo rule on AWS RDS, which the registry cannot tell from a plain SQL Server, and the tool says the same. */
+        : string.Equals(collectorName, "agent_alerts", StringComparison.Ordinal) ? CollectorRuntimePrecondition.AgentAlertsPossibleCauses
+        : null;
 
     /// <summary>
     /// The sentence for a collector that has no <c>collection_log</c> row for this server in all retained history, on a server
@@ -64,9 +69,9 @@ public partial class ViewerServerTab
     /// </summary>
     internal static (string Text, Visibility Visibility) EngineGapState(
         string serverName, int engineEdition, string? engineKind, string collectorName, int rowCount,
-        bool collectorNeverRan = false, string? neverRanNote = null)
+        AwsRdsKind awsRdsKind, bool collectorNeverRan = false, string? neverRanNote = null)
     {
-        var note = EngineGapNote(serverName, engineEdition, engineKind, collectorName)
+        var note = EngineGapNote(serverName, engineEdition, engineKind, collectorName, awsRdsKind)
             ?? (collectorNeverRan ? neverRanNote ?? NeverRanNote(serverName, collectorName) : null);
 
         return (note ?? "", note is not null && rowCount == 0 ? Visibility.Visible : Visibility.Collapsed);
@@ -76,8 +81,8 @@ public partial class ViewerServerTab
     /// Whether a surface must read <c>collection_log</c> at all: only when it has no rows and its engine rule has nothing to say.
     /// With rows the collector plainly ran, and where the engine rule already gives the sentence there is nothing to add.
     /// </summary>
-    internal static bool NeedsCollectorRunRead(string serverName, int engineEdition, string? engineKind, string collectorName, int rowCount) =>
-        rowCount == 0 && EngineGapNote(serverName, engineEdition, engineKind, collectorName) is null;
+    internal static bool NeedsCollectorRunRead(string serverName, int engineEdition, string? engineKind, string collectorName, int rowCount, AwsRdsKind awsRdsKind) =>
+        rowCount == 0 && EngineGapNote(serverName, engineEdition, engineKind, collectorName, awsRdsKind) is null;
 
     /// <summary>
     /// <see cref="EngineGapState"/> from the facts the viewer reads from <c>collection_log</c>: when the collector last ran
@@ -89,14 +94,24 @@ public partial class ViewerServerTab
     /// (<see cref="CollectorRuntimePrecondition.NotYetRunMessage"/>), and after it <see cref="NeverRanNote"/>. A row of any age
     /// means the collector ran, so a collector that runs once at load never reads as switched off. The first collection has no
     /// default, so a caller cannot drop the grace by leaving it out.</para>
+    /// <para><paramref name="outcomeNote"/> is <see cref="CollectorOutcomeNote"/> for the collector's latest run, or null. When it is
+    /// set it replaces the never-ran sentences, because a collector with a latest run has run (#6861).</para>
     /// </summary>
     internal static (string Text, Visibility Visibility) EngineGapStateFromRuns(
         string serverName, int engineEdition, string? engineKind, string collectorName, int rowCount,
-        DateTime? collectorLastRunUtc, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc)
+        DateTime? collectorLastRunUtc, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc,
+        AwsRdsKind awsRdsKind, string? outcomeNote = null)
     {
-        string? note = null;
+        /* #6861: a collector whose LATEST run recorded a named skip (PERMISSIONS and the like) did run, so the never-ran rules
+           below have nothing to say about it. The skip's own sentence is the answer, and the engine gap still wins inside
+           EngineGapState. */
+        string? note = outcomeNote;
 
-        if (SwitchedOffReasonsFor(collectorName) is { } reasons)
+        if (note is not null)
+        {
+            /* the sentence is settled */
+        }
+        else if (SwitchedOffReasonsFor(collectorName) is { } reasons)
         {
             note = CollectorRuntimePrecondition.GatedOffReaderMessage(
                 serverName, collectorName, reasons, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
@@ -107,7 +122,7 @@ public partial class ViewerServerTab
                 ?? NeverRanNote(serverName, collectorName);
         }
 
-        return EngineGapState(serverName, engineEdition, engineKind, collectorName, rowCount, note is not null, note);
+        return EngineGapState(serverName, engineEdition, engineKind, collectorName, rowCount, awsRdsKind, note is not null, note);
     }
 
     /// <summary>
@@ -116,18 +131,20 @@ public partial class ViewerServerTab
     /// A read that fails leaves the surface on its own empty state: this note is a diagnostic, and it must not turn an empty
     /// grid into a failed tab load. A read that sees the collector run adds it to <paramref name="collectorsSeenToRun"/> when
     /// <see cref="RunSettlesNeverRanRule"/> says one run settles it, so a later refresh of the same empty surface makes no
-    /// read. <paramref name="readLastRun"/> is <see cref="ViewerDataService.GetCollectorLastRunAsync"/> on the live path.
+    /// read. <paramref name="readLastRun"/> is <see cref="ViewerDataService.GetCollectorLastRunAsync"/> on the live path, and <paramref name="readLatestOutcome"/> is <see cref="ViewerDataService.GetLatestCollectorOutcomeAsync"/> (#6861). It has no default, so a caller cannot leave a named skip unexplained by omitting it.
     /// </summary>
     internal static async Task<(string Text, Visibility Visibility)> ReadEngineGapStateAsync(
         CollectorLastRunReader readLastRun, ISet<string>? collectorsSeenToRun, int serverId, string serverName,
-        int engineEdition, string? engineKind, string collectorName, int rowCount)
+        int engineEdition, string? engineKind, string collectorName, int rowCount,
+        CollectorOutcomeReader readLatestOutcome, AwsRdsKind awsRdsKind)
     {
         DateTime? collectorLastRunUtc = null;
         DateTime? serverLastCollectedUtc = null;
         DateTime? serverFirstCollectedUtc = null;
+        var needsRead = NeedsCollectorRunRead(serverName, engineEdition, engineKind, collectorName, rowCount, awsRdsKind);
+        var seenToRun = collectorsSeenToRun?.Contains(collectorName) == true;
 
-        if (collectorsSeenToRun?.Contains(collectorName) != true
-            && NeedsCollectorRunRead(serverName, engineEdition, engineKind, collectorName, rowCount))
+        if (!seenToRun && needsRead)
         {
             try
             {
@@ -146,9 +163,59 @@ public partial class ViewerServerTab
             }
         }
 
+        /* #6861: the latest run's status is read for an empty surface of a collector that has run, and on every refresh, because a
+           named skip is a current state that comes and goes (a grant is given, a session is created). A collector with no run has
+           no status to read, so it makes no second pass through its history. */
+        string? outcomeNote = null;
+
+        if (needsRead && (seenToRun || collectorLastRunUtc is not null))
+        {
+            try
+            {
+                var (status, errorMessage, observedUtc) = await readLatestOutcome(serverId, collectorName);
+                outcomeNote = CollectorOutcomeNote(serverName, collectorName, status, errorMessage, observedUtc);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                outcomeNote = null;
+            }
+        }
+
         return EngineGapStateFromRuns(
-            serverName, engineEdition, engineKind, collectorName, rowCount, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
+            serverName, engineEdition, engineKind, collectorName, rowCount, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc,
+            awsRdsKind, outcomeNote);
     }
+
+    /// <summary>
+    /// The sentence for a collector whose latest run was a named skip such as PERMISSIONS: the MCP tools' <c>precondition</c>
+    /// answer (<see cref="CollectorRuntimePrecondition.CollectionOutcomeMessage"/>) worded for a reader, without its closing
+    /// paragraph for an MCP client (<see cref="CollectorRuntimePrecondition.CollectionOutcomeReaderMessage"/>, #6861). The web
+    /// dashboard cuts the MCP answer at the same paragraph. Null for every other status, and for a run with none.
+    /// </summary>
+    internal static string? CollectorOutcomeNote(
+        string serverName, string collectorName, string? status, string? errorMessage, DateTime? observedUtc) =>
+        CollectorRuntimePrecondition.IsNamedSkip(status)
+            ? CollectorRuntimePrecondition.CollectionOutcomeReaderMessage(serverName, collectorName, status, errorMessage, observedUtc)
+            : null;
+
+    /// <summary>
+    /// What the tempdb file latency chart's note shows (#6861): the Azure SQL Database sentence from
+    /// <see cref="CollectorEngineCapability.TempDbFileIoNotCollectedMessage"/> while the chart has no points, and nothing on any
+    /// other engine or once points exist.
+    /// </summary>
+    internal static (string Text, Visibility Visibility) TempDbFileIoGapState(string serverName, int engineEdition, int pointCount)
+    {
+        var note = CollectorEngineCapability.TempDbFileIoNotCollectedMessage(serverName, engineEdition);
+
+        return (note ?? "", note is not null && pointCount == 0 ? Visibility.Visible : Visibility.Collapsed);
+    }
+
+    /// <summary>
+    /// The read of one collector's latest <c>collection_log</c> run: its status, the stored explanation and when it ran.
+    /// <see cref="ViewerDataService.GetLatestCollectorOutcomeAsync"/> on the live path, and a stand-in in a test.
+    /// </summary>
+    internal delegate Task<(string? Status, string? ErrorMessage, DateTime? ObservedUtc)> CollectorOutcomeReader(
+        int serverId, string collectorName);
 
     /// <summary>
     /// The read of when one collector last ran for one server and when that server last and first collected anything:
@@ -172,7 +239,8 @@ public partial class ViewerServerTab
     private Task<(string Text, Visibility Visibility)> EngineGapStateAsync(string collectorName, int rowCount) =>
         ReadEngineGapStateAsync(
             (serverId, collector) => _dataService.GetCollectorLastRunAsync(serverId, collector), _collectorsSeenToRun,
-            _server.ServerId, _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, rowCount);
+            _server.ServerId, _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, rowCount,
+            (serverId, collector) => _dataService.GetLatestCollectorOutcomeAsync(serverId, collector), _server.AwsRdsKind);
 
     /// <summary>
     /// Fills a surface's message element once its data is bound, with what <see cref="EngineGapStateFromRuns"/> says for this

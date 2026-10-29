@@ -18,7 +18,7 @@
  * the source panel afterwards does not touch the drafted rule, and editing the rule does not touch the panel.
  */
 
-import { el } from "./util.js";
+import { el, storeHash } from "./util.js";
 
 /* The one-shot handoff slot: a panel's metric spec waiting for the next #/alert-rule/new render to consume. */
 let _pendingSeed = null;
@@ -82,7 +82,7 @@ export function buildCreateAlertAction(p, toDesc) {
   btn.addEventListener("click", () => {
     const metric = metricSpecFromDesc(toDesc(p));
     setPendingAlertSeed({ metric, name: (p.title || "").trim() });
-    location.hash = "#/alert-rule/new";
+    location.hash = storeHash("#/alert-rule/new");
   });
   return el("div", { class: "composed-panel-actions" }, [btn]);
 }
