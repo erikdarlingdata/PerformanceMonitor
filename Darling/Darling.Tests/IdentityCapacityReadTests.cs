@@ -155,6 +155,10 @@ public sealed class IdentityCapacityReadLiveTests
     private static readonly int DataId = ServerIdHelper.GetDeterministicHashCode(DataServer);
     private static readonly int CleanId = ServerIdHelper.GetDeterministicHashCode(CleanServer);
     private static readonly int EmptyId = ServerIdHelper.GetDeterministicHashCode(EmptyServer);
+    private const string DisabledServer = "darling-identity-disabled";
+    private const string PostgresServer = "darling-identity-pg";
+    private static readonly int DisabledId = ServerIdHelper.GetDeterministicHashCode(DisabledServer);
+    private static readonly int PostgresId = ServerIdHelper.GetDeterministicHashCode(PostgresServer);
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -197,12 +201,12 @@ public sealed class IdentityCapacityReadLiveTests
 
     private static Task Column(
         NpgsqlConnection c, CancellationToken ct, string database, string table, string type, int precision, string last, string seed, string increment,
-        double percent, DateTime at) =>
+        double percent, DateTime at, int? serverId = null, string? server = null) =>
         DarlingMcpTestData.ExecAsync(c, ct,
             @"INSERT INTO collect.identity_capacity
 (collection_id, collection_time, server_id, server_name, database_name, schema_name, table_name, column_name, data_type, type_precision, last_value, seed_value, increment_value, percent_used)
 VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric,$12)",
-            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), DataId, DataServer, database, table, type, precision, last, seed, increment, percent);
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), serverId ?? DataId, server ?? DataServer, database, table, type, precision, last, seed, increment, percent);
 
     private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement;
 
@@ -323,6 +327,19 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             await Marker(c, ct, DataId, DataServer, "Clean", newAt);
             /* The other server has a clean scan only. */
             await Marker(c, ct, CleanId, CleanServer, "Quiet", newAt);
+            /* A server disabled after its last scan and one registered as PostgreSQL still hold rows in the window, with a critical column each:
+               the card leaves both out (the enabled SQL Server filter). */
+            foreach (var (id, name, set) in new[]
+            {
+                (DisabledId, DisabledServer, "is_enabled = FALSE"),
+                (PostgresId, PostgresServer, "engine_kind = 'postgres'"),
+            })
+            {
+                await DarlingMcpTestData.RegisterServerAsync(c, id, name, ct);
+                await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET " + set + " WHERE server_id = $1", id);
+                await Marker(c, ct, id, name, "Sales", newAt);
+                await Column(c, ct, "Sales", "Audit", "int", 10, "2000000000", "1", "1", 93.1, newAt, id, name);
+            }
         }, async (postgres, ct) =>
         {
             var card = await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, now, ct);
@@ -333,6 +350,8 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             Assert.Equal(3, worst.Value.ColumnsAtBar);
             Assert.DoesNotContain(CleanId, card.Keys);
             Assert.DoesNotContain(EmptyId, card.Keys);
+            Assert.DoesNotContain(DisabledId, card.Keys);
+            Assert.DoesNotContain(PostgresId, card.Keys);
 
             await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(postgres.ConnectionString);
             var viewerCard = await viewer.GetIdentityCapacityCardAsync(DataId, now, ct);
