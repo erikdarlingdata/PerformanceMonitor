@@ -426,9 +426,13 @@ a:hover { text-decoration: underline; }
 
 .metric-bands {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  /* minmax(0, 1fr), not 1fr: a 1fr track will not shrink below its content's min-content width, so a long nowrap
+     .detail sentence stretched its column far past the card and the ellipsis never applied (#6901). */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.4rem;
 }
+/* A grid item defaults to min-width: auto, which holds the tile open at its content's width and defeats the detail ellipsis (#6901). Scoped to this grid: the AG replica chips share .metric-chip but are not items of it. */
+.metric-bands > .metric-chip { min-width: 0; }
 .metric-chip {
   background: var(--bg-dark);
   border-radius: var(--radius-sm);
@@ -1356,6 +1360,8 @@ pre.code {
 .server-reason.band-Offline { color: var(--err); }
 .server-reason.band-Healthy { color: var(--ok); }
 .server-why .metric-bands { max-width: 900px; }
+/* The server page has room to show the whole sentence, so the tile detail wraps instead of truncating (#6901). */
+.server-why .metric-chip .detail { white-space: normal; overflow-wrap: anywhere; }
 
 /* ─────────────────────────── Fleet Sweeps (#3466 lane 3) ─────────────────────────── */
 

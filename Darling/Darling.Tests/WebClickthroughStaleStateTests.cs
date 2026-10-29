@@ -83,6 +83,17 @@ public sealed class WebClickthroughStaleStateTests
         Assert.StartsWith("CollectorsStale", texts[5], StringComparison.Ordinal);
     }
 
+    /// <summary>#6901: a chip's detail is clamped to one line, so its full text must sit on the detail's title, or a long sentence is unreadable.</summary>
+    [Fact]
+    public void AChipWithALongDetail_KeepsTheFullDetailOnItsTitle()
+    {
+        var agent = Run("longDetail").GetProperty("chips").EnumerateArray()
+            .Single(c => c.GetProperty("text").GetString()!.StartsWith("Agent alerts", StringComparison.Ordinal));
+        var detail = agent.GetProperty("detail").GetString();
+        Assert.Equal("No alert is set for severity 19 through 25 errors. No alert is set for error 823, 824 or 825 (corruption).", detail);
+        Assert.Equal(detail, agent.GetProperty("detailTitle").GetString());
+    }
+
     /// <summary>#6828: the server header's Collectors chip counts a WARNING collector as a warning, not as healthy.</summary>
     [Fact]
     public void TheCollectorsChip_ShowsTheWarningCount_AndDoesNotCountWarningsAsHealthy()
