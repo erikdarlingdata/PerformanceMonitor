@@ -191,8 +191,9 @@ public sealed class McpAlertSettingsKeyTests
     /// <summary>#6873 (V222): the three groups Darling reports for the database-protection alerts (Backup Overdue,
     /// Log Backup Overdue, CHECKDB Overdue) and Lite does not. Each switch governs an alert judged over the
     /// <c>database_protection</c> collector's last good CHECKDB and last full and log backup, and Lite has no such
-    /// collector: nothing in this SKU reads msdb's backup history or the DBCC CHECKDB fact, which is checkable and
-    /// checked (<see cref="GetAlertSettings_OmitsDatabaseProtectionAlerts_BecauseLiteHasNoDatabaseProtectionCollector"/>).
+    /// collector: nothing in this SKU reads msdb's backup history or the DBCC CHECKDB fact. The payload is held to that by
+    /// <see cref="GetAlertSettings_OmitsDatabaseProtectionAlerts_BecauseLiteHasNoDatabaseProtectionCollector"/>: Darling
+    /// emits all three groups and Lite none.
     /// Emitting the switches here would advertise knobs this product cannot act on, the placeholder failure this
     /// file's history rejected for <c>ag.disconnect_refire_minutes</c>.</summary>
     private static readonly string[] DatabaseProtectionGroups = { "backup_overdue", "log_backup_overdue", "checkdb_overdue" };
