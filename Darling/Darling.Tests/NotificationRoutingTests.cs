@@ -558,6 +558,10 @@ public sealed class NotificationRoutingTests
             RunnableQueueEvaluator.MetricName,
             /* #5640: the Client Timeouts alert fires from AlertEngine.CheckAttentionAsync through AttentionEvaluator.MetricName. */
             AttentionEvaluator.MetricName,
+            /* #6873: the three database-protection overdue alerts fire from ApplyOverdueMetricAsync through its metric
+               parameter (FireAsync(key, serverName, metric, ...)), a variable the FireAsync literal scan below cannot see. */
+            DarlingSelfAlertEvaluator.BackupOverdueMetric, DarlingSelfAlertEvaluator.LogBackupOverdueMetric,
+            DarlingSelfAlertEvaluator.CheckDbOverdueMetric,
         };
 
         /* The literals: the third argument of every `new AlertOutcome(` in the shared engine and the worker

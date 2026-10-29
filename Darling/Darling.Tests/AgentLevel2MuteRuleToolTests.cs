@@ -128,13 +128,16 @@ public sealed class AgentLevel2ToolPolicyTests
         Assert.True(DarlingMcpAgentActions.IsProtectedMetric(metric));
 
     [Fact]
-    public void EverySelfAlertMetricConstant_IsProtected_ExceptTheNineAnAgentMayMute()
+    public void EverySelfAlertMetricConstant_IsProtected_ExceptTheTwelveAnAgentMayMute()
     {
         var unprotected = new[]
         {
             DarlingSelfAlertEvaluator.AgFailoverMetric, DarlingSelfAlertEvaluator.AgReplicaDisconnectedMetric,
             DarlingSelfAlertEvaluator.AgReplicaReconnectedMetric, DarlingSelfAlertEvaluator.AgSyncFellBehindMetric,
             DarlingSelfAlertEvaluator.AgDatabaseSuspendedMetric, DarlingSelfAlertEvaluator.AgentDownMetric,
+            /* #6873: the three database-protection overdue alerts are about a monitored server, like the AG ones. */
+            DarlingSelfAlertEvaluator.BackupOverdueMetric, DarlingSelfAlertEvaluator.LogBackupOverdueMetric,
+            DarlingSelfAlertEvaluator.CheckDbOverdueMetric,
             DarlingSelfAlertEvaluator.CollectorCostDigestMetric, DarlingSelfAlertEvaluator.FleetSweepRollupMetric,
             DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric,
         };

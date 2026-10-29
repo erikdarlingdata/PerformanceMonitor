@@ -25,6 +25,9 @@ using Xunit;
 
 namespace Darling.Tests;
 
+/* #1776 own-store: every live fact mints its own scratch database through ScratchPostgres and never touches another
+   test's rows, so it is deliberately NOT [Collection("live-postgres")]. */
+
 /// <summary>
 /// #6873: the "Backup Overdue", "Log Backup Overdue" and "CHECKDB Overdue" self-alerts, the fleet card's overdue field and the three settings
 /// switches. The alerts are judged by <see cref="DatabaseProtectionBands.OverdueFacts"/> over the newest fresh capture. These tests drive the
