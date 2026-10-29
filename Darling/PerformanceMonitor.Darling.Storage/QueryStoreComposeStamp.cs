@@ -502,6 +502,24 @@ WHERE hour < $1;";
       AND a.pid <> pg_backend_pid()";
 
     /// <summary>
+    /// The writer cutoff (#5582 review round 2) as the ONE definition the planner (<see cref="PlanSql"/>) and the fleet rollup read
+    /// (<c>QueryTagRollupHashRoute.LedgerSql</c>, #6865) share: a one-row <c>SELECT</c> of <c>since</c>, the start of the oldest open writer
+    /// of the wide table. No writer is <c>infinity</c>, and a writer whose <c>xact_start</c> reads NULL is <c>-infinity</c> (it counts as open
+    /// from before every hour, see <see cref="OpenWriterSql"/>). Used as a CTE named <c>cutoff</c>, with <see cref="BlockedByWriterTail"/>.
+    /// </summary>
+    internal const string WriterCutoffSql = @"SELECT coalesce(min(coalesce(w.xact_start AT TIME ZONE 'UTC', '-infinity'::timestamp)), 'infinity'::timestamp) AS since
+    FROM (" + WideWriterRowsSql + @"
+    ) AS w";
+
+    /// <summary>
+    /// What follows an hour expression to say "an open writer would defer this hour" against the <c>cutoff</c> CTE
+    /// (<see cref="WriterCutoffSql"/>): the row trigger skips a row within one hour of the writer's clock, so a row of hour H can land
+    /// unmarked only while the store's clock is before H + 2 h (<see cref="OpenWriterSql"/>). The planner and the fleet rollup read both
+    /// use it, so an hour the builder will not build because of a writer is the same hour the read does not wait for.
+    /// </summary>
+    internal const string BlockedByWriterTail = " + interval '2 hours' > cutoff.since";
+
+    /// <summary>
     /// The margin guard (#5582 review round 1, narrowed in round 2): the oldest open WRITER OF THE WIDE TABLE (<see cref="WideWriterRowsSql"/>)
     /// that could hold an unmarked row of the hour, if there is one: $1 the hour. The row trigger skips a row whose
     /// <c>collection_time</c> is within one hour of the hour of the writer's clock (<see cref="WhenOffset"/>), so a row of hour H can land
@@ -685,13 +703,11 @@ clock AS
 ),
 cutoff AS
 (
-    SELECT coalesce(min(coalesce(w.xact_start AT TIME ZONE 'UTC', '-infinity'::timestamp)), 'infinity'::timestamp) AS since
-    FROM (" + WideWriterRowsSql + @"
-    ) AS w
+    " + WriterCutoffSql + @"
 ),
 stale AS
 (
-    SELECT b.hour, true AS stale, (b.hour + interval '2 hours' > cutoff.since) AS blocked,
+    SELECT b.hour, true AS stale, (b.hour" + BlockedByWriterTail + @") AS blocked,
            NOT bool_or(b.built_seq IS DISTINCT FROM b.late_seq) AS backlog
     FROM collect.query_store_compose_stamp_built AS b
     JOIN collect.query_store_compose_stamp_hours AS h ON h.hour = b.hour
@@ -703,7 +719,7 @@ stale AS
 ),
 missing AS
 (
-    SELECT g AS hour, false AS stale, (g + interval '2 hours' > cutoff.since) AS blocked, false AS backlog
+    SELECT g AS hour, false AS stale, (g" + BlockedByWriterTail + @") AS blocked, false AS backlog
     FROM bounds
     CROSS JOIN cutoff
     CROSS JOIN clock

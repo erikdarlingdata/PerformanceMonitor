@@ -182,7 +182,7 @@ export function edgesText(block) {
 }
 
 /** #6865: why the section starts later than the window does, in the page's own clock. The same sentence as QueryTagRollupHashRoute.BacklogNote.
-    hours_left_out is the size of the gap (whole hours from the window's first hour to the start), backlog_hours_waiting the backlog hours inside it. */
+    hours_left_out is the size of the gap (whole hours from the window's first hour to the start, among them the hours the interval table's floor cut), backlog_hours_waiting the backlog hours inside it. */
 export function backlogText(block) {
   const n = block.backlog_hours_waiting;
   const left = block.hours_left_out;

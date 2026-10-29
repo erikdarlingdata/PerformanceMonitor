@@ -738,6 +738,106 @@ VALUES (TIMESTAMP '{At(stuck)}', 6, '57014', 'canceling statement due to stateme
         }
     }
 
+    /// <summary>An open writer of the wide table: an uncommitted insert on its own session, <paramref name="trackActivities"/> off for a session whose start time nobody can read.</summary>
+    private static async Task<(NpgsqlConnection Connection, NpgsqlTransaction Transaction)> OpenWriterAsync(Arranged a, bool trackActivities, CancellationToken ct)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(a.Scratch.ConnectionString) { ApplicationName = "writer_6865" };
+        if (!trackActivities)
+        {
+            builder.Options = "-c track_activities=off";
+        }
+
+        var writer = new NpgsqlConnection(builder.ConnectionString);
+        await writer.OpenAsync(ct);
+        var transaction = await writer.BeginTransactionAsync(ct);
+        var at = At(a.HourNow.AddMinutes(-10));
+        await using var insert = new NpgsqlCommand($@"
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+ module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us, runtime_stats_interval_id)
+VALUES (TIMESTAMP '{at}', 1, 'dbX', 99, 99, 'Regular', TIMESTAMP '{at}', TIMESTAMP '{at}', 'modX', 'hashX', 7, 1000, 500, 2000, 900, 9300002)", writer, transaction);
+        await insert.ExecuteNonQueryAsync(ct);
+        return (writer, transaction);
+    }
+
+    /// <summary>A built hour that waits only for the hash table: the upgrade backlog.</summary>
+    private static async Task MakeBacklogAsync(Arranged a, DateTime hour, CancellationToken ct)
+    {
+        await ExecAsync(a.Connection, $"UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL WHERE hour = TIMESTAMP '{At(hour)}'", ct);
+        await ExecAsync(a.Connection, $"DELETE FROM collect.query_store_hash_hourly WHERE hour = TIMESTAMP '{At(hour)}'", ct);
+    }
+
+    private static async Task CloseWriterAsync(NpgsqlConnection? writer, NpgsqlTransaction? open, CancellationToken ct)
+    {
+        if (open is not null)
+        {
+            await open.RollbackAsync(ct);
+        }
+
+        if (writer is not null)
+        {
+            await writer.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// #6865: a writer whose start nobody can read (<c>track_activities</c> off, or another role's session without <c>pg_read_all_stats</c>) counts
+    /// as open from before every hour, so the planner holds back every hour and nothing builds. The read must not wait for hours that cannot build:
+    /// it answers the whole window from the wide table, as it did before the hash table, instead of only the last few hours. When the writer
+    /// finishes, the hour is backlog again. A writer whose start is readable and recent holds back no old hour, so the same hour stays backlog and
+    /// the read is cut after it, as without a writer.
+    /// </summary>
+    [Fact]
+    public async Task AWriterWhoseStartCannotBeRead_HoldsEveryHourBack_SoTheReadAnswersTheFullWindow_AndANormalWriterChangesNothing()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var a = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        NpgsqlConnection? writer = null;
+        NpgsqlTransaction? open = null;
+        try
+        {
+            var stuck = a.HourNow.AddHours(-20);
+            await MakeBacklogAsync(a, stuck, ct);
+            var windowStart = a.HourNow.AddHours(-168).AddMinutes(17);
+            var starts = Servers.ToDictionary(s => s, _ => windowStart);
+            var first = QueryTagRollupHashRoute.CeilHour(windowStart);
+
+            (writer, open) = await OpenWriterAsync(a, trackActivities: true, ct);
+            var normal = await FleetFromAsync(a, starts, ct);
+            Assert.Equal(1, normal.BacklogHoursWaiting);
+            Assert.All(normal.RoutedStarts!.Values, start => Assert.Equal(stuck.AddHours(1), start));
+            await CloseWriterAsync(writer, open, ct);
+
+            (writer, open) = await OpenWriterAsync(a, trackActivities: false, ct);
+            var full = await FleetFromAsync(a, starts, ct);
+            Assert.Equal(0, full.BacklogHoursWaiting);
+            Assert.Equal(0, full.BacklogHoursLeftOut);
+            Assert.All(full.RoutedStarts!.Values, start => Assert.Equal(first, start));
+            Assert.Equal(Canon(await TodaysAsync(a, Snapped(full), a.End, ct)), Canon(full.Facts));
+            using (var doc = await ToolAsync(a, ct))
+            {
+                var section = QueryStoreSection(doc);
+                Assert.False(section.TryGetProperty("backlog_note", out _));
+                Assert.False(section.TryGetProperty("hours_left_out", out _));
+            }
+
+            await CloseWriterAsync(writer, open, ct);
+            writer = null;
+            open = null;
+            var cut = await FleetFromAsync(a, starts, ct);
+            Assert.Equal(1, cut.BacklogHoursWaiting);
+            Assert.All(cut.RoutedStarts!.Values, start => Assert.Equal(stuck.AddHours(1), start));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CloseWriterAsync(writer, open, ct);
+            await CleanupAsync(a, bodySucceeded);
+        }
+    }
+
     /// <summary>
     /// #6865: a server added later starts after the cut. Every surface names the latest server's start as where the figures start, so the hours left
     /// out are counted to that same instant, not to the cut. Servers 1 and 2 read from the window start, server 3 from 8 hours back, and the

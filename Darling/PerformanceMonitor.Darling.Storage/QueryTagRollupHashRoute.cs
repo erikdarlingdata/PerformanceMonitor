@@ -57,25 +57,33 @@ public static class QueryTagRollupHashRoute
     /// stale too (<c>built_seq</c> differs from <c>late_seq</c>: a late writer touched the hour), false for a pair stale only for the hash table.
     /// <c>failing</c> (#6865) marks a third kind of row: a NULL <c>server_id</c> with <c>failing</c> true is an hour with a record in
     /// <c>collect.query_store_compose_stamp_failures</c>, an hour the builder does not build in its backlog pass (in back-off or being retried).
+    /// <c>blocked</c> (#6865) is true on a built-hour row an open writer of the wide table would defer: the planner drops such an hour before it
+    /// picks a build, so it never builds and never gets a failure record, and the read must not wait for it either. It is the planner's own
+    /// predicate (<see cref="QueryStoreComposeStamp.WriterCutoffSql"/> and <see cref="QueryStoreComposeStamp.BlockedByWriterTail"/>).
     /// </summary>
-    internal const string LedgerSql = """
-        SELECT h.hour, NULL::integer AS server_id, false AS late_write, false AS failing
-        FROM collect.query_store_compose_stamp_hours AS h
-        WHERE h.hour >= $1
-        AND   h.hour < $2
-        UNION ALL
-        SELECT b.hour, b.server_id, b.built_seq IS DISTINCT FROM b.late_seq AS late_write, false AS failing
-        FROM collect.query_store_compose_stamp_built AS b
-        WHERE b.hour >= $1
-        AND   b.hour < $2
-        AND   b.server_id = ANY($3)
-        AND   b.hash_built_seq IS DISTINCT FROM b.late_seq
-        UNION ALL
-        SELECT f.hour, NULL::integer AS server_id, false AS late_write, true AS failing
-        FROM collect.query_store_compose_stamp_failures AS f
-        WHERE f.hour >= $1
-        AND   f.hour < $2
-        """;
+    internal const string LedgerSql = @"
+WITH cutoff AS
+(
+    " + QueryStoreComposeStamp.WriterCutoffSql + @"
+)
+SELECT h.hour, NULL::integer AS server_id, false AS late_write, false AS failing,
+       (h.hour" + QueryStoreComposeStamp.BlockedByWriterTail + @") AS blocked
+FROM collect.query_store_compose_stamp_hours AS h
+CROSS JOIN cutoff
+WHERE h.hour >= $1
+AND   h.hour < $2
+UNION ALL
+SELECT b.hour, b.server_id, b.built_seq IS DISTINCT FROM b.late_seq AS late_write, false AS failing, false AS blocked
+FROM collect.query_store_compose_stamp_built AS b
+WHERE b.hour >= $1
+AND   b.hour < $2
+AND   b.server_id = ANY($3)
+AND   b.hash_built_seq IS DISTINCT FROM b.late_seq
+UNION ALL
+SELECT f.hour, NULL::integer AS server_id, false AS late_write, true AS failing, false AS blocked
+FROM collect.query_store_compose_stamp_failures AS f
+WHERE f.hour >= $1
+AND   f.hour < $2";
 
     /// <summary>Which source answers what: the (day, server) pairs read from the day table, the (hour, server) pairs read from the hourly table and the (server, from, to) ranges read from the wide table, each range <c>[from, to)</c> with the statement's window-end bound applied on top.
     /// <paramref name="Starts"/> is each server's snapped start (the first instant it reads) and <paramref name="RequestedStart"/> the latest read start before snapping, the start the section's note names.</summary>
@@ -229,8 +237,8 @@ public static class QueryTagRollupHashRoute
 
     /// <summary>
     /// #6865: the one sentence the MCP section, the Viewer and (as a copy in query-tag-usage.js) the web page give when the read leaves out the first
-    /// hours of the window. <paramref name="hoursLeftOut"/> is the size of the gap, counted from the window's first whole hour, and
-    /// <paramref name="hoursWaiting"/> the backlog hours inside it that are the reason. The two are different numbers, and the text never gives the second as the first.
+    /// hours of the window. <paramref name="hoursLeftOut"/> is the size of the gap, counted from the window's first whole hour (it holds every hour before
+    /// the start, among them the hours the interval table's floor cut), and <paramref name="hoursWaiting"/> the backlog hours inside it that are the reason. The two are different numbers, and the text never gives the second as the first.
     /// </summary>
     public static string BacklogNote(string startText, int hoursLeftOut, int hoursWaiting) =>
         $"The figures start at {startText}, which leaves out the first {hoursLeftOut} {(hoursLeftOut == 1 ? "hour" : "hours")} of the window, because "
@@ -266,6 +274,7 @@ public static class QueryTagRollupHashRoute
         var stale = new HashSet<(DateTime Hour, int ServerId)>();
         var lateWriteHours = new HashSet<DateTime>();
         var failingHours = new HashSet<DateTime>();
+        var blockedHours = new HashSet<DateTime>();
         await using (var ledger = new NpgsqlCommand(LedgerSql, connection) { CommandTimeout = readSeconds })
         {
             ledger.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = first });
@@ -284,6 +293,10 @@ public static class QueryTagRollupHashRoute
                     else
                     {
                         built.Add(hour);
+                        if (reader.GetBoolean(4))
+                        {
+                            blockedHours.Add(hour);
+                        }
                     }
                 }
                 else
@@ -306,10 +319,14 @@ public static class QueryTagRollupHashRoute
         }
 
         /* #6865: a built hour whose pairs are stale only for the hash table (and no pair of it is a late write) is backlog: the read starts after the
-           newest one instead of reading it from the wide table. An hour with a failure record is not: the builder's backlog pass skips it (it is in
-           back-off, or retried by the normal selection), so it may not build for a day or more, and an hour that stays stale must not pin the cut
-           and take every older hour with it. Such an hour is read wide, as before, unless a backlog hour newer than it puts it before the cut. */
-        var backlog = stale.Select(p => p.Hour).Where(h => built.Contains(h) && !lateWriteHours.Contains(h) && !failingHours.Contains(h)).ToHashSet();
+           newest one instead of reading it from the wide table. An hour the builder will not build soon is not: one with a failure record (in
+           back-off, or retried by the normal selection, so it may not build for a day or more) and one an open writer of the wide table would
+           defer (the planner drops it before it picks a build, so it never builds and never gets a failure record; with a writer whose start
+           reads NULL that is every hour). An hour that stays stale must not pin the cut and take every older hour with it. Such an hour is read
+           wide, as before, unless a backlog hour newer than it puts it before the cut. */
+        var backlog = stale.Select(p => p.Hour)
+            .Where(h => built.Contains(h) && !lateWriteHours.Contains(h) && !failingHours.Contains(h) && !blockedHours.Contains(h))
+            .ToHashSet();
         var (moved, waiting, leftOut) = SpanPastBacklog(allowed, windowStart, windowEnd, backlog);
         var plan = Split(waiting == 0 ? allowed : moved, windowEnd, built, stale, validDays) with { BacklogHoursWaiting = waiting, BacklogHoursLeftOut = leftOut };
         /* With hours left out the route answers even with no table hour in the span: today's statement would read the whole window wide. */
