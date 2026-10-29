@@ -144,6 +144,7 @@ public static class CollectorEngineCapability
             ["query_store_health"] = "the per-database Query Store configuration and health",
             ["query_store_forced_plans"] = "the per-database list of Query Store forced plans",
             ["query_store_hints"] = "the per-database list of Query Store hints",
+            ["identity_capacity"] = "the per-database identity column capacity",
             ["plan_cache_stats"] = "the plan-cache composition statistics",
             ["plan_correction"] = "the sys.dm_db_tuning_recommendations automatic plan corrections",
             ["pvs_stats"] = "the persistent version store statistics",
@@ -567,6 +568,44 @@ public static class CollectorEngineCapability
         return false;
     }
 
+    /// <summary>How an Amazon RDS for SQL Server target is named in a not-collected message (#6894).</summary>
+    public const string AwsRdsDescription = "Amazon RDS for SQL Server (an AWS RDS instance)";
+
+    /// <summary>
+    /// True when SOME Amazon RDS for SQL Server target runs <paramref name="definition"/> (#6894): the third axis, after engine KIND and
+    /// engine EDITION. Derived exactly like the edition axis, by asking the collector's own gate over every shape the fact permits:
+    /// the RDS fact is fixed, the two Azure flags are fixed false (an RDS instance is neither), and the msdb access and the SQL major
+    /// version vary, because an operator can change both. A collector that is gated on RDS only for want of msdb access or a version floor
+    /// is therefore not reported as an RDS gap, and a gate that opens up stops the claim by itself.
+    /// <para>A PostgreSQL collector, a PostgreSQL target and an unrecognised collector make no claim (true): the question does not apply
+    /// to them, the same way <see cref="IsCollectedOnEngineEdition(ICollectorSchemaInfo, int)"/> treats a foreign dialect.</para>
+    /// </summary>
+    public static bool IsCollectedOnAwsRds(ICollectorSchemaInfo definition, string? engineKind)
+    {
+        if (MonitoredEngineKind.IsPostgres(engineKind) || !CollectorCatalog.EngineMatches(definition, SqlServerProbe))
+        {
+            return true;
+        }
+
+        foreach (var target in TargetsWithEngineEdition(UnknownEngineEdition))
+        {
+            if (target.IsAwsRds && CollectorCatalog.AppliesTo(definition, target))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The by-name form of <see cref="IsCollectedOnAwsRds(ICollectorSchemaInfo, string?)"/>; an unknown name is true (no claim).</summary>
+    public static bool IsCollectedOnAwsRds(string collectorName, string? engineKind = null)
+    {
+        var definition = CollectorCatalog.Find(collectorName);
+
+        return definition is null || IsCollectedOnAwsRds(definition, engineKind);
+    }
+
     /// <summary>
     /// True when SOME server of this engine KIND runs <paramref name="collectorName"/> — the second axis
     /// (#2530), and the one that separates a PostgreSQL target from a SQL Server that has never connected.
@@ -652,7 +691,7 @@ public static class CollectorEngineCapability
     /// column at all (Lite, which has no PostgreSQL target seam). Null makes NO claim on this axis; the
     /// edition axis then answers exactly as it did before.</para>
     /// </summary>
-    public static string? NotCollectedMessage(string serverName, int engineEdition, string? engineKind, string collectorName)
+    public static string? NotCollectedMessage(string serverName, int engineEdition, string? engineKind, string collectorName, bool isAwsRds = false)
     {
         var definition = CollectorCatalog.Find(collectorName);
 
@@ -698,7 +737,14 @@ public static class CollectorEngineCapability
 
         if (IsCollectedOnEngineEdition(definition, engineEdition))
         {
-            return null;
+            /* #6894: the third axis, and the last. Amazon RDS reports an ordinary edition, so the edition axis cannot see it and a
+               read of a collector RDS gates off fell back to a "possible cause" precondition that says a setup step can fix it. The
+               caller passes the RDS fact only when it knows it (Darling reads it from the registry, Lite from its connection check);
+               false makes no claim, which is the pre-#6894 answer. */
+            return isAwsRds && !IsCollectedOnAwsRds(definition, engineKind)
+                ? $"{serverName} runs on {AwsRdsDescription}. The {collectorName} collector does not run on it — its own AppliesTo gate excludes " +
+                  $"Amazon RDS — so this server does not collect {CapturePathOf(collectorName)}, and never will. {PermanentGapEpilogue}"
+                : null;
         }
 
         /* "this server does not collect X" rather than "X is not collected", so the sentence reads correctly

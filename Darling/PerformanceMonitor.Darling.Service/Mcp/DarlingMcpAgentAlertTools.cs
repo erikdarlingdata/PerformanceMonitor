@@ -44,7 +44,7 @@ public sealed class DarlingMcpAgentAlertTools
         "(the alert's count rose in the window and it tells no operator), no_alerts_defined (the instance has no alert at all: a gap, not empty data). " +
         "alerts[] is the newest capture in the window, with fired_in_window from the change in occurrence_count (null with only one capture). " +
         "Reads the agent_alerts collector (every 15 minutes), never a monitored server. Status words: unavailable (no capture in the window), " +
-        "precondition (the collector was refused or is switched off for this server), not_collected (Azure SQL Database and Managed Instance have no Agent alerts).")]
+        "precondition (the collector was refused or is switched off for this server), not_collected (Azure SQL Database and Managed Instance have no Agent alerts, and the collector does not run on Amazon RDS).")]
     public static async Task<string> GetAgentAlerts(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -70,8 +70,9 @@ public sealed class DarlingMcpAgentAlertTools
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "agent_alerts", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "agent_alerts", cancellationToken)
                     /* #6874: the gate is !IsAzureSqlDb && !IsAwsRds && !IsAzureManagedInstance. The engine half is answered above, so AWS RDS
-                       is the one candidate left, and the registry cannot tell it from a plain SQL Server (it reports an ordinary edition and
-                       has no RDS column). The gated-off route is the one get_running_jobs uses for the same case. */
+                       is the one candidate left. Since #6894 the registry records the RDS fact on every connect and the capability read above answers
+                       not_collected for it, so this route is reached only by a server no connect has stamped yet (or a read that failed). The
+                       gated-off route is the one get_running_jobs uses for the same case. */
                     ?? await DarlingRuntimePrecondition.GatedOffStatusAsync(
                         postgres, resolved.ServerId, resolved.DisplayName, "agent_alerts",
                         CollectorRuntimePrecondition.AgentAlertsPossibleCauses, cancellationToken)

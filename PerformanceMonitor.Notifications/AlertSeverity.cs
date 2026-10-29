@@ -74,6 +74,8 @@ internal static class AlertSeverity
                live fire carries the tier on Context.SeverityOverride, so this arm styles only an override-less
                replay; it never fired presence-flat red, so WARNING-amber is the faithful replay. */
             "Runnable Queue" => ("#D97706", "WARNING", "\U0001F7E0"),
+            /* #6875: graded at its fire site (Warning, or Critical at the Critical bar), so the replay arm is the Warning one like Runnable Queue. */
+            "Identity Capacity" => ("#D97706", "WARNING", "\U0001F7E0"),
             /* #5640: graded at its fire site like Runnable Queue (Warning, or Critical at the Critical bar) and every live fire
                carries the tier on Context.SeverityOverride, so this arm styles only an override-less replay. */
             AlertFamily.ClientTimeoutsMetric => ("#D97706", "WARNING", "\U0001F7E0"),

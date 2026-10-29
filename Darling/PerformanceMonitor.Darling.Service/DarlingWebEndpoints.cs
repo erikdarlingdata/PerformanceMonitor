@@ -6157,6 +6157,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_server_config"] = R(CatConfig, "Server-level configuration (sp_configure) for a server.", PServer()),
             ["get_trace_flags"] = R(CatConfig, "Active trace flags for a server.", PServer()),
             ["get_database_protection"] = R(CatConfig, "Per database, the last good CHECKDB, the last full backup and the last log backup with their ages, and which databases are overdue (full backup 7 days, log backup 60 minutes, CHECKDB 14 days). Azure SQL Database, Managed Instance and RDS show the age and are never overdue.", PServer(), PHours(24), PAsOf(), PBool("overdue_only", false)),
+            ["get_identity_capacity"] = R(CatConfig, "How full each identity column is and how long until it runs out, per scanned database (the fullest columns above 10 percent used).", PServer(), PHours(168), PAsOf(), PDatabases(), PLimit(200)),
             ["get_database_config_changes"] = R(CatConfig, "Database-configuration changes over time.", PServer(), PHours(168), PAsOf(), PDatabases()),
             ["get_database_scoped_config"] = R(CatConfig, "Database-scoped configuration for a database.", PServer(), PDatabases()),
             ["get_query_store_health"] = R(CatConfig, "Per-database Query Store health: actual vs desired state, readonly_reason, storage vs cap, and the two capture modes (query_capture_mode ALL / AUTO / CUSTOM / NONE, wait_stats_capture_mode ON / OFF; null on a pre-rung row or a pre-2017 engine).", PServer(), PDatabases()),
@@ -7194,6 +7195,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_server_config"] = (c, pg, an) => DarlingMcpConfigTools.GetServerConfig(pg, Server(c), c.RequestAborted),
             ["get_trace_flags"] = (c, pg, an) => DarlingMcpConfigTools.GetTraceFlags(pg, Server(c), c.RequestAborted),
             ["get_database_protection"] = (c, pg, an) => DarlingMcpDatabaseProtectionTools.GetDatabaseProtection(pg, Server(c), Hours(c, 24), AsOf(c), QueryBool(c, "overdue_only", false), c.RequestAborted),
+            ["get_identity_capacity"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpIdentityCapacityTools.GetIdentityCapacity(pg, Server(c), Hours(c, DarlingMcpIdentityCapacityTools.DefaultHoursBack), AsOf(c), databases, Rows(c, "limit", DarlingMcpIdentityCapacityTools.MaxListed), c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_database_config_changes"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpConfigHistoryTools.GetDatabaseConfigChanges(pg, Server(c), Hours(c, 168), databases, AsOf(c), null, c.RequestAborted)
                 : DatabaseNamesRefusal(c),

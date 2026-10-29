@@ -897,6 +897,19 @@ public sealed class AlertsConfig
     [JsonPropertyName("clientTimeoutsCriticalMultiple")]
     public int ClientTimeoutsCriticalMultiple { get; set; } = AttentionBaselineMath.DefaultCriticalMultiple;
 
+    /// <summary>The "Identity Capacity" alert (#6875): fires when an identity column is at or past the warning bar (or the critical bar) of
+    /// its type's capacity. Ships OFF, like the other alerts that start firing on upgrade. Store column <c>identity_capacity_enabled</c> (V224).</summary>
+    [JsonPropertyName("identityCapacityEnabled")]
+    public bool IdentityCapacityEnabled { get; set; }
+
+    /// <summary>Percent used at which an identity column warns (default 70). Store column <c>identity_capacity_warning_percent</c> (V224). A per-server or
+    /// per-database threshold override (<c>identity_capacity.warning_percent</c>) replaces it.</summary>
+    [JsonPropertyName("identityCapacityWarningPercent")]
+    public int IdentityCapacityWarningPercent { get; set; } = 70;
+
+    /// <summary>Percent used at which an identity column is critical (default 90). Store column <c>identity_capacity_critical_percent</c> (V224).</summary>
+    [JsonPropertyName("identityCapacityCriticalPercent")]
+    public int IdentityCapacityCriticalPercent { get; set; } = 90;
     /// <summary>The "Agent Alert Gaps" alert (#6874): fires when a server's SQL Server Agent alert setup has a gap (no alert for severities 19 to
     /// 25 or errors 823 to 825, an alert that tells no operator, a disabled alert, a firing that told no one). Ships OFF, like the other alerts that
     /// start firing on upgrade. Store column <c>agent_alert_gaps_enabled</c> (V222).</summary>

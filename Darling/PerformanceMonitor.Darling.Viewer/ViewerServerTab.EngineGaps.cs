@@ -28,10 +28,12 @@ public partial class ViewerServerTab
     /// <summary>
     /// The note a surface shows where <paramref name="collectorName"/> cannot run on this server's engine: the sentence
     /// <see cref="CollectorEngineCapability.NotCollectedMessage"/> gives. Null anywhere the collector can run, including a
-    /// server whose engine has not been read yet, where the surface keeps its own empty-state text.
+    /// server whose engine has not been read yet, where the surface keeps its own empty-state text. <paramref name="isAwsRds"/> is
+    /// <see cref="DarlingServer.IsAwsRds"/> (#6894): on Amazon RDS the Agent collectors are closed by their own gate and never run,
+    /// so the note names RDS, as the MCP tools do, instead of the "possible cause" text that implies a setup step could fix it.
     /// </summary>
-    internal static string? EngineGapNote(string serverName, int engineEdition, string? engineKind, string collectorName) =>
-        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName);
+    internal static string? EngineGapNote(string serverName, int engineEdition, string? engineKind, string collectorName, bool isAwsRds = false) =>
+        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, isAwsRds);
 
     /// <summary>
     /// The text <see cref="CollectorRuntimePrecondition.GatedOffMessage"/> needs for this collector, or null for a collector
@@ -67,9 +69,9 @@ public partial class ViewerServerTab
     /// </summary>
     internal static (string Text, Visibility Visibility) EngineGapState(
         string serverName, int engineEdition, string? engineKind, string collectorName, int rowCount,
-        bool collectorNeverRan = false, string? neverRanNote = null)
+        bool collectorNeverRan = false, string? neverRanNote = null, bool isAwsRds = false)
     {
-        var note = EngineGapNote(serverName, engineEdition, engineKind, collectorName)
+        var note = EngineGapNote(serverName, engineEdition, engineKind, collectorName, isAwsRds)
             ?? (collectorNeverRan ? neverRanNote ?? NeverRanNote(serverName, collectorName) : null);
 
         return (note ?? "", note is not null && rowCount == 0 ? Visibility.Visible : Visibility.Collapsed);
@@ -79,8 +81,8 @@ public partial class ViewerServerTab
     /// Whether a surface must read <c>collection_log</c> at all: only when it has no rows and its engine rule has nothing to say.
     /// With rows the collector plainly ran, and where the engine rule already gives the sentence there is nothing to add.
     /// </summary>
-    internal static bool NeedsCollectorRunRead(string serverName, int engineEdition, string? engineKind, string collectorName, int rowCount) =>
-        rowCount == 0 && EngineGapNote(serverName, engineEdition, engineKind, collectorName) is null;
+    internal static bool NeedsCollectorRunRead(string serverName, int engineEdition, string? engineKind, string collectorName, int rowCount, bool isAwsRds = false) =>
+        rowCount == 0 && EngineGapNote(serverName, engineEdition, engineKind, collectorName, isAwsRds) is null;
 
     /// <summary>
     /// <see cref="EngineGapState"/> from the facts the viewer reads from <c>collection_log</c>: when the collector last ran
@@ -98,7 +100,7 @@ public partial class ViewerServerTab
     internal static (string Text, Visibility Visibility) EngineGapStateFromRuns(
         string serverName, int engineEdition, string? engineKind, string collectorName, int rowCount,
         DateTime? collectorLastRunUtc, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc,
-        string? outcomeNote = null)
+        string? outcomeNote = null, bool isAwsRds = false)
     {
         /* #6861: a collector whose LATEST run recorded a named skip (PERMISSIONS and the like) did run, so the never-ran rules
            below have nothing to say about it. The skip's own sentence is the answer, and the engine gap still wins inside
@@ -120,7 +122,7 @@ public partial class ViewerServerTab
                 ?? NeverRanNote(serverName, collectorName);
         }
 
-        return EngineGapState(serverName, engineEdition, engineKind, collectorName, rowCount, note is not null, note);
+        return EngineGapState(serverName, engineEdition, engineKind, collectorName, rowCount, note is not null, note, isAwsRds);
     }
 
     /// <summary>
@@ -134,12 +136,12 @@ public partial class ViewerServerTab
     internal static async Task<(string Text, Visibility Visibility)> ReadEngineGapStateAsync(
         CollectorLastRunReader readLastRun, ISet<string>? collectorsSeenToRun, int serverId, string serverName,
         int engineEdition, string? engineKind, string collectorName, int rowCount,
-        CollectorOutcomeReader readLatestOutcome)
+        CollectorOutcomeReader readLatestOutcome, bool isAwsRds = false)
     {
         DateTime? collectorLastRunUtc = null;
         DateTime? serverLastCollectedUtc = null;
         DateTime? serverFirstCollectedUtc = null;
-        var needsRead = NeedsCollectorRunRead(serverName, engineEdition, engineKind, collectorName, rowCount);
+        var needsRead = NeedsCollectorRunRead(serverName, engineEdition, engineKind, collectorName, rowCount, isAwsRds);
         var seenToRun = collectorsSeenToRun?.Contains(collectorName) == true;
 
         if (!seenToRun && needsRead)
@@ -181,7 +183,7 @@ public partial class ViewerServerTab
 
         return EngineGapStateFromRuns(
             serverName, engineEdition, engineKind, collectorName, rowCount, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc,
-            outcomeNote);
+            outcomeNote, isAwsRds);
     }
 
     /// <summary>
@@ -238,7 +240,7 @@ public partial class ViewerServerTab
         ReadEngineGapStateAsync(
             (serverId, collector) => _dataService.GetCollectorLastRunAsync(serverId, collector), _collectorsSeenToRun,
             _server.ServerId, _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, rowCount,
-            (serverId, collector) => _dataService.GetLatestCollectorOutcomeAsync(serverId, collector));
+            (serverId, collector) => _dataService.GetLatestCollectorOutcomeAsync(serverId, collector), _server.IsAwsRds);
 
     /// <summary>
     /// Fills a surface's message element once its data is bound, with what <see cref="EngineGapStateFromRuns"/> says for this

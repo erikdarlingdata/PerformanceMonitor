@@ -1332,7 +1332,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* #5736 (V211): not the shipped 3 / 10, for the same reason as the floors above. */
         ClientTimeoutsWarningMultiple: 2, ClientTimeoutsCriticalMultiple: 7,
         AgentAlertGapsEnabled: true,
-        BackupOverdueEnabled: true, LogBackupOverdueEnabled: true, CheckDbOverdueEnabled: true);
+        BackupOverdueEnabled: true, LogBackupOverdueEnabled: true, CheckDbOverdueEnabled: true,
+        IdentityCapacityEnabled: true, IdentityCapacityWarningPercent: 72, IdentityCapacityCriticalPercent: 92);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

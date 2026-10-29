@@ -876,6 +876,8 @@ export function metricBands(c) {
     chip("Blocking", fmtInt(c.blocking_count), c.blocking_severity, blockingDetail),
     chip("Deadlocks", fmtInt(c.deadlock_count), c.deadlock_severity, deadlockDetail),
     chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail),
+    /* #6875: a chip only when a column is at the warning bar or past it. It is not a band: nothing above reads it, and a server without one shows no extra chip. */
+    ...identityCapacityChip(c),
     /* #6874: a chip only when the server's Agent alert setup has a gap. It is not a band: nothing above reads it, and a
        server without a gap shows no extra chip. */
     ...agentAlertChip(c),
@@ -899,6 +901,14 @@ function databaseProtectionChip(c) {
 
 /* A short non-color severity cue so severity isn't conveyed by border color alone (M2). */
 const SEV_BADGE = { Critical: "CRIT", Warning: "WARN" };
+
+function identityCapacityChip(c) {
+  const ic = c.identity_capacity;
+  if (!ic || !ic.columns_at_bar) return [];
+  const n = ic.columns_at_bar;
+  return [chip("Identity capacity", fmtInt(n) + (n === 1 ? " column" : " columns"), ic.worst_band === "critical" ? "Critical" : "Warning",
+    "At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is " + ic.worst_band + ".")];
+}
 
 function chip(label, value, sev, detail) {
   const badge = SEV_BADGE[sev];

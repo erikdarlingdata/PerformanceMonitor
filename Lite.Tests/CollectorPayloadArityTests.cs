@@ -87,7 +87,11 @@ public class CollectorPayloadArityTests
             /* A default row is enough: this counts WRITES, not values. A collector that branched on row
                CONTENT to decide how many values to write would already be broken against the fixed column
                list, so the default is not a weaker test — it is the same test. */
-            var row = rowType.IsValueType ? Activator.CreateInstance(rowType) : null;
+            /* A row class with a public parameterless constructor is exercised the same way (identity_capacity,
+               #6875, has one, and left to the skip list it took the unexercised count to the limit below). */
+            var row = rowType.IsValueType || rowType.GetConstructor(Type.EmptyTypes) is not null
+                ? Activator.CreateInstance(rowType)
+                : null;
 
             if (row is null)
             {

@@ -328,6 +328,53 @@ GROUP BY s.server_id";
         }
     }
 
+    /// <summary>The store version that added <c>collect.servers.is_aws_rds</c> (V225, #6894). An older store has no column, so no server
+    /// reads as Amazon RDS and the Agent surfaces keep their old text.</summary>
+    internal const int AwsRdsStoreSchemaVersion = 225;
+
+    /// <summary>The servers the service stamped as Amazon RDS (#6894). NULL and false match nothing.</summary>
+    internal const string AwsRdsServersSql = "SELECT server_id FROM servers WHERE is_aws_rds";
+
+    /// <summary>
+    /// Fills <see cref="DarlingServer.IsAwsRds"/> on the listed servers (#6894). A store older than V225 has no column, so nothing is
+    /// read, and a failed read leaves every server false: the note is a diagnostic and is never worth losing the sidebar over.
+    /// </summary>
+    private async Task AttachAwsRdsAsync(List<DarlingServer> servers, CancellationToken cancellationToken)
+    {
+        if (servers.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var version = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+            if (version is not int known || known < AwsRdsStoreSchemaVersion)
+            {
+                return;
+            }
+
+            var byId = servers.GroupBy(x => x.ServerId).ToDictionary(g => g.Key, g => g.ToList());
+            await using var command = _dataSource.CreateCommand(AwsRdsServersSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (byId.TryGetValue(reader.GetInt32(0), out var matches))
+                {
+                    foreach (var server in matches)
+                    {
+                        server.IsAwsRds = true;
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ViewerLogger.Warn("App", $"AWS RDS flag read failed: {ex.Message}");
+        }
+    }
+
     /// <summary>
     /// The managed server set for the sidebar. Config-authoritative once the service has seeded the store
     /// (added servers appear, removed ones disappear); on a pre-seed store (<c>config_service</c> absent) it
@@ -376,6 +423,7 @@ GROUP BY s.server_id";
         }
 
         await AttachSameMachineAsync(servers, cancellationToken);
+        await AttachAwsRdsAsync(servers, cancellationToken);
         return servers;
     }
 

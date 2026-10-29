@@ -128,10 +128,11 @@ public partial class ServerTab : UserControl
     /// so they all say the same thing about a new server.
     /// </summary>
     internal static (string Text, Visibility Visibility) EngineGapStateFromRuns(
-        string serverName, bool isAzureSqlDatabase, string collectorName, int rowCount, string? skipped, CollectorRunHistory runs)
+        string serverName, bool isAzureSqlDatabase, string collectorName, int rowCount, string? skipped, CollectorRunHistory runs,
+        bool isAwsRds = false)
     {
         var noRun = NoRunNote(serverName, collectorName, skipped, runs);
-        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, noRun);
+        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, noRun, isAwsRds);
     }
 
     /// <summary>
@@ -150,9 +151,10 @@ public partial class ServerTab : UserControl
         bool collectorNeverRan,
         string collectorName,
         int rowCount,
-        string? neverRanNote = null)
+        string? neverRanNote = null,
+        bool isAwsRds = false)
     {
-        var text = EngineGapNote(serverName, isAzureSqlDatabase, collectorName)
+        var text = EngineGapNote(serverName, isAzureSqlDatabase, collectorName, isAwsRds)
             ?? (collectorNeverRan ? neverRanNote ?? NeverCollectedNote(serverName, collectorName) : null);
 
         return text is not null && rowCount == 0 ? (text, Visibility.Visible) : ("", Visibility.Collapsed);
@@ -177,7 +179,7 @@ public partial class ServerTab : UserControl
         }
 
         _skippedNotes.TryGetValue(collectorName, out var skipped);
-        var gap = EngineGapStateFromRuns(_server.DisplayName, _isAzureSqlDatabase, collectorName, rowCount, skipped, _collectorRuns);
+        var gap = EngineGapStateFromRuns(_server.DisplayName, _isAzureSqlDatabase, collectorName, rowCount, skipped, _collectorRuns, _isAwsRds);
         var gapShows = gap.Visibility == Visibility.Visible;
 
         message.Text = gapShows ? gap.Text : ownText;

@@ -538,7 +538,11 @@ LIMIT 1";
         /* #6873 (V223): the three database protection alert switches (boolean NOT NULL, default off). APPENDED, same reason. */
         bool BackupOverdueEnabled,
         bool LogBackupOverdueEnabled,
-        bool CheckDbOverdueEnabled);
+        bool CheckDbOverdueEnabled,
+        /* #6875 (V224): the Identity Capacity switch (boolean NOT NULL, default off) and its warning and critical bars (integer NOT NULL, 70 and 90). APPENDED, same reason. */
+        bool IdentityCapacityEnabled,
+        int IdentityCapacityWarningPercent,
+        int IdentityCapacityCriticalPercent);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -577,7 +581,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute,
        excluded_volumes,
        client_timeouts_warning_multiple, client_timeouts_critical_multiple,
-       agent_alert_gaps_enabled, backup_overdue_enabled, log_backup_overdue_enabled, checkdb_overdue_enabled
+       agent_alert_gaps_enabled, backup_overdue_enabled, log_backup_overdue_enabled, checkdb_overdue_enabled,
+       identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -646,7 +651,9 @@ WHERE id = 1";
             /* #5736 (V211): the multiples at 77-78. */
             reader.GetInt32(77), reader.GetInt32(78),
             /* #6874 (V222): the Agent Alert Gaps switch at 79. #6873 (V223): the three database protection switches at 80-82. */
-            reader.GetBoolean(79), reader.GetBoolean(80), reader.GetBoolean(81), reader.GetBoolean(82));
+            reader.GetBoolean(79), reader.GetBoolean(80), reader.GetBoolean(81), reader.GetBoolean(82),
+            /* #6875 (V224): the Identity Capacity switch and bars at 83-85. */
+            reader.GetBoolean(83), reader.GetInt32(84), reader.GetInt32(85));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */
