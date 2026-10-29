@@ -22,7 +22,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #6873 (part of #6872): the <c>database_protection</c> collector. Its reading of the three facts (never, unknown, a recent time,
-/// none in the window, SIMPLE recovery), its platform label for each target shape, and its V222 table.
+/// none in the window, SIMPLE recovery), its platform label for each target shape, and its V223 table.
 /// </summary>
 public sealed class DatabaseProtectionCollectorTests
 {
@@ -208,9 +208,9 @@ public sealed class DatabaseProtectionCollectorTests
     }
 
     [Fact]
-    public void TheV222Table_IsTheGeneratorsOutputForTheCatalogEntry()
+    public void TheV223Table_IsTheGeneratorsOutputForTheCatalogEntry()
     {
-        var rung = PgMigrations.Scripts.Single(m => m.Version == 222).Sql.Replace("collect.", "", StringComparison.Ordinal);
+        var rung = PgMigrations.Scripts.Single(m => m.Version == 223).Sql.Replace("collect.", "", StringComparison.Ordinal);
         var generated = PgSchemaGenerator.CreateTable(DatabaseProtectionCollector.Instance) + "\n\n" + PgSchemaGenerator.CreateIndex(DatabaseProtectionCollector.Instance);
 
         static string Norm(string s) => string.Join(' ', s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
@@ -221,7 +221,7 @@ public sealed class DatabaseProtectionCollectorTests
 }
 
 /// <summary>
-/// #6873: the rows land in the V222 table through the product's own writer, and read back as written.
+/// #6873: the rows land in the V223 table through the product's own writer, and read back as written.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class DatabaseProtectionStoreLiveTests

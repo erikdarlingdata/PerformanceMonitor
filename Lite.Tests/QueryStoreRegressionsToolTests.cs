@@ -285,6 +285,74 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
         Assert.Contains("1000", tooBig, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #6877: an as_of replay whose 24 hour window and 7 day baseline both end before the stored rows start (the only rows are 3 days
+    /// back, the replay is 6 days back), on a server whose collector was storing rows 20 days back. The answer names where the stored
+    /// data starts and says there is nothing to compare, instead of "no sample stored yet" quoting the server now.
+    /// </summary>
+    [Fact]
+    public async Task AReplayWindowEndingBeforeTheStoredRows_OnAServerCollectedBeforeIt_NamesWhereTheDataStarts()
+    {
+        var service = new LocalDataService(_duckDb);
+        var baseNow = Truncate(DateTime.UtcNow);
+        await SeedAsync(baseNow.AddDays(-3), 100, 1000, 1000, intervalId: 1);
+        await SeedCollectionLogAsync(baseNow.AddDays(-20), baseNow);
+
+        var root = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, 24, as_of: ReplayAsOf(baseNow, 6)));
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("This window (", message, StringComparison.Ordinal);
+        Assert.Contains($"is older than this server's raw Query Store data, which starts {baseNow.AddDays(-3).ToString("MMM d", System.Globalization.CultureInfo.InvariantCulture)}, so there is nothing to compare", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("no Query Store sample has been stored yet", message, StringComparison.Ordinal);
+        /* A productive run at or before the window's start is the evidence, so the sentence says retention MAY have dropped the data. */
+        Assert.Contains("may have been dropped by retention", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("has since aged out", message, StringComparison.Ordinal);
+        var hints = root.GetProperty("hints");
+        Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+        Assert.NotEqual(JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
+    }
+
+    /// <summary>#6877: a server whose first productive run is after the replay window keeps the first-interval answers, labelled as the server now.</summary>
+    [Fact]
+    public async Task AReplayWindowEndingBeforeTheStoredRows_OnAServerAddedAfterIt_DoesNotClaimTheDataAgedOut()
+    {
+        var service = new LocalDataService(_duckDb);
+        var baseNow = Truncate(DateTime.UtcNow);
+        await SeedAsync(baseNow.AddDays(-3), 100, 1000, 1000, intervalId: 1);
+        await SeedCollectionLogAsync(baseNow.AddDays(-2), baseNow);
+
+        var root = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, 24, as_of: ReplayAsOf(baseNow, 6)));
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.DoesNotContain("This window (", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("which starts", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("aged out", message, StringComparison.Ordinal);
+    }
+
+    private static string ReplayAsOf(DateTime now, int daysBack) =>
+        now.AddDays(-daysBack).ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>One successful query_store run a day from <paramref name="from"/> to <paramref name="to"/>.</summary>
+    private async Task SeedCollectionLogAsync(DateTime from, DateTime to)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        for (var t = from; t <= to; t = t.AddDays(1))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, rows_collected)
+VALUES ($1, $2, $3, 'query_store', $4, 'SUCCESS', 5)";
+            cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
+            cmd.Parameters.Add(new DuckDBParameter { Value = _serverId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = t });
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
+
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
 
     private static DateTime Truncate(DateTime value) =>

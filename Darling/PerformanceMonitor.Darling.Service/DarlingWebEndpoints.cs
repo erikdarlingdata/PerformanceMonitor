@@ -6291,6 +6291,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── jobs (DarlingMcpJobTools) ── */
             ["get_running_jobs"] = R(CatJobs, "Currently-running SQL Agent jobs.", PServer()),
+            ["get_agent_alerts"] = R(CatJobs, "The SQL Server Agent alerts defined on an instance, and the gaps in them (no alert for severities 19 to 25 or errors 823 to 825, an alert that notifies no one, a disabled alert, an alert that fired and told no one).", PServer(), PHours(24), PAsOf()),
             ["get_job_history"] = R(CatJobs, "Retained SQL Agent job runs, newest first; omit server for every server.", PServer(), PHours(24), PText("job_name"), PText("status"), PText("category"), PLimit(100), PInt("min_duration_seconds"), PAsOf()),
 
             /* ── stored plan XML (DarlingMcpPlanTools; the analyze_*_plan compute family stays excluded) ── */
@@ -7466,6 +7467,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── jobs ── */
             ["get_running_jobs"] = (c, pg, an) => DarlingMcpJobTools.GetRunningJobs(pg, Server(c), c.RequestAborted),
+            ["get_agent_alerts"] = (c, pg, an) => DarlingMcpAgentAlertTools.GetAgentAlerts(pg, Server(c), Hours(c, 24), AsOf(c), c.RequestAborted),
             ["get_job_history"] = (c, pg, an) => OptionalInt(c, "min_duration_seconds", out var minDurationSeconds)
                 ? DarlingMcpJobTools.GetJobHistory(pg, Server(c), Hours(c, 24), Str(c, "job_name"), Str(c, "status"), Str(c, "category"), Rows(c, "limit", 100), as_of: AsOf(c), min_duration_seconds: minDurationSeconds, cancellationToken: c.RequestAborted)
                 : UnparseableParam("min_duration_seconds"),

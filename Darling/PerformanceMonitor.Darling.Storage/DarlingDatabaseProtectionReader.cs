@@ -44,7 +44,7 @@ public sealed record DatabaseProtectionRead(IReadOnlyList<DatabaseProtectionFact
 }
 
 /// <summary>
-/// #6873: per-database last good CHECKDB and last full and log backup, from <c>collect.database_protection</c> (V222). One pass stamps one
+/// #6873: per-database last good CHECKDB and last full and log backup, from <c>collect.database_protection</c> (V223). One pass stamps one
 /// <c>collection_time</c> for every database, so the newest capture in the window is the current set of databases: a dropped database
 /// leaves the next capture and is not listed, though its older rows stay until retention. Bounded by <c>server_id</c> and the window
 /// on <c>collection_time</c> (<c>idx_database_protection_time</c>).

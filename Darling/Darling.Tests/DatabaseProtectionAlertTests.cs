@@ -466,7 +466,7 @@ VALUES (515152, 'PROTECTION-PG', 'PROTECTION-PG', TRUE, 0, $1), (515153, 'PROTEC
     [Fact]
     public async Task TheSettings_ShipOff_AndRoundTripThroughTheSeed_TheStoreRead_TheTool_AndTheViewerSave()
     {
-        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V222 settings round trip (it mints its own scratch database).");
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V223 settings round trip (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);

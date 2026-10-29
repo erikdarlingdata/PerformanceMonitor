@@ -2319,6 +2319,9 @@ export const SERVER_TABS = [
          the platform label are the service's (DatabaseProtectionBands), the same ones the Viewer shows. A server with no capture, a
          refused collector or an engine that is not collected answers with its own sentence in each panel. */
       ...fanout("get_database_protection", { server }, DATABASE_PROTECTION_SPECS),
+      /* #6874: the SQL Server Agent alerts and the gaps in them, one read feeding three panels. A server with no Agent alerts at all
+         (Azure SQL Database, Managed Instance) or whose collector is refused answers with its own sentence in every panel. */
+      ...fanout("get_agent_alerts", { server }, AGENT_ALERT_SPECS),
     ],
   },
 
@@ -5318,59 +5321,59 @@ const JOB_COLUMNS = [
   { key: "successful_run_count", label: "Successes", format: "int" },
 ];
 
-/* #6873: the Health Checks panels on the Configuration tab. One fact is the age and the state word the service gives it. A platform-managed
-   or native-only target shows the platform's label beside the age and is never overdue. Overdue databases sort first. */
-function protectionFactText(f) {
-  if (!f) return "-";
-  const state = f.state === "overdue" || f.state === "ok" ? "" : String(f.state).replace(/_/g, " ");
-  const overdue = f.overdue ? " - overdue" : "";
-  if (f.age) return f.age + (state ? " (" + state + ")" : "") + overdue;
-  return (state || "-") + overdue;
+/* #6874: the Agent alert panels on the Configuration tab. The status words and the gap sentences are the service's (AgentAlertStatus),
+   the same ones the Viewer shows. A gap names either the alerts it is about or the severities and errors that have no alert. */
+function agentAlertGapWhich(r) {
+  const alerts = Array.isArray(r && r.alerts) ? r.alerts : [];
+  const missing = Array.isArray(r && r.missing) ? r.missing : [];
+  return alerts.length ? alerts.join(", ") : missing.join(", ");
 }
-function protectionFact(key, label) {
-  return {
-    key,
-    label,
-    display: (r) => protectionFactText(r[key]),
-    sortValue: (r) => (r[key] && r[key].overdue ? 0 : 1),
-    cellClass: (r) => (r[key] && r[key].overdue ? "sev-High" : null),
-  };
-}
-const DATABASE_PROTECTION_COLUMNS = [
-  { key: "database", label: "Database" },
-  { key: "state", label: "State", small: true },
-  protectionFact("full_backup", "Last full backup"),
-  protectionFact("log_backup", "Last log backup"),
-  protectionFact("checkdb", "Last good CHECKDB"),
-  { key: "platform", label: "Platform", display: (r) => (r.platform && r.platform !== "native" ? String(r.platform).replace(/_/g, " ") : ""), small: true },
-  { key: "excluded_reason", label: "Not judged because", small: true },
-];
-const DATABASE_PROTECTION_STATS = [
-  { key: "summary.text", label: "Overdue", format: "text", small: true },
+const AGENT_ALERT_STAT_COLUMNS = [
+  { key: "instance_status", label: "Alert setup", format: "text", small: true },
+  { key: "alert_count", label: "Alerts defined", format: "int" },
   { key: "captured_at", label: "Captured", format: "time", small: true },
 ];
-const overdueFirst = (rows) => [...rows].sort((a, b) => {
-  const score = (r) => ["full_backup", "log_backup", "checkdb"].filter((k) => r[k] && r[k].overdue).length;
-  return score(b) - score(a);
-});
-const DATABASE_PROTECTION_SPECS = [
+const AGENT_ALERT_GAP_COLUMNS = [
+  { key: "message", label: "What is wrong" },
+  { key: "which", label: "Which", render: (r) => el("span", { text: agentAlertGapWhich(r) }), sortValue: agentAlertGapWhich },
+];
+const AGENT_ALERT_COLUMNS = [
+  { key: "name", label: "Alert" },
+  { key: "enabled", label: "Enabled", format: "bool" },
+  { key: "severity", label: "Severity", format: "int" },
+  { key: "message_id", label: "Error", format: "int" },
+  { key: "database_name", label: "Database" },
+  { key: "operator_count", label: "Operators", format: "int" },
+  { key: "fired_in_window", label: "Fired in the window", format: "bool" },
+  { key: "occurrence_count", label: "Times fired", format: "int" },
+  { key: "last_occurrence", label: "Last fired (server clock)" },
+];
+const AGENT_ALERT_SPECS = [
   {
-    title: "Health Checks",
-    subtitle: "full backup 7 days, log backup 60 minutes, CHECKDB 14 days, collected hourly",
+    title: "Agent Alerts",
+    subtitle: "msdb.dbo.sysalerts, collected every 15 minutes",
     span: 2,
     viz: "stat",
-    stats: DATABASE_PROTECTION_STATS,
-    emptyText: "No database protection capture yet.",
+    stats: AGENT_ALERT_STAT_COLUMNS,
+    emptyText: "No SQL Server Agent alert capture yet.",
   },
   {
-    title: "Backups and CHECKDB by Database",
-    subtitle: "newest capture, overdue first",
+    title: "Alert Setup Gaps",
+    subtitle: "severities 19 to 25, errors 823 to 825, operators",
     span: 2,
     viz: "table",
-    rowsKey: "databases",
-    columns: DATABASE_PROTECTION_COLUMNS,
-    orderRows: overdueFirst,
-    emptyText: "No databases in the newest capture.",
+    rowsKey: "gaps",
+    columns: AGENT_ALERT_GAP_COLUMNS,
+    emptyText: "No gaps. Every severity from 19 to 25 and every error from 823 to 825 has an enabled alert that tells an operator.",
+  },
+  {
+    title: "Alert Definitions",
+    subtitle: "newest capture, fired judged over the last 24 hours",
+    span: 2,
+    viz: "table",
+    rowsKey: "alerts",
+    columns: AGENT_ALERT_COLUMNS,
+    emptyText: "No SQL Server Agent alert is defined on this instance.",
   },
 ];
 

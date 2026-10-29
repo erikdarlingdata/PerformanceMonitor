@@ -405,6 +405,12 @@
                                     <Button x:Name="ConfigureDatabaseStatesButton" Content="Configure…" Margin="8,0,0,0" Padding="8,2"
                                             VerticalAlignment="Center" Click="ConfigureDatabaseStatesButton_Click"/>
                                 </WrapPanel>
+                                <!-- #6874: off by default. Alerts when the newest SQL Server Agent alert capture shows a gap (no alert for
+                                     severity 19 to 25 or errors 823 to 825, an alert with no operator, an alert off, or none defined). -->
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertAgentAlertGapsCheckBox" Content="SQL Server Agent alert setup has a gap (off by default)"
+                                              VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
                                 <!-- #6873: the three database protection alerts. Off by default. -->
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertBackupOverdueCheckBox" Content="Full backup overdue (older than 7 days)"

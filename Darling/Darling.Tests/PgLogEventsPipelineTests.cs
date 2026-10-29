@@ -2205,13 +2205,70 @@ public sealed class PgLogEventsPipelineTests
 
         var run = DarlingCollectorRunner.WithForeignZoneLinesNote(
             new CollectorRunResult(rows.Count, 1, 1, context.Measurements));
-        Assert.Contains("(#4046)", run.Note, StringComparison.Ordinal);
+        Assert.Contains("#4046", run.Note, StringComparison.Ordinal);
         Assert.EndsWith("; foreign_zone_lines_skipped=1", run.Note, StringComparison.Ordinal);
 
         /* An ordinary run gets no note at all, as before. */
         var quiet = new CollectorRunResult(15, 1, 1, CollectorContext.NoMeasurements);
         Assert.Same(quiet, DarlingCollectorRunner.WithForeignZoneLinesNote(quiet));
         Assert.Null(quiet.Note);
+    }
+
+    /// <summary>
+    /// #6866: one read on a named-zone target makes exactly one trip to the server to prove its stamps, however many
+    /// lines or repeated stamps the slab holds, and the stored instants are the ones it proved. A UTC target, and a
+    /// named-zone slab with no line to prove, make none.
+    /// </summary>
+    [Fact]
+    public async Task OneReadOnANamedZoneTarget_AsksTheServerOnce_AndAUtcTargetOrAnEmptySlabNever()
+    {
+        var body = "2026-10-24 12:00:00.000 CEST [11] ERROR:  first\n"
+                   + "2026-10-24 12:00:00.000 CEST [12] ERROR:  same stamp\n"
+                   + "2026-10-24 13:30:00.500 CEST [13] ERROR:  later\n";
+        var calls = 0;
+        IReadOnlyCollection<PgLogZonePair>? asked = null;
+
+        CollectorContext Counting()
+        {
+            var context = TestContext();
+            context.PgLogZoneResolver = (_, pairs, _) =>
+            {
+                calls++;
+                asked = pairs;
+                return Task.FromResult<PgLogZoneMap?>(PgLogZoneMap.FromMatches(
+                [
+                    ("2026-10-24 12:00:00.000", "CEST", 1, new DateTime(2026, 10, 24, 10, 0, 0)),
+                    ("2026-10-24 13:30:00.500", "CEST", 1, new DateTime(2026, 10, 24, 11, 30, 0, 500)),
+                ]));
+            };
+            return context;
+        }
+
+        using (var reader = new FakeReader(new object?[][] { new object?[] { body, "Europe/Berlin" } }))
+        {
+            var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, Counting(), CancellationToken.None);
+
+            Assert.Equal(3, rows.Count);
+            Assert.Equal(1, calls);
+            Assert.Equal(2, asked!.Count);
+            Assert.Equal(
+                new[] { new DateTime(2026, 10, 24, 10, 0, 0), new DateTime(2026, 10, 24, 10, 0, 0), new DateTime(2026, 10, 24, 11, 30, 0, 500) },
+                rows.Select(r => r.OccurredAtUtc).OrderBy(t => t).ToArray());
+        }
+
+        calls = 0;
+        using (var reader = new FakeReader(new object?[][] { new object?[] { "no log lines in this slab\n", "Europe/Berlin" } }))
+        {
+            await PgLogEventsCollector.Instance.ReadAsync(reader, Counting(), CancellationToken.None);
+            Assert.Equal(0, calls);
+        }
+
+        using (var reader = new FakeReader(new object?[][] { new object?[] { SelfHostedLog, "UTC" } }))
+        {
+            var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, Counting(), CancellationToken.None);
+            Assert.Equal(15, rows.Count);
+            Assert.Equal(0, calls);
+        }
     }
 
     /// <summary>

@@ -190,6 +190,8 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
         AttentionBaselineMath.ClampMultiples(_config.Alerts.ClientTimeoutsWarningMultiple, _config.Alerts.ClientTimeoutsCriticalMultiple).Warning;
     public int ClientTimeoutsCriticalMultiple =>
         AttentionBaselineMath.ClampMultiples(_config.Alerts.ClientTimeoutsWarningMultiple, _config.Alerts.ClientTimeoutsCriticalMultiple).Critical;
+    /// <summary>#6874: the Agent Alert Gaps alert's switch. Off by default; not on <see cref="IAlertEngineSettings"/> because Lite has no such alert.</summary>
+    public bool AgentAlertGapsEnabled => _config.Alerts.AgentAlertGapsEnabled;
     /// <summary>#6873: the three database protection alerts' switches. Off by default; not on <see cref="IAlertEngineSettings"/> because Lite has no such alerts.</summary>
     public bool BackupOverdueEnabled => _config.Alerts.BackupOverdueEnabled;
     public bool LogBackupOverdueEnabled => _config.Alerts.LogBackupOverdueEnabled;

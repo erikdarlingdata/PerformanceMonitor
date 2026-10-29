@@ -44,7 +44,7 @@ public sealed class AttentionPlainTableTests
         /* Every opt-out is a table that is NOT in the hypertable grid. The list is exact, so the exception cannot spread
            silently: a second entry reddens here, and its author has to argue the grid decision again. */
         var optedOut = CollectorCatalog.All.Where(c => c.StaysPlainTable).Select(c => c.TargetTable).ToArray();
-        Assert.Equal(new[] { "attention_events", "query_store_forced_plans", "query_store_hints", "database_protection" }, optedOut);
+        Assert.Equal(new[] { "attention_events", "query_store_forced_plans", "query_store_hints", "database_protection", "agent_alerts" }, optedOut);
 
         Assert.DoesNotContain(TimescaleSupport.HypertableTables, t => t.StaysPlainTable);
         Assert.DoesNotContain(TimescaleSupport.HypertableTables, t => t.TargetTable == "attention_events");

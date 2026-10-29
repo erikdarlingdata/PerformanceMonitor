@@ -922,6 +922,7 @@ GROUP BY server_id, collector_name";
             (scanNow, scanToken) => ReadFailingCollectorCountsAsync(postgres, scanNow, scanToken),
             cancellationToken);
         var tags = await ReadTagsAsync(postgres, cancellationToken);
+        var agentAlertGaps = await ReadAgentAlertGapsAsync(postgres, now, cancellationToken);
         var databaseProtection = await ReadDatabaseProtectionOverdueAsync(postgres, now, cancellationToken);
         var tagForest = await ReadTagForestAsync(postgres, cancellationToken);
         /* #3368: the deadlock band's tiers, read ONCE per roll-up rather than per card. A store reload can
@@ -958,11 +959,13 @@ GROUP BY server_id, collector_name";
             lastCollection.TryGetValue(server.ServerId, out var collected);
             failingCollectors.TryGetValue(server.ServerId, out var collectors);
             tags.TryGetValue(server.ServerId, out var serverTags);
+            agentAlertGaps.TryGetValue(server.ServerId, out var serverAgentAlertGaps);
+
             databaseProtection.TryGetValue(server.ServerId, out var serverDatabaseProtection);
 
             cards.Add(BuildCard(
                 server, c, pg, m, mp, t, b, deadlock, pgDeadlock, collected.LastCollection, collectors, serverTags, now,
-                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection, serverDatabaseProtection));
+                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection, serverAgentAlertGaps, serverDatabaseProtection));
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest, collectionHealthAgeSeconds,
@@ -1010,6 +1013,7 @@ GROUP BY server_id, collector_name";
         DeadlockRateThresholds deadlockTiers,
         DateTime? registeredAt = null,
         DateTime? olderCollection = null,
+        IReadOnlyList<FleetAgentAlertGap>? agentAlertGaps = null,
         IReadOnlyList<FleetDatabaseProtectionOverdue>? databaseProtectionOverdue = null)
     {
 
@@ -1207,6 +1211,8 @@ GROUP BY server_id, collector_name";
             ThreadsWaitingForCpu = threads.RunnableTasks,
             RequestsWaitingForThreads = threads.WorkQueue,
             ThreadsSeverity = ServerHealthClassifier.ThreadsSeverity(threads.TotalThreads, availableThreads, threads.RunnableTasks, threads.WorkQueue),
+            /* #6874: set only when the Agent alert setup has a gap. The Band below is not read from it. */
+            AgentAlertGaps = agentAlertGaps is { Count: > 0 } ? agentAlertGaps : null,
             /* #6873: set only when something is overdue. The Band below is not read from it. */
             DatabaseProtectionOverdue = databaseProtectionOverdue is { Count: > 0 } ? databaseProtectionOverdue : null,
             HealthyCollectorCount = collectors.Healthy,
@@ -1594,6 +1600,74 @@ GROUP BY server_id, collector_name";
 
         return forest;
     }
+
+    /// <summary>The newest Agent alert capture per server in the last two hours (the collector runs every 15 minutes), one statement for the
+    /// fleet (#6874): the latest capture's rows. Shaped like the other per-server reads in this file: <c>servers</c> drives a lateral that
+    /// seeks <c>idx_agent_alerts_time</c> (<c>server_id, collection_time</c>) once per server for the newest capture time, then the capture's
+    /// rows are read by the same index, so a fleet load never walks the 30-day table. A server whose newest capture is the all-NULL marker
+    /// row has no alert_id, which is "collected, none defined". Like <see cref="FleetCpuSql"/>, it skips disabled servers and the
+    /// PostgreSQL and Aurora targets (<see cref="SqlServerCollectedTargetSql"/>): they never write this table, so a lateral probe for
+    /// them would be spent on every fleet read for nothing. $1 is the window start.</summary>
+    internal const string FleetAgentAlertsSql = $@"
+SELECT a.server_id, a.alert_id, a.alert_name, a.enabled, a.message_id, a.severity, a.has_notification, a.operator_count
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT MAX(x.collection_time) AS collection_time
+    FROM collect.agent_alerts AS x
+    WHERE x.server_id = s.server_id
+    AND   x.collection_time >= $1
+) AS n
+JOIN collect.agent_alerts AS a ON a.server_id = s.server_id AND a.collection_time = n.collection_time
+WHERE s.is_enabled
+AND   {SqlServerCollectedTargetSql}";
+
+    /// <summary>The Agent alert setup's gaps per server, for the servers that have any (#6874). The status itself is
+    /// <see cref="AgentAlertStatus.Evaluate"/>; this only batches the read.</summary>
+    internal static async Task<Dictionary<int, IReadOnlyList<FleetAgentAlertGap>>> ReadAgentAlertGapsAsync(
+        NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var facts = new Dictionary<int, List<AgentAlertFact>>();
+        await using var command = postgres.CreateCommand(FleetAgentAlertsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - AgentAlertCaptureFreshness, DateTimeKind.Unspecified));
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var serverId = reader.GetInt32(0);
+                if (!facts.TryGetValue(serverId, out var list))
+                {
+                    facts[serverId] = list = new List<AgentAlertFact>();
+                }
+
+                if (reader.IsDBNull(1))
+                {
+                    continue; // the marker row: a capture with no alert
+                }
+
+                int? OptInt(int i) => reader.IsDBNull(i) ? null : reader.GetInt32(i);
+                list.Add(new AgentAlertFact(
+                    reader.GetInt32(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetBoolean(3),
+                    null, OptInt(4), OptInt(5), null, null, null, null, null, null, null, null, OptInt(6), OptInt(7), null, null));
+            }
+        }
+
+        var map = new Dictionary<int, IReadOnlyList<FleetAgentAlertGap>>();
+        foreach (var (serverId, list) in facts)
+        {
+            var status = AgentAlertStatus.Evaluate(list);
+            if (status.Gaps.Count > 0)
+            {
+                map[serverId] = status.Gaps.Select(g => new FleetAgentAlertGap(g.Code, g.Message)).ToList();
+            }
+        }
+
+        return map;
+    }
+
+    /// <summary>How old the newest Agent alert capture may be and still count (#6874): eight passes of the 15-minute collector.</summary>
+    internal static readonly TimeSpan AgentAlertCaptureFreshness = DarlingAgentAlertReader.FreshCaptureWindow;
 
     /// <summary>The newest database protection capture per server inside <see cref="DatabaseProtectionBands.CaptureFreshness"/>, one statement for the
     /// fleet (#6873). Shaped like the other per-server reads in this file: <c>servers</c> drives a lateral that seeks
@@ -2514,6 +2588,11 @@ AND   {SqlServerCollectedTargetSql}";
     }
 }
 
+/// <summary>One gap in a server's SQL Server Agent alert setup, as the fleet card carries it (#6874): the stable <see cref="Code"/> and the sentence.</summary>
+public sealed record FleetAgentAlertGap(
+    [property: JsonPropertyName("code")] string Code,
+    [property: JsonPropertyName("message")] string Message);
+
 /// <summary>
 /// One pre-banded Overview card in the fleet roll-up — every band already computed by the shared
 /// <see cref="ServerHealthClassifier"/>, every instant a naive-UTC value the browser localizes. Serialized with
@@ -2831,6 +2910,12 @@ public sealed class FleetServerCard
     /// A6): no collector has been banded for this server, so there is no collection to call clean.</summary>
     [JsonPropertyName("collector_count")] public int CollectorCount { get; init; }
 
+    /// <summary>The gaps in this server's SQL Server Agent alert setup (#6874), from the newest <c>agent_alerts</c> capture in the last
+    /// two hours through <see cref="AgentAlertStatus.Evaluate"/> (the words come from there, so the page, the Viewer and the tool agree).
+    /// Null when the setup has no gap, when no capture is that fresh, and on every server that never captures (Azure SQL Database, Azure SQL
+    /// Managed Instance, Amazon RDS, PostgreSQL). A chip on the card and nothing more: no band reads it. A firing that told no operator is not
+    /// here, because it needs two captures; <c>get_agent_alerts</c> reports that one.</summary>
+    [JsonPropertyName("agent_alert_gaps")] public IReadOnlyList<FleetAgentAlertGap>? AgentAlertGaps { get; init; }
     /// <summary>The overdue full backups, log backups and CHECKDBs on this server (#6873), from the newest <c>database_protection</c> capture in the
     /// last three hours through <see cref="DatabaseProtectionBands.OverdueFacts"/> (the one judgment, so the page, the Viewer, the alerts and
     /// <c>get_database_protection</c> agree). Null when nothing is overdue, when no capture is that fresh, and on a platform-managed server (Azure SQL Database,

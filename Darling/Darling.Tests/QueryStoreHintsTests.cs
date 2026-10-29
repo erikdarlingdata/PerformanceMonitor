@@ -250,6 +250,89 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
     }
 
     /// <summary>
+    /// #6876: first seen over several databases and many captures. The grouped pass must return exactly what the per-hint minimum it replaced
+    /// returned (that older shape is run here over the same CTEs), a hint that was absent and came back is first seen after its last absence,
+    /// and the same hint id and query id in two databases are judged apart.
+    /// </summary>
+    [Fact]
+    public async Task FirstSeen_OverSeveralDatabases_MatchesThePerHintMinimumItReplaced()
+    {
+        var now = DateTime.UtcNow; var t0 = new DateTime(now.Ticks - now.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Utc).AddHours(-3); /* whole seconds: the store keeps microseconds */
+        const int captures = 10;
+        DateTime At(int c) => t0.AddMinutes(10 * c);
+        string[] dbs = ["DbA", "DbB", "DbC"];
+
+        /* Hint 1: every capture. Hint 2: absent in DbA captures 3 to 5 and in DbB captures 2 to 4, back after. Hint 3: new at capture 7.
+           Hint 4: DbC only, captures 0 to 4, then cleared. DbC has no capture 9, so its newest capture is 8. */
+        static bool Present(string db, int c, long hint) => hint switch
+        {
+            1 => true,
+            2 => !(db == "DbA" && c is >= 3 and <= 5) && !(db == "DbB" && c is >= 2 and <= 4),
+            3 => c >= 7,
+            _ => db == "DbC" && c <= 4
+        };
+
+        await WithStoreAsync(16, async (connection, ct) =>
+        {
+            for (var c = 0; c < captures; c++)
+                foreach (var db in dbs)
+                {
+                    if (db == "DbC" && c == captures - 1) continue;
+                    await InsertAsync(connection, ct, At(c), null, null, null, null, null, db);
+                    for (long hint = 1; hint <= 4; hint++)
+                        if (Present(db, c, hint))
+                            await InsertAsync(connection, ct, At(c), hint, hint * 100, "OPTION (MAXDOP 1)", null, 0, db);
+                }
+        }, async (postgres, ct) =>
+        {
+            var filter = DatabaseFilter.All;
+            var start = t0.AddHours(-1);
+            var end = DateTime.UtcNow;
+
+            /* The shape #6876 replaced, over the same CTEs: one minimum per output row. */
+            var oldSql = $@"
+WITH {DarlingQueryStoreHintReader.Ctes(filter)}
+SELECT h.database_name, h.query_id, h.query_hint_id,
+       (SELECT MIN(x.collection_time) FROM hints AS x
+         WHERE x.database_name = h.database_name AND x.query_id = h.query_id AND x.query_hint_id = h.query_hint_id
+         AND (a.last_absent IS NULL OR x.collection_time > a.last_absent)) AS first_seen
+FROM hints AS h
+JOIN newest AS n ON n.database_name = h.database_name AND n.newest_capture = h.collection_time
+LEFT JOIN absent AS a ON a.database_name = h.database_name AND a.query_id = h.query_id AND a.query_hint_id = h.query_hint_id";
+
+            var before = new Dictionary<(string, long, long), DateTime>();
+            await using (var command = postgres.CreateCommand(oldSql))
+            {
+                command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+                command.Parameters.AddWithValue(ServerId);
+                command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
+                command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
+                command.Parameters.Add(filter.Parameter());
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = DBNull.Value });
+                await using var reader = await command.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                    before[(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2))] = reader.GetDateTime(3);
+            }
+
+            var read = await DarlingQueryStoreHintReader.ReadAsync(postgres, ServerId, filter, null, start, end, cancellationToken: ct);
+            var after = read.Hints.ToDictionary(h => (h.DatabaseName, h.QueryId, h.HintId), h => h.FirstSeen);
+
+            /* DbA and DbB list hints 1 to 3, DbC (newest capture 8) lists 1 to 3 as well: nine hints, hint 4 was cleared. */
+            Assert.Equal(9, after.Count);
+            Assert.Equal(before.OrderBy(p => p.Key).ToList(), after.OrderBy(p => p.Key).ToList());
+
+            DateTime Naive(int c) => DateTime.SpecifyKind(At(c), DateTimeKind.Unspecified);
+            Assert.Equal(Naive(0), after[("DbA", 100, 1)]);
+            Assert.Equal(Naive(6), after[("DbA", 200, 2)]);
+            Assert.Equal(Naive(5), after[("DbB", 200, 2)]);
+            Assert.Equal(Naive(0), after[("DbC", 200, 2)]);
+            Assert.Equal(Naive(7), after[("DbC", 300, 3)]);
+            Assert.DoesNotContain(after.Keys, k => k.Item3 == 4);
+            return 0;
+        });
+    }
+
+    /// <summary>
     /// The read holds at most <see cref="DarlingQueryStoreHintReader.MaxHints"/> hints across every database. Two databases hold 2101 between
     /// them and the one FAILING hint is in the database that sorts last: the cut must not drop it, the answer must say it was cut, and every
     /// count must be the whole-set figure (or named as a count of what was returned).

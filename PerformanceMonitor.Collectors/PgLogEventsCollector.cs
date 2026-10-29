@@ -313,6 +313,7 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
             }
 
             var logTimezoneIsUtc = PgServerLogTail.LogTimezoneIsUtc(reader, 1);
+            var logTimezoneSetting = PgServerLogTail.LogTimezoneSetting(reader, 1);
             var logLinePrefix = PgServerLogTail.LogLinePrefix(reader, 2);
 
             if (context.PgLogUsesJsonlog)
@@ -329,7 +330,8 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
                 /* The same foreign-zone rule the csvlog and stderr paths apply: under a UTC log_timezone a
                    record in another zone is not the server's own and is skipped and counted rather than
                    refusing the whole read; otherwise a foreign zone refuses the read whole (#2993). */
-                var jsonKept = FilterForeignZoneEntries(jsonEntries, logTimezoneIsUtc, out var jsonForeignZoneLines);
+                var (jsonKept, jsonForeignZoneLines) = await PgLogNamedZone.FilterEntriesAsync(
+                    jsonEntries, logTimezoneIsUtc, logTimezoneSetting, context.PgLogZoneResolver, cancellationToken);
                 PgServerLogTail.MeasureForeignZoneLines(context, jsonForeignZoneLines);
 
                 if (jsonRecordsDiscarded > 0)
@@ -357,7 +359,8 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
                    log_timezone a record in another zone is not the server's own and is skipped and counted
                    rather than refusing the whole read; otherwise a foreign zone refuses the read whole, the
                    #2993 trade. */
-                var kept = FilterForeignZoneEntries(entries, logTimezoneIsUtc, out var foreignZoneLines);
+                var (kept, foreignZoneLines) = await PgLogNamedZone.FilterEntriesAsync(
+                    entries, logTimezoneIsUtc, logTimezoneSetting, context.PgLogZoneResolver, cancellationToken);
                 PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
 
                 if (recordsDiscarded > 0)
@@ -382,7 +385,12 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
                skipped and counted instead (#4046). The target's own log_line_prefix (#4501) rides the same
                read, so the forgery check inside the assembler can use its actual separator instead of the
                no-separator fallback. */
-            rows.AddRange(classifier.Classify(body, logTimezoneIsUtc, logLinePrefix, out var stderrForeignZoneLines));
+            /* #6866: a named local log_timezone is proved against the server first, one statement for every stamp in
+               the slab. Null (a UTC or unreadable setting, or one that is not a named zone) keeps the paths above. */
+            var zones = await PgLogNamedZone.ResolveBodyAsync(
+                body, logTimezoneIsUtc, logTimezoneSetting, context.PgLogZoneResolver, cancellationToken);
+
+            rows.AddRange(classifier.Classify(body, logTimezoneIsUtc, logLinePrefix, zones, out var stderrForeignZoneLines));
             PgServerLogTail.MeasureForeignZoneLines(context, stderrForeignZoneLines);
         }
 

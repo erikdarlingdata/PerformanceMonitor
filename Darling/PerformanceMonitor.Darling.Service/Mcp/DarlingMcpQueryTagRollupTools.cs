@@ -39,7 +39,7 @@ public sealed class DarlingMcpQueryTagRollupTools
     internal const int DefaultLimit = 25;
     private const int MaxLimit = 200;
 
-    [McpServerTool(Name = "get_resource_use_by_tag"), Description("Rolls resource use up by query tag, one section per source: plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks. SECTIONS ARE NEVER SUMMED: the plan cache and Query Store count the same executions. Each section has tag rows (own figure and subtree figure), an untagged row and a total. Omit server_name for the fleet. tag limits the answer to that tag's subtree. <<GUIDE>> Rolls resource use up by query tag from the tag map (config.query_tag_map); nothing is evaluated at read time, so a rule change shows after the map's next pass. Sections: plan_cache (cpu_ms, duration_ms, logical_reads, logical_writes, executions), query_store (the same plus peak_memory_pages, a maximum not a sum; read only when hours_back is 24 or more), procedures (as plan_cache), blocking_reports and blocking_snapshots (blocked_ms is wait time on the blocked side's tag, caused_ms the same wait on the blocking side's tag; the snapshot figures repeat a still-open wait once per sample), deadlocks (deadlocks and processes: a deadlock counts once for each tag among its processes, so the rows do not add up to the total). Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children, a parent's own figure leaves its children out. A key tagged on one server is untagged on another. Fleet answers list each server and give fleet_total per section. With tag set there is no untagged row and total is that tag's subtree. truncated says a section held more tag rows than limit; scan_truncated says the deadlock graphs read hit their ceiling. A section status of empty means no rows in the window; unavailable means the source does not exist in this store yet or, for query_store, one of three things: its table is missing, the window is under the 24-hour minimum its interval table is read for (ask for hours_back 24 or more), or the interval table's gate refused a server (no coverage row, a pending batch, or a failed decision; the section names that server). The sections answer independently: the top-level status is unavailable only when every section is, empty when every served section is empty, and a top-level message names any section not served.")]
+    [McpServerTool(Name = "get_resource_use_by_tag"), Description("Rolls resource use up by query tag, one section per source: plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks. SECTIONS ARE NEVER SUMMED: the plan cache and Query Store count the same executions. Each section has tag rows (own figure and subtree figure), an untagged row and a total. Omit server_name for the fleet. tag limits the answer to that tag's subtree. <<GUIDE>> Rolls resource use up by query tag from the tag map (config.query_tag_map); nothing is evaluated at read time, so a rule change shows after the map's next pass. Sections: plan_cache (cpu_ms, duration_ms, logical_reads, logical_writes, executions), query_store (the same plus peak_memory_pages, a maximum not a sum; read only when hours_back is 24 or more), procedures (as plan_cache), blocking_reports and blocking_snapshots (blocked_ms is wait time on the blocked side's tag, caused_ms the same wait on the blocking side's tag; the snapshot figures repeat a still-open wait once per sample), deadlocks (deadlocks and processes: a deadlock counts once for each tag among its processes, so the rows do not add up to the total). Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children, a parent's own figure leaves its children out. A key tagged on one server is untagged on another. Fleet answers list each server and give fleet_total per section. With tag set there is no untagged row and total is that tag's subtree. truncated says a section held more tag rows than limit; scan_truncated says the deadlock graphs read hit their ceiling. In the query_store section, effective_start is where its figures start, and window_truncated true means they start later than the window asked for: either the interval table's retention floor cut the start, or hours at the start are still being built into the hourly Query Store table. In the second case backlog_hours_waiting counts the hours still being built (an hour the builder cannot build soon is not one of them: an hour in back-off after a failed build, or one an open writer of the interval table holds back, is read from the interval table as before), hours_left_out counts the whole hours the read leaves out from the window's start (it can be larger, because it also counts every other hour before the start, among them the hours the interval table's floor cut), and backlog_note says the same in one sentence. A section status of empty means no rows in the window; unavailable means the source does not exist in this store yet or, for query_store, one of three things: its table is missing, the window is under the 24-hour minimum its interval table is read for (ask for hours_back 24 or more), or the interval table's gate refused a server (no coverage row, a pending batch, or a failed decision; the section names that server). The sections answer independently: the top-level status is unavailable only when every section is, empty when every served section is empty, and a top-level message names any section not served.")]
     public static Task<string> GetResourceUseByTag(
         NpgsqlDataSource postgres,
         [Description("Server name or display name. Omit for the whole fleet.")] string? server_name = null,
@@ -97,7 +97,8 @@ public sealed class DarlingMcpQueryTagRollupTools
 
             var windowStart = windowEnd.AddHours(-hours_back);
             var serverIds = scope.Select(s => s.ServerId).ToArray();
-            var names = scope.ToDictionary(s => s.ServerId, s => s.ServerName);
+            /* #6860: answers name a server by its display name (#6179), not the connection key. */
+            var names = scope.ToDictionary(s => s.ServerId, s => DarlingServerResolver.AnswerNameOf(servers, s));
 
             /* Each stats section routes on its own (their rollups and floors are independent) and says how far back it reached: the raw branch
                carries effective_start / window_truncated, the hourly branch the served window_end. The routing lives in the reader, which judges
@@ -164,9 +165,18 @@ public sealed class DarlingMcpQueryTagRollupTools
                 {
                     var from = allowed.Values.Max();
                     /* #6800: the fleet route starts every server's read on the hour, so the first instant read is the rounded-up start and the
-                       section says what that dropped. window_truncated stays the gate's own judgment (the table floor), not the rounding's. */
+                       section says what that dropped. window_truncated is the gate's own judgment (the table floor), not the rounding's, and it is also true
+                       when the backlog cut left the first hours out (#6865): two causes, the second one named by backlog_note. */
                     reach["effective_start"] = McpHelpers.FormatEffectiveStart(read.RoutedStarts is { Count: > 0 } routed ? routed.Values.Max() : from);
-                    reach["window_truncated"] = RawWindowFloor.IsTruncated(from, windowStart);
+                    reach["window_truncated"] = RawWindowFloor.IsTruncated(from, windowStart) || read.BacklogHoursWaiting > 0;
+                    if (read.BacklogHoursWaiting > 0)
+                    {
+                        /* #6865: the route never reads the hours that wait for the hourly builder from the wide table, so this is the newest span that needs none of them. backlog_hours_waiting counts the backlog hours, hours_left_out the whole hours from the window's first hour to the start, which includes every other hour before the start, among them the hours the table's floor cut. */
+                        reach["backlog_hours_waiting"] = read.BacklogHoursWaiting;
+                        reach["hours_left_out"] = read.BacklogHoursLeftOut;
+                        reach["backlog_note"] = QueryTagRollupHashRoute.BacklogNote($"{reach["effective_start"]}", read.BacklogHoursLeftOut, read.BacklogHoursWaiting);
+                    }
+
                     if (read.UsedHashHourly)
                     {
                         reach["tier"] = read.UsedHashDaily ? "daily+hourly+tail" : "hourly+tail";
@@ -235,7 +245,7 @@ public sealed class DarlingMcpQueryTagRollupTools
             {
                 if (!fleet)
                 {
-                    var unmet = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, scope[0].ServerId, scope[0].ServerName, "query_stats", cancellationToken);
+                    var unmet = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, scope[0].ServerId, names[scope[0].ServerId], "query_stats", cancellationToken);
                     if (unmet != null) return unmet;
                 }
 
@@ -257,7 +267,7 @@ public sealed class DarlingMcpQueryTagRollupTools
             }
 
             payload["scope"] = fleet ? "fleet" : "server";
-            payload["server"] = fleet ? null : scope[0].ServerName;
+            payload["server"] = fleet ? null : names[scope[0].ServerId];
             payload["hours_back"] = hours_back;
             payload["window_start"] = windowStart.ToString("o", CultureInfo.InvariantCulture);
             payload["window_end"] = windowEnd.ToString("o", CultureInfo.InvariantCulture);

@@ -586,6 +586,8 @@ public sealed partial class DarlingMcpAlertTools
         long_running_job = new { enabled = s.LongRunningJobEnabled, multiplier = s.LongRunningJobMultiplier },
         failed_job = new { enabled = s.FailedJobEnabled, lookback_minutes = s.FailedJobLookbackMinutes },
         database_state = new { enabled = s.DatabaseStateEnabled },
+        /* #6874: the Agent Alert Gaps alert (SQL Server Agent alert setup has a gap). Off by default. */
+        agent_alert_gaps = new { enabled = s.AgentAlertGapsEnabled },
         /* #6873: the database protection alerts (a full backup, a log backup or a CHECKDB older than its threshold). Off by default. */
         backup_overdue = new { enabled = s.BackupOverdueEnabled },
         log_backup_overdue = new { enabled = s.LogBackupOverdueEnabled },
@@ -3190,6 +3192,17 @@ public sealed partial class DarlingMcpAlertTools
                         {
                             case "enabled": AddBool("database_state_enabled", n, "database_state.enabled"); break;
                             default: error = $"Unknown field 'database_state.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "agent_alert_gaps":
+                    Group(prop.Value, "agent_alert_gaps", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("agent_alert_gaps_enabled", n, "agent_alert_gaps.enabled"); break;
+                            default: error = $"Unknown field 'agent_alert_gaps.{k}'."; break;
                         }
                     });
                     break;

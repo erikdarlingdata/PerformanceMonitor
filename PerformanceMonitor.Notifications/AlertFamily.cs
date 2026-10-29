@@ -134,6 +134,7 @@ public static class AlertFamily
         ["Failed Agent Job"] = AgentJobs,
         ["Long-Running Job"] = AgentJobs,
         ["Agent Not Running"] = AgentJobs,
+        ["Agent Alert Gaps"] = AgentJobs,
 
         /* ---- self-monitor: the monitor's own health (DarlingSelfAlertEvaluator) ---- */
         ["Collection Stopped"] = SelfMonitor,

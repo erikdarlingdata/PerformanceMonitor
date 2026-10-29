@@ -56,7 +56,7 @@ export const IDENTITY = new Set([
 /** Every other SQL Server read a module of the server page names: the data has no database, so the filter does not apply.
  *  That includes the fleet, FinOps, alert and self-monitoring reads the page's shared modules name. */
 export const SERVER_WIDE = new Set([
-  "audit_config", "get_alert_history", "get_analysis_findings", "get_block_chain", "get_collection_health", "get_collection_log",
+  "audit_config", "get_agent_alerts", "get_alert_history", "get_analysis_findings", "get_block_chain", "get_collection_health", "get_collection_log",
   "get_cpu_scheduler_pressure", "get_cpu_utilization", "get_database_protection", "get_daily_summary", "get_daily_summary_range", "get_finops", "get_fleet_overview", "get_investigation_reports",
   "get_health_parser_cpu_tasks", "get_health_parser_io_issues", "get_health_parser_memory_broker",
   "get_health_parser_memory_conditions", "get_health_parser_memory_node_oom", "get_health_parser_scheduler_issues",

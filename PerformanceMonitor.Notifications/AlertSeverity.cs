@@ -110,6 +110,8 @@ internal static class AlertSeverity
             "Backup Overdue" or "Log Backup Overdue" or "CHECKDB Overdue" => ("#D97706", "WARNING", "\U0001F7E0"),
             /* #5450: fires Warning at its one site. */
             "Collection Gap At Start" => ("#D97706", "WARNING", "\U0001F7E0"),
+            /* #6874: fires Warning at its one site. */
+            "Agent Alert Gaps" => ("#D97706", "WARNING", "\U0001F7E0"),
             /* #5450: fires Warning at its one site. */
             "Collection Gaps In History" => ("#D97706", "WARNING", "\U0001F7E0"),
             /* #3816: the other two policy families page under their own names, and each name has exactly ONE

@@ -1506,6 +1506,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpPlanForcePrecheckTools>()
             /* #5632 step 1b: get_forced_plans, whether each Query Store force works. */
             .WithGeminiCompatibleTools<DarlingMcpForcedPlanTools>()
+            /* #6874: get_agent_alerts, the SQL Server Agent alerts and what they lack. */
+            .WithGeminiCompatibleTools<DarlingMcpAgentAlertTools>()
             /* #6873: get_database_protection, the last good CHECKDB and the last full and log backup per database. */
             .WithGeminiCompatibleTools<DarlingMcpDatabaseProtectionTools>()
             /* #6073: get_query_store_aborts, the queries ranked by aborted and failed Query Store runs. */

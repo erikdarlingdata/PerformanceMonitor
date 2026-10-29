@@ -171,6 +171,7 @@ public static partial class CustomViewValidation
         "get_cpu_scheduler_pressure",
         "get_plan_cache_bloat",
         "get_running_jobs",
+        "get_agent_alerts",
         "get_job_history",
         "get_plan_xml",
         "get_query_store_plan_xml",

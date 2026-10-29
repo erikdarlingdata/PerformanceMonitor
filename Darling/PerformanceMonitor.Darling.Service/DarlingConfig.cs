@@ -897,10 +897,15 @@ public sealed class AlertsConfig
     [JsonPropertyName("clientTimeoutsCriticalMultiple")]
     public int ClientTimeoutsCriticalMultiple { get; set; } = AttentionBaselineMath.DefaultCriticalMultiple;
 
+    /// <summary>The "Agent Alert Gaps" alert (#6874): fires when a server's SQL Server Agent alert setup has a gap (no alert for severities 19 to
+    /// 25 or errors 823 to 825, an alert that tells no operator, a disabled alert, a firing that told no one). Ships OFF, like the other alerts that
+    /// start firing on upgrade. Store column <c>agent_alert_gaps_enabled</c> (V222).</summary>
+    [JsonPropertyName("agentAlertGapsEnabled")]
+    public bool AgentAlertGapsEnabled { get; set; }
     /// <summary>The "Backup Overdue", "Log Backup Overdue" and "CHECKDB Overdue" alerts (#6873): each fires when a database's last full backup (7 days),
     /// last log backup (60 minutes) or last good CHECKDB (14 days) is older than its threshold, judged by <c>DatabaseProtectionBands</c>. All three ship
     /// OFF, like the other alerts that start firing on upgrade. Store columns <c>backup_overdue_enabled</c>, <c>log_backup_overdue_enabled</c> and
-    /// <c>checkdb_overdue_enabled</c> (V222).</summary>
+    /// <c>checkdb_overdue_enabled</c> (V223).</summary>
     [JsonPropertyName("backupOverdueEnabled")]
     public bool BackupOverdueEnabled { get; set; }
 

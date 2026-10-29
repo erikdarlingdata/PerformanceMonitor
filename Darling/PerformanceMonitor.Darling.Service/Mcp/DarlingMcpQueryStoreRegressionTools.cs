@@ -150,7 +150,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
 
             if (rows.Count == 0)
                 return McpHelpers.WithDatabasesLeftOut(
-                    await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, baselineStart, hours_back, databaseFilter, notice, tableSpans, dataStart, cancellationToken), leftOut)!;
+                    await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, baselineStart, hours_back, databaseFilter, notice, tableSpans, dataStart, !string.IsNullOrWhiteSpace(as_of), cancellationToken), leftOut)!;
 
             /* #6750: always present. On the table path below raw's floor each arm's own start; otherwise both are the notice's effective_start. */
             var costBaselineStart = tableSpans is not null ? McpHelpers.FormatEffectiveStart(tableSpans.CostStart) : notice.EffectiveStart;
@@ -359,7 +359,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
     /// </summary>
     private static async Task<string> EmptyAsync(
         NpgsqlDataSource postgres, string serverName, int serverId, DateTime start, DateTime end, DateTime baselineStart, int hours_back,
-        DatabaseFilter databases, McpWindowNotice notice, DarlingQueryStoreRegressionReader.RegressionSpans? tableSpans, DateTime? rawDataStart, CancellationToken cancellationToken)
+        DatabaseFilter databases, McpWindowNotice notice, DarlingQueryStoreRegressionReader.RegressionSpans? tableSpans, DateTime? rawDataStart, bool replay, CancellationToken cancellationToken)
     {
         /* #6750: when the table read reached below raw's floor, the two questions are asked of the table that served the cost arms, over
            the span it compared. Raw's probe would answer "no baseline" for a 168 hour read on a store whose raw tier keeps 4 days, while
@@ -370,19 +370,29 @@ public sealed class DarlingMcpQueryStoreRegressionTools
 
         var (hasBaseline, hasRecent) = await CoverageAsync(DatabaseFilter.All);
 
+        /* #6829: where the data the answer could read starts: the table path's later arm start, else this server's raw start. */
+        var floor = tableSpans is not null ? DarlingMcpWindowNotice.Later(tableSpans.CostStart, tableSpans.FailureStart) : rawDataStart;
+
         if (!hasBaseline && !hasRecent)
         {
+            /* #6877: a window that ENDS before the kept data starts (an as_of replay) is not a server that has stored nothing yet: when
+               the server was being collected before the window, its data was stored and aged out. Say that, with the window-floor hints,
+               and leave out the first-interval answer, which describes the server now and not the window. */
+            if (await RetentionCause.ForWindowAsync(postgres, serverId, baselineStart, end, floor, tableSpans is not null, cancellationToken) is { } aged)
+            {
+                /* The notice read above had no floor to report (the probe answers null for a window that ends before the data), so
+                   the hints are built from the oldest row found here: effective_start is where the data starts. */
+                return McpHelpers.Status("unavailable", aged.Message, DarlingMcpWindowNotice.Build(aged.Floor, baselineStart, "query_store_stats").AsHints());
+            }
+
             /* #6181: Query Store on, collector healthy, first interval not closed yet: say so instead of "may be OFF". */
             return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, serverName, "query_store", cancellationToken)
                 ?? (await DarlingRuntimePrecondition.QueryStoreFirstIntervalMessageAsync(postgres, serverId, serverName, databases, cancellationToken)
-                    is { } firstInterval ? McpHelpers.Status("unavailable", firstInterval + " There is nothing to compare yet, so this is not a report of zero regressions.") : null)
+                    is { } firstInterval ? McpHelpers.Status("unavailable", firstInterval + (replay ? $" That is this server's state now, not as of {end:yyyy-MM-dd HH:mm}Z, the end of the requested window, which holds no Query Store sample." : "") + " There is nothing to compare yet, so this is not a report of zero regressions.") : null)
                 ?? McpHelpers.Status(
                     "unavailable",
                     $"No Query Store data has EVER been collected for {serverName}, so this is NOT a report of zero regressions — there is nothing to compare. Query Store may be OFF on this server's databases, which get_query_store_health will say; otherwise check that collection is running for this server.");
         }
-
-        /* #6829: where the data the answer could read starts: the table path's later arm start, else this server's raw start. */
-        var floor = tableSpans is not null ? DarlingMcpWindowNotice.Later(tableSpans.CostStart, tableSpans.FailureStart) : rawDataStart;
 
         if (!hasBaseline)
         {

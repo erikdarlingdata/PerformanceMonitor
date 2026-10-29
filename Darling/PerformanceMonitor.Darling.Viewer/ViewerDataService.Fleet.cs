@@ -53,10 +53,23 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>
+    /// The gaps in one server's SQL Server Agent alert setup (#6874) for its Overview card. It reads the newest capture inside
+    /// <see cref="DarlingAgentAlertReader.FreshCaptureWindow"/> through the same reader and <see cref="AgentAlertStatus.Evaluate"/> as
+    /// the Agent Alerts tab and the web fleet card, so a lagging feed shows no gaps and makes no claim (Collection Stopped owns it).
+    /// </summary>
+    public async Task<IReadOnlyList<AgentAlertGap>> GetAgentAlertGapsAsync(int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        var read = await DarlingAgentAlertReader.ReadAsync(
+            _dataSource, serverId, nowUtc - DarlingAgentAlertReader.FreshCaptureWindow, nowUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        return read.HasCapture ? AgentAlertStatus.Evaluate(read.Alerts).Gaps : Array.Empty<AgentAlertGap>();
+    }
+
+    /// <summary>
     /// The overdue full backups, log backups and CHECKDBs of one server for the fleet card's chip (#6873): the value ("3 overdue") and the
     /// facts in words, both null when nothing is overdue. The judgment is <see cref="DatabaseProtectionBands.OverdueFacts"/>, the one the
     /// alerts, the web card and <c>get_database_protection</c> use, over the newest capture inside <see cref="DatabaseProtectionBands.CaptureFreshness"/>.
-    /// A store older than V222 has no table: that is no chip, not an error on the card.
+    /// A store older than V223 has no table: that is no chip, not an error on the card.
     /// </summary>
     internal async Task<(string? Value, string? Detail)> GetDatabaseProtectionChipAsync(
         int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)

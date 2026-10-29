@@ -310,7 +310,67 @@ public static class PgLogEntryAssembler
         string? logBody, bool logTimezoneIsUtc, string? logLinePrefix, out int foreignZoneLines)
     {
         var (applyCheck, separator) = ForgeryCheckFor(logLinePrefix);
-        return Assemble(logBody, logTimezoneIsUtc, applyCheck, separator, out foreignZoneLines);
+        return Assemble(logBody, logTimezoneIsUtc, applyCheck, separator, zones: null, out foreignZoneLines);
+    }
+
+    /// <summary>
+    /// <see cref="Assemble(string?, bool, string?, out int)"/> for a target whose <c>log_timezone</c> is a NAMED local
+    /// zone that the server has proved the lines of (#6866, <see cref="PgLogNamedZone"/>). A line is kept only when
+    /// <paramref name="zones"/> holds its stamp and zone text, and then <see cref="PgLogEntry.OccurredAtUtc"/> is the
+    /// instant the server proved. Any other line, primary or companion, is skipped and counted in
+    /// <paramref name="foreignZoneLines"/> and ends the open entry, exactly as a UTC target treats a line in another
+    /// zone (#4046): it was written under an earlier setting, or a client forged it, or it names a time the zone
+    /// never had, or the zone keeps one abbreviation across a transition and the text fits two instants. A null
+    /// <paramref name="zones"/> is <see cref="Assemble(string?, bool, string?, out int)"/>, refusal included.
+    /// </summary>
+    public static List<PgLogEntry> Assemble(
+        string? logBody, bool logTimezoneIsUtc, string? logLinePrefix, PgLogZoneMap? zones, out int foreignZoneLines)
+    {
+        var (applyCheck, separator) = ForgeryCheckFor(logLinePrefix);
+        return Assemble(logBody, logTimezoneIsUtc, applyCheck, separator, zones, out foreignZoneLines);
+    }
+
+    /// <summary>
+    /// The distinct <c>(stamp, zone)</c> pairs of every prefix line in the slab, in first-seen order, for the server
+    /// check of a named local zone (#6866). Only the pairs the server can be asked about are returned
+    /// (<see cref="PgLogNamedZone.IsAskable"/>). A line the walk would treat as a forged label contributes its pair
+    /// too, which costs the check a row and changes nothing about what is kept.
+    /// </summary>
+    public static List<PgLogZonePair> ZonePairs(string? logBody)
+    {
+        var seen = new HashSet<PgLogZonePair>();
+        var pairs = new List<PgLogZonePair>();
+
+        if (string.IsNullOrEmpty(logBody))
+        {
+            return pairs;
+        }
+
+        foreach (var raw in logBody.Split('\n'))
+        {
+            var line = raw.TrimEnd('\r');
+
+            if (line.Length == 0 || line[0] == '\t')
+            {
+                continue;
+            }
+
+            var match = s_prefixLine.Match(line);
+
+            if (!match.Success)
+            {
+                continue;
+            }
+
+            var pair = new PgLogZonePair(match.Groups["stamp"].Value, match.Groups["zone"].Value);
+
+            if (PgLogNamedZone.IsAskable(pair.Stamp) && seen.Add(pair))
+            {
+                pairs.Add(pair);
+            }
+        }
+
+        return pairs;
     }
 
     /// <summary>
@@ -415,13 +475,14 @@ public static class PgLogEntryAssembler
     /// <exception cref="PgLogTimezoneUnsupportedException">Only when <paramref name="logTimezoneIsUtc"/> is false: see
     /// <see cref="Assemble(string?)"/>.</exception>
     public static List<PgLogEntry> Assemble(string? logBody, bool logTimezoneIsUtc, out int foreignZoneLines) =>
-        Assemble(logBody, logTimezoneIsUtc, applyForgeryCheck: true, separator: null, out foreignZoneLines);
+        Assemble(logBody, logTimezoneIsUtc, applyForgeryCheck: true, separator: null, zones: null, out foreignZoneLines);
 
     /// <summary>The walk itself, parameterised over the #4501 forgery rule (see <see cref="IsForgedLabel"/>)
     /// so both the pre-#4501-shaped overloads (a bare check, the store's default separator) and the
     /// prefix-aware overload above share one implementation.</summary>
     private static List<PgLogEntry> Assemble(
-        string? logBody, bool logTimezoneIsUtc, bool applyForgeryCheck, string? separator, out int foreignZoneLines)
+        string? logBody, bool logTimezoneIsUtc, bool applyForgeryCheck, string? separator, PgLogZoneMap? zones,
+        out int foreignZoneLines)
     {
         var entries = new List<PgLogEntry>();
         foreignZoneLines = 0;
@@ -483,7 +544,21 @@ public static class PgLogEntryAssembler
 
             /* #4046: the setting says this zone is not the server's, so the line is not its own. Skipped and
                counted, and it ends the open entry like an unrecognised line above. */
-            if (logTimezoneIsUtc && !PgDeadlockLogParser.IsZeroOffsetLogZone(match.Groups["zone"].Value))
+            DateTime? provenUtc = null;
+
+            if (zones is not null)
+            {
+                /* #6866: a named local zone. The server proved some (stamp, zone) pairs; a line outside them is
+                   handled as a UTC target handles a line in another zone, skipped and counted. */
+                if (zones.TryGet(match.Groups["stamp"].Value, match.Groups["zone"].Value, out var proven))
+                {
+                    provenUtc = proven;
+                }
+            }
+
+            if (zones is not null
+                ? provenUtc is null
+                : logTimezoneIsUtc && !PgDeadlockLogParser.IsZeroOffsetLogZone(match.Groups["zone"].Value))
             {
                 foreignZoneLines++;
 
@@ -505,7 +580,7 @@ public static class PgLogEntryAssembler
                     entries.Add(current.Build());
                 }
 
-                current = Builder.Start(match, line);
+                current = Builder.Start(match, line, provenUtc);
                 continue;
             }
 
@@ -556,7 +631,7 @@ public static class PgLogEntryAssembler
 
         public string Pid { get; }
 
-        private Builder(Match match, string line)
+        private Builder(Match match, string line, DateTime? provenUtc)
         {
             _stamp = match.Groups["stamp"].Value;
             _zone = match.Groups["zone"].Value;
@@ -569,12 +644,17 @@ public static class PgLogEntryAssembler
             /* THROWN rather than skipped, and it is the one intolerant thing in the assembler — see the
                type header and PgDeadlockLogParser.FromReport for why a per-line skip is the silent-wrong
                outcome here. Under a UTC log_timezone the walk skips such a line before it gets here (#4046). */
-            if (!PgDeadlockLogParser.IsZeroOffsetLogZone(_zone))
+            if (provenUtc is null && !PgDeadlockLogParser.IsZeroOffsetLogZone(_zone))
             {
                 throw new PgLogTimezoneUnsupportedException(_zone);
             }
 
-            if (!DateTime.TryParse(
+            if (provenUtc is not null)
+            {
+                /* #6866: the server rendered this instant back as exactly this line's text. */
+                _occurredAtUtc = DateTime.SpecifyKind(provenUtc.Value, DateTimeKind.Utc);
+            }
+            else if (!DateTime.TryParse(
                     _stamp,
                     CultureInfo.InvariantCulture,
                     DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
@@ -590,7 +670,7 @@ public static class PgLogEntryAssembler
             _raw.Append(line).Append('\n');
         }
 
-        public static Builder Start(Match match, string line) => new(match, line);
+        public static Builder Start(Match match, string line, DateTime? provenUtc = null) => new(match, line, provenUtc);
 
         public void Continue(string text)
         {

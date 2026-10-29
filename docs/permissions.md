@@ -57,6 +57,8 @@ GRANT SELECT ON dbo.sysjobactivity  TO [YourLogin];
 GRANT SELECT ON dbo.sysjobhistory   TO [YourLogin];
 GRANT SELECT ON dbo.sysjobschedules TO [YourLogin];
 GRANT SELECT ON dbo.syscategories   TO [YourLogin];
+GRANT SELECT ON dbo.sysalerts       TO [YourLogin];  -- Agent alert definitions and counters (SQL Server only)
+GRANT SELECT ON dbo.sysnotifications TO [YourLogin]; -- the operators each Agent alert notifies
 GRANT SELECT ON dbo.syssessions     TO [YourLogin];
 GRANT EXECUTE ON dbo.agent_datetime TO [YourLogin];
 GRANT SELECT ON dbo.backupset      TO [YourLogin];  -- Darling: the last full and log backup per database

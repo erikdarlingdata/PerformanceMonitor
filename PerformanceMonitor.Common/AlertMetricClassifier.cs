@@ -339,6 +339,7 @@ namespace PerformanceMonitor.Common
                     or "Backup Overdue"
                     or "Log Backup Overdue"
                     or "CHECKDB Overdue"
+                    or "Agent Alert Gaps"
 
                     /* #1881, the metrics that stored a NONZERO number that was not a measurement:
 

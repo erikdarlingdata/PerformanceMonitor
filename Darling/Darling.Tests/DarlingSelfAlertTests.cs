@@ -311,6 +311,8 @@ public sealed class DarlingSelfAlertTests
         public bool BackupOverdueEnabled { get; set; }
         public bool LogBackupOverdueEnabled { get; set; }
         public bool CheckDbOverdueEnabled { get; set; }
+        /// <summary>#6874: the Agent Alert Gaps switch, read live. Default off, the shipped default.</summary>
+        public bool AgentAlertSetupEnabled { get; set; }
 
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
@@ -334,6 +336,7 @@ public sealed class DarlingSelfAlertTests
             retentionHoldCriticalRatio: WireRetentionHoldKnobs ? () => RetentionHoldCriticalRatio : null,
             readFailures: ReadFailures,
             storeName: StoreName,
+            agentAlertSetupEnabled: () => AgentAlertSetupEnabled,
             backupOverdueEnabled: () => BackupOverdueEnabled,
             logBackupOverdueEnabled: () => LogBackupOverdueEnabled,
             checkDbOverdueEnabled: () => CheckDbOverdueEnabled);
