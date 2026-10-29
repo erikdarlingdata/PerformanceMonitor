@@ -52,6 +52,20 @@ export function healthBandClass(health) {
   return "band-Critical";
 }
 
+/**
+ * The stores (or any list of things that each belong to one store) with the picked store first and the rest in their existing
+ * order (#6917). The Fleet page and the sidebar both list stores in the front door's order and both call this, so the picked
+ * store leads in both. `nameOf` reads an item's store name. Returns a new array and leaves `items` alone.
+ */
+export function currentFirst(items, nameOf, current = currentStore()) {
+  return [...items.filter((x) => nameOf(x) === current), ...items.filter((x) => nameOf(x) !== current)];
+}
+
+/** The small muted word that follows the picked store's name on its Fleet section and sidebar header (#6917). */
+export function currentMark() {
+  return el("span", { class: "store-current-mark", text: "current" });
+}
+
 /** The store this browser used last, or null (nothing stored, or storage is not available). */
 function remembered() {
   try {
@@ -151,7 +165,11 @@ function paintPicker() {
   );
   if (currentStore()) select.value = currentStore();
   select.addEventListener("change", () => switchStore(select.value));
-  mount(pickerHost, [el("label", { class: "store-picker-label", for: "store-picker-select", text: "Store" }), select]);
+  mount(pickerHost, [
+    el("label", { class: "store-picker-label", for: "store-picker-select", text: "Store" }),
+    select,
+    el("div", { class: "store-picker-note", text: "Alerts, views and settings come from this store." }),
+  ]);
 }
 
 /** Picks another store and reloads the page on the same route inside it. A full reload, because the views list, the alert

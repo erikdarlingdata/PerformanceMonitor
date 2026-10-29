@@ -227,6 +227,10 @@ public sealed class FrontDoorWebPagesTests
         Assert.Equal(1, r.GetProperty("reloads").GetInt32());
         Assert.Equal("use2", r.GetProperty("remembered").GetString());
         Assert.Equal("use2", r.GetProperty("storeAfter").GetString());
+
+        // #6917: the picker says what a store scopes, and the label stays "Store"
+        Assert.Equal(new[] { "Alerts, views and settings come from this store." }, r.GetProperty("notes").EnumerateArray().Select(o => o.GetString()).ToArray());
+        Assert.Equal(new[] { "Store" }, r.GetProperty("labels").EnumerateArray().Select(o => o.GetString()).ToArray());
     }
 
     [Fact]
@@ -259,10 +263,43 @@ public sealed class FrontDoorWebPagesTests
     }
 
     [Fact]
+    public void TheFleetPage_DrawsThePickedStoreFirst_MarkedCurrent_AndTheOtherStoreStillDraws()
+    {
+        var sections = Run("fleetCurrentSecond").GetProperty("sections").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "use2", "use1" }, sections.Select(s => s.GetProperty("store").GetString()).ToArray());
+        Assert.Contains("current", sections[0].GetProperty("headClass").GetString()!.Split(' '));
+        Assert.Equal("true", sections[0].GetProperty("ariaCurrent").GetString());
+        Assert.Equal(new[] { "current" }, sections[0].GetProperty("marks").EnumerateArray().Select(e => e.GetString()).ToArray());
+        // the other store is not marked, and its servers still draw
+        Assert.DoesNotContain("current", sections[1].GetProperty("headClass").GetString()!.Split(' '));
+        Assert.Equal(JsonValueKind.Null, sections[1].GetProperty("ariaCurrent").ValueKind);
+        Assert.Empty(sections[1].GetProperty("marks").EnumerateArray());
+        Assert.Equal(new[] { "bravo" }, sections[0].GetProperty("titles").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Equal(new[] { "alpha" }, sections[1].GetProperty("titles").EnumerateArray().Select(e => e.GetString()).ToArray());
+    }
+
+    [Fact]
+    public void TheSidebar_ListsThePickedStoreFirst_MarkedCurrent_AndTheOtherStoreStillDraws()
+    {
+        var r = Run("sidebarCurrentSecond");
+        var headers = r.GetProperty("headers").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "use2", "use1" }, headers.Select(h => h.GetProperty("store").GetString()).ToArray());
+        Assert.Contains("current", headers[0].GetProperty("cls").GetString()!.Split(' '));
+        Assert.Equal("true", headers[0].GetProperty("ariaCurrent").GetString());
+        Assert.Equal(new[] { "current" }, headers[0].GetProperty("marks").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.DoesNotContain("current", headers[1].GetProperty("cls").GetString()!.Split(' '));
+        Assert.Equal(JsonValueKind.Null, headers[1].GetProperty("ariaCurrent").ValueKind);
+        Assert.Empty(headers[1].GetProperty("marks").EnumerateArray());
+        // both stores' servers still draw, the picked store's first, and the caller's list is not reordered
+        Assert.Equal(new[] { "bravo", "alpha" }, r.GetProperty("items").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Equal(new[] { "use1", "use2" }, r.GetProperty("groupOrder").EnumerateArray().Select(e => e.GetString()).ToArray());
+    }
+
+    [Fact]
     public void TheSidebar_GroupsServersByStore_AndAFailingStoreShowsItsOwnLine()
     {
         var r = Run("sidebar");
-        Assert.Equal(new[] { "use1", "use2unreachable", "<i>use3</i>stale" }, r.GetProperty("headers").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Equal(new[] { "use1current", "use2unreachable", "<i>use3</i>stale" }, r.GetProperty("headers").EnumerateArray().Select(e => e.GetString()).ToArray());
         Assert.Equal(new[] { "use2 is not answering" }, r.GetProperty("errors").EnumerateArray().Select(e => e.GetString()).ToArray());
 
         // only the current store's server lights up as the open page
