@@ -127,11 +127,10 @@ DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
     AND   d.database_id < 32761
     AND   d.state_desc = N'ONLINE'
     AND   d.name <> N'PerformanceMonitor'
-    AND   HAS_DBACCESS(d.name) = 1
-    AND   d.name NOT IN
+        AND   d.name NOT IN
           (
               N'master', N'model', N'msdb', N'tempdb',
-              N'rdsadmin', N'gcloud_cloudsqladmin',
+              " + DatabaseScopeFilter.VendorControlledDatabaseNames + @",
               N'ReportServer', N'ReportServerTempDB',
               N'DWConfiguration', N'DWDiagnostics', N'DWQueue',
               N'DBAUtil', N'DBAUtils', N'Utility'
@@ -146,7 +145,7 @@ FROM db_check
 INTO @db;
 
 WHILE @@FETCH_STATUS = 0
-BEGIN
+BEGIN" + NoDatabaseAccessNote.LoopGuardDbCheck + @"
     BEGIN TRY
         SET @sql = N'
     DECLARE

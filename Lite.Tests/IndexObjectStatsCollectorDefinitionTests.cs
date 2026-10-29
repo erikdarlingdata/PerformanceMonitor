@@ -37,7 +37,7 @@ public sealed class IndexObjectStatsCollectorDefinitionTests
         Assert.Null(IndexObjectStatsCollector.Instance.BuildEnumerationQuery(CollectorTestContext.Make(s_deltas, isAzureSqlDb: true)));
         var enumeration = IndexObjectStatsCollector.Instance.BuildEnumerationQuery(CollectorTestContext.Make(s_deltas));
         Assert.NotNull(enumeration);
-        Assert.Contains("HAS_DBACCESS(d.name) = 1", enumeration!.Text, StringComparison.Ordinal);
+        Assert.Contains("s.has_access = 1", enumeration!.Text, StringComparison.Ordinal);
     }
 
     [Fact]

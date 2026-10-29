@@ -543,9 +543,12 @@ BEGIN
     FETCH NEXT FROM @key_dbs INTO @resolve_database_id;
 END;
 
-/* PAGE / RID -> object_id via sys.dm_db_page_info (2019+ or Azure SQL DB; VIEW DATABASE STATE -> TRY/CATCH). */
+/* PAGE / RID -> object_id via sys.dm_db_page_info (2019+, Azure SQL DB or Managed Instance; VIEW DATABASE STATE -> TRY/CATCH).
+   A Managed Instance (EngineEdition 8) reports ProductVersion 12.0.x yet answers the DMV (#6889), so it is matched by edition
+   here and only here: @azure stays Azure SQL Database (5) for the rest of the batch. */
 IF @product_version >= 15
 OR @azure = 1
+OR CONVERT(integer, SERVERPROPERTY('EngineEdition')) = 8
 BEGIN
     /* #1865: deliberately NO server-level permission screen here, though sys.dm_db_page_info is
        gated by one (VIEW SERVER STATE; VIEW SERVER PERFORMANCE STATE on 2022+). So is the

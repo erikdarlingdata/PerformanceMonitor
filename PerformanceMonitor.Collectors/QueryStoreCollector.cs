@@ -187,8 +187,7 @@ DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
     AND   d.database_id < 32761
     AND   d.state_desc = N'ONLINE'
     AND   d.name <> N'PerformanceMonitor'
-    AND   HAS_DBACCESS(d.name) = 1 /*#1823's screen, which this collector never got: without it a least-privilege login probes every database it cannot enter and takes a 916 per database per cycle. Harmless while those failures were swallowed; with #1837 recording them they would be a permanent probe-failure note and a warning burst every cycle for a permission posture that is not changing. Its three siblings (database_scoped_config, index_object_stats, database_size_stats) already filter this way. On-prem only - from master on Azure SQL DB this returns 0 for every user database, and Azure does not use this enumeration.*/
-    /* Default screen (#1565): vendor/system-adjacent databases with no customer workload. First group =
+        /* Default screen (#1565): vendor/system-adjacent databases with no customer workload. First group =
        vendor-controlled names (cannot collide with real customer data): cloud-provider management dbs,
        SSRS catalogs, PolyBase/DW artifacts, plus the id>4 system four as a name-based belt for clarity.
        Second group = common DBA-convention tooling names, screened by operator decision; the inverse
@@ -196,7 +195,7 @@ DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
     AND   d.name NOT IN
           (
               N'master', N'model', N'msdb', N'tempdb',
-              N'rdsadmin', N'gcloud_cloudsqladmin',
+              " + DatabaseScopeFilter.VendorControlledDatabaseNames + @",
               N'ReportServer', N'ReportServerTempDB',
               N'DWConfiguration', N'DWDiagnostics', N'DWQueue',
               N'DBAUtil', N'DBAUtils', N'Utility'
@@ -216,7 +215,7 @@ FROM db_check
 INTO @db;
 
 WHILE @@FETCH_STATUS = 0
-BEGIN
+BEGIN" + NoDatabaseAccessNote.LoopGuardDbCheck + @"
     BEGIN TRY
         /* actual_state IN (1,2,4) = READ_ONLY / READ_WRITE / READ_CAPTURE_SECONDARY (#1546: > 0 also
            admitted 3 = ERROR). readonly_reason & 8 = 0 (#1558): bit 8 is the engine saying read-only

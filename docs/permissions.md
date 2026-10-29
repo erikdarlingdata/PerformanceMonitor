@@ -68,7 +68,7 @@ Two operational notes. The msdb grants live inside a system database that SQL Se
 
 **Availability Groups need a second grant.** The `ag_replica_states` / `ag_database_replica_states` collectors read the AG *catalog views* (`sys.availability_groups`, `sys.availability_replicas`) alongside the `sys.dm_hadr_*` DMVs. The DMVs are covered by `VIEW SERVER STATE`, but [the catalog views require `VIEW ANY DEFINITION`](https://learn.microsoft.com/en-us/sql/database-engine/availability-groups/windows/monitor-availability-groups-transact-sql) — and catalog views enforce that by *hiding rows*, not by raising an error. So on a real AG cluster a login with only `VIEW SERVER STATE` gets zero rows, which looks exactly like a server with no availability groups. If your AG dashboards are empty, this grant is why.
 
-Darling can print this script for you. `PerformanceMonitor.Darling.Service.exe --grant-script <server-name>` prints the login and the grants below for a server that Darling monitors. `--grant-script --host <host>` does the same for a host that you did not add yet. In the Viewer, the Add Server dialog has a **Copy grant script** button that copies the same text.
+Darling can print this script for you. `PerformanceMonitor.Darling.Service.exe --grant-script <server-name>` prints the login and the grants below for a server that Darling monitors. `--grant-script --host <host>` does the same for a host that you did not add yet. In the Viewer, the Add Server dialog has a **Copy grant script** button that copies the same text. An Amazon RDS host gets the RDS form, see [AWS RDS for SQL Server](#aws-rds-for-sql-server).
 
 On the machine that runs the service, the Copy grant script button and `--grant-script` read the account the service runs as. On any other machine they cannot read that. The script then names a placeholder account (`DOMAIN\your-service-account`) and says so. Run `--grant-script` on the service's machine for the real account, or pass `--service-account <account>` to name it yourself.
 
@@ -79,7 +79,7 @@ The principal is the SQL login that the server entry uses. With Windows authenti
 
 `--finops` adds the FinOps per-database grants. `--azure` prints the Azure SQL Database form, and a `name.database.windows.net` host does too. An Azure SQL Managed Instance host has a zone label before `database.windows.net`, so it gets the on-premises form. The script has no password, only a placeholder. You can run it a second time with no harm.
 
-The connection test also names each of the four required grants that the login does not have: `VIEW SERVER STATE`, `CONNECT ANY DATABASE`, `VIEW ANY DEFINITION` and `ALTER ANY EVENT SESSION`. Beside a successful test, it shows a warning with the statement that adds each missing grant. With Windows authentication, only the service's own test does this check: the Viewer, the MCP tools and `test_connect`. `--test-connection` runs as the console user, so it skips the check.
+The connection test also names each of the four required grants that the login does not have: `VIEW SERVER STATE`, `CONNECT ANY DATABASE`, `VIEW ANY DEFINITION` and `ALTER ANY EVENT SESSION`. On Amazon RDS it checks the other three, because RDS refuses `CONNECT ANY DATABASE`. Beside a successful test, it shows a warning with the statement that adds each missing grant. With Windows authentication, only the service's own test does this check: the Viewer, the MCP tools and `test_connect`. `--test-connection` runs as the console user, so it skips the check.
 
 Darling uses the same target-server grants. Its bundled PostgreSQL store and service account are covered in the [Darling operator guide](../Darling/README.md). Darling can also monitor PostgreSQL servers, which need different grants (see [PostgreSQL targets](#postgresql-targets-darling)), and it has two optional extra logins (see [Optional Darling logins](#optional-darling-logins)). The deprecated Full edition's install/least-privilege grants are in [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md).
 
@@ -213,7 +213,35 @@ Works like on-premises. Use server-level logins with `VIEW SERVER STATE`. SQL Ag
 
 ### AWS RDS for SQL Server
 
-For ongoing collection, `VIEW SERVER STATE` and msdb access work the same as on-premises, but `sp_configure` is not available (use RDS Parameter Groups instead — see [Platform Notes](platform-notes.md#platform-notes)).
+RDS has no sysadmin. The master user is the most powerful login you have, and RDS refuses it some grants, so the on-premises block above cannot be run as written. Measured on an RDS for SQL Server 2022 instance, run one statement at a time as the master user:
+
+| Statement | On RDS |
+|---|---|
+| `CREATE LOGIN`, `GRANT VIEW SERVER STATE`, `VIEW ANY DEFINITION`, `ALTER ANY EVENT SESSION`, `ALTER TRACE` | Works |
+| `GRANT CONNECT ANY DATABASE` | Refused: "Grantor does not have GRANT permission." |
+| `GRANT ALTER SETTINGS` | Refused: "Grantor does not have GRANT permission." |
+| msdb `CREATE USER`, and `SELECT` on `sysjobs`, `sysjobactivity`, `sysjobhistory` | Works |
+| msdb `SELECT` on `sysjobsteps`, `sysjobschedules`, `syscategories`, `sysalerts`, `sysnotifications`, `syssessions`, `backupset`, and `EXECUTE` on `agent_datetime` | Refused: the object cannot be found or you do not have permission |
+| Reading `msdb.dbo.backupset` | Works without the grant: a login with a user in msdb reads it, so backup history works |
+
+Without `CONNECT ANY DATABASE` the login enters no user database by itself, so every per-database collector (Query Store, index and object stats, database size, database scoped configuration) lists no database and stores nothing for it. The fix is a user for the login in each user database. The RDS form of the script does that:
+
+- It leaves out `CONNECT ANY DATABASE` and `ALTER SETTINGS`, each with a comment. Without `ALTER SETTINGS` the service does not set `blocked process threshold (s)`. Set it in the RDS parameter group instead.
+- It runs `CREATE USER ... FOR LOGIN ...` in every current online read-write user database, skipping system databases and `rdsadmin`. It uses the same per-database cursor as the FinOps block, and it is safe to run twice.
+- **A database created later has no user for the login.** Run the script again after you create a database, or run the same `CREATE USER [YourLogin] FOR LOGIN [YourLogin];` in it.
+- In msdb it keeps only the user and the three job reads RDS accepts. Without the other eight, a Long-Running Query alert cannot name the Agent job and step, Running Jobs and Agent Status do not collect on RDS, and Agent alerts and their operators are not collected on RDS. Job History reads `sysjobs` and `sysjobhistory` and still collects. RDS refuses the backup history grant too, and on the instance we tested the login could read backup history without it, so the backups and CHECKDB view still fills on RDS.
+- With FinOps ticked, the same block also adds the FinOps per-database grants.
+
+Run the script as the RDS master user. The Add Server dialog picks the RDS form for a `*.rds.amazonaws.com` host. The command line does the same, or you can ask for it with `--rds` when a custom DNS name stands in front of the instance:
+
+```
+PerformanceMonitor.Darling.Service.exe --grant-script --host mydb.abc123.us-east-1.rds.amazonaws.com --auth sql --username pm_monitor
+PerformanceMonitor.Darling.Service.exe --grant-script --host sql.example.com --rds --auth sql --username pm_monitor
+```
+
+`sp_configure` is not available on RDS. Use RDS parameter groups instead, see [Platform Notes](platform-notes.md#platform-notes).
+
+The connection test on an RDS target does not report `CONNECT ANY DATABASE` as missing. It does count the online user databases the login cannot enter and names the `CREATE USER` statement that fixes them, so after you create a database, re-run the connection test (or the script) rather than waiting for an empty Query Store read.
 
 ### PostgreSQL targets (Darling)
 

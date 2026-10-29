@@ -306,6 +306,175 @@ public sealed class MonitoringGrantScriptTests
         Assert.Null(MonitoringGrantScript.DescribeMissingGrants(Array.Empty<(GrantEntry, string)>()));
     }
 
+    /* #6889: Amazon RDS for SQL Server has no sysadmin and refuses CONNECT ANY DATABASE, ALTER SETTINGS and eight msdb grants to its
+       master user. The RDS form leaves those out and gives the login a user in each user database instead. */
+    private static string RdsScript(bool finOps = false) => MonitoringGrantScript.Build(
+        MonitoringGrantScript.ChoosePrincipal(Inputs("sql", "pm_monitor")), finOps, azureSqlDatabase: false, serverLabel: "db1.abc.us-east-1.rds.amazonaws.com", awsRds: true);
+
+    private static string[] StatementLines(string script) =>
+        script.Split('\n').Select(l => l.Trim()).Where(l => l.StartsWith("GRANT ", StringComparison.Ordinal)).ToArray();
+
+    [Fact]
+    public void Rds_LeavesOutTheTwoServerGrantsRdsRefuses_AndSaysWhy()
+    {
+        var script = RdsScript();
+        var grants = StatementLines(script);
+
+        Assert.DoesNotContain(grants, g => g.Contains("CONNECT ANY DATABASE", StringComparison.Ordinal));
+        Assert.DoesNotContain(grants, g => g.Contains("ALTER SETTINGS", StringComparison.Ordinal));
+        Assert.Contains("GRANT VIEW SERVER STATE TO [pm_monitor];", grants);
+        Assert.Contains("GRANT VIEW ANY DEFINITION TO [pm_monitor];", grants);
+        Assert.Contains("GRANT ALTER ANY EVENT SESSION TO [pm_monitor];", grants);
+        Assert.Contains("GRANT ALTER TRACE TO [pm_monitor];", grants);
+        Assert.Contains("RDS refuses the CONNECT ANY DATABASE grant", script);
+        Assert.Contains("RDS refuses the ALTER SETTINGS grant", script);
+        Assert.Contains("the service does not set 'blocked process threshold (s)'", script);
+
+        /* The same call without the RDS form still grants both. */
+        var onPremises = StatementLines(MonitoringGrantScript.Build(
+            MonitoringGrantScript.ChoosePrincipal(Inputs("sql", "pm_monitor")), finOps: false, azureSqlDatabase: false));
+        Assert.Contains("GRANT CONNECT ANY DATABASE TO [pm_monitor];", onPremises);
+        Assert.Contains("GRANT ALTER SETTINGS TO [pm_monitor];", onPremises);
+    }
+
+    [Fact]
+    public void Rds_Msdb_KeepsTheUserAndTheThreeJobReadsRdsAccepts_AndNothingElse()
+    {
+        var script = RdsScript();
+        var msdb = script[script.IndexOf("/* Optional: SQL Agent job history.", StringComparison.Ordinal)..script.LastIndexOf("USE [master];", StringComparison.Ordinal)];
+
+        Assert.Contains("CREATE USER [pm_monitor] FOR LOGIN [pm_monitor];", msdb);
+        Assert.Equal(
+            new[]
+            {
+                "GRANT SELECT ON dbo.sysjobs TO [pm_monitor];",
+                "GRANT SELECT ON dbo.sysjobactivity TO [pm_monitor];",
+                "GRANT SELECT ON dbo.sysjobhistory TO [pm_monitor];",
+            },
+            StatementLines(msdb));
+        /* #6882: the backup history grant is the eighth RDS refuses, so no GRANT names backupset (the list above has none) and the
+           comment says the backups and CHECKDB view still fills without it. */
+        Assert.DoesNotContain("GRANT SELECT ON dbo.backupset", msdb);
+        Assert.Contains("can read msdb.dbo.backupset without it", msdb);
+        Assert.Contains("Running Jobs and Agent Status do not collect on RDS", msdb);
+    }
+
+    [Fact]
+    public void Rds_AddsAUserToEachUserDatabase_InTheFinOpsCursorForm_SkippingRdsadmin_AndSafeToRunTwice()
+    {
+        var script = RdsScript();
+
+        Assert.DoesNotContain("sp_MSforeach", script);
+        Assert.Contains("CURSOR LOCAL FAST_FORWARD", script);
+        Assert.Contains("WHERE d.database_id > 4", script);
+        Assert.Contains("AND   d.name <> N'rdsadmin'", script);
+        Assert.Contains("DATABASEPROPERTYEX(d.name, N'Updateability') = N'READ_WRITE'", script);
+        Assert.Contains("@login sysname = N'pm_monitor'", script);
+        Assert.Contains("N'CREATE USER ' + QUOTENAME(@login) + N' FOR LOGIN ' + QUOTENAME(@login)", script.Replace("''", "'", StringComparison.Ordinal));
+        Assert.Contains("WHERE dp.name = @login", script);   /* the per-database user is created only when missing */
+        Assert.Contains("A database created later needs the same CREATE USER", script);
+
+        /* Without FinOps the block adds the user and no FinOps grant. */
+        Assert.DoesNotContain("GRANT VIEW DATABASE STATE TO", script);
+        Assert.DoesNotContain("sql_expression_dependencies", script);
+
+        /* With FinOps the one block carries both: one cursor, the user, then the FinOps grants. */
+        var withFinOps = RdsScript(finOps: true);
+        Assert.Equal(1, withFinOps.Split("CURSOR LOCAL FAST_FORWARD", StringSplitOptions.None).Length - 1);
+        Assert.Contains("d.name <> N'rdsadmin'", withFinOps);
+        Assert.Contains("GRANT VIEW DATABASE STATE TO ", withFinOps);
+
+        /* The login, the msdb user and the per-database user: three guards. */
+        Assert.Equal(3, script.Split("IF NOT EXISTS", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public void Rds_HeaderTellsTheOperatorToUseTheMasterUser_NotASysadmin()
+    {
+        var header = RdsScript().Split("*/", 2, StringSplitOptions.None)[0];
+
+        Assert.Contains("run it as the RDS master user", header);
+        Assert.DoesNotContain("as a sysadmin", header);
+
+        var onPremises = MonitoringGrantScript.Build(
+            MonitoringGrantScript.ChoosePrincipal(Inputs("sql", "pm_monitor")), finOps: false, azureSqlDatabase: false)
+            .Split("*/", 2, StringSplitOptions.None)[0];
+        Assert.Contains("as a sysadmin", onPremises);
+    }
+
+    [Fact]
+    public void Rds_DoesNotChangeTheAzureSqlDatabaseScript()
+    {
+        var principal = MonitoringGrantScript.ChoosePrincipal(Inputs("sql", "pm_monitor"));
+        Assert.Equal(
+            MonitoringGrantScript.Build(principal, finOps: true, azureSqlDatabase: true),
+            MonitoringGrantScript.Build(principal, finOps: true, azureSqlDatabase: true, awsRds: true));
+    }
+
+    [Theory]
+    [InlineData("db1.cabcdef.us-east-1.rds.amazonaws.com", true)]
+    [InlineData("DB1.CABCDEF.US-EAST-1.RDS.AMAZONAWS.COM,1433", true)]
+    [InlineData("tcp:db1.cabcdef.us-east-1.rds.amazonaws.com,1433", true)]
+    [InlineData("db1.cabcdef.cn-north-1.rds.amazonaws.com.cn", true)]
+    [InlineData("sql01", false)]
+    [InlineData("rds.amazonaws.com.example.com", false)]
+    [InlineData("contoso.database.windows.net", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void IsAwsRdsHost_RecognizesAnRdsEndpoint(string? host, bool expected) =>
+        Assert.Equal(expected, MonitoringGrantScript.IsAwsRdsHost(host));
+
+    [Fact]
+    public void RdsPermissionCheck_DoesNotAskForTheGrantRdsRefuses()
+    {
+        var rds = MonitoringGrantScript.RequiredRdsServerGrants.Select(e => e.Permission).ToArray();
+
+        Assert.Equal(new[] { "VIEW SERVER STATE", "VIEW ANY DEFINITION", "ALTER ANY EVENT SESSION" }, rds);
+        Assert.DoesNotContain("CONNECT ANY DATABASE", MonitoringGrantScript.BuildPermissionCheckSql(MonitoringGrantScript.RequiredRdsServerGrants));
+        Assert.Contains("CONNECT ANY DATABASE", MonitoringGrantScript.BuildPermissionCheckSql(MonitoringGrantScript.RequiredServerGrants));
+    }
+
+    [Theory]
+    [InlineData("--host db1.abc.us-east-1.rds.amazonaws.com --auth sql --username pm", true)]
+    [InlineData("--host sql01 --rds", true)]
+    [InlineData("sql01 --rds --finops", true)]
+    [InlineData("--host sql01 --rds --azure", true)]
+    public void ArgumentParsing_TakesTheRdsFlag(string line, bool ok)
+    {
+        Assert.Equal(ok, DarlingCliCommands.TryParseGrantScriptArgs(
+            line.Split(' ', StringSplitOptions.RemoveEmptyEntries), out var parsed, out _));
+        Assert.Equal(line.Contains("--rds", StringComparison.Ordinal), parsed!.Rds);
+    }
+
+    [Fact]
+    public async Task Verb_ForAnRdsFlagOrAnRdsHost_PrintsTheRdsForm_AndAnOtherHostKeepsTheSysadminForm()
+    {
+        async Task<string> Run(params string[] args)
+        {
+            var output = new StringWriter();
+            var code = await DarlingCliCommands.GrantScriptAsync(
+                args, output, new StringWriter(), TestContext.Current.CancellationToken, readServiceAccount: () => null, machineName: "DARLING01", domainName: "CORP");
+            Assert.Equal(0, code);
+            return output.ToString();
+        }
+
+        var byFlag = await Run("--host", "sql01", "--auth", "sql", "--username", "pm_monitor", "--rds");
+        var byHost = await Run("--host", "db1.abc.us-east-1.rds.amazonaws.com", "--auth", "sql", "--username", "pm_monitor");
+        var plain = await Run("--host", "sql01", "--auth", "sql", "--username", "pm_monitor");
+
+        foreach (var rds in new[] { byFlag, byHost })
+        {
+            Assert.DoesNotContain("GRANT CONNECT ANY DATABASE", rds);
+            Assert.DoesNotContain("GRANT ALTER SETTINGS", rds);
+            Assert.Contains("run it as the RDS master user", rds);
+            Assert.Contains("d.name <> N'rdsadmin'", rds);
+        }
+
+        Assert.Contains("GRANT CONNECT ANY DATABASE TO [pm_monitor];", plain);
+        Assert.DoesNotContain("rdsadmin", plain);
+        Assert.Contains("--rds", DarlingCliCommands.GrantScriptUsageText());
+    }
+
     [Fact]
     public void AzureSqlDatabase_ChecksTheDatabaseGrants_NotTheServerOnes()
     {
