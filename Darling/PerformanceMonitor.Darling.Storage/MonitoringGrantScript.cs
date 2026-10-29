@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -596,7 +597,8 @@ public static class MonitoringGrantScript
         {
             /* #6889: online user databases the login cannot enter. The grants above can all be held and these still be empty to it,
                because a database needs a user (or CONNECT ANY DATABASE); the per-database collectors drop such a database silently. */
-            columns.Add("(SELECT COUNT_BIG(*) FROM sys.databases AS d WHERE d.database_id > 4 AND d.database_id < 32761 AND d.state = 0 AND d.name <> N'rdsadmin' AND HAS_DBACCESS(d.name) = 0) AS no_user_dbs");
+            columns.Add("(SELECT COUNT_BIG(*) FROM sys.databases AS d WHERE d.database_id " + NoDatabaseAccessNote.UserDatabaseIds
+                + " AND d.state = 0 AND d.name " + NoDatabaseAccessNote.NotVendorControlled + " AND HAS_DBACCESS(d.name) = 0) AS no_user_dbs");
         }
 
         return "SELECT " + string.Join(", ", columns) + ";";

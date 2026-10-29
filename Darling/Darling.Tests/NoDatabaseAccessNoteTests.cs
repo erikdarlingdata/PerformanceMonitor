@@ -126,7 +126,7 @@ public sealed class NoDatabaseAccessNoteTests
         var azure = MonitoringGrantScript.BuildPermissionCheckSql(MonitoringGrantScript.RequiredAzureGrants);
 
         Assert.Contains("HAS_DBACCESS(d.name) = 0", server);
-        Assert.Contains("d.name <> N'rdsadmin'", server);
+        Assert.Contains("d.name " + NoDatabaseAccessNote.NotVendorControlled, server);
         Assert.DoesNotContain("HAS_DBACCESS", azure);
     }
 

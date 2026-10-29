@@ -4742,7 +4742,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
     /// an enumeration probe — accurate for both, since a payload collector reaches this only by
     /// enumerating and probing databases inside its own server-side cursor.</para>
     /// </summary>
-    private void LogEnumerationProbeFailures<TRow>(
+    internal void LogEnumerationProbeFailures<TRow>(
         ICollectorDefinition<TRow> definition,
         ServerRuntime server,
         IReadOnlyList<EnumerationProbeFailure> probeFailures)
@@ -4752,17 +4752,27 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             return;
         }
 
-        var shown = Math.Min(probeFailures.Count, EnumeratedCollectorDriver.MaxLoggedProbeFailures);
+        /* #6889: a login with no user in a database is a posture that does not change, so those rows get ONE Information
+           line per run (the same ten names the SUCCESS-row note uses) and never a Warning. Every other probe failure keeps
+           the capped per-item Warning below. */
+        var (noAccess, others) = NoDatabaseAccessNote.Partition(probeFailures);
+        if (noAccess.Count > 0)
+        {
+            _logger?.LogInformation(NoDatabaseAccessNote.NoAccessLogTemplate,
+                definition.Name, server.Config.DisplayName, noAccess.Count, NoDatabaseAccessNote.NamedList(noAccess));
+        }
+
+        var shown = Math.Min(others.Count, EnumeratedCollectorDriver.MaxLoggedProbeFailures);
         for (var i = 0; i < shown; i++)
         {
             _logger?.LogWarning(EnumeratedCollectorDriver.ProbeFailureLogTemplate,
-                definition.Name, server.Config.DisplayName, probeFailures[i].Item, probeFailures[i].Error);
+                definition.Name, server.Config.DisplayName, others[i].Item, others[i].Error);
         }
 
-        if (probeFailures.Count > shown)
+        if (others.Count > shown)
         {
             _logger?.LogWarning(EnumeratedCollectorDriver.ProbeFailureOverflowLogTemplate,
-                definition.Name, server.Config.DisplayName, probeFailures.Count, probeFailures.Count - shown, shown);
+                definition.Name, server.Config.DisplayName, others.Count, others.Count - shown, shown);
         }
     }
 

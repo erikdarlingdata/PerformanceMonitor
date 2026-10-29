@@ -240,7 +240,7 @@ PerformanceMonitor.Darling.Service.exe --grant-script --host sql.example.com --r
 
 `sp_configure` is not available on RDS. Use RDS parameter groups instead, see [Platform Notes](platform-notes.md#platform-notes).
 
-The connection test on an RDS target does not report `CONNECT ANY DATABASE` as missing. It cannot tell you that a database has no user for the login, so after a new database appears and has no Query Store rows, check that it has the `CREATE USER` line.
+The connection test on an RDS target does not report `CONNECT ANY DATABASE` as missing. It does count the online user databases the login cannot enter and names the `CREATE USER` statement that fixes them, so after you create a database, re-run the connection test (or the script) rather than waiting for an empty Query Store read.
 
 ### PostgreSQL targets (Darling)
 

@@ -25,18 +25,20 @@ public static class NoDatabaseAccessNote
     /// <summary>The probe-failure <c>error_text</c> that marks a no-access row. The note builder partitions on it.</summary>
     public const string ProbeErrorText = "the monitoring login has no user in this database";
 
-    /// <summary>Appended to a list query's database scope for the normal list: databases the login can enter.</summary>
-    public const string AccessiblePredicate = "AND   HAS_DBACCESS(d.name) = 1";
+    /// <summary>
+    /// The first half of the one rule "an online user database, not a vendor database", written after an id expression:
+    /// <c>d.database_id BETWEEN 5 AND 32760</c> leaves out the system databases and the reserved range above them. A
+    /// <c>BETWEEN</c> so the expression (<c>DB_ID(@db)</c> in a loop guard) is written once. Every site that asks the question
+    /// composes this with <see cref="NotVendorControlled"/> instead of retyping it, so the two vendor names cannot drift (#6889).
+    /// </summary>
+    public const string UserDatabaseIds = "BETWEEN 5 AND 32760";
 
     /// <summary>
-    /// Appended to the same scope for the no-access probe. Online user databases only: the system databases and
-    /// <c>rdsadmin</c> (which no customer login enters on Amazon RDS) never count.
+    /// The second half of the rule, written after a name expression: not <c>rdsadmin</c> and not <c>gcloud_cloudsqladmin</c>,
+    /// the names in <see cref="DatabaseScopeFilter.VendorControlledDatabaseNames"/>. No customer login enters either, and the
+    /// lists that skip them (#1565) must not report them as databases the login cannot enter.
     /// </summary>
-    public const string InaccessiblePredicate =
-        "AND   HAS_DBACCESS(d.name) = 0 AND d.database_id > 4 AND d.database_id < 32761 AND d.name <> N'rdsadmin'";
-
-    /// <summary>The projection of the no-access probe: the probe-failure contract's (name, error_text) pair.</summary>
-    public const string ProbeProjection = "SELECT /* PerformanceMonitorLite */ d.name, N'" + ProbeErrorText + "'";
+    public const string NotVendorControlled = "NOT IN (" + DatabaseScopeFilter.VendorControlledDatabaseNames + ")";
 
     /// <summary>
     /// For a plain list query: the opening of the statement that records every candidate database with its access answer
@@ -67,9 +69,8 @@ SELECT /* PerformanceMonitorLite */
     N'" + ProbeErrorText + @"'
 FROM @scope AS s
 WHERE s.has_access = 0
-AND   s.database_id > 4
-AND   s.database_id < 32761
-AND   s.name <> N'rdsadmin'
+AND   s.database_id " + UserDatabaseIds + @"
+AND   s.name " + NotVendorControlled + @"
 ORDER BY
     s.name;";
 
@@ -80,7 +81,7 @@ ORDER BY
     public const string LoopGuardDbCheck = @"
     IF HAS_DBACCESS(@db) = 0
     BEGIN
-        IF DB_ID(@db) > 4 AND DB_ID(@db) < 32761 AND @db <> N'rdsadmin'
+        IF DB_ID(@db) " + UserDatabaseIds + @" AND @db " + NotVendorControlled + @"
         BEGIN
             INSERT @probe_failures (name, error_text)
             VALUES (@db, N'" + ProbeErrorText + @"');
@@ -98,7 +99,7 @@ ORDER BY
     public const string LoopGuardDbCursor = @"
     IF HAS_DBACCESS(@db_name) = 0
     BEGIN
-        IF DB_ID(@db_name) > 4 AND DB_ID(@db_name) < 32761 AND @db_name <> N'rdsadmin'
+        IF DB_ID(@db_name) " + UserDatabaseIds + @" AND @db_name " + NotVendorControlled + @"
         BEGIN
             INSERT @probe_failures (name, error_text)
             VALUES (@db_name, N'" + ProbeErrorText + @"');
@@ -114,7 +115,55 @@ ORDER BY
     public const int MaxNamed = 10;
 
     /// <summary>
-    /// The single sentence for the databases that failed <see cref="InaccessiblePredicate"/>, or null when none did.
+    /// The names the note and the app-log line spell out: at most <see cref="MaxNamed"/>, then a count of the rest.
+    /// One builder, so the SUCCESS-row sentence and the log line name the same databases the same way.
+    /// </summary>
+    public static string NamedList(IReadOnlyList<string> databases)
+    {
+        ArgumentNullException.ThrowIfNull(databases);
+        var named = string.Join(", ", databases.Take(MaxNamed));
+        if (databases.Count > MaxNamed)
+        {
+            named += string.Create(CultureInfo.InvariantCulture, $", and {databases.Count - MaxNamed} more");
+        }
+
+        return named;
+    }
+
+    /// <summary>
+    /// The ONE app-log line for a run's no-access databases (Information, not Warning). The note on the SUCCESS row already
+    /// carries the story, and a least-privilege login with no user in many databases is a posture that does not change, so
+    /// writing a Warning per database per collector per cycle would bury the failures worth reading (#1823, #6889).
+    /// </summary>
+    public const string NoAccessLogTemplate =
+        "{Collector} on '{Server}': {Count} online user database(s) not collected, the monitoring login has no user in {Databases}";
+
+    /// <summary>
+    /// Splits a run's probe failures into the no-access databases (their names, in order) and every other failure. The
+    /// hosts log the first group as one Information line and keep the per-item Warning loop for the second.
+    /// </summary>
+    public static (List<string> NoAccess, List<EnumerationProbeFailure> Other) Partition(IReadOnlyList<EnumerationProbeFailure> probeFailures)
+    {
+        ArgumentNullException.ThrowIfNull(probeFailures);
+        var noAccess = new List<string>();
+        var other = new List<EnumerationProbeFailure>();
+        foreach (var failure in probeFailures)
+        {
+            if (string.Equals(failure.Error, ProbeErrorText, StringComparison.Ordinal))
+            {
+                noAccess.Add(failure.Item);
+            }
+            else
+            {
+                other.Add(failure);
+            }
+        }
+
+        return (noAccess, other);
+    }
+
+    /// <summary>
+    /// The single sentence for the online user databases the login cannot enter (the rule <see cref="UserDatabaseIds"/> and <see cref="NotVendorControlled"/> state), or null when none did.
     /// On Amazon RDS it adds the statement that fixes it, because RDS refuses <c>CONNECT ANY DATABASE</c> and a user in each
     /// database is the only way in.
     /// </summary>
@@ -126,11 +175,7 @@ ORDER BY
             return null;
         }
 
-        var named = string.Join(", ", databases.Take(MaxNamed));
-        if (databases.Count > MaxNamed)
-        {
-            named += string.Create(CultureInfo.InvariantCulture, $", and {databases.Count - MaxNamed} more");
-        }
+        var named = NamedList(databases);
 
         var text = string.Create(
             CultureInfo.InvariantCulture,

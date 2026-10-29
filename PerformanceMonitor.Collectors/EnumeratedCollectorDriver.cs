@@ -674,10 +674,7 @@ public static class EnumeratedCollectorDriver
 
         /* #6889: the rows that say "the login has no user in this database" are not failures to probe; they get their
            own sentence, naming the databases, and the generic count covers only the rest. */
-        var noAccess = probeFailures
-            .Where(f => string.Equals(f.Error, NoDatabaseAccessNote.ProbeErrorText, StringComparison.Ordinal))
-            .Select(f => f.Item)
-            .ToList();
+        var (noAccess, _) = NoDatabaseAccessNote.Partition(probeFailures);
         var generic = BuildNote(enumerationWasEmpty, probeFailures.Count - noAccess.Count);
         return MergeNotes(generic, NoDatabaseAccessNote.Sentence(noAccess, awsRds));
     }
