@@ -95,6 +95,12 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// sidebar overlay state: it is filled by a second read after the registry rows are built.</summary>
     public IReadOnlyList<string> SameMachineAs { get; set; } = Array.Empty<string>();
 
+    /// <summary>True when <c>servers.is_aws_rds</c> (V225, #6894) says this SQL Server target is Amazon RDS. NULL (never stamped), a
+    /// store older than V225 and a failed read are all false, which keeps the old text. Filled by a second read after the registry rows
+    /// are built, like <see cref="SameMachineAs"/>, so the two registry queries stay as they are. The Agent surfaces use it to say
+    /// the collector does not run on RDS, in the MCP tools' words, instead of a "possible cause" that no setup step can act on.</summary>
+    public bool IsAwsRds { get; set; }
+
     /// <summary>The sidebar's details line (#6351): the version label, then the same-machine flag when there is one. The flag is part of
     /// the row's text rather than a tooltip alone, so it is on the screen without hovering.</summary>
     public string SidebarDetail => SameMachineAs.Count == 0
@@ -3459,6 +3465,7 @@ SELECT
         }
 
         await AttachSameMachineAsync(servers, cancellationToken);
+        await AttachAwsRdsAsync(servers, cancellationToken);
         return servers;
     }
 

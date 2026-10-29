@@ -10,6 +10,9 @@ using System;
 using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
+using System.Windows;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
@@ -80,5 +83,53 @@ public sealed class AwsRdsNotCollectedTests : IClassFixture<SharedDuckDbFixture>
         var notApplicable = doc.RootElement.GetProperty("not_applicable");
         Assert.Equal(1, notApplicable.GetArrayLength());
         Assert.Contains("Amazon RDS", notApplicable[0].GetProperty("reason").GetString(), StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// #6894: the Running Jobs tab on an Amazon RDS server. The collector never runs there, so the empty grid says what get_running_jobs says
+/// (not collected, naming RDS), not the "possible cause" text that implies a setup step could fix it. The connection check's finding
+/// reaches the tab as its isAwsRds flag.
+/// </summary>
+public sealed class AwsRdsNotCollectedTabNoteTests
+{
+    private const string ServerName = "RdsSrv";
+
+    /* What the Running Jobs loader hands the tab on a server whose collector was never seen to run. */
+    private static readonly string Skipped = ServerTab.RunningJobsSkippedNote(ServerName, null, new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc), null)!;
+
+    [Fact]
+    public void AnEmptyRunningJobsGridOnAnRdsServer_NamesRds_AndIsTheMcpSentence()
+    {
+        var (text, visibility) = ServerTab.EngineGapState(
+            ServerName, isAzureSqlDatabase: false, collectorNeverRan: true, "running_jobs", rowCount: 0, neverRanNote: Skipped, isAwsRds: true);
+
+        Assert.Equal(Visibility.Visible, visibility);
+        Assert.Equal(
+            CollectorEngineCapability.NotCollectedMessage(ServerName, CollectorEngineCapability.UnknownEngineEdition, engineKind: null, "running_jobs", isAwsRds: true),
+            text);
+        Assert.Contains("Amazon RDS", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Possible cause", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheSameFactsWithoutTheRdsFinding_KeepTheSkippedCollectorSentence()
+    {
+        var (text, visibility) = ServerTab.EngineGapState(
+            ServerName, isAzureSqlDatabase: false, collectorNeverRan: true, "running_jobs", rowCount: 0, neverRanNote: Skipped);
+
+        Assert.Equal(Visibility.Visible, visibility);
+        Assert.Equal(Skipped, text);
+    }
+
+    [Fact]
+    public void AnRdsServerWithRows_ShowsNoNote_AndACollectorRdsDoesNotGateKeepsItsText()
+    {
+        var withRows = ServerTab.EngineGapState(
+            ServerName, isAzureSqlDatabase: false, collectorNeverRan: true, "running_jobs", rowCount: 2, neverRanNote: Skipped, isAwsRds: true);
+        Assert.Equal(Visibility.Collapsed, withRows.Visibility);
+
+        Assert.Null(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: false, "wait_stats", isAwsRds: true));
+        Assert.Null(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: false, "job_history", isAwsRds: true));
     }
 }
