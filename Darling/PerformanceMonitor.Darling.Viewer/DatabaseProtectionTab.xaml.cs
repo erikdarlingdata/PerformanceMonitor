@@ -50,7 +50,7 @@ public partial class DatabaseProtectionTab : UserControl
         var gen = _loads.Claim(nameof(RefreshAsync));
         try
         {
-            var servers = await _dataService.GetServersAsync();
+            var servers = await _dataService.GetPickerServersAsync();
             if (_loads.Superseded(nameof(RefreshAsync), gen)) return;
 
             var pickedId = (ServerComboBox.SelectedItem as DarlingServer)?.ServerId;
