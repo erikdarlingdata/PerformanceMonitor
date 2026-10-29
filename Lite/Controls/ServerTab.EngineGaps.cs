@@ -129,10 +129,10 @@ public partial class ServerTab : UserControl
     /// </summary>
     internal static (string Text, Visibility Visibility) EngineGapStateFromRuns(
         string serverName, bool isAzureSqlDatabase, string collectorName, int rowCount, string? skipped, CollectorRunHistory runs,
-        bool isAwsRds = false)
+        AwsRdsKind awsRdsKind)
     {
         var noRun = NoRunNote(serverName, collectorName, skipped, runs);
-        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, noRun, isAwsRds);
+        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, awsRdsKind, noRun);
     }
 
     /// <summary>
@@ -151,10 +151,10 @@ public partial class ServerTab : UserControl
         bool collectorNeverRan,
         string collectorName,
         int rowCount,
-        string? neverRanNote = null,
-        bool isAwsRds = false)
+        AwsRdsKind awsRdsKind,
+        string? neverRanNote = null)
     {
-        var text = EngineGapNote(serverName, isAzureSqlDatabase, collectorName, isAwsRds)
+        var text = EngineGapNote(serverName, isAzureSqlDatabase, collectorName, awsRdsKind)
             ?? (collectorNeverRan ? neverRanNote ?? NeverCollectedNote(serverName, collectorName) : null);
 
         return text is not null && rowCount == 0 ? (text, Visibility.Visible) : ("", Visibility.Collapsed);
@@ -179,7 +179,7 @@ public partial class ServerTab : UserControl
         }
 
         _skippedNotes.TryGetValue(collectorName, out var skipped);
-        var gap = EngineGapStateFromRuns(_server.DisplayName, _isAzureSqlDatabase, collectorName, rowCount, skipped, _collectorRuns, _isAwsRds);
+        var gap = EngineGapStateFromRuns(_server.DisplayName, _isAzureSqlDatabase, collectorName, rowCount, skipped, _collectorRuns, _awsRdsKind);
         var gapShows = gap.Visibility == Visibility.Visible;
 
         message.Text = gapShows ? gap.Text : ownText;
@@ -213,7 +213,7 @@ public partial class ServerTab : UserControl
                 ?? NeverCollectedNote(serverName, collectorName);
         }
 
-        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, noRun);
+        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, awsRdsKind: AwsRdsKind.None, noRun);
     }
 
     /// <summary>
@@ -244,7 +244,7 @@ public partial class ServerTab : UserControl
         DateTime? serverLastCollectedUtc = null;
         DateTime? serverFirstCollectedUtc = null;
 
-        if (rowCount == 0 && EngineGapNote(_server.DisplayName, _isAzureSqlDatabase, "tempdb_stats") is null)
+        if (rowCount == 0 && EngineGapNote(_server.DisplayName, _isAzureSqlDatabase, "tempdb_stats", awsRdsKind: AwsRdsKind.None) is null)
         {
             try
             {
@@ -284,11 +284,11 @@ public partial class ServerTab : UserControl
     /// msdb access and the running_jobs collector can run here. On an Azure SQL Database or an AWS RDS instance the
     /// collector does not run at all, so no grant could help, and the not-collected note is all the tab says.
     /// </summary>
-    internal static Visibility RunningJobsMsdbWarningVisibility(bool hasMsdbAccess, bool isAzureSqlDatabase, bool isAwsRds)
+    internal static Visibility RunningJobsMsdbWarningVisibility(bool hasMsdbAccess, bool isAzureSqlDatabase, AwsRdsKind awsRdsKind)
     {
         var edition = isAzureSqlDatabase ? CollectorEngineCapability.AzureSqlDatabaseEngineEdition : CollectorEngineCapability.UnknownEngineEdition;
 
-        return !hasMsdbAccess && !isAwsRds && CollectorEngineCapability.IsCollectedOnEngineEdition("running_jobs", edition)
+        return !hasMsdbAccess && awsRdsKind == AwsRdsKind.None && CollectorEngineCapability.IsCollectedOnEngineEdition("running_jobs", edition)
             ? Visibility.Visible
             : Visibility.Collapsed;
     }

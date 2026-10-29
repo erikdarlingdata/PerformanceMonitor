@@ -113,7 +113,7 @@ internal static class DarlingGatedCollectorRows
         string? engineKind;
         try
         {
-            (engineEdition, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, serverId, cancellationToken);
+            (engineEdition, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, serverId, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -124,7 +124,7 @@ internal static class DarlingGatedCollectorRows
             CollectorCatalog.All,
             engineKind,
             loggedRows.Select(r => r.CollectorName).ToHashSet(StringComparer.Ordinal),
-            name => CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, name));
+            name => CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, name, awsRdsKind: AwsRdsKind.None));
     }
 
     /// <summary>

@@ -104,7 +104,7 @@ public sealed class CollectorOutcomeStateTests
         var (text, visibility) = State(isAzureSqlDatabase: true, "running_jobs", rowCount: 0, CollectorRuntimePrecondition.DegradedStatus);
 
         Assert.Equal(Visibility.Visible, visibility);
-        Assert.Equal(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, "running_jobs"), text);
+        Assert.Equal(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, "running_jobs", awsRdsKind: AwsRdsKind.None), text);
     }
 
     [Fact]

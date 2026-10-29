@@ -84,6 +84,32 @@ public sealed class AwsRdsNotCollectedTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(1, notApplicable.GetArrayLength());
         Assert.Contains("Amazon RDS", notApplicable[0].GetProperty("reason").GetString(), StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task GetDeadlocks_OnAnRdsWebOrExpressServer_IsNotCollected_NamingTheEditionLimit()
+    {
+        var status = _serverManager.GetConnectionStatus(_server.Id);
+        status.IsAwsRds = true;
+        status.IsAwsRdsWebOrExpress = true;
+
+        using var doc = JsonDocument.Parse(await McpBlockingTools.GetDeadlocks(_dataService, _serverManager));
+
+        Assert.Equal("not_collected", doc.RootElement.GetProperty("status").GetString());
+        var message = doc.RootElement.GetProperty("message").GetString()!;
+        Assert.Contains("Amazon RDS for SQL Server Web or Express edition", message, StringComparison.Ordinal);
+        Assert.Contains("only on the Enterprise and Standard editions", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Possible cause", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetDeadlocks_OnAnRdsEnterpriseOrStandardServer_MakesNoRdsClaim()
+    {
+        _serverManager.GetConnectionStatus(_server.Id).IsAwsRds = true;
+
+        using var doc = JsonDocument.Parse(await McpBlockingTools.GetDeadlocks(_dataService, _serverManager));
+
+        Assert.NotEqual("not_collected", doc.RootElement.GetProperty("status").GetString());
+    }
 }
 
 /// <summary>
@@ -102,11 +128,11 @@ public sealed class AwsRdsNotCollectedTabNoteTests
     public void AnEmptyRunningJobsGridOnAnRdsServer_NamesRds_AndIsTheMcpSentence()
     {
         var (text, visibility) = ServerTab.EngineGapState(
-            ServerName, isAzureSqlDatabase: false, collectorNeverRan: true, "running_jobs", rowCount: 0, neverRanNote: Skipped, isAwsRds: true);
+            ServerName, isAzureSqlDatabase: false, collectorNeverRan: true, "running_jobs", rowCount: 0, neverRanNote: Skipped, awsRdsKind: AwsRdsKind.Rds);
 
         Assert.Equal(Visibility.Visible, visibility);
         Assert.Equal(
-            CollectorEngineCapability.NotCollectedMessage(ServerName, CollectorEngineCapability.UnknownEngineEdition, engineKind: null, "running_jobs", isAwsRds: true),
+            CollectorEngineCapability.NotCollectedMessage(ServerName, CollectorEngineCapability.UnknownEngineEdition, engineKind: null, "running_jobs", awsRdsKind: AwsRdsKind.Rds),
             text);
         Assert.Contains("Amazon RDS", text, StringComparison.Ordinal);
         Assert.DoesNotContain("Possible cause", text, StringComparison.Ordinal);
@@ -116,7 +142,7 @@ public sealed class AwsRdsNotCollectedTabNoteTests
     public void TheSameFactsWithoutTheRdsFinding_KeepTheSkippedCollectorSentence()
     {
         var (text, visibility) = ServerTab.EngineGapState(
-            ServerName, isAzureSqlDatabase: false, collectorNeverRan: true, "running_jobs", rowCount: 0, neverRanNote: Skipped);
+            ServerName, isAzureSqlDatabase: false, collectorNeverRan: true, "running_jobs", rowCount: 0, neverRanNote: Skipped, awsRdsKind: AwsRdsKind.None);
 
         Assert.Equal(Visibility.Visible, visibility);
         Assert.Equal(Skipped, text);
@@ -126,10 +152,10 @@ public sealed class AwsRdsNotCollectedTabNoteTests
     public void AnRdsServerWithRows_ShowsNoNote_AndACollectorRdsDoesNotGateKeepsItsText()
     {
         var withRows = ServerTab.EngineGapState(
-            ServerName, isAzureSqlDatabase: false, collectorNeverRan: true, "running_jobs", rowCount: 2, neverRanNote: Skipped, isAwsRds: true);
+            ServerName, isAzureSqlDatabase: false, collectorNeverRan: true, "running_jobs", rowCount: 2, neverRanNote: Skipped, awsRdsKind: AwsRdsKind.Rds);
         Assert.Equal(Visibility.Collapsed, withRows.Visibility);
 
-        Assert.Null(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: false, "wait_stats", isAwsRds: true));
-        Assert.Null(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: false, "job_history", isAwsRds: true));
+        Assert.Null(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: false, "wait_stats", awsRdsKind: AwsRdsKind.Rds));
+        Assert.Null(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: false, "job_history", awsRdsKind: AwsRdsKind.Rds));
     }
 }

@@ -49,7 +49,7 @@ public sealed class ViewerCollectorOutcomeNoteTests
     private static Task<(string Text, Visibility Visibility)> Read(
         Reads reads, ISet<string>? seen, string collector, int rows, int edition = 3) =>
         ViewerServerTab.ReadEngineGapStateAsync(
-            reads.LastRun, seen, 7, ServerName, edition, MonitoredEngineKind.SqlServer, collector, rows, reads.Outcome);
+            reads.LastRun, seen, 7, ServerName, edition, MonitoredEngineKind.SqlServer, collector, rows, reads.Outcome, awsRdsKind: AwsRdsKind.None);
 
     [Fact]
     public async Task EmptyTempdb_WithAPermissionsRun_ShowsTheReaderSentence_WithoutTheMcpClosingParagraph()
@@ -135,7 +135,7 @@ public sealed class ViewerCollectorOutcomeNoteTests
     public async Task TheEngineGapStillWins_OverALatestRunSkip()
     {
         var gap = ViewerServerTab.EngineGapNote(
-            ServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs");
+            ServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", awsRdsKind: AwsRdsKind.None);
         Assert.NotNull(gap);
 
         var reads = new Reads(CollectorRuntimePrecondition.DegradedStatus);

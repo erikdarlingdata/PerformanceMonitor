@@ -491,7 +491,7 @@ public sealed class CollectorEngineCapabilityMovingGateTests
             .ToArray();
         Assert.Equal(new[] { "pg_wait_sampling" }, auroraGaps);
         Assert.Contains("pg_wait_stats",
-            CollectorEngineCapability.NotCollectedMessage("aurora-01", 0, MonitoredEngineKind.AuroraPostgres, "pg_wait_sampling"),
+            CollectorEngineCapability.NotCollectedMessage("aurora-01", 0, MonitoredEngineKind.AuroraPostgres, "pg_wait_sampling", awsRdsKind: AwsRdsKind.None),
             StringComparison.Ordinal);
 
         /* Stock PostgreSQL is where the Aurora-only surfaces become a real gap (#2532), so the two tokens
@@ -548,7 +548,7 @@ public sealed class CollectorEngineCapabilityMovingGateTests
     public void TheKindMessage_NamesTheRealReason_DialectOrTheCollectorsOwnGate()
     {
         var dialect = CollectorEngineCapability.NotCollectedMessage(
-            "aurora-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.AuroraPostgres, "wait_stats");
+            "aurora-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.AuroraPostgres, "wait_stats", awsRdsKind: AwsRdsKind.None);
 
         Assert.NotNull(dialect);
         Assert.Contains("aurora-01 runs Aurora PostgreSQL.", dialect, StringComparison.Ordinal);
@@ -556,7 +556,7 @@ public sealed class CollectorEngineCapabilityMovingGateTests
         Assert.Contains("the dispatch gate's engine half never sends it at another engine", dialect, StringComparison.Ordinal);
 
         var ownGate = CollectorEngineCapability.NotCollectedMessage(
-            "pg-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.Postgres, "pg_wait_stats");
+            "pg-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.Postgres, "pg_wait_stats", awsRdsKind: AwsRdsKind.None);
 
         Assert.NotNull(ownGate);
         Assert.Contains("pg-01 runs PostgreSQL.", ownGate, StringComparison.Ordinal);
@@ -577,7 +577,7 @@ public sealed class CollectorEngineCapabilityMovingGateTests
         /* And the same read on the engine that DOES have the surface says nothing at all, so the read keeps
            its own miss vocabulary. */
         Assert.Null(CollectorEngineCapability.NotCollectedMessage(
-            "aurora-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.AuroraPostgres, "pg_wait_stats"));
+            "aurora-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.AuroraPostgres, "pg_wait_stats", awsRdsKind: AwsRdsKind.None));
     }
 
     /// <summary>
@@ -591,7 +591,7 @@ public sealed class CollectorEngineCapabilityMovingGateTests
     {
         /* Edition 0 AND a known PostgreSQL kind — exactly what the store holds for an Aurora target. */
         var message = CollectorEngineCapability.NotCollectedMessage(
-            "aurora-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.AuroraPostgres, "system_health_events");
+            "aurora-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.AuroraPostgres, "system_health_events", awsRdsKind: AwsRdsKind.None);
 
         Assert.NotNull(message);
         Assert.Contains("Aurora PostgreSQL", message, StringComparison.Ordinal);
@@ -606,19 +606,19 @@ public sealed class CollectorEngineCapabilityMovingGateTests
 
         /* Same server, same edition, kind absent — the pre-rung row — keeps its old silence. */
         Assert.Null(CollectorEngineCapability.NotCollectedMessage(
-            "aurora-01", CollectorEngineCapability.UnknownEngineEdition, engineKind: null, "system_health_events"));
+            "aurora-01", CollectorEngineCapability.UnknownEngineEdition, engineKind: null, "system_health_events", awsRdsKind: AwsRdsKind.None));
 
         /* And a PostgreSQL read asked about a KNOWN SQL Server target is the mirror image, which is what
            shows the axis is about engines rather than about PostgreSQL being second-class. */
         var mirrored = CollectorEngineCapability.NotCollectedMessage(
-            "box-01", 3, MonitoredEngineKind.SqlServer, "pg_wait_stats");
+            "box-01", 3, MonitoredEngineKind.SqlServer, "pg_wait_stats", awsRdsKind: AwsRdsKind.None);
         Assert.NotNull(mirrored);
         Assert.Contains("box-01 runs SQL Server.", mirrored, StringComparison.Ordinal);
         Assert.Contains("is written against PostgreSQL", mirrored, StringComparison.Ordinal);
 
         /* A SQL Server read about a SQL Server target whose collector runs everywhere: untouched. */
         Assert.Null(CollectorEngineCapability.NotCollectedMessage(
-            "box-01", 3, MonitoredEngineKind.SqlServer, "wait_stats"));
+            "box-01", 3, MonitoredEngineKind.SqlServer, "wait_stats", awsRdsKind: AwsRdsKind.None));
     }
 }
 

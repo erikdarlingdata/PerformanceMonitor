@@ -3,6 +3,7 @@ using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -62,7 +63,7 @@ public sealed class McpObjectStatsTools
 
                 /* #5244: every answer shape says which database it was limited to (null for every database). */
                 return McpHelpers.WithDatabase(
-                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats"),
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats", awsRdsKind: AwsRdsKind.None),
                            McpDatabaseSelection.Describe(names))
                     ?? await HealthyEmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, "table size rows", McpDatabaseSelection.Describe(names))
                     ?? McpHelpers.StatusForDatabase("unavailable", "No object size data available. Index/object stats are collected daily.", McpDatabaseSelection.Describe(names));
@@ -217,7 +218,7 @@ public sealed class McpObjectStatsTools
                     }
                 }
 
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats", awsRdsKind: AwsRdsKind.None)
                     ?? await HealthyEmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, "index usage rows", null)
                     ?? McpHelpers.Status("unavailable", "No index usage data available. Index/object stats are collected daily.");
             }
@@ -317,7 +318,7 @@ public sealed class McpObjectStatsTools
                         optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
                 }
 
-                var notCollected = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats");
+                var notCollected = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats", awsRdsKind: AwsRdsKind.None);
                 if (notCollected is not null) return notCollected;
 
                 /* #5372 (r2 Low): a latest snapshot that holds index rows, none of them contended, is a TRUE negative:

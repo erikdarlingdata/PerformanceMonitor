@@ -182,7 +182,7 @@ public sealed partial class ViewerDataService
         foreach (var definition in postgresCollectors)
         {
             var gap = CollectorEngineCapability.NotCollectedMessage(
-                server.DisplayName, server.EngineEdition, server.EngineKind, definition.Name);
+                server.DisplayName, server.EngineEdition, server.EngineKind, definition.Name, awsRdsKind: AwsRdsKind.None);
 
             byName.TryGetValue(definition.Name, out var facts);
 

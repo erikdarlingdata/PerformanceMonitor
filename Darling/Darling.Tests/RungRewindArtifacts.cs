@@ -573,6 +573,10 @@ ALTER TABLE config.config_alert_settings
         // V225 does everything again. Safe on a store that never had it.
         new(225, "hasServerAwsRds",
             @"ALTER TABLE collect.servers DROP COLUMN IF EXISTS is_aws_rds;"),
+        // V226 (#6893): the AWS RDS Web or Express fact on the server registry. The column is the probe's newest sentinel. The rewind drops it,
+        // so a re-run of V226 does everything again. Safe on a store that never had it.
+        new(226, "hasServerAwsRdsWebOrExpress",
+            @"ALTER TABLE collect.servers DROP COLUMN IF EXISTS is_aws_rds_web_or_express;"),
     ];
 
     /// <summary>

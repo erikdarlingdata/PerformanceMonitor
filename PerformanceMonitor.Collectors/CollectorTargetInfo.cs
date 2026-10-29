@@ -60,7 +60,7 @@ public sealed class CollectorTargetInfo
     /// Enterprise and Standard editions"), and no grant or setting changes that: only an edition change does. The four
     /// XE-session collectors (deadlocks, blocked_process_report, attention, long_query_completions) gate off on it through
     /// <see cref="XeSessionSupported"/>. <c>SERVERPROPERTY('EngineEdition')</c> is 2 for both Web and Standard, so it is probed
-    /// from <c>SERVERPROPERTY('Edition')</c> (see <see cref="CollectorEngineCapability.IsRdsXeUnsupportedEdition"/>), never from the
+    /// from <c>SERVERPROPERTY('Edition')</c> (see <see cref="CollectorEngineCapability.IsWebOrExpressEditionName"/>), never from the
     /// engine edition.
     /// </summary>
     public bool IsAwsRdsWebOrExpress { get; init; }

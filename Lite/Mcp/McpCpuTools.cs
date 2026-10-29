@@ -3,6 +3,7 @@ using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -41,7 +42,7 @@ public sealed class McpCpuTools
             var points = await dataService.GetCpuBucketsAsync(resolved.ServerId, hours_back, windowEnd, serverClock, bucketMinutes);
             if (points.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "cpu_utilization")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "cpu_utilization", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("unavailable", "No CPU utilization data available.");
             }
 

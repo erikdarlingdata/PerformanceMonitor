@@ -5,6 +5,7 @@ using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -38,7 +39,7 @@ public sealed class McpBlockingTools
             var rows = await dataService.GetRecentDeadlocksAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "deadlocks")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "deadlocks")
                     /* #2546: capability first (permanent), then the runtime precondition (fixable), then the
                        read's own miss. A deadlock capture the collector cannot read returns zero rows
                        forever, which is byte-identical to a server that simply did not deadlock — the one
@@ -140,7 +141,7 @@ public sealed class McpBlockingTools
             var withXml = truncated ? candidates.Take(limit).ToList() : candidates;
             if (withXml.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "deadlocks")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "deadlocks")
                     ?? McpHelpers.Status("empty", "No deadlock XML available in the specified time range.",
                         (await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.Deadlocks, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
@@ -248,7 +249,7 @@ public sealed class McpBlockingTools
             var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.ServerId, hours_back, databaseNames: database == null ? null : new[] { database }, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "blocked_process_report")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "blocked_process_report")
                     ?? McpHelpers.Status("empty", $"No blocked process reports found in the specified time range{ForChosenDatabase(database)}.",
                         (await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
@@ -381,7 +382,7 @@ public sealed class McpBlockingTools
             var withXml = truncated ? candidates.Take(limit).ToList() : candidates;
             if (withXml.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "blocked_process_report")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "blocked_process_report")
                     /* #2546: same order and same reason as get_deadlocks — a blocked-process capture the
                        collector cannot read is indistinguishable here from a server that never blocked. */
                     ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "blocked_process_report")
@@ -519,7 +520,7 @@ public sealed class McpBlockingTools
                     collection_log, which records a SUCCESS with zero rows for a collector that ran and saw
                     nothing. Darling's twin makes the same distinction with the same words.
                 */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "blocked_process_report");
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "blocked_process_report");
                 if (gated != null)
                 {
                     return gated;
@@ -575,7 +576,7 @@ public sealed class McpBlockingTools
             if (points.Count == 0)
             {
                 /* Same two facts as the blocking trend above, same denominator, same reason. */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "deadlocks");
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "deadlocks");
                 if (gated != null)
                 {
                     return gated;
@@ -646,7 +647,7 @@ public sealed class McpBlockingTools
                     and filtering the probe the same way would call that server uncollected. Darling's twin
                     makes the same distinction with the same words.
                 */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "wait_stats");
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "wait_stats", awsRdsKind: AwsRdsKind.None);
                 if (gated != null)
                 {
                     return gated;

@@ -601,8 +601,7 @@ SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
             ServerId = config.ServerId,
             HasMsdbAccess = hasMsdbAccess,
             IsAwsRds = isAwsRds,
-            /* #6893: the registry records an RDS Web or Express instance as its own edition, so the capability reads can say why. */
-            EngineEdition = isAwsRdsWebOrExpress ? CollectorEngineCapability.AwsRdsWebOrExpressEngineEdition : engineEdition,
+            EngineEdition = engineEdition,
             EditionName = editionName,
             ConnectedDatabase = connectedDatabase,
             MachineIdentity = machineIdentity,

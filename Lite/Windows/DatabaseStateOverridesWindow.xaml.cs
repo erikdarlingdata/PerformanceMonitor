@@ -195,7 +195,7 @@ public partial class DatabaseStateOverridesWindow : Window
                the sentence the MCP tools return as not_collected. Elsewhere it is the tabs' sentence for a collector with no run:
                not run yet inside its first-run grace, never ran after it. An unknown edition (no stored row) and a failed history
                read make no claim, so the count shows as it always did. */
-            StatusText.Text = ServerTab.EngineGapStateFromRuns(serverName, engineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition, "database_states", _rows.Count, skipped: null, runs) is { Visibility: Visibility.Visible } gap
+            StatusText.Text = ServerTab.EngineGapStateFromRuns(serverName, engineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition, "database_states", _rows.Count, skipped: null, runs, awsRdsKind: AwsRdsKind.None) is { Visibility: Visibility.Visible } gap
                 ? gap.Text
                 : $"{_rows.Count} database(s); {deviating} currently deviating from expected.";
         }

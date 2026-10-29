@@ -50,10 +50,14 @@ public static class DarlingObservability
 
        is_aws_rds (V225, #6894) is written on BOTH arms too: whether the target is an Amazon RDS for SQL Server instance is a probed fact, and the
        collectors RDS gates off never run there, so this column is the only place the read side can learn why they have no data. NULL off a
-       PostgreSQL target, where it is not a SQL Server fact and makes no claim. */
+       PostgreSQL target, where it is not a SQL Server fact and makes no claim.
+
+       is_aws_rds_web_or_express (V226, #6893) is written on BOTH arms in the same way: whether that RDS instance is on the Web or Express edition is a
+       probed fact the engine edition cannot carry (SERVERPROPERTY('EngineEdition') is 2 for both Web and Standard), and the four Extended Events
+       captures never run there, so the read side needs the column to say why they have no data. sql_engine_edition keeps the real probed value. */
     internal const string UpsertServerSql = @"
-INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date, monthly_cost_usd, postgres_major_version, machine_identity, is_aws_rds)
-VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $7, $8, $9, $10, $11)
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date, monthly_cost_usd, postgres_major_version, machine_identity, is_aws_rds, is_aws_rds_web_or_express)
+VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (server_id) DO UPDATE SET
     server_name = EXCLUDED.server_name,
     display_name = EXCLUDED.display_name,
@@ -65,7 +69,8 @@ ON CONFLICT (server_id) DO UPDATE SET
     postgres_major_version = EXCLUDED.postgres_major_version,
     machine_identity = CASE WHEN EXCLUDED.machine_identity IS NULL AND servers.server_name = EXCLUDED.server_name AND servers.engine_kind = EXCLUDED.engine_kind
                             THEN servers.machine_identity ELSE EXCLUDED.machine_identity END,
-    is_aws_rds = EXCLUDED.is_aws_rds;";
+    is_aws_rds = EXCLUDED.is_aws_rds,
+    is_aws_rds_web_or_express = EXCLUDED.is_aws_rds_web_or_express;";
 
     /* The identity the registry holds for this registration BEFORE the connect's upsert (#6351). An upsert cannot hand back the
        value it overwrote, so it is read right before; the connect path is single-threaded per server, so nothing writes between. */
@@ -225,6 +230,9 @@ ON CONFLICT (server_id) DO UPDATE SET
             /* V225 (#6894): the connector's RDS probe, SQL Server targets only. A PostgreSQL target's IsAwsRds comes from its endpoint and is not this fact. */
             command.Parameters.AddWithValue(
                 server.Target.Engine == CollectorTargetEngine.SqlServer ? server.Target.IsAwsRds : (object)DBNull.Value);
+            /* V226 (#6893): the same probe's Web or Express fact, under the same SQL Server only guard. */
+            command.Parameters.AddWithValue(
+                server.Target.Engine == CollectorTargetEngine.SqlServer ? server.Target.IsAwsRdsWebOrExpress : (object)DBNull.Value);
             await command.ExecuteNonQueryAsync(cancellationToken);
 
             /* #6351: a connect that reads an identity stores exactly that value (the upsert keeps the old one only when none was read),

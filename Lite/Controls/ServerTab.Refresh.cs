@@ -275,7 +275,7 @@ public partial class ServerTab : UserControl
         _engineEdition = await ResolveEngineEditionAsync(_engineEdition, () => Task.Run(() => _dataService.GetSqlEngineEditionAsync(_serverId)));
 
         /* The constructor decided the msdb warning from the connection check's edition, which was unknown. */
-        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _isAwsRds);
+        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _awsRdsKind);
     }
 
     private async System.Threading.Tasks.Task RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false, CancellationToken ct = default)

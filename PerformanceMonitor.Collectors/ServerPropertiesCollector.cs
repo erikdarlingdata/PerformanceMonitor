@@ -192,14 +192,7 @@ SELECT /* PerformanceMonitorLite */
     product_update_level =
         CONVERT(nvarchar(128), SERVERPROPERTY(N'ProductUpdateLevel')),
     engine_edition =
-        /* #6893: RDS refuses every Extended Events session on Web and Express, and EngineEdition cannot tell them from Standard. */
-        CASE
-            WHEN DB_ID(N'rdsadmin') IS NOT NULL
-            AND  (   CONVERT(nvarchar(128), SERVERPROPERTY(N'Edition')) LIKE N'Web Edition%'
-                  OR CONVERT(nvarchar(128), SERVERPROPERTY(N'Edition')) LIKE N'Express Edition%')
-            THEN 1002
-            ELSE CONVERT(integer, SERVERPROPERTY(N'EngineEdition'))
-        END,
+        CONVERT(integer, SERVERPROPERTY(N'EngineEdition')),
     cpu_count =
         @cpu_count,
     hyperthread_ratio =

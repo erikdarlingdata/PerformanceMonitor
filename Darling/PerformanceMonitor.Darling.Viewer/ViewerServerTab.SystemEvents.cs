@@ -277,7 +277,7 @@ public partial class ViewerServerTab
     /// <c>not_collected</c> answer give. Null anywhere else, where the grid keeps its "no events in this window" text.
     /// </summary>
     internal static string? DefaultTraceGapNote(string serverName, int engineEdition, string? engineKind) =>
-        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, "default_trace_events");
+        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, "default_trace_events", awsRdsKind: AwsRdsKind.None);
 
     /// <summary>
     /// The note every sub-tab the system_health session feeds shows where the system_health_events collector cannot run
@@ -286,7 +286,7 @@ public partial class ViewerServerTab
     /// in this window" text and the charts show.
     /// </summary>
     internal static string? SystemHealthGapNote(string serverName, int engineEdition, string? engineKind) =>
-        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, "system_health_events");
+        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, "system_health_events", awsRdsKind: AwsRdsKind.None);
 
     /// <summary>A system_health grid's empty state: shown when the window has no rows. Where the collector cannot run it
     /// says so, in place of the grid's "no events in this window" text.</summary>

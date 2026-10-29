@@ -244,7 +244,7 @@ public sealed partial class DarlingMcpPlanForceTools
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, plan_id.ToString(CultureInfo.InvariantCulture), database_name.Trim());
 
             /* 1: SQL Server only. A PostgreSQL target is refused with its own reason, before the gate is asked, and the refusal is journaled. */
-            var (_, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            var (_, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 var problem = InvestigationToolCore.ParseAgentAction(agent_action, out var parsed);
@@ -437,7 +437,7 @@ public sealed partial class DarlingMcpPlanForceTools
             }
 
             /* 2: SQL Server only. */
-            var (_, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            var (_, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
@@ -535,7 +535,7 @@ public sealed partial class DarlingMcpPlanForceTools
             var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: owner);
 
             /* 1: the engine decides how the session is named. A PostgreSQL target has its own arm (pid plus start second from backend_id). */
-            var (engineEdition, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            var (engineEdition, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
                 return await RunKillPostgresAsync(owner, logger, store, resolved, session_id, backend_id, agent_action, dry_run, ct, agentTokenName, namedAgentNames);
 

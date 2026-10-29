@@ -36,17 +36,19 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class DarlingEngineCapability
 {
     /// <summary>
-    /// The two engine facts the registration upsert stamps on every connect
-    /// (<see cref="DarlingObservability"/>): the probed <c>SERVERPROPERTY('EngineEdition')</c> and, since
-    /// V82 (#2530), the target's engine KIND. Exposed as a const so Darling.Tests can pin the dialect without
-    /// a live store. $1 server_id.
+    /// The engine facts the registration upsert stamps on every connect
+    /// (<see cref="DarlingObservability"/>): the probed <c>SERVERPROPERTY('EngineEdition')</c>, since
+    /// V82 (#2530) the target's engine KIND, since V225 (#6894) whether the target is Amazon RDS for SQL Server, and since
+    /// V226 (#6893) whether that RDS instance is on the Web or Express edition.
+    /// Exposed as a const so Darling.Tests can pin the dialect without a live store. $1 server_id.
     ///
-    /// <para>ONE round trip for both, deliberately: they are read together on every miss, and two reads would
-    /// also make it possible to answer the kind axis from one server's row and the edition axis from a stale
-    /// copy of another's.</para>
+    /// <para>ONE round trip for all four, deliberately: they are read together on every miss, and separate reads would
+    /// also make it possible to answer the kind axis from one server's row and the edition or RDS axis from a stale
+    /// copy of another's. The service migrates its store to the current version before it serves, so the V225 and V226
+    /// columns are always there for it.</para>
     /// </summary>
     public const string ServerEngineSql = @"
-SELECT sql_engine_edition, engine_kind
+SELECT sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express
 FROM servers
 WHERE server_id = $1";
 
@@ -68,16 +70,17 @@ WHERE server_id = $1";
     {
         int engineEdition;
         string? engineKind;
+        AwsRdsKind awsRdsKind;
         try
         {
-            (engineEdition, engineKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
+            (engineEdition, engineKind, awsRdsKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
         }
         catch (Exception)
         {
             return null;
         }
 
-        var engineEnvelope = await EnvelopeAsync(postgres, serverId, serverName, engineEdition, engineKind, collectorName, cancellationToken);
+        var engineEnvelope = Envelope(serverName, engineEdition, engineKind, collectorName, awsRdsKind);
         if (engineEnvelope is not null || !IsReadableSecondaryGated(collectorName))
         {
             return engineEnvelope;
@@ -118,55 +121,14 @@ WHERE server_id = $1";
             : null;
 
     /// <summary>
-    /// #6894: <see cref="Envelope"/> plus the Amazon RDS axis. The registry's RDS fact is read only when the engine axes found no gap AND the
-    /// collector's own gate is closed on RDS, so a read of any other collector costs nothing extra. A NULL (never stamped) or failed read is
-    /// false, which makes no RDS claim and leaves the read on its own precondition answer.
+    /// The <c>not_collected</c> envelope for this engine and collector, or <c>null</c> when the collector can run there.
+    /// <paramref name="awsRdsKind"/> is the registry's Amazon RDS facts from the same row as the engine facts (#6894, #6893). It only matters
+    /// when the collector's own gate is closed on that kind of RDS target, and NULL (never stamped, or a PostgreSQL target) reads as
+    /// <see cref="AwsRdsKind.None"/>: no RDS claim.
     /// </summary>
-    private static async Task<string?> EnvelopeAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, int engineEdition, string? engineKind, string collectorName,
-        CancellationToken cancellationToken)
+    private static string? Envelope(string serverName, int engineEdition, string? engineKind, string collectorName, AwsRdsKind awsRdsKind)
     {
-        var envelope = Envelope(serverName, engineEdition, engineKind, collectorName);
-        if (envelope is not null || CollectorEngineCapability.IsCollectedOnAwsRds(collectorName, engineKind))
-        {
-            return envelope;
-        }
-
-        return await IsAwsRdsAsync(postgres, serverId, cancellationToken)
-            ? Envelope(serverName, engineEdition, engineKind, collectorName, isAwsRds: true)
-            : null;
-    }
-
-    /// <summary>#6894: the registry's Amazon RDS fact for one server, stamped by every connect (V225). $1 server_id.</summary>
-    public const string AwsRdsSql = @"
-SELECT is_aws_rds
-FROM servers
-WHERE server_id = $1";
-
-    /// <summary>
-    /// #6894: whether the registry says this server is an Amazon RDS for SQL Server instance. False when there is no row, the column is NULL
-    /// (no connect has stamped it, or a PostgreSQL target) or the read fails: no claim is the answer that keeps a read on its own precondition
-    /// text. A cancellation still propagates.
-    /// </summary>
-    internal static async Task<bool> IsAwsRdsAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await using var command = postgres.CreateCommand(AwsRdsSql);
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            DarlingMcpReadParameters.AddInt(command, serverId);
-            return await command.ExecuteScalarAsync(cancellationToken) is true;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return false;
-        }
-    }
-
-    /// <summary>The <c>not_collected</c> envelope for this engine and collector, or <c>null</c> when the collector can run there.</summary>
-    private static string? Envelope(string serverName, int engineEdition, string? engineKind, string collectorName, bool isAwsRds = false)
-    {
-        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, isAwsRds);
+        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, awsRdsKind);
         return message is null ? null : McpHelpers.Status("not_collected", message);
     }
 
@@ -211,8 +173,8 @@ ORDER BY server_name";
             string? envelope;
             try
             {
-                var (engineEdition, engineKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
-                envelope = await EnvelopeAsync(postgres, serverId, serverName, engineEdition, engineKind, collectorName, cancellationToken);
+                var (engineEdition, engineKind, awsRdsKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
+                envelope = Envelope(serverName, engineEdition, engineKind, collectorName, awsRdsKind);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -269,16 +231,17 @@ ORDER BY server_name";
     }
 
     /// <summary>
-    /// The server's probed engine edition and engine kind, defaulting to
-    /// <see cref="CollectorEngineCapability.UnknownEngineEdition"/> and <c>null</c> when the registry has no
-    /// row or a NULL.
+    /// The server's probed engine edition, engine kind and Amazon RDS kind, defaulting to
+    /// <see cref="CollectorEngineCapability.UnknownEngineEdition"/>, <c>null</c> and <see cref="AwsRdsKind.None"/> when the registry has no
+    /// row or a NULL. The RDS facts (V225, V226) ride the same row so a message never mixes two states of one server. The edition is the
+    /// real <c>SERVERPROPERTY('EngineEdition')</c> even for an RDS Web or Express instance (#6893): the Web or Express fact is its own column.
     ///
     /// <para>The two NULLs mean different things and are both correct. A PostgreSQL target always has edition
     /// 0 — <c>SERVERPROPERTY</c> does not exist there — so the edition is unknown for it permanently, and it
     /// is the KIND that carries the fact. A NULL kind is a row no connect has stamped since V82 landed, which
     /// makes no claim on that axis and leaves the edition axis answering exactly as it did before (#2530).</para>
     /// </summary>
-    internal static async Task<(int EngineEdition, string? EngineKind)> ReadServerEngineAsync(
+    internal static async Task<(int EngineEdition, string? EngineKind, AwsRdsKind AwsRdsKind)> ReadServerEngineAsync(
         NpgsqlDataSource postgres,
         int serverId,
         CancellationToken cancellationToken)
@@ -290,12 +253,14 @@ ORDER BY server_name";
 
         if (!await reader.ReadAsync(cancellationToken))
         {
-            return (CollectorEngineCapability.UnknownEngineEdition, null);
+            return (CollectorEngineCapability.UnknownEngineEdition, null, AwsRdsKind.None);
         }
 
         var edition = reader.IsDBNull(0) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(0);
         var kind = reader.IsDBNull(1) ? null : reader.GetString(1);
-        return (edition, kind);
+        var isAwsRds = !reader.IsDBNull(2) && reader.GetBoolean(2);
+        var isAwsRdsWebOrExpress = !reader.IsDBNull(3) && reader.GetBoolean(3);
+        return (edition, kind, CollectorEngineCapability.AwsRdsKindOf(isAwsRds, isAwsRdsWebOrExpress));
     }
 
     /// <summary>

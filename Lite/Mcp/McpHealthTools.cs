@@ -780,7 +780,7 @@ public sealed class McpHealthTools
                 servers.Add(new CollectorFleetLiveness.ServerFacts(
                     id, s.ServerName, string.IsNullOrWhiteSpace(s.DisplayName) ? null : s.DisplayName,
                     await McpEngineCapability.EngineEditionAsync(dataService, id), null,
-                    serverManager.GetConnectionStatus(s.Id).IsAwsRds));
+                    McpEngineCapability.AwsRdsKindOf(serverManager, id)));
             }
 
             var runs = await dataService.GetCollectorFleetLivenessAsync(collector, windowStart, windowEnd);
@@ -1423,7 +1423,7 @@ public sealed class McpHealthTools
                     Both empty is two facts, and the wrong one is the REASSURING one -- "nothing was
                     waiting" reads as all-clear and stops a caller looking. Same words as Darling's twin.
                 */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "waiting_tasks");
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "waiting_tasks", awsRdsKind: AwsRdsKind.None);
                 if (gated != null)
                 {
                     return gated;
@@ -1537,7 +1537,7 @@ public sealed class McpHealthTools
                 /* The denominator is whether we LOOKED, not whether we ever FOUND anything: these are
                    edge tables, and a healthy server that never blocked has no rows to find. Same words
                    as Darling's twin. */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "blocked_process_report");
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "blocked_process_report");
                 if (gated != null)
                 {
                     return gated;

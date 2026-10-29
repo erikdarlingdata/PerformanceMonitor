@@ -56,7 +56,7 @@ public sealed partial class ViewerDataService
             return new ViewerIdentityCapacityRead(read.Columns.Count > 0 || read.Unscanned.Count > 0 || read.Skipped.Count > 0 ? ViewerIdentityCapacityRead.Data : ViewerIdentityCapacityRead.Empty, null, read);
         }
 
-        var engineGap = ViewerServerTab.EngineGapNote(server.DisplayName, server.EngineEdition, server.EngineKind, "identity_capacity");
+        var engineGap = ViewerServerTab.EngineGapNote(server.DisplayName, server.EngineEdition, server.EngineKind, "identity_capacity", awsRdsKind: AwsRdsKind.None);
         if (engineGap is not null)
         {
             return new ViewerIdentityCapacityRead(ViewerIdentityCapacityRead.NotCollected, engineGap, read);

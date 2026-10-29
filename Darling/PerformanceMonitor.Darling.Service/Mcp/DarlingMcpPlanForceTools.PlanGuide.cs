@@ -72,7 +72,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
             /* 2: SQL Server only. Microsoft's sp_create_plan_guide page lists Azure SQL Database and Managed Instance, but the sp_control_plan_guide page, which the
                drop of an invalid guide and the Undo need, lists SQL Server alone, so an Azure target is refused rather than half supported. */
-            var (engineEdition, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            var (engineEdition, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
@@ -273,7 +273,7 @@ public sealed partial class DarlingMcpPlanForceTools
             return PlanUndoAnswer.Refused(AzureDatabaseExcluded, ExcludedDatabaseRefusal(facts.Database).Message);
         }
 
-        var (engineEdition, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(owner, facts.ServerId, ct);
+        var (engineEdition, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(owner, facts.ServerId, ct);
         if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
         {
             await session.RecordRefusalAsync(PostgresTarget, ct);
@@ -332,7 +332,7 @@ public sealed partial class DarlingMcpPlanForceTools
             }
 
             /* 2: SQL Server only, as the create is: sp_control_plan_guide is documented for SQL Server alone. */
-            var (engineEdition, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            var (engineEdition, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,

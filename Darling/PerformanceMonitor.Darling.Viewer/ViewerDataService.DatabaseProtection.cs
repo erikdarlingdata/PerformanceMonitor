@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -68,7 +69,7 @@ public sealed partial class ViewerDataService
                 null, capturedAt, banded, summary);
         }
 
-        var engineGap = ViewerServerTab.EngineGapNote(server.DisplayName, server.EngineEdition, server.EngineKind, "database_protection");
+        var engineGap = ViewerServerTab.EngineGapNote(server.DisplayName, server.EngineEdition, server.EngineKind, "database_protection", awsRdsKind: AwsRdsKind.None);
         if (engineGap is not null)
         {
             return new ViewerDatabaseProtectionRead(ViewerDatabaseProtectionRead.NotCollected, engineGap, null, [], null);
@@ -77,7 +78,7 @@ public sealed partial class ViewerDataService
         var (text, _) = await ViewerServerTab.ReadEngineGapStateAsync(
             (serverId, collector) => GetCollectorLastRunAsync(serverId, collector, cancellationToken), null,
             server.ServerId, server.DisplayName, server.EngineEdition, server.EngineKind, "database_protection", 0,
-            (serverId, collector) => GetLatestCollectorOutcomeAsync(serverId, collector, cancellationToken));
+            (serverId, collector) => GetLatestCollectorOutcomeAsync(serverId, collector, cancellationToken), awsRdsKind: AwsRdsKind.None);
         if (!string.IsNullOrEmpty(text))
         {
             return new ViewerDatabaseProtectionRead(ViewerDatabaseProtectionRead.Precondition, text, null, [], null);

@@ -40,31 +40,40 @@ public sealed class RdsXeEditionGateTests
     }
 
     [Fact]
-    public void OnTheRdsWebOrExpressEdition_TheFourCapturesAreAPermanentGap_WithAReasonNamingTheEditionLimit()
+    public void OnAnRdsWebOrExpressTarget_TheFourCapturesAreAPermanentGap_WithAReasonNamingTheEditionLimit()
     {
         foreach (var name in XeCollectors)
         {
+            /* The registry keeps the real EngineEdition (2 for Web and Standard, 4 for Express): the gap comes from the stored RDS fact. */
             foreach (var edition in new[] { 2, 3, 4 })
             {
                 Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(name, edition), $"{name} {edition}");
-                Assert.Null(CollectorEngineCapability.NotCollectedMessage("srv", edition, null, name));
+                Assert.Null(CollectorEngineCapability.NotCollectedMessage("srv", edition, null, name, AwsRdsKind.None));
+                Assert.Null(CollectorEngineCapability.NotCollectedMessage("srv", edition, null, name, AwsRdsKind.Rds));
             }
 
-            Assert.False(CollectorEngineCapability.IsCollectedOnEngineEdition(name, CollectorEngineCapability.AwsRdsWebOrExpressEngineEdition), name);
-            var message = CollectorEngineCapability.NotCollectedMessage("srv", CollectorEngineCapability.AwsRdsWebOrExpressEngineEdition, null, name);
+            Assert.False(CollectorEngineCapability.IsCollectedOnAwsRds(name, null, AwsRdsKind.RdsWebOrExpress), name);
+            Assert.True(CollectorEngineCapability.IsCollectedOnAwsRds(name, null, AwsRdsKind.Rds), name);
+            var message = CollectorEngineCapability.NotCollectedMessage("srv", 2, null, name, AwsRdsKind.RdsWebOrExpress);
             Assert.NotNull(message);
             Assert.Contains("only on the Enterprise and Standard editions", message, System.StringComparison.Ordinal);
-            Assert.Contains("Web or Express", message, System.StringComparison.Ordinal);
+            Assert.Contains("Amazon RDS for SQL Server Web or Express edition", message, System.StringComparison.Ordinal);
+            Assert.DoesNotContain("1002", message, System.StringComparison.Ordinal);
         }
     }
 
     [Fact]
-    public void TheRegistryEdition_IsTheRdsWebOrExpressEditionOnlyForRds()
+    public void AnRdsWebOrExpressTarget_IsGapForARdsOnlyGate_AndPlainRdsMakesNoXeClaim()
     {
-        Assert.Equal(CollectorEngineCapability.AwsRdsWebOrExpressEngineEdition,
-            CollectorEngineCapability.EffectiveEngineEdition(2, new CollectorTargetInfo { IsAwsRds = true, IsAwsRdsWebOrExpress = true }));
-        Assert.Equal(2, CollectorEngineCapability.EffectiveEngineEdition(2, new CollectorTargetInfo { IsAwsRds = true }));
-        Assert.Equal(2, CollectorEngineCapability.EffectiveEngineEdition(2, new CollectorTargetInfo { IsAwsRdsWebOrExpress = true }));
+        /* running_jobs is closed on every RDS target, so the Web or Express kind still answers it, in the RDS words. */
+        var jobs = CollectorEngineCapability.NotCollectedMessage("srv", 2, null, "running_jobs", AwsRdsKind.RdsWebOrExpress);
+        Assert.NotNull(jobs);
+        Assert.Contains("Amazon RDS for SQL Server Web or Express edition", jobs, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("only on the Enterprise and Standard editions", jobs, System.StringComparison.Ordinal);
+
+        Assert.Equal(AwsRdsKind.None, CollectorEngineCapability.AwsRdsKindOf(false, true));
+        Assert.Equal(AwsRdsKind.Rds, CollectorEngineCapability.AwsRdsKindOf(true, false));
+        Assert.Equal(AwsRdsKind.RdsWebOrExpress, CollectorEngineCapability.AwsRdsKindOf(true, true));
     }
 
     [Theory]

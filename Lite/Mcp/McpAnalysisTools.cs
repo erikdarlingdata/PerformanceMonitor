@@ -784,7 +784,7 @@ public sealed class McpAnalysisTools
             {
                 /* Same engine question get_server_config asks on its miss: an engine that never collects
                    server_config (Azure SQL Database) gets the permanent-gap answer, not "may not have run yet". */
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_config")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_config", awsRdsKind: AwsRdsKind.None)
                     ?? JsonSerializer.Serialize(new
                     {
                         server = resolved.DisplayName,

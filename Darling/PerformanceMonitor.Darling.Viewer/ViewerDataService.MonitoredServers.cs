@@ -332,12 +332,20 @@ GROUP BY s.server_id";
     /// reads as Amazon RDS and the Agent surfaces keep their old text.</summary>
     internal const int AwsRdsStoreSchemaVersion = 225;
 
+    /// <summary>The store version that added <c>collect.servers.is_aws_rds_web_or_express</c> (V226, #6893). A store at V225 has only the RDS
+    /// fact, so no server reads as the Web or Express edition there.</summary>
+    internal const int AwsRdsWebOrExpressStoreSchemaVersion = 226;
+
     /// <summary>The servers the service stamped as Amazon RDS (#6894). NULL and false match nothing.</summary>
     internal const string AwsRdsServersSql = "SELECT server_id FROM servers WHERE is_aws_rds";
 
+    /// <summary>The same read with the Web or Express fact (V226, #6893), for a store that has the column. NULL and false match nothing in either column.</summary>
+    internal const string AwsRdsKindServersSql = "SELECT server_id, is_aws_rds_web_or_express FROM servers WHERE is_aws_rds";
+
     /// <summary>
-    /// Fills <see cref="DarlingServer.IsAwsRds"/> on the listed servers (#6894). A store older than V225 has no column, so nothing is
-    /// read, and a failed read leaves every server false: the note is a diagnostic and is never worth losing the sidebar over.
+    /// Fills <see cref="DarlingServer.AwsRdsKind"/> on the listed servers (#6894, #6893). A store older than V225 has no column, so nothing is
+    /// read, a store at V225 reads the RDS fact alone, and a failed read leaves every server <see cref="AwsRdsKind.None"/>: the note is a
+    /// diagnostic and is never worth losing the sidebar over.
     /// </summary>
     private async Task AttachAwsRdsAsync(List<DarlingServer> servers, CancellationToken cancellationToken)
     {
@@ -355,16 +363,18 @@ GROUP BY s.server_id";
             }
 
             var byId = servers.GroupBy(x => x.ServerId).ToDictionary(g => g.Key, g => g.ToList());
-            await using var command = _dataSource.CreateCommand(AwsRdsServersSql);
+            var readsWebOrExpress = known >= AwsRdsWebOrExpressStoreSchemaVersion;
+            await using var command = _dataSource.CreateCommand(readsWebOrExpress ? AwsRdsKindServersSql : AwsRdsServersSql);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
                 if (byId.TryGetValue(reader.GetInt32(0), out var matches))
                 {
+                    var kind = CollectorEngineCapability.AwsRdsKindOf(isAwsRds: true, readsWebOrExpress && !reader.IsDBNull(1) && reader.GetBoolean(1));
                     foreach (var server in matches)
                     {
-                        server.IsAwsRds = true;
+                        server.AwsRdsKind = kind;
                     }
                 }
             }

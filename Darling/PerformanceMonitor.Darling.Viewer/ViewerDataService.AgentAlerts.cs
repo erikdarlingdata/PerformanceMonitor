@@ -55,7 +55,7 @@ public sealed partial class ViewerDataService
             return new ViewerAgentAlertsRead(status.Word, null, status, read);
         }
 
-        var engineGap = ViewerServerTab.EngineGapNote(server.DisplayName, server.EngineEdition, server.EngineKind, "agent_alerts", server.IsAwsRds);
+        var engineGap = ViewerServerTab.EngineGapNote(server.DisplayName, server.EngineEdition, server.EngineKind, "agent_alerts", server.AwsRdsKind);
         if (engineGap is not null)
         {
             return new ViewerAgentAlertsRead(ViewerAgentAlertsRead.NotCollected, engineGap, null, read);
@@ -64,7 +64,7 @@ public sealed partial class ViewerDataService
         var (text, _) = await ViewerServerTab.ReadEngineGapStateAsync(
             (serverId, collector) => GetCollectorLastRunAsync(serverId, collector, cancellationToken), null,
             server.ServerId, server.DisplayName, server.EngineEdition, server.EngineKind, "agent_alerts", 0,
-            (serverId, collector) => GetLatestCollectorOutcomeAsync(serverId, collector, cancellationToken), server.IsAwsRds);
+            (serverId, collector) => GetLatestCollectorOutcomeAsync(serverId, collector, cancellationToken), server.AwsRdsKind);
         if (!string.IsNullOrEmpty(text))
         {
             return new ViewerAgentAlertsRead(ViewerAgentAlertsRead.Precondition, text, null, read);

@@ -2974,6 +2974,7 @@ $rung$;";
         new Migration(223, "database-protection", V223Sql),
         new Migration(224, "identity-capacity", V224Sql),
         new Migration(225, "server-aws-rds", V225Sql),
+        new Migration(226, "server-aws-rds-web-or-express", V226Sql),
     };
 
     /// <summary>
@@ -2987,6 +2988,19 @@ $rung$;";
     private const string V225Sql = @"
 ALTER TABLE collect.servers
     ADD COLUMN IF NOT EXISTS is_aws_rds boolean;";
+
+    /// <summary>
+    /// V226 (#6893): <c>collect.servers.is_aws_rds_web_or_express</c>, whether that Amazon RDS for SQL Server instance is on the Web or Express
+    /// edition (the connect query's <c>SERVERPROPERTY('Edition')</c> together with the RDS flag), written on every connect. RDS refuses every
+    /// Extended Events session create on those editions, so the deadlock, blocked-process, client-timeout and long-query captures never run
+    /// there, and <c>SERVERPROPERTY('EngineEdition')</c> is 2 for both Web and Standard, so <c>sql_engine_edition</c> cannot say it. The read
+    /// side needs this column to answer those reads with the edition limit instead of a setup step that cannot help. NULL means no connect has
+    /// stamped it yet (and a PostgreSQL target), which makes no claim. No backfill: a registration fills its own on its next connect. No view
+    /// refresh: <c>collect.servers</c> is a registry, not a hypertable.
+    /// </summary>
+    private const string V226Sql = @"
+ALTER TABLE collect.servers
+    ADD COLUMN IF NOT EXISTS is_aws_rds_web_or_express boolean;";
 
     /// <summary>
     /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c>, the failure record of the Query Store compose builder: one row
