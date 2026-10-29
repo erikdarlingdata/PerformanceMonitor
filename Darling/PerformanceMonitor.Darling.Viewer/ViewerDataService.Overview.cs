@@ -255,6 +255,22 @@ ORDER BY collection_time DESC
 LIMIT 1";
 
     /// <summary>
+    /// The identity columns at the warning bar or past it on one server (#6875) for its Overview card, from each database's newest scan in the last
+    /// seven days through <see cref="DarlingIdentityCapacityReader.ReadNewestScansAsync"/> (the card needs the columns only, not the listing of databases waiting) and <see cref="IdentityCapacityMath.Band(double)"/>, the read and the band the web
+    /// fleet card, the tool and the alert use. Null when no column is.
+    /// </summary>
+    public async Task<IdentityCapacityCard?> GetIdentityCapacityCardAsync(int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        var read = await DarlingIdentityCapacityReader.ReadNewestScansAsync(
+            _dataSource, serverId, DatabaseFilter.All, nowUtc.AddHours(-168), nowUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        var bands = read.Columns.Select(c => c.Band).Where(b => b is IdentityCapacityMath.BandWarning or IdentityCapacityMath.BandCritical).ToList();
+        return bands.Count == 0
+            ? null
+            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count);
+    }
+
+    /// <summary>
     /// One server's Overview-card summary — Lite's <c>GetServerSummaryAsync</c> ported to Postgres and
     /// enriched toward the Dashboard's <c>ServerHealthCard</c>. The caller sets
     /// <see cref="ServerSummaryItem.ServerName"/> and applies the freshness-derived status
@@ -270,22 +286,6 @@ LIMIT 1";
     /// — the mixed reading <c>DarlingFleetReader.GetFleetOverviewAsync</c> hoists its own copy of this read
     /// to avoid. Null bands on the shipped pair, which is what a single-card caller with no fleet refresh
     /// around it gets; <c>GetDeadlockRateThresholdsAsync</c> is the read.</param>
-    /// <summary>
-    /// The identity columns at the warning bar or past it on one server (#6875) for its Overview card, from each database's newest scan in the last
-    /// seven days through <see cref="DarlingIdentityCapacityReader"/> and <see cref="IdentityCapacityMath.Band(double)"/>, the read and the band the web
-    /// fleet card, the tool and the alert use. Null when no column is.
-    /// </summary>
-    public async Task<IdentityCapacityCard?> GetIdentityCapacityCardAsync(int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
-    {
-        var read = await DarlingIdentityCapacityReader.ReadAsync(
-            _dataSource, serverId, DatabaseFilter.All, nowUtc.AddHours(-168), nowUtc,
-            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
-        var bands = read.Columns.Select(c => c.Band).Where(b => b is IdentityCapacityMath.BandWarning or IdentityCapacityMath.BandCritical).ToList();
-        return bands.Count == 0
-            ? null
-            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count);
-    }
-
     public async Task<ServerSummaryItem> GetServerSummaryAsync(
         int serverId,
         string displayName,

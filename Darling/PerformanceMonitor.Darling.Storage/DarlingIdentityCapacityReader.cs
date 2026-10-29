@@ -126,30 +126,46 @@ public static class DarlingIdentityCapacityReader
     /// <summary>
     /// Each scanned database with its newest marker, then that scan's columns beside the same column's oldest sample in the window. A
     /// database with a marker and no column comes back as one row with NULL column fields. $1 server, $2 start, $3 end, $4 database filter.
+    ///
+    /// <para>No CTE is read more than once: PostgreSQL materializes one that is, and the correlated lookup per column then rescanned the
+    /// tuplestore with no index (#6875). The newest marker per database is a <c>DISTINCT ON</c> over the partial marker index, the
+    /// columns of that scan are joined from the base table (the window bound on the join is implied by the marker's time, and it is what
+    /// lets the planner use <c>idx_identity_capacity_time</c> instead of a seq scan), and the oldest sample per column is one
+    /// <c>DISTINCT ON</c> pass over the window instead of a probe per column. Same rows as the old shape: on a throwaway store with 400
+    /// databases and 28 scans in the window, 3,340 ms before and 175 ms after.</para>
     /// </summary>
     public static string ScanSql(DatabaseFilter databases) => $@"
-WITH win AS (
-    SELECT collection_time, database_name, schema_name, table_name, column_name, data_type, type_precision,
-           last_value::text AS last_value, seed_value::text AS seed_value, increment_value::text AS increment_value, percent_used, skip_reason
-    FROM collect.identity_capacity
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)}),
-scan AS (
-    SELECT database_name, MAX(collection_time) AS scanned_at FROM win WHERE column_name IS NULL AND skip_reason IS NULL GROUP BY database_name)
-SELECT s.database_name, s.scanned_at, c.schema_name, c.table_name, c.column_name, c.data_type, c.type_precision,
-       c.last_value, c.seed_value, c.increment_value, c.percent_used, f.collection_time, f.last_value
-FROM scan AS s
-LEFT JOIN win AS c ON c.database_name = s.database_name AND c.collection_time = s.scanned_at AND c.column_name IS NOT NULL
-LEFT JOIN LATERAL (
-    SELECT w.collection_time, w.last_value FROM win AS w
-    WHERE w.database_name = c.database_name AND w.schema_name = c.schema_name AND w.table_name = c.table_name AND w.column_name = c.column_name
-    ORDER BY w.collection_time LIMIT 1) AS f ON c.column_name IS NOT NULL
-ORDER BY c.percent_used DESC NULLS LAST, s.database_name, c.schema_name, c.table_name, c.column_name";
+SELECT n.database_name, n.scanned_at, c.schema_name, c.table_name, c.column_name, c.data_type, c.type_precision,
+       c.last_value::text, c.seed_value::text, c.increment_value::text, c.percent_used, f.collection_time, f.last_value
+FROM (
+    SELECT DISTINCT ON (m.database_name) m.database_name, m.collection_time AS scanned_at
+    FROM collect.identity_capacity AS m
+    WHERE m.server_id = $1 AND m.collection_time >= $2 AND m.collection_time <= $3
+    AND   m.column_name IS NULL AND m.skip_reason IS NULL{databases.Clause("m.database_name", 4)}
+    ORDER BY m.database_name, m.collection_time DESC) AS n
+LEFT JOIN collect.identity_capacity AS c
+  ON c.server_id = $1 AND c.collection_time = n.scanned_at AND c.collection_time >= $2 AND c.collection_time <= $3
+  AND c.database_name = n.database_name AND c.column_name IS NOT NULL
+LEFT JOIN (
+    SELECT DISTINCT ON (w.database_name, w.schema_name, w.table_name, w.column_name)
+           w.database_name, w.schema_name, w.table_name, w.column_name, w.collection_time, w.last_value::text AS last_value
+    FROM collect.identity_capacity AS w
+    WHERE w.server_id = $1 AND w.collection_time >= $2 AND w.collection_time <= $3 AND w.column_name IS NOT NULL{databases.Clause("w.database_name", 4)}
+    ORDER BY w.database_name, w.schema_name, w.table_name, w.column_name, w.collection_time) AS f
+  ON f.database_name = c.database_name AND f.schema_name = c.schema_name AND f.table_name = c.table_name AND f.column_name = c.column_name
+ORDER BY c.percent_used DESC NULLS LAST, n.database_name, c.schema_name, c.table_name, c.column_name";
 
     /// <summary>
     /// The server's online user databases in its newest database config capture at or before the window's end, each with its newest
     /// marker at or before the end, and the reason the collector stored for skipping it on purpose in the window (newest wins). The reader
     /// drops the ones that have a marker in the window. A skip row has <c>column_name</c> NULL too, so a marker read says
     /// <c>skip_reason IS NULL</c>. $1 server, $2 end, $3 database filter, $4 the names the collector never scans, $5 window start.
+    ///
+    /// <para>A database the collector's own database scope (#3477) leaves out is not listed either: the collector's enumeration never reaches
+    /// it, so it would read "not yet scanned" forever. The scope is read from the same row the collector's context is built from
+    /// (<c>config.config_collector_schedules.databases</c> for <c>identity_capacity</c>, the server's own row first, then the fleet row,
+    /// NULL falls through and an empty array means no scope) and compared without case, so the reader errs toward listing a database. The
+    /// server-level exclusion needs no clause: <c>v_database_config</c> never holds a database it excludes.</para>
     /// </summary>
     public static string ListedDatabasesSql(DatabaseFilter databases) => $@"
 SELECT d.database_name,
@@ -160,48 +176,45 @@ SELECT d.database_name,
         AND   i.collection_time >= $5 AND i.collection_time <= $2
         ORDER BY i.collection_time DESC LIMIT 1)
 FROM (
-    SELECT DISTINCT database_name FROM v_database_config
-    WHERE server_id = $1
-    AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1 AND capture_time <= $2)
-    AND   state_desc = 'ONLINE'
-    AND   database_name IS NOT NULL
-    AND   database_name <> ALL($4){databases.Clause("database_name", 3)}) AS d
+    SELECT DISTINCT v.database_name FROM v_database_config AS v
+    CROSS JOIN (
+        SELECT COALESCE(array_agg(lower(btrim(s.name, E' \t\r\n'))) FILTER (WHERE btrim(s.name, E' \t\r\n') <> ''), ARRAY[]::text[]) AS names
+        FROM unnest(COALESCE(
+            (SELECT cs.databases FROM config.config_collector_schedules AS cs WHERE cs.collector_name = 'identity_capacity' AND cs.server_id = $1),
+            (SELECT cs.databases FROM config.config_collector_schedules AS cs WHERE cs.collector_name = 'identity_capacity' AND cs.server_id IS NULL),
+            ARRAY[]::text[])) AS s(name)) AS scope
+    WHERE v.server_id = $1
+    AND   v.capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1 AND capture_time <= $2)
+    AND   v.state_desc = 'ONLINE'
+    AND   v.database_name IS NOT NULL
+    AND   v.database_name <> ALL($4){databases.Clause("v.database_name", 3)}
+    AND   (cardinality(scope.names) = 0 OR lower(v.database_name) = ANY(scope.names))) AS d
 ORDER BY d.database_name";
 
-    /// <summary>Reads the newest scan of every database with a marker in the window <paramref name="start"/> to <paramref name="end"/> (UTC).</summary>
+    /// <summary>
+    /// The newest scan's columns of every database with a marker in the window, and nothing else (#6875): the read behind the self-alert
+    /// sweep (every 30 seconds per server) and the Viewer Overview card, which judge the columns and never look at the databases waiting or
+    /// skipped. One statement, <see cref="ScanSql"/>; <see cref="IdentityCapacityRead.NotYetScanned"/> and
+    /// <see cref="IdentityCapacityRead.SkippedOnPurpose"/> are null, so a caller that needs them uses <see cref="ReadAsync"/>.
+    /// </summary>
+    public static async Task<IdentityCapacityRead> ReadNewestScansAsync(
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, DateTime start, DateTime end,
+        int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        var (scanned, columns) = await ReadScansAsync(postgres, serverId, databases, start, end, commandTimeoutSeconds, cancellationToken);
+        return Assemble(scanned, columns, null, null);
+    }
+
+    /// <summary>Reads the newest scan of every database with a marker in the window <paramref name="start"/> to <paramref name="end"/> (UTC), and the databases still waiting or skipped on purpose.</summary>
     public static async Task<IdentityCapacityRead> ReadAsync(
         NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, DateTime start, DateTime end,
         int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
-        await using var command = postgres.CreateCommand(ScanSql(databases));
-        command.CommandTimeout = commandTimeoutSeconds;
-        command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
-        command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
-        command.Parameters.Add(databases.Parameter());
-
-        var scanned = new Dictionary<string, DateTime>(StringComparer.Ordinal);
-        var columns = new List<IdentityColumnFact>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            var database = reader.GetString(0);
-            var scannedAt = reader.GetDateTime(1);
-            scanned[database] = scannedAt;
-            if (reader.IsDBNull(4))
-                continue; // the marker alone: scanned, no column above 10 percent
-
-            string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
-            BigInteger? Big(int i) => reader.IsDBNull(i) ? null : BigInteger.Parse(reader.GetString(i), CultureInfo.InvariantCulture);
-            columns.Add(new IdentityColumnFact(
-                database, Text(2), Text(3), Text(4), Text(5), reader.IsDBNull(6) ? null : reader.GetInt32(6),
-                Big(7), Big(8), Big(9), reader.IsDBNull(10) ? null : reader.GetDouble(10), scannedAt,
-                Big(12), reader.IsDBNull(11) ? null : reader.GetDateTime(11)));
-        }
-
-        await reader.CloseAsync();
+        var (scanned, columns) = await ReadScansAsync(postgres, serverId, databases, start, end, commandTimeoutSeconds, cancellationToken);
 
         // A database the rotation has not reached has no marker, so the scan answer alone would leave it out and the server could look
         // clean. The server's database list is its newest database config capture (every online database, once per capture).
@@ -230,12 +243,50 @@ ORDER BY d.database_name";
             }
         }
 
-        return new IdentityCapacityRead(
+        return Assemble(scanned, columns, notYetScanned, skipped);
+    }
+
+    private static async Task<(Dictionary<string, DateTime> Scanned, List<IdentityColumnFact> Columns)> ReadScansAsync(
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, DateTime start, DateTime end,
+        int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand(ScanSql(databases));
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
+        command.Parameters.Add(databases.Parameter());
+
+        var scanned = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        var columns = new List<IdentityColumnFact>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var database = reader.GetString(0);
+            var scannedAt = reader.GetDateTime(1);
+            scanned[database] = scannedAt;
+            if (reader.IsDBNull(4))
+                continue; // the marker alone: scanned, no column above 10 percent
+
+            string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+            BigInteger? Big(int i) => reader.IsDBNull(i) ? null : BigInteger.Parse(reader.GetString(i), CultureInfo.InvariantCulture);
+            columns.Add(new IdentityColumnFact(
+                database, Text(2), Text(3), Text(4), Text(5), reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                Big(7), Big(8), Big(9), reader.IsDBNull(10) ? null : reader.GetDouble(10), scannedAt,
+                Big(12), reader.IsDBNull(11) ? null : reader.GetDateTime(11)));
+        }
+
+        return (scanned, columns);
+    }
+
+    private static IdentityCapacityRead Assemble(
+        Dictionary<string, DateTime> scanned, List<IdentityColumnFact> columns,
+        List<IdentityNotYetScannedDatabase>? notYetScanned, List<IdentitySkippedDatabase>? skipped) =>
+        new(
             columns.OrderByDescending(c => c.PercentUsed ?? -1)
                 .ThenBy(c => c.DatabaseName, StringComparer.Ordinal).ThenBy(c => c.SchemaName, StringComparer.Ordinal)
                 .ThenBy(c => c.TableName, StringComparer.Ordinal).ThenBy(c => c.ColumnName, StringComparer.Ordinal).ToList(),
             scanned.OrderBy(d => d.Key, StringComparer.Ordinal).Select(d => new IdentityScannedDatabase(d.Key, d.Value)).ToList(),
             notYetScanned,
             skipped);
-    }
 }

@@ -1543,8 +1543,9 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         /* Identity Capacity (#6875): off by default, so a fleet that never turned it on pays no read here. A server with no scan in the window
-           (the collector has not run, or has not reached any database) is judged on nothing: it neither fires nor clears. */
-        if (_identityCapacityEnabled())
+           (the collector has not run, or has not reached any database) is judged on nothing: it neither fires nor clears. A PostgreSQL target
+           never writes this table (the collector is SQL Server only), so it pays no read. */
+        if (_identityCapacityEnabled() && engine != CollectorTargetEngine.PostgreSql)
         {
             var identityReadClock = Stopwatch.StartNew();
             try
@@ -4346,14 +4347,15 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>
     /// The newest scan of each database in the last <see cref="IdentityCapacityWindow"/> (#6875), or null when no database was scanned in it.
-    /// A database is judged by its own newest marker.
+    /// A database is judged by its own newest marker. The narrow read: this runs every sweep per server and judges only the columns, so it
+    /// skips the listing of databases waiting or skipped that <see cref="DarlingIdentityCapacityReader.ReadAsync"/> adds.
     /// </summary>
     internal async Task<IdentityCapacityRead?> ReadIdentityCapacityAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         var now = _utcNow();
         var read = await ReadWithOneRetryAsync(
-            token => DarlingIdentityCapacityReader.ReadAsync(
+            token => DarlingIdentityCapacityReader.ReadNewestScansAsync(
                 postgres, serverId, DatabaseFilter.All, now - IdentityCapacityWindow, now, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, token),
             serverId, IdentityCapacityReadName, cancellationToken);
         return read.HasScan ? read : null;

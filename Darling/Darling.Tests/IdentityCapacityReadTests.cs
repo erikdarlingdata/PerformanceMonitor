@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
@@ -478,6 +479,88 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             var none = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, "Fresh", 200, ct));
             Assert.Equal("unavailable", none.GetProperty("status").GetString());
             Assert.Contains("1 database(s) not yet scanned (Fresh)", none.GetProperty("message").GetString());
+        });
+    }
+
+    private static async Task SetScopeAsync(NpgsqlDataSource postgres, int? serverId, string[]? databases, CancellationToken ct)
+    {
+        await using (var delete = postgres.CreateCommand("DELETE FROM config.config_collector_schedules WHERE collector_name = 'identity_capacity' AND server_id IS NOT DISTINCT FROM $1"))
+        {
+            delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = (object?)serverId ?? DBNull.Value });
+            await delete.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var insert = postgres.CreateCommand("INSERT INTO config.config_collector_schedules (server_id, collector_name, databases) VALUES ($1, 'identity_capacity', $2)");
+        insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = (object?)serverId ?? DBNull.Value });
+        insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = (object?)databases ?? DBNull.Value });
+        await insert.ExecuteNonQueryAsync(ct);
+    }
+
+    [Fact]
+    public async Task ADatabaseTheCollectorsOwnScopeLeavesOut_IsNeverListedAsNotYetScanned_ServerRowFirst_ThenTheFleetRow_AnEmptyListMeansNoScope()
+    {
+        var now = DateTime.UtcNow;
+        await WithStoreAsync(async (c, ct) =>
+        {
+            foreach (var name in new[] { "Alpha", "Beta", "Gamma" })
+                await ConfigRow(c, ct, name, "ONLINE", now.AddHours(-2));
+        }, async (postgres, ct) =>
+        {
+            async Task<string[]> Waiting() =>
+                (await DarlingIdentityCapacityReader.ReadAsync(postgres, DataId, DatabaseFilter.All, now.AddHours(-168), now, 30, ct))
+                    .Unscanned.Select(d => d.DatabaseName).ToArray();
+
+            /* No scope row: every online database is waiting. */
+            Assert.Equal(new[] { "Alpha", "Beta", "Gamma" }, await Waiting());
+
+            /* The server's own row scopes the collector to two databases (hand-edited case and spaces): the third is not waiting, the collector never goes there. */
+            await SetScopeAsync(postgres, DataId, new[] { " alpha ", "BETA", "  " }, ct);
+            Assert.Equal(new[] { "Alpha", "Beta" }, await Waiting());
+
+            /* The tool agrees: Gamma is in neither list. */
+            var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, ct));
+            Assert.Equal(2, root.GetProperty("summary").GetProperty("databases_not_yet_scanned").GetInt32());
+            Assert.DoesNotContain(root.GetProperty("databases").EnumerateArray(), d => d.GetProperty("database").GetString() == "Gamma");
+
+            /* An empty list on the server's row is "no scope at this level" and stops the fall-through to a fleet scope. */
+            await SetScopeAsync(postgres, null, new[] { "Gamma" }, ct);
+            await SetScopeAsync(postgres, DataId, Array.Empty<string>(), ct);
+            Assert.Equal(new[] { "Alpha", "Beta", "Gamma" }, await Waiting());
+
+            /* A NULL list on the server's row falls through to the fleet row. */
+            await SetScopeAsync(postgres, DataId, null, ct);
+            Assert.Equal(new[] { "Gamma" }, await Waiting());
+        });
+    }
+
+    [Fact]
+    public async Task TheNarrowRead_GivesTheSameColumnsAndScannedDatabasesAsTheFullRead_AndNoListingOfDatabasesWaiting()
+    {
+        var now = DateTime.UtcNow;
+        var oldAt = now.AddDays(-4);
+        var newAt = now.AddHours(-3);
+        await WithStoreAsync(async (c, ct) =>
+        {
+            await ConfigRow(c, ct, "Sales", "ONLINE", now.AddHours(-2));
+            await ConfigRow(c, ct, "Waiting", "ONLINE", now.AddHours(-2));
+            await Marker(c, ct, DataId, DataServer, "Sales", oldAt);
+            await Column(c, ct, "Sales", "Orders", "int", 10, "1500000000", "1", "1", 69.8, oldAt);
+            await Marker(c, ct, DataId, DataServer, "Sales", newAt);
+            await Column(c, ct, "Sales", "Orders", "int", 10, "1800000000", "1", "1", 83.8, newAt);
+            await Column(c, ct, "Sales", "Lines", "int", 10, "300000000", "1", "1", 14.0, newAt);
+        }, async (postgres, ct) =>
+        {
+            var start = now.AddHours(-168);
+            var full = await DarlingIdentityCapacityReader.ReadAsync(postgres, DataId, DatabaseFilter.All, start, now, 30, ct);
+            var narrow = await DarlingIdentityCapacityReader.ReadNewestScansAsync(postgres, DataId, DatabaseFilter.All, start, now, 30, ct);
+
+            Assert.Equal(2, narrow.Columns.Count);
+            Assert.Equal(full.Columns.Select(x => (x.TableName, x.PercentUsed, x.CapturedAt, x.FirstValue, x.FirstAt)), narrow.Columns.Select(x => (x.TableName, x.PercentUsed, x.CapturedAt, x.FirstValue, x.FirstAt)));
+            Assert.Equal(new BigInteger(1500000000), narrow.Columns.Single(x => x.TableName == "Orders").FirstValue);
+            Assert.Equal(full.Databases.Select(x => (x.DatabaseName, x.ScannedAt)), narrow.Databases.Select(x => (x.DatabaseName, x.ScannedAt)));
+            Assert.True(narrow.HasScan);
+            Assert.Equal(new[] { "Waiting" }, full.Unscanned.Select(x => x.DatabaseName).ToArray());
+            Assert.Empty(narrow.Unscanned);
         });
     }
 }
