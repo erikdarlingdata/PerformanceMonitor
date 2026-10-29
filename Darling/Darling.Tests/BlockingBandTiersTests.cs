@@ -44,6 +44,7 @@ public sealed class BlockingBandTiersTests
     {
         var signals = new DailyHealthSignals
         {
+            HasData = true,
             Window = Day,
             BlockingReports = 1764,
             BlockingEvents = 1764,
