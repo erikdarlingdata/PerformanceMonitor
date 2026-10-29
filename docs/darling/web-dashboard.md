@@ -179,7 +179,7 @@ Those rows show a horizon age of "pins nothing" and not a number. Terminating th
 
 Both tab registries branch on it: `serverTabsFor(card)` on the web and `ViewerPostgresTabs` in the viewer. The header of a server in the viewer carries the same engine label. A server that the store makes no claim about gets no badge at all, and not a badge that reads "SQL Server". Its tabs are a default and not a finding.
 
-One consequence: a SQL Server read that targets a PostgreSQL server now answers `not_collected` and names the engine ("...runs Aurora PostgreSQL. The system_health_events collector is written against SQL Server..."). It no longer answers `unavailable` with advice to check that collection is running. That applies to the reads that use the capability helper, which is not every read yet.
+One consequence: a SQL Server read that targets a PostgreSQL server now answers `not_collected` and names the engine ("...runs Aurora PostgreSQL. The system_health_events collector is written for SQL Server..."). It no longer answers `unavailable` with advice to check that collection is running. That applies to the reads that use the capability helper, which is not every read yet.
 
 #### Desktop features that a web imitation would make worse
 

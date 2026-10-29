@@ -552,22 +552,23 @@ public sealed class CollectorEngineCapabilityMovingGateTests
 
         Assert.NotNull(dialect);
         Assert.Contains("aurora-01 runs Aurora PostgreSQL.", dialect, StringComparison.Ordinal);
-        Assert.Contains("is written against SQL Server", dialect, StringComparison.Ordinal);
-        Assert.Contains("the dispatch gate's engine half never sends it at another engine", dialect, StringComparison.Ordinal);
+        Assert.Contains("is written for SQL Server", dialect, StringComparison.Ordinal);
+        Assert.Contains("and never runs against another engine", dialect, StringComparison.Ordinal);
 
         var ownGate = CollectorEngineCapability.NotCollectedMessage(
             "pg-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.Postgres, "pg_wait_stats", awsRdsKind: AwsRdsKind.None);
 
         Assert.NotNull(ownGate);
         Assert.Contains("pg-01 runs PostgreSQL.", ownGate, StringComparison.Ordinal);
-        Assert.Contains("its own AppliesTo gate excludes it", ownGate, StringComparison.Ordinal);
+        Assert.Contains("does not run on this engine", ownGate, StringComparison.Ordinal);
         Assert.Contains("the aurora_stat_system_waits() cumulative wait counters", ownGate, StringComparison.Ordinal);
         Assert.Contains("and never will.", ownGate, StringComparison.Ordinal);
 
         /* The dialect sentence must NOT appear on the own-gate message: it is the specific falsehood this
            split exists to prevent. */
-        Assert.DoesNotContain("is written against PostgreSQL", ownGate, StringComparison.Ordinal);
-        Assert.DoesNotContain("dispatch gate's engine half", ownGate, StringComparison.Ordinal);
+        Assert.DoesNotContain("is written for PostgreSQL", ownGate, StringComparison.Ordinal);
+        Assert.DoesNotContain("never runs against another engine", ownGate, StringComparison.Ordinal);
+        Assert.DoesNotContain("does not run on this engine", dialect, StringComparison.Ordinal);
         Assert.DoesNotContain("check that collection is running", ownGate, StringComparison.OrdinalIgnoreCase);
 
         /* No EngineEdition claim about a PostgreSQL server, on either shape. */
@@ -596,7 +597,7 @@ public sealed class CollectorEngineCapabilityMovingGateTests
         Assert.NotNull(message);
         Assert.Contains("Aurora PostgreSQL", message, StringComparison.Ordinal);
         Assert.Contains("system_health_events", message, StringComparison.Ordinal);
-        Assert.Contains("is written against SQL Server", message, StringComparison.Ordinal);
+        Assert.Contains("is written for SQL Server", message, StringComparison.Ordinal);
         Assert.Contains("and never will.", message, StringComparison.Ordinal);
 
         /* The edition axis must not have spoken: its sentence names an EngineEdition number, and
@@ -614,7 +615,7 @@ public sealed class CollectorEngineCapabilityMovingGateTests
             "box-01", 3, MonitoredEngineKind.SqlServer, "pg_wait_stats", awsRdsKind: AwsRdsKind.None);
         Assert.NotNull(mirrored);
         Assert.Contains("box-01 runs SQL Server.", mirrored, StringComparison.Ordinal);
-        Assert.Contains("is written against PostgreSQL", mirrored, StringComparison.Ordinal);
+        Assert.Contains("is written for PostgreSQL", mirrored, StringComparison.Ordinal);
 
         /* A SQL Server read about a SQL Server target whose collector runs everywhere: untouched. */
         Assert.Null(CollectorEngineCapability.NotCollectedMessage(

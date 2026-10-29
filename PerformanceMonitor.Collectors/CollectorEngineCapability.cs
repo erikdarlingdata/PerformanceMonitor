@@ -500,7 +500,7 @@ public static class CollectorEngineCapability
     private static string CoveredInsteadSuffix(string collectorName) =>
         CoveredInsteadBy.TryGetValue(collectorName, out var sibling)
             ? $" The same question IS answered on this server by the {sibling} collector, which reads a " +
-              $"different source for it — check that panel rather than this one."
+              $"different source for it. Check that panel rather than this one."
             : string.Empty;
 
     /// <summary>
@@ -730,9 +730,9 @@ public static class CollectorEngineCapability
             if (ProbeForKind(engineKind) is { } probe && !CollectorCatalog.EngineMatches(definition, probe))
             {
                 return engine +
-                       $"The {collectorName} collector is written against " +
-                       $"{DescribeTargetEngine(definition.TargetEngine)} and the dispatch gate's engine half never " +
-                       $"sends it at another engine, so this server does not collect " +
+                       $"The {collectorName} collector is written for " +
+                       $"{DescribeTargetEngine(definition.TargetEngine)} and never runs against another engine, " +
+                       $"so this server does not collect " +
                        $"{CapturePathOf(collectorName)}, and never will. {PermanentGapEpilogue}" +
                        CoveredInsteadSuffix(collectorName);
             }
@@ -742,9 +742,8 @@ public static class CollectorEngineCapability
                and only this collector's own gate says it is not read here. The closing epilogue is still
                the one shared sentence, so the two never disagree about whether the gap is worth chasing. */
             return engine +
-                   $"The {collectorName} collector does not run on that engine — its own AppliesTo gate " +
-                   $"excludes it — so this server does not collect {CapturePathOf(collectorName)}, and never " +
-                   $"will. {PermanentGapEpilogue}" + CoveredInsteadSuffix(collectorName);
+                   $"The {collectorName} collector does not run on this engine, so this server does not " +
+                   $"collect {CapturePathOf(collectorName)}, and never will. {PermanentGapEpilogue}" + CoveredInsteadSuffix(collectorName);
         }
 
         if (IsCollectedOnEngineEdition(definition, engineEdition))
