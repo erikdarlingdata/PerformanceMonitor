@@ -100,7 +100,7 @@ public partial class ViewerServerTab
     internal static (string Text, Visibility Visibility) EngineGapStateFromRuns(
         string serverName, int engineEdition, string? engineKind, string collectorName, int rowCount,
         DateTime? collectorLastRunUtc, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc,
-        AwsRdsKind awsRdsKind, string? outcomeNote = null)
+        AwsRdsKind awsRdsKind, string? outcomeNote = null, DateTime? serviceStartedUtc = null)
     {
         /* #6861: a collector whose LATEST run recorded a named skip (PERMISSIONS and the like) did run, so the never-ran rules
            below have nothing to say about it. The skip's own sentence is the answer, and the engine gap still wins inside
@@ -114,11 +114,11 @@ public partial class ViewerServerTab
         else if (SwitchedOffReasonsFor(collectorName) is { } reasons)
         {
             note = CollectorRuntimePrecondition.GatedOffReaderMessage(
-                serverName, collectorName, reasons, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
+                serverName, collectorName, reasons, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc);
         }
         else if (collectorLastRunUtc is null && serverLastCollectedUtc is not null)
         {
-            note = CollectorRuntimePrecondition.NotYetRunMessage(serverName, collectorName, serverLastCollectedUtc, serverFirstCollectedUtc)
+            note = CollectorRuntimePrecondition.NotYetRunMessage(serverName, collectorName, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc)
                 ?? NeverRanNote(serverName, collectorName);
         }
 
@@ -136,11 +136,12 @@ public partial class ViewerServerTab
     internal static async Task<(string Text, Visibility Visibility)> ReadEngineGapStateAsync(
         CollectorLastRunReader readLastRun, ISet<string>? collectorsSeenToRun, int serverId, string serverName,
         int engineEdition, string? engineKind, string collectorName, int rowCount,
-        CollectorOutcomeReader readLatestOutcome, AwsRdsKind awsRdsKind)
+        CollectorOutcomeReader readLatestOutcome, AwsRdsKind awsRdsKind, ServiceStartReader? readServiceStarted = null)
     {
         DateTime? collectorLastRunUtc = null;
         DateTime? serverLastCollectedUtc = null;
         DateTime? serverFirstCollectedUtc = null;
+        DateTime? serviceStartedUtc = null;
         var needsRead = NeedsCollectorRunRead(serverName, engineEdition, engineKind, collectorName, rowCount, awsRdsKind);
         var seenToRun = collectorsSeenToRun?.Contains(collectorName) == true;
 
@@ -155,6 +156,21 @@ public partial class ViewerServerTab
                 collectorLastRunUtc = null;
                 serverLastCollectedUtc = null;
                 serverFirstCollectedUtc = null;
+            }
+
+            /* #6932: a collector with no run waits one cadence after the collecting service started for its first slot, which the
+               server's first collection (long ago) cannot say. The start is read only for that case. A failed read leaves it
+               null and the sentence stays on the server's own times. */
+            if (collectorLastRunUtc is null && serverLastCollectedUtc is not null && readServiceStarted is not null)
+            {
+                try
+                {
+                    serviceStartedUtc = await readServiceStarted();
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    serviceStartedUtc = null;
+                }
             }
 
             if (collectorLastRunUtc is not null && RunSettlesNeverRanRule(collectorName))
@@ -183,7 +199,7 @@ public partial class ViewerServerTab
 
         return EngineGapStateFromRuns(
             serverName, engineEdition, engineKind, collectorName, rowCount, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc,
-            awsRdsKind, outcomeNote);
+            awsRdsKind, outcomeNote, serviceStartedUtc);
     }
 
     /// <summary>
@@ -226,6 +242,12 @@ public partial class ViewerServerTab
         int serverId, string collectorName);
 
     /// <summary>
+    /// The read of when the newest collecting service process started (#6932): <see cref="ViewerDataService.GetServiceStartedAsync"/>
+    /// on the live path, and a stand-in in a test. Null where the store has no version row yet.
+    /// </summary>
+    internal delegate Task<DateTime?> ServiceStartReader();
+
+    /// <summary>
     /// Whether one read that saw <paramref name="collectorName"/> run settles the never-ran rule for good. <c>collection_log</c>
     /// only gains rows, so a collector that has run stays "ran". Not so for a collector with a
     /// <see cref="SwitchedOffReasonsFor"/> text (running_jobs): its "no longer invoked" arm compares its last run with the
@@ -240,7 +262,8 @@ public partial class ViewerServerTab
         ReadEngineGapStateAsync(
             (serverId, collector) => _dataService.GetCollectorLastRunAsync(serverId, collector), _collectorsSeenToRun,
             _server.ServerId, _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, rowCount,
-            (serverId, collector) => _dataService.GetLatestCollectorOutcomeAsync(serverId, collector), _server.AwsRdsKind);
+            (serverId, collector) => _dataService.GetLatestCollectorOutcomeAsync(serverId, collector), _server.AwsRdsKind,
+            () => _dataService.GetServiceStartedAsync());
 
     /// <summary>
     /// Fills a surface's message element once its data is bound, with what <see cref="EngineGapStateFromRuns"/> says for this
