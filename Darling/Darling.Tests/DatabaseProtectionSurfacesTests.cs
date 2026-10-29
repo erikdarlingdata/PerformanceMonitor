@@ -130,12 +130,13 @@ public sealed class ViewerDatabaseProtectionTextTests
     [InlineData("not_collected", "Azure SQL Database does not have this data.")]
     [InlineData("precondition", "The monitoring login was refused SELECT on msdb.dbo.backupset.")]
     [InlineData("unavailable", "No database protection capture in the 24-hour window.")]
-    public void ARead_WithoutACapture_ShowsTheReadsOwnSentence_InPlaceOfTheList(string status, string sentence)
+    public void ARead_WithoutACapture_ShowsTheReadsOwnSentenceOnce_AndTheGridSaysNoData(string status, string sentence)
     {
         var read = new ViewerDatabaseProtectionRead(status, sentence, null, [], null);
 
         Assert.Equal(sentence, ViewerDatabaseProtectionText.StatusLine(read));
-        Assert.Equal(sentence, ViewerDatabaseProtectionText.EmptyText(read));
+        /* #6907: the status line carries the sentence, so the grid note must not repeat it. */
+        Assert.Equal(ViewerDatabaseProtectionText.NoData, ViewerDatabaseProtectionText.EmptyText(read));
         Assert.Empty(ViewerDatabaseProtectionText.Rows(read));
     }
 

@@ -47,6 +47,9 @@ public static class ViewerIdentityCapacityText
     /// <summary>Which bars this tab bands with: the shipped ones, which the alert's configured bars and overrides may differ from.</summary>
     public const string BandsNote = "Bands: warning from 70% used, critical from 90% used (the shipped bars, the alert's own bars may differ)";
 
+    /// <summary>#6907: the grid note when the read holds no scan. The status line already gives the reason, so the grids do not repeat it.</summary>
+    public const string NoData = "No data for this server.";
+
     private const string Dash = "-";
 
     /// <summary>The status line: how many columns are critical and warning, and how many databases were scanned.</summary>
@@ -75,7 +78,7 @@ public static class ViewerIdentityCapacityText
     public static string ColumnsEmptyText(ViewerIdentityCapacityRead read)
     {
         ArgumentNullException.ThrowIfNull(read);
-        return read.Read is { HasScan: true } ? NoColumns : read.Message ?? NoScan;
+        return read.Read is { HasScan: true } ? NoColumns : NoData;
     }
 
     /// <summary>The databases, one row each: scanned clean, scanned with columns, or not yet scanned.</summary>
@@ -103,11 +106,15 @@ public static class ViewerIdentityCapacityText
     private static string LocalTime(DateTime utc) =>
         DateTime.SpecifyKind(utc, DateTimeKind.Utc).ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
 
-    /// <summary>The sentence under the scan list when it has no row.</summary>
+    /// <summary>
+    /// The sentence under the scan list when it has no row. The list has a row for every scanned, unscanned and skipped database, so
+    /// it is empty only when no database was scanned in the window (<c>HasScan</c> false). That is the case where the status line
+    /// carries the read's own sentence (#6907), so this note is always <see cref="NoData"/>.
+    /// </summary>
     public static string ScanEmptyText(ViewerIdentityCapacityRead read)
     {
         ArgumentNullException.ThrowIfNull(read);
-        return read.Message ?? NoScan;
+        return NoData;
     }
 
     /// <summary>The scan state of a scanned database that has <paramref name="columnsAbove10"/> columns above 10 percent.</summary>

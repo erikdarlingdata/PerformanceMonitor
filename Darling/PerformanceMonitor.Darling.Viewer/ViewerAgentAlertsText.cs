@@ -38,6 +38,12 @@ public static class ViewerAgentAlertsText
     /// <summary>What the tab says when the read holds no capture and gave no sentence of its own.</summary>
     public const string NoCapture = "No SQL Server Agent alert capture yet.";
 
+    /// <summary>
+    /// #6907: the grid note when the read holds no capture. The status line above the grids already gives the reason (the read's
+    /// own sentence), so the grids say only that they hold no data instead of repeating it.
+    /// </summary>
+    public const string NoData = "No data for this server.";
+
     private const string Dash = "—";
 
     /// <summary>The status line: the alert setup word, the alerts defined and when the newest capture was taken.</summary>
@@ -74,18 +80,18 @@ public static class ViewerAgentAlertsText
             : string.Join(", ", gap.Missing.Select(m => m.ToString(CultureInfo.InvariantCulture)));
     }
 
-    /// <summary>The sentence under the gaps list when it has no row: the all-clear for ok, the read's sentence otherwise.</summary>
+    /// <summary>The sentence under the gaps list when it has no row: the all-clear for ok, <see cref="NoData"/> otherwise (the status line has the reason).</summary>
     public static string GapsEmptyText(ViewerAgentAlertsRead read)
     {
         ArgumentNullException.ThrowIfNull(read);
-        return read.InstanceStatus is null ? read.Message ?? NoCapture : NoGaps;
+        return read.InstanceStatus is null ? NoData : NoGaps;
     }
 
     /// <summary>The sentence under the alerts list when it has no row.</summary>
     public static string AlertsEmptyText(ViewerAgentAlertsRead read)
     {
         ArgumentNullException.ThrowIfNull(read);
-        return read.InstanceStatus is null ? read.Message ?? NoCapture : NoAlertsDefined;
+        return read.InstanceStatus is null ? NoData : NoAlertsDefined;
     }
 
     /// <summary>The alerts of the newest capture, one row each.</summary>

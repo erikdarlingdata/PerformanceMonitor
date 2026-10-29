@@ -32,7 +32,7 @@
 
         <Grid Grid.Row="2" Margin="10,0,10,6">
             <DataGrid x:Name="DatabasesDataGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="True"
-                      GridLinesVisibility="Horizontal" HeadersVisibility="Column" SelectionMode="Extended">
+                      GridLinesVisibility="Horizontal" HeadersVisibility="Column" ColumnHeaderHeight="30" SelectionMode="Extended">
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="Database" Binding="{Binding Database}" Width="200"/>
                     <DataGridTextColumn Header="State" Binding="{Binding State}" Width="90"/>
@@ -43,7 +43,7 @@
                     <DataGridTextColumn Header="Not judged because" Binding="{Binding NotJudgedBecause}" Width="*"/>
                 </DataGrid.Columns>
             </DataGrid>
-            <TextBlock x:Name="EmptyMessage" Visibility="Collapsed" TextWrapping="Wrap" Margin="4,6"
+            <TextBlock x:Name="EmptyMessage" Visibility="Collapsed" TextWrapping="Wrap" Margin="4,36,4,6"
                        VerticalAlignment="Top" Foreground="{DynamicResource ForegroundMutedBrush}"/>
         </Grid>
     </Grid>
