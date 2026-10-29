@@ -205,6 +205,8 @@ OUTER APPLY
 WHERE wt.blocking_session_id IS NOT NULL
 AND   wt.blocking_session_id <> 0
 AND   wt.blocking_session_id <> wt.session_id
+/* #6896: a memory-grant wait named this snapshot's own session as the blocker, so the monitor blamed itself. Skip it. */
+AND   wt.blocking_session_id <> @@SPID
 AND   wt.session_id > 50
 /* #6312: session_id > 50 is not a user-session test on Azure SQL Database, where internal sessions carry ids above 50
    and wait on each other; an idle database raised a blocking alert for 5 sessions. Only a user session's wait is blocking. */
