@@ -24,7 +24,7 @@
 # this line and global.json together, deliberately, instead of being bumped by an upstream tag move.
 # Dependabot's dotnet-sdk updates edit only global.json, so DockerfileSdkPinTests fails their pull request
 # until this line matches (#3906).
-FROM mcr.microsoft.com/dotnet/sdk:10.0.402 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0.403 AS build
 
 # The msbuild version property for the publish below, threaded in by nightly.yml (#3455) so the
 # service compiled into a :nightly image stamps the same 3.7.0-nightly.<date>.<run> string its image

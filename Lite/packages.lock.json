@@ -10,18 +10,18 @@
       },
       "DuckDB.NET.Bindings.Full": {
         "type": "Direct",
-        "requested": "[1.5.5, )",
-        "resolved": "1.5.5",
-        "contentHash": "QIyg93jXN+ebHtsl3UhNmoKV+UoBlHxicycGUVY8cw/kwTGB8CrrULcLr7ngUkk5pftaPoyIHycxTgshBOalaA=="
+        "requested": "[1.5.6.1, )",
+        "resolved": "1.5.6.1",
+        "contentHash": "Lk/w0DHTr2MjhTFnSkO0+al6FpdZBfxXESDzULKuNVrIOI6r+nUaFE4rlOo0L+ZgBSTVd6qqHriGL7gu4OSJDA=="
       },
       "DuckDB.NET.Data": {
         "type": "Direct",
-        "requested": "[1.5.5, )",
-        "resolved": "1.5.5",
-        "contentHash": "VerE5IRph9ui+E8Ljz1xNuErbuZMrYvfwxo+KLZmBngrpj3UVdYWXmr2FwvHRJWwuCpuk7PcouEbdhNnU5DYlQ==",
+        "requested": "[1.5.6.1, )",
+        "resolved": "1.5.6.1",
+        "contentHash": "fz5jYe/NGufgjdYL5Trr+LtZB5PXj2kjcygpeu4fULaimX8T6o1zzRoLXdGXD8GuF103jwLD5xmWcgfX1XRrPg==",
         "dependencies": {
           "Apache.Arrow": "23.0.0",
-          "DuckDB.NET.Bindings": "1.5.5"
+          "DuckDB.NET.Bindings": "1.5.6.1"
         }
       },
       "Hardcodet.NotifyIcon.Wpf": {
@@ -178,8 +178,8 @@
       },
       "DuckDB.NET.Bindings": {
         "type": "Transitive",
-        "resolved": "1.5.5",
-        "contentHash": "DrQS4YgORTdmQ7ZkPosk/Wo/f3ctlBQSmz0O23BKbIc/7Tb+hgCOgYSX5Bdy2/Oqmc3t8J9Dz8Z/BQOqCfpoww=="
+        "resolved": "1.5.6.1",
+        "contentHash": "aaDbLAfmnClaZ+VDoUYMVxNO5OuTdNn4byrKrxIl1vavZJknyTgL9XqJVTeJtGoV/wny9OhEQnemfwHbcHTx3w=="
       },
       "HarfBuzzSharp": {
         "type": "Transitive",
@@ -833,9 +833,9 @@
     "net10.0-windows7.0/win-x64": {
       "DuckDB.NET.Bindings.Full": {
         "type": "Direct",
-        "requested": "[1.5.5, )",
-        "resolved": "1.5.5",
-        "contentHash": "QIyg93jXN+ebHtsl3UhNmoKV+UoBlHxicycGUVY8cw/kwTGB8CrrULcLr7ngUkk5pftaPoyIHycxTgshBOalaA=="
+        "requested": "[1.5.6.1, )",
+        "resolved": "1.5.6.1",
+        "contentHash": "Lk/w0DHTr2MjhTFnSkO0+al6FpdZBfxXESDzULKuNVrIOI6r+nUaFE4rlOo0L+ZgBSTVd6qqHriGL7gu4OSJDA=="
       },
       "Microsoft.Data.SqlClient": {
         "type": "Direct",
