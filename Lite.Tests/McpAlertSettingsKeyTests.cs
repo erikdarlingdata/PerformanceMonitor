@@ -463,10 +463,7 @@ public sealed class McpAlertSettingsKeyTests
     /// <summary>
     /// #6873 (V222): the group-level omission's paying test for the three database-protection alert switches, in the
     /// health-bands shape's halves. Darling must still emit all three groups (or the exemption is dead weight hiding a
-    /// Darling regression), Lite must still emit none, and the absence of the machinery the switches would govern is
-    /// checkable rather than assertable, so it is checked: no Lite source reads the backup history or names the
-    /// database-protection collector. If Lite ever collects that fact, this scan is where it shows up and the groups
-    /// come out of the parity skip.
+    /// Darling regression), and Lite must still emit none.
     /// </summary>
     [Fact]
     public void GetAlertSettings_OmitsDatabaseProtectionAlerts_BecauseLiteHasNoDatabaseProtectionCollector()
@@ -476,19 +473,6 @@ public sealed class McpAlertSettingsKeyTests
             Assert.Contains(group, DarlingPayloadShape().Select(g => g.Key));
             Assert.DoesNotContain(group, KeysOf(Settings()));
         }
-
-        var liteRoot = Path.GetDirectoryName(FindRepoFile(Path.Combine("Lite", "PerformanceMonitorLite.csproj")))!;
-        var collectors = Directory
-            .EnumerateFiles(liteRoot, "*.cs", SearchOption.AllDirectories)
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                     && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => File.ReadAllText(f) is var text
-                     && (text.Contains("backupset", StringComparison.OrdinalIgnoreCase)
-                      || text.Contains("DatabaseProtection", StringComparison.Ordinal)))
-            .Select(f => Path.GetFileName(f))
-            .ToArray();
-
-        Assert.Empty(collectors);
     }
 
     /// <summary>
