@@ -65,7 +65,7 @@ namespace PerformanceMonitor.Collectors;
 /// <see cref="MaxEventsPerPass"/> events, so one pass stays under the host's command timeout (a read the client cancels
 /// saves no state and would repeat every interval); a pass that hits the cap keeps its rows and moves the bookmark to the
 /// last buffer it scanned, even when every event there was older than the watermark, and the next one continues. Anything
-/// that stops the file read (no event_file target, a permission refusal, Managed Instance or RDS, an error) drops back to
+/// that stops the file read (no event_file target, a permission refusal, RDS, an error) drops back to
 /// the ring buffer exactly as before, truncation measurement included. The run records <c>event_file_events</c> for a
 /// file read that reached the end of what the file holds (a pass the cap stopped does not, #6453), <c>event_file_fallback</c> for the fallback, <c>event_file_error</c> (the SQL Server error number) next to
 /// it when an error caused it, and <c>event_file_buffer_cut</c> when one buffer held more than <see cref="BufferReReadFactor"/> times the cap, and <c>event_file_wildcard</c> when the bookmark's file had rolled over and the read opened every rollover file (#6544).</para>
@@ -368,6 +368,14 @@ BEGIN
     END;
 END;
 
+/* #6897: Managed Instance refuses every path with a directory in it and the `_0_` pattern (error 40538), so there the
+   read always uses the bare pattern the host passes. The target must still name a file, or there is no event_file to read. */
+IF  @read_path_override IS NOT NULL
+AND @event_file_name IS NOT NULL
+BEGIN
+    SET @event_file_path = @read_path_override;
+END;
+
 SET @attempt =
     CASE
         WHEN @bookmark_file IS NOT NULL
@@ -392,7 +400,14 @@ BEGIN
         END;
 
     SELECT
-        @read_path = CASE WHEN @read_wildcard = 1 THEN @event_file_path ELSE @event_file_name END,
+        @read_path =
+            CASE
+                WHEN @read_path_override IS NOT NULL
+                THEN @read_path_override
+                WHEN @read_wildcard = 1
+                THEN @event_file_path
+                ELSE @event_file_name
+            END,
         @read_file = CASE WHEN @attempt = 1 THEN @bookmark_file END,
         @read_offset = CASE WHEN @attempt = 1 THEN @bookmark_offset END,
         @read_cutoff =
@@ -665,8 +680,25 @@ SELECT
             new("@bookmark_file", bookmark?.File, CollectorParameterType.NVarChar260),
             new("@bookmark_offset", bookmark?.Offset, CollectorParameterType.BigInt),
             new("@max_events", MaxEventsPerPass, CollectorParameterType.Int32),
+            new("@read_path_override", EventFileReadPathOverride(context.Target), CollectorParameterType.NVarChar260),
         });
     }
+
+    /// <summary>
+    /// The bare file pattern Managed Instance reads the system_health event_file with (#6897).
+    /// </summary>
+    internal const string ManagedInstanceReadPath = "system_health*.xel";
+
+    /// <summary>
+    /// #6897: the read path the batch must use instead of the directory-qualified one, or NULL to keep the usual paths. Azure
+    /// SQL Managed Instance refuses any path with a directory in it and the <c>system_health_0_*.xel</c> pattern with error
+    /// 40538, and accepts the bare <c>system_health*.xel</c> for the fresh read and for the bookmark resume alike (the
+    /// bookmark's <c>file_name</c> goes in unchanged, as the function returned it). The <c>_0_</c> pattern exists so a user
+    /// session named like <c>system_health_copy</c> is not matched, and on Managed Instance a user session cannot write an
+    /// event_file to a local folder (only to an https URL), so the bare pattern cannot match another session's files there.
+    /// </summary>
+    internal static string? EventFileReadPathOverride(CollectorTargetInfo target) =>
+        target.IsAzureManagedInstance ? ManagedInstanceReadPath : null;
 
     /// <summary>
     /// The cutoff a pass reads past: the most recent event_time in the host store, or <see cref="CollectorContext.EventFallbackWindow"/>
