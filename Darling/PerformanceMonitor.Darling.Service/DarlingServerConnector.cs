@@ -832,7 +832,7 @@ FROM pg_catalog.pg_control_system() AS s";
             var checksTheWrongPrincipal = runsAsConsoleUser && !config.UsesSqlAuth && !config.UsesEntra;
             var missingGrants = isPostgres || checksTheWrongPrincipal
                 ? null
-                : await ProbeMissingGrantsAsync(runtime.ConnectionString, runtime.Target.IsAzureSqlDb, logger, cancellationToken);
+                : await ProbeMissingGrantsAsync(runtime.ConnectionString, runtime.Target.IsAzureSqlDb, logger, cancellationToken, isAwsRds: runtime.Target.IsAwsRds);
 
             return new ConnectionProbeResult(
                 Success: true,
@@ -888,13 +888,19 @@ FROM pg_catalog.pg_control_system() AS s";
     /// names each missing one with the statement that adds it, or null when none is missing. It never throws except for cancellation and
     /// says nothing when it cannot read the answer (an old version that does not know a permission name answers NULL, which is no claim):
     /// the connection worked, and a missing grant is a warning beside that result, not a failure of it.
-    /// <paramref name="createConnection"/> is a test seam; null opens a SqlConnection.
+    /// <paramref name="createConnection"/> is a test seam; null opens a SqlConnection. <paramref name="isAwsRds"/> leaves out the grants RDS refuses (#6889).
     /// </summary>
     internal static async Task<string?> ProbeMissingGrantsAsync(
         string connectionString, bool isAzureSqlDatabase, ILogger? logger, CancellationToken cancellationToken,
-        Func<string, System.Data.Common.DbConnection>? createConnection = null)
+        Func<string, System.Data.Common.DbConnection>? createConnection = null,
+        bool isAwsRds = false)
     {
-        var entries = isAzureSqlDatabase ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.RequiredAzureGrants : PerformanceMonitor.Darling.Storage.MonitoringGrantScript.RequiredServerGrants;
+        /* #6889: Amazon RDS refuses CONNECT ANY DATABASE to its master user, so asking for it there names a statement that cannot succeed. */
+        var entries = isAzureSqlDatabase
+            ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.RequiredAzureGrants
+            : isAwsRds
+                ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.RequiredRdsServerGrants
+                : PerformanceMonitor.Darling.Storage.MonitoringGrantScript.RequiredServerGrants;
         try
         {
             await using var connection = createConnection is null ? new SqlConnection(connectionString) : createConnection(connectionString);
@@ -915,7 +921,17 @@ FROM pg_catalog.pg_control_system() AS s";
             }
 
             var who = reader.IsDBNull(entries.Count) ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.PlaceholderLogin : reader.GetString(entries.Count);
-            return PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeMissingGrants(PerformanceMonitor.Darling.Storage.MonitoringGrantScript.MissingGrants(entries, held, who));
+            var missingText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeMissingGrants(PerformanceMonitor.Darling.Storage.MonitoringGrantScript.MissingGrants(entries, held, who));
+
+            /* #6889: the count of online user databases the login cannot enter rides after the login name (server scope only). */
+            long noUserDatabases = 0;
+            if (reader.FieldCount > entries.Count + 1 && !reader.IsDBNull(entries.Count + 1))
+            {
+                noUserDatabases = Convert.ToInt64(reader.GetValue(entries.Count + 1), System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            var noUserText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeNoUserDatabases(noUserDatabases, who, isAwsRds);
+            return missingText is null ? noUserText : noUserText is null ? missingText : missingText + " " + noUserText;
         }
         catch (OperationCanceledException)
         {

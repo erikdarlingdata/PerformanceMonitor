@@ -7,12 +7,17 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Data;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Lite.Tests.Helpers;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Models;
+using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -282,14 +287,14 @@ public class EnumerationProbeFailureTests
     }
 
     [Fact]
-    public void QueryStore_OnPrem_Enumeration_Screens_Databases_The_Login_Cannot_Enter()
+    public void QueryStore_OnPrem_Enumeration_Reports_Databases_The_Login_Cannot_Enter()
     {
-        /* #1823's screen, which this collector never got — the sibling enumerations
-           (database_scoped_config, index_object_stats, database_size_stats) all carry it. Without it a
-           least-privilege login probes every database it cannot enter and takes a 916 per database; those
-           failures were harmless while the CATCH swallowed them, but recording them turns a permission
-           posture that is not changing into a probe-failure note and a warning burst EVERY cycle. The
-           screen keeps the probe-failure channel for the failures worth reading. */
+        /* #1823 screened these databases out of the enumeration so a least-privilege login would not take a 916 per database.
+           #6889 moved that screen from the WHERE into the loop, so the skipped databases are REPORTED on the probe-failure
+           channel instead of dropped without a word (a Query Store read for them is otherwise an ordinary empty result).
+           The warning burst #1823 feared is bounded where the failures are logged: LogEnumerationProbeFailures writes ONE
+           Information line for the whole no-access group and keeps the Warning loop for genuine probe failures (see
+           The_Log_Summarises_NoAccess_Databases_In_One_Information_Line below). */
         var plan = QueryStoreCollector.Instance.BuildEnumerationQuery(new CollectorContext
         {
             ServerId = 42,
@@ -298,7 +303,93 @@ public class EnumerationProbeFailureTests
             Deltas = new RecordingCollectorDeltaCalculator(),
         });
 
-        Assert.Contains("HAS_DBACCESS(d.name) = 1", plan!.Text, StringComparison.Ordinal);
+        Assert.Contains("IF HAS_DBACCESS(@db) = 0", plan!.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_Log_Summarises_NoAccess_Databases_In_One_Information_Line_And_Keeps_Genuine_Warnings()
+    {
+        /* #6889: a login with no user in 50 databases must not write 50 Warning lines per collector per cycle. The no-access
+           group is ONE Information line naming the same ten databases the note names, and a real probe failure in the same
+           batch still gets its Warning. */
+        var dir = Path.Combine(Path.GetTempPath(), "pm-probe-log-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var log = new List<(LogLevel Level, string Message)>();
+            using var db = new DuckDbInitializer(Path.Combine(dir, "pm.duckdb"));
+            var service = new RemoteCollectorService(
+                db,
+                new ServerManager(dir),
+                new ScheduleManager(dir),
+                new CapturingLogger(log));
+            var failures = new List<EnumerationProbeFailure>();
+            for (var i = 0; i < 12; i++)
+            {
+                failures.Add(new EnumerationProbeFailure($"db{i:D2}", NoDatabaseAccessNote.ProbeErrorText));
+            }
+
+            failures.Add(new EnumerationProbeFailure("broken", "Msg 916: the real error"));
+
+            service.LogEnumerationProbeFailures(
+                DatabaseScopedConfigCollector.Instance, new ServerConnection { ServerName = "s", DisplayName = "s" }, failures);
+
+            var info = Assert.Single(log, l => l.Level == LogLevel.Information);
+            Assert.Contains("12 online user database(s) not collected", info.Message, StringComparison.Ordinal);
+            Assert.Contains("db09", info.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("db10", info.Message, StringComparison.Ordinal);
+            Assert.Contains("and 2 more", info.Message, StringComparison.Ordinal);
+
+            var warning = Assert.Single(log, l => l.Level == LogLevel.Warning);
+            Assert.Contains("broken", warning.Message, StringComparison.Ordinal);
+            Assert.Contains("Msg 916", warning.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void A_Batch_Of_Only_NoAccess_Databases_Writes_No_Warning()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "pm-probe-log-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var log = new List<(LogLevel Level, string Message)>();
+            using var db = new DuckDbInitializer(Path.Combine(dir, "pm.duckdb"));
+            var service = new RemoteCollectorService(
+                db,
+                new ServerManager(dir),
+                new ScheduleManager(dir),
+                new CapturingLogger(log));
+            var failures = new List<EnumerationProbeFailure>();
+            for (var i = 0; i < 8; i++)
+            {
+                failures.Add(new EnumerationProbeFailure($"db{i}", NoDatabaseAccessNote.ProbeErrorText));
+            }
+
+            service.LogEnumerationProbeFailures(
+                DatabaseScopedConfigCollector.Instance, new ServerConnection { ServerName = "s", DisplayName = "s" }, failures);
+
+            Assert.Single(log, l => l.Level == LogLevel.Information);
+            Assert.DoesNotContain(log, l => l.Level >= LogLevel.Warning);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    private sealed class CapturingLogger(List<(LogLevel Level, string Message)> sink) : ILogger<RemoteCollectorService>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => sink.Add((logLevel, formatter(state, exception)));
     }
 
     /* ── helpers ── */

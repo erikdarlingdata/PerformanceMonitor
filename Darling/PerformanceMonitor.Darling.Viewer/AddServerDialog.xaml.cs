@@ -1206,15 +1206,20 @@ public partial class AddServerDialog : Window
         var principal = MonitoringGrantScript.ChoosePrincipal(new GrantPrincipalInputs(
             auth, username, host, serviceAccount, Environment.MachineName, Environment.UserDomainName,
             ServiceNotOnThisMachine: serviceAccount is null));
+        /* #6889: an Amazon RDS host gets the RDS form (no sysadmin there, and a user in each database instead of CONNECT ANY DATABASE). */
+        var isAzure = MonitoringGrantScript.IsAzureSqlDatabaseHost(host);
+        var isRds = !isAzure && MonitoringGrantScript.IsAwsRdsHost(host);
         var script = MonitoringGrantScript.Build(
-            principal, GrantScriptFinOpsCheck.IsChecked == true, MonitoringGrantScript.IsAzureSqlDatabaseHost(host), host);
+            principal, GrantScriptFinOpsCheck.IsChecked == true, isAzure, host, awsRds: isRds);
         /* The shared guard: another process can hold the clipboard, and the operator can click again. */
         StatusText.Text = !PerformanceMonitor.Ui.ClipboardText.TrySetText(script)
             ? "Could not reach the clipboard. Try again."
             : principal.IsPlaceholder
                 ? $"Copied the grant script with a placeholder account ({principal.Name}): the service is not on this machine, so its account is a guess. "
                     + "Replace it, or run PerformanceMonitor.Darling.Service.exe --grant-script --host <host> on the service's machine for the real one."
-                : $"Copied the grant script for {principal.Name}. Review it, then run it on {host} as a sysadmin.";
+                : isRds
+                    ? $"Copied the Amazon RDS grant script for {principal.Name}. Review it, then run it on {host} as the RDS master user."
+                    : $"Copied the grant script for {principal.Name}. Review it, then run it on {host} as a sysadmin.";
     }
 
     private void CancelButton_Click(object sender, RoutedEventArgs e)

@@ -87,7 +87,7 @@ public sealed class QueryStoreHealthStoreTests
         var context = TestContext(isAzure: false);
         var query = QueryStoreHealthCollector.Instance.BuildEnumerationQuery(context)!;
 
-        Assert.Contains("HAS_DBACCESS(d.name) = 1", query.Text, StringComparison.Ordinal);
+        Assert.Contains("s.has_access = 1", query.Text, StringComparison.Ordinal);
         Assert.Contains("drs.is_primary_replica = 1", query.Text, StringComparison.Ordinal);
         Assert.Contains("d.state_desc = N'ONLINE'", query.Text, StringComparison.Ordinal);
         Assert.Contains("OPTION(RECOMPILE)", query.Text, StringComparison.Ordinal);

@@ -147,17 +147,57 @@ public sealed class JobHistoryCollector : CollectorDefinitionBase<JobHistoryColl
        varies wildly between the all-history first run and the tiny steady-state instance_id windows. */
     /* Parsed once — the template is re-formatted every collection cycle (CA1863). */
     private static readonly System.Text.CompositeFormat QueryTemplateFormat =
-        System.Text.CompositeFormat.Parse(QueryTemplate);
+        System.Text.CompositeFormat.Parse(QueryPrefix + QueryTemplate.Replace("'", "''", StringComparison.Ordinal) + QuerySuffix);
 
-    private const string QueryTemplate = @"
+    /* #6889: msdb.dbo.syscategories is the one object this collector reads that a login can lack SELECT on and no
+       script can fix: Amazon RDS lets its master user read it but refuses to let it GRANT it ("Cannot find the
+       object"), so the RDS form of the grant script leaves it out. SQL Server checks object permission when a
+       statement compiles, so a LEFT JOIN does not help, and neither does an IF around two statements in one
+       batch. The statement therefore runs through sp_executesql, and HAS_PERMS_BY_NAME picks the text: with the
+       grant the join and c.name, without it a NULL category (the rows are otherwise identical, and
+       job_history.category_name is nullable). READ UNCOMMITTED is set on the outer batch and inherited by the
+       inner one. The {0} filter and OPTION(RECOMPILE) are untouched. */
+    private const string QueryPrefix = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+DECLARE
+    @category_readable bit =
+        CASE
+            WHEN HAS_PERMS_BY_NAME(N'msdb.dbo.syscategories', N'OBJECT', N'SELECT') = 1
+            THEN 1
+            ELSE 0
+        END,
+    @sql nvarchar(max) = N'";
+
+    /* {1} is empty on the first run and otherwise the sp_executesql parameter list the incremental filter needs. */
+    private const string QuerySuffix = @"';
+
+SET @sql =
+    REPLACE
+    (
+        REPLACE
+        (
+            @sql,
+            N'$category_select$',
+            CASE WHEN @category_readable = 1 THEN N'c.name' ELSE N'CONVERT(sysname, NULL)' END
+        ),
+        N'$category_join$',
+        CASE
+            WHEN @category_readable = 1
+            THEN N'LEFT JOIN msdb.dbo.syscategories AS c ON c.category_id = j.category_id'
+            ELSE N''
+        END
+    );
+
+EXECUTE sys.sp_executesql @sql{1};";
+
+    private const string QueryTemplate = @"
 SELECT /* PerformanceMonitorLite */
     instance_id = jh.instance_id,
     job_id = CONVERT(varchar(36), jh.job_id),
     job_name = j.name,
     job_enabled = j.enabled,
-    category_name = c.name,
+    category_name = $category_select$,
     step_id = jh.step_id,
     step_name = jh.step_name,
     run_status = jh.run_status,
@@ -188,8 +228,7 @@ SELECT /* PerformanceMonitorLite */
 FROM msdb.dbo.sysjobhistory AS jh
 JOIN msdb.dbo.sysjobs AS j
   ON j.job_id = jh.job_id
-LEFT JOIN msdb.dbo.syscategories AS c
-  ON c.category_id = j.category_id
+$category_join$
 WHERE 1 = 1{0}
 ORDER BY
     jh.instance_id
@@ -457,6 +496,10 @@ AND   (
         && CollectorEngineCapability.IsCollectedOnEngineKind(Instance, engineKind)
         && CollectorEngineCapability.IsCollectedOnEngineEdition(Instance, engineEdition);
 
+    /// <summary>The sp_executesql tail that hands the incremental filter's two parameters down to the inner batch (#6889).</summary>
+    private const string IncrementalExecParameters =
+        ", N'@last_instance_id bigint, @min_run_datetime datetime2', @last_instance_id = @last_instance_id, @min_run_datetime = @min_run_datetime";
+
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         /* Incremental filter selection (the numeric high-water mark, with the Lite archival-emptied fallback):
@@ -476,6 +519,7 @@ AND   (
                                                          double-count). */
         string filter;
         IReadOnlyList<CollectorParameter> parameters;
+        var execParameters = string.Empty;
 
         if (context.NumericWatermark.HasValue)
         {
@@ -493,6 +537,7 @@ AND   (
                 new CollectorParameter("@last_instance_id", context.NumericWatermark.Value, CollectorParameterType.BigInt),
                 new CollectorParameter("@min_run_datetime", minRunDateTime, CollectorParameterType.DateTime2),
             };
+            execParameters = IncrementalExecParameters;
         }
         else if (context.HasCollectedBefore)
         {
@@ -505,7 +550,7 @@ AND   (
             parameters = Array.Empty<CollectorParameter>();
         }
 
-        var text = string.Format(CultureInfo.InvariantCulture, QueryTemplateFormat, filter);
+        var text = string.Format(CultureInfo.InvariantCulture, QueryTemplateFormat, filter, execParameters);
         return new CollectorQuery(text, parameters);
     }
 

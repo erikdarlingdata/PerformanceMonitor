@@ -69,7 +69,7 @@ public sealed class DarlingEmptyEnumerationNoteTests
            cannot drift. Routing the whole enumeration read — items, probe failures, and the composed
            note — through the shared driver does, because there is then no host-side text at all. Lite's
            twin pin asserts the identical routing on its runner. */
-        Assert.Contains("EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken)", source);
+        Assert.Contains("EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken, context.Target.IsAwsRds)", source);
         Assert.Contains("new CollectorRunResult(0, sqlMs, 0, CollectorContext.NoMeasurements, enumeration.Note)", source);
 
         /* Via the shared driver, never a copy of the text — a literal here is exactly the drift this
