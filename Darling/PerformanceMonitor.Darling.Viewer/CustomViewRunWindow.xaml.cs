@@ -52,7 +52,7 @@ public partial class CustomViewRunWindow : Window
         var choices = new List<ServerChoice> { new(null, "All servers") };
         try
         {
-            choices.AddRange((await _dataService.GetServersAsync()).Select(s => new ServerChoice(s.ServerName, s.DisplayName)));
+            choices.AddRange((await _dataService.GetPickerServersAsync()).Select(s => new ServerChoice(s.ServerName, s.DisplayName)));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -387,6 +387,16 @@ GROUP BY s.server_id";
     }
 
     /// <summary>
+    /// The servers a tab's server picker offers (#6906): the managed set the sidebar shows, not the observed registry.
+    /// <see cref="GetServersAsync"/> keeps every server ever registered, removed ones included, so a server removed and
+    /// re-added showed twice in each picker and the removed entry (listed first) answered with a collector that had
+    /// not run. Callers that map ids to names for history (the Manage Servers registered-date lookup, the
+    /// availability-group names) still want the observed read.
+    /// </summary>
+    public Task<List<DarlingServer>> GetPickerServersAsync(CancellationToken cancellationToken = default) =>
+        GetManagedServersAsync(cancellationToken);
+
+    /// <summary>
     /// The config half of <see cref="GetManagedServersAsync"/>: the managed set when the store is seeded, and
     /// null when <see cref="IsConfigSeededAsync"/> says no. That covers a pre-seed store AND a seeded check
     /// that failed, which the check cannot tell apart. Null rather than the observed fallback, for a caller
