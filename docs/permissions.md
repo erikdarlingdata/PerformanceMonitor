@@ -57,6 +57,8 @@ GRANT SELECT ON dbo.sysjobactivity  TO [YourLogin];
 GRANT SELECT ON dbo.sysjobhistory   TO [YourLogin];
 GRANT SELECT ON dbo.sysjobschedules TO [YourLogin];
 GRANT SELECT ON dbo.syscategories   TO [YourLogin];
+GRANT SELECT ON dbo.sysalerts       TO [YourLogin];  -- Agent alert definitions and counters (SQL Server only)
+GRANT SELECT ON dbo.sysnotifications TO [YourLogin]; -- the operators each Agent alert notifies
 GRANT SELECT ON dbo.syssessions     TO [YourLogin];
 GRANT EXECUTE ON dbo.agent_datetime TO [YourLogin];
 ```
@@ -218,7 +220,7 @@ RDS has no sysadmin. The master user is the most powerful login you have, and RD
 | `GRANT CONNECT ANY DATABASE` | Refused: "Grantor does not have GRANT permission." |
 | `GRANT ALTER SETTINGS` | Refused: "Grantor does not have GRANT permission." |
 | msdb `CREATE USER`, and `SELECT` on `sysjobs`, `sysjobactivity`, `sysjobhistory` | Works |
-| msdb `SELECT` on `sysjobsteps`, `sysjobschedules`, `syscategories`, `syssessions`, and `EXECUTE` on `agent_datetime` | Refused: the object cannot be found or you do not have permission |
+| msdb `SELECT` on `sysjobsteps`, `sysjobschedules`, `syscategories`, `sysalerts`, `sysnotifications`, `syssessions`, and `EXECUTE` on `agent_datetime` | Refused: the object cannot be found or you do not have permission |
 | `msdb.dbo.backupset` | No grant needed: `public` already reads it, so backup history works |
 
 Without `CONNECT ANY DATABASE` the login enters no user database by itself, so every per-database collector (Query Store, index and object stats, database size, database scoped configuration) lists no database and stores nothing for it. The fix is a user for the login in each user database. The RDS form of the script does that:
@@ -226,7 +228,7 @@ Without `CONNECT ANY DATABASE` the login enters no user database by itself, so e
 - It leaves out `CONNECT ANY DATABASE` and `ALTER SETTINGS`, each with a comment. Without `ALTER SETTINGS` the service does not set `blocked process threshold (s)`. Set it in the RDS parameter group instead.
 - It runs `CREATE USER ... FOR LOGIN ...` in every current online read-write user database, skipping system databases and `rdsadmin`. It uses the same per-database cursor as the FinOps block, and it is safe to run twice.
 - **A database created later has no user for the login.** Run the script again after you create a database, or run the same `CREATE USER [YourLogin] FOR LOGIN [YourLogin];` in it.
-- In msdb it keeps only the user and the three job reads RDS accepts. Without the other five, a Long-Running Query alert cannot name the Agent job and step, and Running Jobs and Agent Status do not collect on RDS. Job History reads `sysjobs` and `sysjobhistory` and still collects.
+- In msdb it keeps only the user and the three job reads RDS accepts. Without the other seven, a Long-Running Query alert cannot name the Agent job and step, Running Jobs and Agent Status do not collect on RDS, and Agent alerts and their operators are not collected on RDS. Job History reads `sysjobs` and `sysjobhistory` and still collects.
 - With FinOps ticked, the same block also adds the FinOps per-database grants.
 
 Run the script as the RDS master user. The Add Server dialog picks the RDS form for a `*.rds.amazonaws.com` host. The command line does the same, or you can ask for it with `--rds` when a custom DNS name stands in front of the instance:

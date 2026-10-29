@@ -306,7 +306,7 @@ public sealed class MonitoringGrantScriptTests
         Assert.Null(MonitoringGrantScript.DescribeMissingGrants(Array.Empty<(GrantEntry, string)>()));
     }
 
-    /* #6889: Amazon RDS for SQL Server has no sysadmin and refuses CONNECT ANY DATABASE, ALTER SETTINGS and five msdb grants to its
+    /* #6889: Amazon RDS for SQL Server has no sysadmin and refuses CONNECT ANY DATABASE, ALTER SETTINGS and seven msdb grants to its
        master user. The RDS form leaves those out and gives the login a user in each user database instead. */
     private static string RdsScript(bool finOps = false) => MonitoringGrantScript.Build(
         MonitoringGrantScript.ChoosePrincipal(Inputs("sql", "pm_monitor")), finOps, azureSqlDatabase: false, serverLabel: "db1.abc.us-east-1.rds.amazonaws.com", awsRds: true);

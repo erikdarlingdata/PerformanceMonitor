@@ -128,6 +128,8 @@ public static class MonitoringGrantScript
         new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.sysjobhistory", false, "Optional: SQL Agent job monitoring."),
         new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.sysjobschedules", false, "Optional: SQL Agent job monitoring.", RdsRefused: true),
         new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.syscategories", false, "Optional: SQL Agent job monitoring.", RdsRefused: true),
+        new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.sysalerts", false, "Optional: SQL Server Agent alert definitions and counters (not read on Azure SQL Managed Instance or Amazon RDS).", RdsRefused: true),
+        new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.sysnotifications", false, "Optional: the operators each Agent alert notifies.", RdsRefused: true),
         new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.syssessions", false, "Optional: SQL Agent job monitoring.", RdsRefused: true),
         new(GrantSet.Base, GrantScope.Msdb, "EXECUTE", "dbo.agent_datetime", false, "Optional: SQL Agent job monitoring.", RdsRefused: true),
         new(GrantSet.FinOps, GrantScope.EachDatabase, "VIEW DATABASE STATE", null, true, "FinOps Index Analysis runs sp_IndexCleanup in each database you inspect."),
@@ -347,7 +349,7 @@ public static class MonitoringGrantScript
     /// server gets the login, the base grants and the msdb grants, plus the FinOps per-database grants when <paramref name="finOps"/>.
     /// Running it twice is clean: the login and user are created only when missing, and a repeated GRANT is a no-op.
     /// <paramref name="awsRds"/> (#6889) is the Amazon RDS for SQL Server form: RDS has no sysadmin and refuses CONNECT ANY DATABASE, ALTER
-    /// SETTINGS and five msdb grants to its master user, so those are left out and the login gets a user in each current user database
+    /// SETTINGS and seven msdb grants to its master user, so those are left out and the login gets a user in each current user database
     /// instead. It has no effect on an Azure SQL Database script.
     /// </summary>
     public static string Build(GrantPrincipal principal, bool finOps, bool azureSqlDatabase, string? serverLabel = null, bool awsRds = false)
@@ -432,7 +434,7 @@ public static class MonitoringGrantScript
 
         if (awsRds)
         {
-            Line("/* Optional: SQL Agent job history. RDS refuses the grants on sysjobsteps, sysjobschedules, syscategories, syssessions and agent_datetime, so they are left out: a Long-Running Query alert cannot name the Agent job and step, and Running Jobs and Agent Status do not collect on RDS. Job History is complete without them apart from the job category, which shows as empty (the collector reads it as NULL when the login cannot read syscategories). msdb.dbo.backupset needs no grant, public already reads it. */");
+            Line("/* Optional: SQL Agent job history. RDS refuses the grants on sysjobsteps, sysjobschedules, syscategories, sysalerts, sysnotifications, syssessions and agent_datetime, so they are left out: a Long-Running Query alert cannot name the Agent job and step, Running Jobs and Agent Status do not collect on RDS, and Agent alerts and their operators are not collected on RDS. Job History is complete without them apart from the job category, which shows as empty (the collector reads it as NULL when the login cannot read syscategories). msdb.dbo.backupset needs no grant, public already reads it. */");
         }
         else
         {

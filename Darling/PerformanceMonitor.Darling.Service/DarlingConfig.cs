@@ -897,6 +897,12 @@ public sealed class AlertsConfig
     [JsonPropertyName("clientTimeoutsCriticalMultiple")]
     public int ClientTimeoutsCriticalMultiple { get; set; } = AttentionBaselineMath.DefaultCriticalMultiple;
 
+    /// <summary>The "Agent Alert Gaps" alert (#6874): fires when a server's SQL Server Agent alert setup has a gap (no alert for severities 19 to
+    /// 25 or errors 823 to 825, an alert that tells no operator, a disabled alert, a firing that told no one). Ships OFF, like the other alerts that
+    /// start firing on upgrade. Store column <c>agent_alert_gaps_enabled</c> (V222).</summary>
+    [JsonPropertyName("agentAlertGapsEnabled")]
+    public bool AgentAlertGapsEnabled { get; set; }
+
     [JsonPropertyName("longRunningQueryEnabled")]
     public bool LongRunningQueryEnabled { get; set; } = true;
 

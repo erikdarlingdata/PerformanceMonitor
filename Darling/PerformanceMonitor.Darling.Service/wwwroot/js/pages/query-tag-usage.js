@@ -181,6 +181,16 @@ export function edgesText(block) {
   return sentences.length ? sentences.join(" ") : null;
 }
 
+/** #6865: why the section starts later than the window does, in the page's own clock. The same sentence as QueryTagRollupHashRoute.BacklogNote.
+    hours_left_out is the size of the gap (whole hours from the window's first hour to the start, among them the hours the interval table's floor cut), backlog_hours_waiting the backlog hours inside it. */
+export function backlogText(block) {
+  const n = block.backlog_hours_waiting;
+  const left = block.hours_left_out;
+  const start = typeof block.effective_start === "string" && parseUtc(block.effective_start) ? localTime(block.effective_start) : null;
+  return "The figures start " + (start ? "at " + start : "later") + ", which leaves out the first " + left + (left === 1 ? " hour" : " hours") + " of the window, because "
+    + n + (n === 1 ? " hour" : " hours") + " in that part " + (n === 1 ? "is" : "are") + " still being built into the hourly Query Store table. The full window answers once they are built.";
+}
+
 /** A section with no rows in the window says so in one line; the table of zeros under it is not drawn. */
 function isEmptyBlock(block) {
   return !!block && block.status === "empty";
@@ -196,6 +206,8 @@ export function sectionCard(section, block, onTag, range = "this time range", se
   if (section.name === "deadlocks") parts.push(el("div", { class: "muted", text: DEADLOCK_NOTE }));
   /* #6794: an hourly-rollup section says which edges the hour buckets moved (the note names the materialization ceiling). */
   const edges = edgesText(block);
+  /* #6865: the fleet read leaves out the hours that wait for the hourly builder, so the section is the newest span that needs none of them. */
+  if (block.window_truncated === true && Number.isInteger(block.backlog_hours_waiting) && block.backlog_hours_waiting > 0 && Number.isInteger(block.hours_left_out) && block.hours_left_out > 0) parts.push(el("div", { class: "muted", text: backlogText(block) }));
   if (edges) parts.push(el("div", { class: "muted", text: edges }));
   else if (block.tier === "hourly" && block.window_end && parseUtc(block.window_end)) parts.push(el("div", { class: "muted", text: "Read from the hourly rollup up to " + localTime(block.window_end) + "." }));
   if (isEmptyBlock(block) && !Array.isArray(block.servers)) {
