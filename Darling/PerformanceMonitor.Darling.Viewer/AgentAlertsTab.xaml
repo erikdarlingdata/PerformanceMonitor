@@ -36,13 +36,13 @@
                    Foreground="{DynamicResource ForegroundBrush}"/>
         <Grid Grid.Row="3" Margin="10,0,10,6">
             <DataGrid x:Name="GapsDataGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="True"
-                      GridLinesVisibility="Horizontal" HeadersVisibility="Column" MaxHeight="180">
+                      GridLinesVisibility="Horizontal" HeadersVisibility="Column" ColumnHeaderHeight="30" MaxHeight="180">
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="What is wrong" Binding="{Binding Message}" Width="420"/>
                     <DataGridTextColumn Header="Which" Binding="{Binding Which}" Width="*"/>
                 </DataGrid.Columns>
             </DataGrid>
-            <TextBlock x:Name="GapsEmptyMessage" Visibility="Collapsed" TextWrapping="Wrap" Margin="4,6"
+            <TextBlock x:Name="GapsEmptyMessage" Visibility="Collapsed" TextWrapping="Wrap" Margin="4,36,4,6"
                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
         </Grid>
 
@@ -54,7 +54,7 @@
             <TextBlock Grid.Row="0" Text="Alert Definitions" Margin="0,4,0,2" FontWeight="Bold"
                        Foreground="{DynamicResource ForegroundBrush}"/>
             <DataGrid Grid.Row="1" x:Name="AlertsDataGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="True"
-                      GridLinesVisibility="Horizontal" HeadersVisibility="Column" SelectionMode="Extended">
+                      GridLinesVisibility="Horizontal" HeadersVisibility="Column" ColumnHeaderHeight="30" SelectionMode="Extended">
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="Alert" Binding="{Binding Name}" Width="220"/>
                     <DataGridTextColumn Header="Enabled" Binding="{Binding Enabled}" Width="70"/>
@@ -67,7 +67,7 @@
                     <DataGridTextColumn Header="Last fired (server clock)" Binding="{Binding LastFired}" Width="*"/>
                 </DataGrid.Columns>
             </DataGrid>
-            <TextBlock Grid.Row="1" x:Name="AlertsEmptyMessage" Visibility="Collapsed" TextWrapping="Wrap" Margin="4,6"
+            <TextBlock Grid.Row="1" x:Name="AlertsEmptyMessage" Visibility="Collapsed" TextWrapping="Wrap" Margin="4,36,4,6"
                        VerticalAlignment="Top" Foreground="{DynamicResource ForegroundMutedBrush}"/>
         </Grid>
     </Grid>

@@ -33,7 +33,7 @@
 
         <Grid Grid.Row="2" Margin="10,0,10,6">
             <DataGrid x:Name="ColumnsDataGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="True"
-                      GridLinesVisibility="Horizontal" HeadersVisibility="Column" SelectionMode="Extended">
+                      GridLinesVisibility="Horizontal" HeadersVisibility="Column" ColumnHeaderHeight="30" SelectionMode="Extended">
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="Database" Binding="{Binding Database}" Width="130"/>
                     <DataGridTextColumn Header="Table" Binding="{Binding Table}" Width="200"/>
@@ -46,7 +46,7 @@
                     <DataGridTextColumn Header="Band" Binding="{Binding Band}" Width="*"/>
                 </DataGrid.Columns>
             </DataGrid>
-            <TextBlock x:Name="ColumnsEmptyMessage" Visibility="Collapsed" TextWrapping="Wrap" Margin="4,6"
+            <TextBlock x:Name="ColumnsEmptyMessage" Visibility="Collapsed" TextWrapping="Wrap" Margin="4,36,4,6"
                        VerticalAlignment="Top" Foreground="{DynamicResource ForegroundMutedBrush}"/>
         </Grid>
 
@@ -58,14 +58,14 @@
             <TextBlock Grid.Row="0" Text="Scan State" Margin="0,4,0,2" FontWeight="Bold"
                        Foreground="{DynamicResource ForegroundBrush}"/>
             <DataGrid Grid.Row="1" x:Name="ScanDataGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="True"
-                      GridLinesVisibility="Horizontal" HeadersVisibility="Column" MaxHeight="180">
+                      GridLinesVisibility="Horizontal" HeadersVisibility="Column" ColumnHeaderHeight="30" MaxHeight="180">
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="Database" Binding="{Binding Database}" Width="200"/>
                     <DataGridTextColumn Header="Scan state" Binding="{Binding State}" Width="280"/>
                     <DataGridTextColumn Header="Last scanned" Binding="{Binding LastScanned}" Width="*"/>
                 </DataGrid.Columns>
             </DataGrid>
-            <TextBlock Grid.Row="1" x:Name="ScanEmptyMessage" Visibility="Collapsed" TextWrapping="Wrap" Margin="4,6"
+            <TextBlock Grid.Row="1" x:Name="ScanEmptyMessage" Visibility="Collapsed" TextWrapping="Wrap" Margin="4,36,4,6"
                        VerticalAlignment="Top" Foreground="{DynamicResource ForegroundMutedBrush}"/>
         </Grid>
     </Grid>

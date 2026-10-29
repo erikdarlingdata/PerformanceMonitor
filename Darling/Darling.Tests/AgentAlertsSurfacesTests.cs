@@ -115,14 +115,15 @@ public sealed class ViewerAgentAlertsTextTests
     }
 
     [Fact]
-    public void ARead_WithoutACapture_ShowsTheReadsOwnSentence_InPlaceOfTheLists()
+    public void ARead_WithoutACapture_ShowsTheReadsOwnSentenceOnce_AndTheGridsSayNoData()
     {
         var read = new ViewerAgentAlertsRead(ViewerAgentAlertsRead.NotCollected, "Azure SQL Database does not have this data.", null,
             new AgentAlertRead([], null, null, 0));
 
         Assert.Equal("Azure SQL Database does not have this data.", ViewerAgentAlertsText.StatusLine(read));
-        Assert.Equal("Azure SQL Database does not have this data.", ViewerAgentAlertsText.GapsEmptyText(read));
-        Assert.Equal("Azure SQL Database does not have this data.", ViewerAgentAlertsText.AlertsEmptyText(read));
+        /* #6907: the status line carries the sentence, so the grid notes must not repeat it. */
+        Assert.Equal(ViewerAgentAlertsText.NoData, ViewerAgentAlertsText.GapsEmptyText(read));
+        Assert.Equal(ViewerAgentAlertsText.NoData, ViewerAgentAlertsText.AlertsEmptyText(read));
         Assert.Empty(ViewerAgentAlertsText.GapRows(read));
         Assert.Empty(ViewerAgentAlertsText.AlertRows(read));
     }

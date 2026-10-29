@@ -31,6 +31,9 @@ public static class ViewerDatabaseProtectionText
     /// <summary>What the tab says when the read holds no capture and gave no sentence of its own.</summary>
     public const string NoCapture = "No database protection capture yet.";
 
+    /// <summary>#6907: the grid note when the read holds no capture. The status line already gives the reason, so the grid does not repeat it.</summary>
+    public const string NoData = "No data for this server.";
+
     private const string Dash = "-";
 
     /// <summary>The status line: the summary sentence and when the newest capture was taken.</summary>
@@ -50,7 +53,7 @@ public static class ViewerDatabaseProtectionText
     public static string EmptyText(ViewerDatabaseProtectionRead read)
     {
         ArgumentNullException.ThrowIfNull(read);
-        return read.Summary is null ? read.Message ?? NoCapture : NoDatabases;
+        return read.Summary is null ? NoData : NoDatabases;
     }
 
     /// <summary>One fact as text: the age, the state word when it is more than ok or overdue, and "overdue" when the banding says so.</summary>

@@ -168,13 +168,14 @@ public sealed class ViewerIdentityCapacityTextTests
     [InlineData(ViewerIdentityCapacityRead.Unavailable, "No identity capacity scan in the 168-hour window.")]
     [InlineData(ViewerIdentityCapacityRead.Precondition, "The identity_capacity collector was refused: SELECT permission was denied.")]
     [InlineData(ViewerIdentityCapacityRead.NotCollected, "This engine does not have this data.")]
-    public void ARead_WithoutAScan_ShowsTheReadsOwnSentence_InPlaceOfTheLists(string status, string message)
+    public void ARead_WithoutAScan_ShowsTheReadsOwnSentenceOnce_AndTheGridsSayNoData(string status, string message)
     {
         var read = new ViewerIdentityCapacityRead(status, message, new IdentityCapacityRead([], []));
 
         Assert.Equal(message, ViewerIdentityCapacityText.StatusLine(read));
-        Assert.Equal(message, ViewerIdentityCapacityText.ColumnsEmptyText(read));
-        Assert.Equal(message, ViewerIdentityCapacityText.ScanEmptyText(read));
+        /* #6907: the status line carries the sentence, so the grid notes must not repeat it. */
+        Assert.Equal(ViewerIdentityCapacityText.NoData, ViewerIdentityCapacityText.ColumnsEmptyText(read));
+        Assert.Equal(ViewerIdentityCapacityText.NoData, ViewerIdentityCapacityText.ScanEmptyText(read));
         Assert.Empty(ViewerIdentityCapacityText.ColumnRows(read));
         Assert.Empty(ViewerIdentityCapacityText.ScanRows(read));
     }
