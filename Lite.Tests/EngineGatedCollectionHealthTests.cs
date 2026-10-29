@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Text.Json;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -54,5 +55,33 @@ public sealed class EngineGatedCollectionHealthTests
 
         Assert.Equal(2, running.Count);
         Assert.Empty(notCollected);
+    }
+
+    [Fact]
+    public void TheCollectionHealthTab_ShowsAGatedCollectorAsNotCollected_WithTheEnginesSentence()
+    {
+        var attention = Row("attention", failing: true);
+        var waits = Row("wait_stats", failing: false);
+        var broken = Row("query_stats", failing: true);
+        Assert.Equal("FAILING", attention.DisplayStatus);
+
+        ServerTab.ApplyEngineGate(new() { attention, waits, broken }, "RDS-WEB-1", 2, AwsRdsKind.RdsWebOrExpress);
+
+        Assert.Equal("not_collected", attention.DisplayStatus);
+        Assert.Contains("Amazon RDS", attention.NoteFormatted, StringComparison.Ordinal);
+        Assert.Equal("HEALTHY", waits.DisplayStatus);
+        /* A collector the engine runs keeps its band, failing or not. */
+        Assert.Equal("FAILING", broken.DisplayStatus);
+    }
+
+    [Fact]
+    public void TheCollectionHealthTab_MakesNoClaimForAPlainServer_AndClearsAStaleMark()
+    {
+        var attention = Row("attention", failing: true);
+        ServerTab.ApplyEngineGate(new() { attention }, "RDS-WEB-1", 2, AwsRdsKind.RdsWebOrExpress);
+        Assert.Equal("not_collected", attention.DisplayStatus);
+
+        ServerTab.ApplyEngineGate(new() { attention }, "SQL-1", 2, AwsRdsKind.None);
+        Assert.Equal("FAILING", attention.DisplayStatus);
     }
 }

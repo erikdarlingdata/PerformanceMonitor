@@ -1278,6 +1278,7 @@ public partial class ServerTab : UserControl
                and the stamped one also holds when the display mode flips or another tab is selected first. */
             var tabClock = _serverClock;
             foreach (var row in collectionHealthTask.Result) row.Clock = tabClock;
+            ApplyEngineGate(collectionHealthTask.Result, _server.DisplayName, _engineEdition, _awsRdsKind);
             foreach (var row in collectionLogTask.Result) row.Clock = tabClock;
 
             SkippedCyclesSummary.Text = (await skippedCyclesTask)?.SummaryLine(tabClock) ?? "Skipped cycles in 24 h: could not be read";

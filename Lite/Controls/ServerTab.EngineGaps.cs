@@ -292,4 +292,21 @@ public partial class ServerTab : UserControl
             ? Visibility.Visible
             : Visibility.Collapsed;
     }
+
+    /// <summary>
+    /// #6912: marks the rows of the collectors this server's engine does not run, so the Status column reads <c>not_collected</c> and the
+    /// Note column carries the engine's sentence, as <c>get_collection_health</c> lists them
+    /// (<see cref="PerformanceMonitorLite.Mcp.McpEngineCapability.SplitCollectionHealthByEngine"/>, the same <see cref="CollectorEngineCapability.NotCollectedMessage"/> gate).
+    /// What such a collector logged before the gate existed (an Amazon RDS Web or Express server's SESSION_MISSING runs for <c>attention</c>)
+    /// stays in the window and bands FAILING, and a collector that does not run can never replace it. An engine not read yet makes no claim.
+    /// </summary>
+    internal static void ApplyEngineGate(List<CollectorHealthRow> health, string serverName, int engineEdition, AwsRdsKind awsRdsKind)
+    {
+        foreach (var row in health)
+        {
+            var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, row.CollectorName, awsRdsKind);
+            row.EngineGated = message is not null;
+            row.EngineNotCollectedMessage = message;
+        }
+    }
 }

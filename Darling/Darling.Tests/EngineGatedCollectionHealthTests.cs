@@ -13,7 +13,9 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
+using ViewerHealthRow = PerformanceMonitor.Darling.Viewer.CollectorHealthRow;
 
 namespace Darling.Tests;
 
@@ -103,5 +105,70 @@ public sealed class EngineGatedCollectionHealthTests
         }
 
         Assert.Equal(2, ungated.Failing);
+    }
+
+    [Fact]
+    public void AGatedDeadlocksCollector_ReadsAsNoDeadlockCapture_OnTheFleetCard()
+    {
+        var gated = FleetEngineGatedCollectors.For(2, null, AwsRdsKind.RdsWebOrExpress);
+        Assert.Contains("deadlocks", gated);
+        var deadlocks = Failing("deadlocks");
+        Assert.Equal("FAILING", deadlocks.HealthStatus);
+
+        var counts = DarlingFleetReader.AddCollector(default, deadlocks, alwaysOnOff: false, engineGated: true);
+
+        /* No band at all, the same null a server with no deadlocks row in the window has, which the card classifies as a silent collector.
+           The stale FAILING band would have classified as a deadlock capture that was read (a Read source, counted as covered). */
+        Assert.Null(counts.DeadlockBand);
+        Assert.Equal(FleetDeadlockSource.CollectorSilent, FleetDeadlockCoverage.ClassifyDeadlockSource(isPostgres: false, counts.DeadlockBand));
+        Assert.Equal(0, counts.Failing);
+        Assert.Equal(1, counts.NotCollected);
+
+        var ungated = DarlingFleetReader.AddCollector(default, deadlocks, alwaysOnOff: false, engineGated: false);
+        Assert.Equal("FAILING", ungated.DeadlockBand);
+        Assert.Equal(1, ungated.Failing);
+    }
+
+    private static ViewerHealthRow ViewerRow(string collector, bool failing)
+    {
+        var last = DateTime.UtcNow.AddMinutes(-1);
+        return new ViewerHealthRow
+        {
+            CollectorName = collector,
+            TotalRuns = 315,
+            SuccessCount = failing ? 0 : 315,
+            ErrorCount = failing ? 315 : 0,
+            LastSuccessTime = failing ? null : last,
+            LastRunTime = last,
+        };
+    }
+
+    [Fact]
+    public void TheViewersCollectionHealthTab_ShowsAGatedCollectorAsNotCollected_WithTheEnginesSentence()
+    {
+        var attention = ViewerRow("attention", failing: true);
+        var waits = ViewerRow("wait_stats", failing: false);
+        var broken = ViewerRow("query_stats", failing: true);
+        Assert.Equal("FAILING", attention.DisplayStatus);
+
+        ViewerServerTab.ApplyEngineGate(new() { attention, waits, broken }, Name, 2, null, AwsRdsKind.RdsWebOrExpress);
+
+        Assert.Equal("not_collected", attention.DisplayStatus);
+        Assert.Contains("Amazon RDS", attention.NoteFormatted, StringComparison.Ordinal);
+        Assert.Equal("HEALTHY", waits.DisplayStatus);
+        /* A collector the engine runs keeps its band, failing or not. */
+        Assert.Equal("FAILING", broken.DisplayStatus);
+    }
+
+    [Fact]
+    public void TheViewersCollectionHealthTab_MakesNoClaimForAServerWhoseEngineIsPlainOrUnread()
+    {
+        var attention = ViewerRow("attention", failing: true);
+
+        ViewerServerTab.ApplyEngineGate(new() { attention }, "SQL-1", 2, null, AwsRdsKind.None);
+        Assert.Equal("FAILING", attention.DisplayStatus);
+
+        ViewerServerTab.ApplyEngineGate(new() { attention }, "SQL-2", CollectorEngineCapability.UnknownEngineEdition, null, AwsRdsKind.None);
+        Assert.Equal("FAILING", attention.DisplayStatus);
     }
 }

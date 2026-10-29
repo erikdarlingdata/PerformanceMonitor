@@ -1589,10 +1589,25 @@ public class CollectorHealthRow
     /// identically. Never feeds <see cref="HealthStatus"/>.
     /// </summary>
     public string NoteFormatted =>
-        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases, RecoveredNote, ReadSource);
+        EngineGated && EngineNotCollectedMessage is not null ? EngineNotCollectedMessage : CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases, RecoveredNote, ReadSource);
 
     /// <summary>#6254: where the newest Query Store run read its rows from (for example <c>replica 12, primary 2</c>), shown in the Note column.
     /// Null for every collector but Query Store and for every server with the replica setting off. Informational only: it never feeds <see cref="HealthStatus"/>.</summary>
     public string? ReadSource { get; set; }
+
+    /// <summary>#6912: this collector does not run on the server's engine, so whatever it logged before the gate existed reads as not collected.
+    /// Stamped by the Collection Health tab's refresh from the same gate <c>get_collection_health</c> lists it with.</summary>
+    public bool EngineGated { get; set; }
+
+    /// <summary>#6912: the engine's own sentence for a gated collector (<see cref="CollectorEngineCapability.NotCollectedMessage"/>), shown in the Note
+    /// column. Null for a collector the engine runs.</summary>
+    public string? EngineNotCollectedMessage { get; set; }
+
+    /// <summary>The status word <c>get_collection_health</c> uses for a collector the engine does not run.</summary>
+    internal const string EngineNotCollectedStatus = "not_collected";
+
+    /// <summary>#6912: the word the Status column shows. A collector the server's engine does not run reads <c>not_collected</c>, as
+    /// <c>get_collection_health</c> lists it, whatever band its pre-gate runs left it. Every other row shows its band.</summary>
+    public string DisplayStatus => EngineGated ? EngineNotCollectedStatus : HealthStatus;
 }
 

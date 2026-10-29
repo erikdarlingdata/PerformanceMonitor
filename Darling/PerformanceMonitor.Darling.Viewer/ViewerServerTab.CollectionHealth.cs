@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Ui;
 using PerformanceMonitor.Darling.Storage;
 
@@ -85,12 +86,38 @@ public partial class ViewerServerTab
            await is not priced against contention that has already finished. */
         readFanOut.Release();
 
+        ApplyEngineGate(healthTask.Result, _server.DisplayName, _server.EngineEdition, _server.EngineKind, _server.AwsRdsKind);
         await ShowCollectionHealthAsync(
             healthTask.Result, logTask.Result, durationTask.Result, caveatsTask.Result, dataStartTask, startUtc, CollectionLogTruncationBanner,
             _collectionHealthFilterMgr!.UpdateData, _collectionLogFilterMgr!.UpdateData, RenderCollectorDurationChart, ShowCollectionCaveats);
 
         await ShowSkippedCyclesAsync();
         await ShowSweepPressureAsync();
+    }
+
+    /// <summary>
+    /// #6912: marks the rows of the collectors this server's engine does not run, so the Status column reads <c>not_collected</c> and the
+    /// Note column carries the engine's sentence, as <c>get_collection_health</c> lists them. What such a collector logged before the gate
+    /// existed (an Amazon RDS Web or Express server's SESSION_MISSING runs for <c>attention</c>) stays in the seven-day window and bands
+    /// FAILING, and a collector that does not run can never replace it. The set is <see cref="FleetEngineGatedCollectors.For"/>, the gate
+    /// the status bar, the Overview card and the fleet card count with. An engine not read yet makes no claim, so those rows stand.
+    /// </summary>
+    internal static void ApplyEngineGate(List<CollectorHealthRow> health, string serverName, int engineEdition, string? engineKind, AwsRdsKind awsRdsKind)
+    {
+        var gated = FleetEngineGatedCollectors.For(engineEdition, engineKind, awsRdsKind);
+        if (gated.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var row in health)
+        {
+            if (gated.Contains(row.CollectorName))
+            {
+                row.EngineGated = true;
+                row.EngineNotCollectedMessage = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, row.CollectorName, awsRdsKind);
+            }
+        }
     }
 
     /// <summary>
