@@ -95,7 +95,9 @@ public sealed partial class ViewerDataService
         /* #5736 (V211): the relative Client Timeouts bars' two multiples, APPENDED for the same reason and under the same gate. */
         "client_timeouts_warning_multiple, client_timeouts_critical_multiple, " +
         /* #6874 (V222): the Agent Alert Gaps alert's switch (off by default), APPENDED for the same reason and under the same gate. */
-        "agent_alert_gaps_enabled";
+        "agent_alert_gaps_enabled, " +
+        /* #6873 (V223): the three database protection alert switches (backup, log backup, CHECKDB overdue), APPENDED, same gate. */
+        "backup_overdue_enabled, log_backup_overdue_enabled, checkdb_overdue_enabled";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -112,7 +114,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80,
+        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -195,6 +197,9 @@ ON CONFLICT (id) DO UPDATE SET
     client_timeouts_warning_multiple = EXCLUDED.client_timeouts_warning_multiple,
     client_timeouts_critical_multiple = EXCLUDED.client_timeouts_critical_multiple,
     agent_alert_gaps_enabled = EXCLUDED.agent_alert_gaps_enabled,
+    backup_overdue_enabled = EXCLUDED.backup_overdue_enabled,
+    log_backup_overdue_enabled = EXCLUDED.log_backup_overdue_enabled,
+    checkdb_overdue_enabled = EXCLUDED.checkdb_overdue_enabled,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -326,6 +331,9 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ctWarningMultiple });                // $78 (#5736, V211)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ctCriticalMultiple });               // $79 (#5736, V211)
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.AgentAlertGapsEnabled });          // $80 (#6874, V222)
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.BackupOverdueEnabled });          // $81 (#6873, V223)
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.LogBackupOverdueEnabled });       // $82 (#6873, V223)
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.CheckDbOverdueEnabled });         // $83 (#6873, V223)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -431,6 +439,10 @@ ON CONFLICT (id) DO UPDATE SET
         ClientTimeoutsCriticalMultiple = reader.GetInt32(78),
         /* #6874 (V222) the Agent Alert Gaps switch appended at ordinal 79. */
         AgentAlertGapsEnabled = reader.GetBoolean(79),
+        /* #6873 (V223) the database protection switches appended at ordinals 80-82. */
+        BackupOverdueEnabled = reader.GetBoolean(80),
+        LogBackupOverdueEnabled = reader.GetBoolean(81),
+        CheckDbOverdueEnabled = reader.GetBoolean(82),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -576,6 +588,12 @@ public sealed class AlertSettingsRow
     public int ClientTimeoutsCriticalMultiple { get; set; } = AttentionBaselineMath.DefaultCriticalMultiple;
     /// <summary>#6874 (V222): judge the SQL Server Agent alert setup and alert on a gap. Off by default: a new alert must not start firing on upgrade.</summary>
     public bool AgentAlertGapsEnabled { get; set; }
+    /// <summary>#6873 (V223): the Backup Overdue alert (a full backup older than 7 days). Off by default.</summary>
+    public bool BackupOverdueEnabled { get; set; }
+    /// <summary>#6873 (V223): the Log Backup Overdue alert (a log backup older than 60 minutes). Off by default.</summary>
+    public bool LogBackupOverdueEnabled { get; set; }
+    /// <summary>#6873 (V223): the CHECKDB Overdue alert (a last good CHECKDB older than 14 days). Off by default.</summary>
+    public bool CheckDbOverdueEnabled { get; set; }
     public bool LongRunningQueryEnabled { get; set; } = true;
     public int LongRunningQueryThresholdMinutes { get; set; } = 30;
     public bool TempDbSpaceEnabled { get; set; } = true;
@@ -679,6 +697,9 @@ public sealed class AlertSettingsRow
             && AgRedoQueueAlertKb == other.AgRedoQueueAlertKb
             && AgDisconnectRefireMinutes == other.AgDisconnectRefireMinutes
             && DatabaseStateEnabled == other.DatabaseStateEnabled
+            && BackupOverdueEnabled == other.BackupOverdueEnabled
+            && LogBackupOverdueEnabled == other.LogBackupOverdueEnabled
+            && CheckDbOverdueEnabled == other.CheckDbOverdueEnabled
             && SelfDiskFreeWarnPercent == other.SelfDiskFreeWarnPercent
             && SelfDiskFreeWarnGb == other.SelfDiskFreeWarnGb
             && CollectionStaleMinutes == other.CollectionStaleMinutes

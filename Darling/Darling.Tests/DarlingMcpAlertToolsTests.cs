@@ -1331,7 +1331,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         ExcludedVolumes: new[] { "S:\\", "/mnt/scratch" },
         /* #5736 (V211): not the shipped 3 / 10, for the same reason as the floors above. */
         ClientTimeoutsWarningMultiple: 2, ClientTimeoutsCriticalMultiple: 7,
-        AgentAlertGapsEnabled: true);
+        AgentAlertGapsEnabled: true,
+        BackupOverdueEnabled: true, LogBackupOverdueEnabled: true, CheckDbOverdueEnabled: true);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

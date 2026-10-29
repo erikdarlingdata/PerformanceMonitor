@@ -65,6 +65,7 @@ public static class CollectorCatalog
         PlanCorrectionCollector.Instance,
         QueryStoreForcedPlansCollector.Instance,
         QueryStoreHintsCollector.Instance,
+        DatabaseProtectionCollector.Instance,
         AgentAlertsCollector.Instance,
         PvsStatsCollector.Instance,
         /* PostgreSQL definitions. They live in the same catalog as the T-SQL ones on purpose: the
